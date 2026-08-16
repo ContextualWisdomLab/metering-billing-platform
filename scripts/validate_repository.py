@@ -1,0 +1,363 @@
+"""Validate the repository's portable contracts without network access.
+
+The validator deliberately implements only the JSON Schema Draft 2020-12
+keywords used by this repository.  Runtime consumers remain free to use any
+standards-compliant JSON Schema implementation; this module exists so exact-head
+CI can verify the checked-in contracts without downloading transitive packages.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+from uuid import UUID
+
+
+DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
+REQUIRED_FILES = (
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "docs/PRD.md",
+    "docs/TRD.md",
+    "docs/ARCHITECTURE.md",
+    "docs/DATA_MODEL.md",
+    "docs/ACCOUNTING_BOUNDARY.md",
+    "docs/adr/0001-commercial-authority.md",
+    "docs/adr/0002-accounting-boundary.md",
+    "docs/doctoring/REFERENCES.md",
+    "docs/doctoring/STANDARD_TRACEABILITY.md",
+    "schemas/usage-event.schema.json",
+    "schemas/provider-capability.schema.json",
+    "schemas/accounting-journal-proposal.schema.json",
+    "database/migrations/0001_initial_billing_core.sql",
+    "requirements-quality.txt",
+    ".github/workflows/ci.yml",
+)
+ACTION_REFERENCE_PATTERN = re.compile(
+    r"\buses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([^\s#]+)"
+)
+FULL_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+PLACEHOLDER_PATTERN = re.compile(
+    r"\b(" + "|".join(("TO" + "DO", "T" + "BD", "FIX" + "ME")) + r")\b"
+)
+SNAKE_CASE_TWO_WORD_PATTERN = re.compile(r"^[a-z][a-z0-9]*_[a-z0-9_]+$")
+SCHEMA_NAME_PATTERN = re.compile(
+    r"\bCREATE\s+SCHEMA(?:\s+IF\s+NOT\s+EXISTS)?\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+    re.IGNORECASE,
+)
+COLUMN_NAME_PATTERN = re.compile(
+    r"^\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+"
+    r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+TABLE_NAME_PATTERN = re.compile(
+    r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
+    r"(?:(?:[a-zA-Z_][a-zA-Z0-9_]*)\.)?([a-zA-Z_][a-zA-Z0-9_]*)",
+    re.IGNORECASE,
+)
+
+
+def find_mutable_action_references(text: str) -> tuple[str, ...]:
+    """Return GitHub Action references that are not pinned to a full SHA."""
+    references = {
+        f"{match.group(1)}@{match.group(2)}"
+        for match in ACTION_REFERENCE_PATTERN.finditer(text)
+        if FULL_COMMIT_PATTERN.fullmatch(match.group(2)) is None
+    }
+    return tuple(sorted(references))
+
+
+def find_placeholder_tokens(text: str) -> tuple[str, ...]:
+    """Return unresolved implementation placeholder tokens in *text*."""
+    return tuple(sorted({match.group(1) for match in PLACEHOLDER_PATTERN.finditer(text)}))
+
+
+def validate_sql_object_names(sql_text: str) -> tuple[str, ...]:
+    """Require created PostgreSQL schemas and tables to use two-word snake case."""
+    errors: list[str] = []
+    for schema_name in SCHEMA_NAME_PATTERN.findall(sql_text):
+        if SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(schema_name) is None:
+            errors.append(
+                f"schema name must contain at least two snake_case words: {schema_name}"
+            )
+    for table_name in TABLE_NAME_PATTERN.findall(sql_text):
+        if SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(table_name) is None:
+            errors.append(
+                f"table name must contain at least two snake_case words: {table_name}"
+            )
+    for column_name in COLUMN_NAME_PATTERN.findall(sql_text):
+        if SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(column_name) is None:
+            errors.append(
+                f"column name must contain at least two snake_case words: {column_name}"
+            )
+    return tuple(errors)
+
+
+def validate_schema_instance(
+    schema: Mapping[str, Any], instance: Any
+) -> tuple[str, ...]:
+    """Validate *instance* against the Draft 2020-12 subset used in this repo."""
+    return tuple(_validate_node(schema, schema, instance, "$"))
+
+
+def validate_repository(root: Path) -> tuple[str, ...]:
+    """Return every deterministic repository-contract violation below *root*."""
+    errors: list[str] = []
+    for relative_path in REQUIRED_FILES:
+        if not (root / relative_path).is_file():
+            errors.append(f"missing required file: {relative_path}")
+
+    schema_identifiers: set[str] = set()
+    schemas_directory = root / "schemas"
+    if schemas_directory.is_dir():
+        for schema_path in sorted(schemas_directory.glob("*.schema.json")):
+            errors.extend(_validate_schema_file(schema_path, schema_identifiers))
+
+    migration_path = root / "database/migrations/0001_initial_billing_core.sql"
+    if migration_path.is_file():
+        sql_text = migration_path.read_text(encoding="utf-8")
+        errors.extend(validate_sql_object_names(sql_text))
+        if "provider_customer_id" in sql_text or "stripe_customer_id" in sql_text:
+            errors.append("provider-specific identifiers must remain in mapping tables")
+
+    requirements_path = root / "requirements-quality.txt"
+    if requirements_path.is_file():
+        requirements_text = requirements_path.read_text(encoding="utf-8")
+        if "--hash=sha256:" not in requirements_text:
+            errors.append("quality dependencies must be hash locked")
+
+    for file_path in _iter_contract_files(root):
+        text = file_path.read_text(encoding="utf-8")
+        relative_path = file_path.relative_to(root).as_posix()
+        for token in find_placeholder_tokens(text):
+            errors.append(f"unresolved placeholder in {relative_path}: {token}")
+        if file_path.suffix in {".yml", ".yaml"}:
+            for reference in find_mutable_action_references(text):
+                errors.append(
+                    f"mutable GitHub Action reference in {relative_path}: {reference}"
+                )
+
+    return tuple(errors)
+
+
+def main(arguments: Sequence[str] | None = None) -> int:
+    """Validate a supplied repository root and print actionable diagnostics."""
+    supplied_arguments = tuple(sys.argv[1:] if arguments is None else arguments)
+    root = Path(supplied_arguments[0]).resolve() if supplied_arguments else Path.cwd()
+    errors = validate_repository(root)
+    if errors:
+        for error in errors:
+            print(error)
+        return 1
+    print(f"repository contracts valid: {root}")
+    return 0
+
+
+def _iter_contract_files(root: Path) -> tuple[Path, ...]:
+    """Return text contract files while excluding test fixtures and VCS state."""
+    included_suffixes = {".json", ".md", ".py", ".sql", ".toml", ".yaml", ".yml"}
+    files = []
+    for file_path in root.rglob("*"):
+        relative_parts = file_path.relative_to(root).parts
+        if not file_path.is_file() or file_path.suffix not in included_suffixes:
+            continue
+        if any(part in {".git", "__pycache__", "tests"} for part in relative_parts):
+            continue
+        files.append(file_path)
+    return tuple(sorted(files))
+
+
+def _validate_schema_file(schema_path: Path, identifiers: set[str]) -> tuple[str, ...]:
+    """Validate one checked-in JSON Schema's root metadata and identity."""
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return (f"invalid JSON in {schema_path.name}: {error.msg}",)
+    errors: list[str] = []
+    if schema.get("$schema") != DRAFT_2020_12:
+        errors.append(f"schema must declare Draft 2020-12: {schema_path.name}")
+    schema_identifier = schema.get("$id")
+    if not isinstance(schema_identifier, str) or not schema_identifier.startswith("https://"):
+        errors.append(f"schema must have an HTTPS $id: {schema_path.name}")
+    elif schema_identifier in identifiers:
+        errors.append(f"duplicate schema $id: {schema_identifier}")
+    else:
+        identifiers.add(schema_identifier)
+    if schema.get("type") != "object":
+        errors.append(f"schema root must be an object: {schema_path.name}")
+    if schema.get("additionalProperties") is not False:
+        errors.append(f"schema root must reject additional properties: {schema_path.name}")
+    return tuple(errors)
+
+
+def _resolve_reference(root_schema: Mapping[str, Any], reference: str) -> Mapping[str, Any]:
+    """Resolve a local JSON Pointer reference from *root_schema*."""
+    if not reference.startswith("#/"):
+        raise ValueError(f"only local JSON Pointer references are supported: {reference}")
+    current: Any = root_schema
+    for raw_token in reference[2:].split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        current = current[token]
+    if not isinstance(current, Mapping):
+        raise ValueError(f"reference does not resolve to a schema object: {reference}")
+    return current
+
+
+def _validate_node(
+    root_schema: Mapping[str, Any],
+    schema: Mapping[str, Any],
+    instance: Any,
+    path: str,
+) -> list[str]:
+    """Validate one node and return stable path-qualified error messages."""
+    if "$ref" in schema:
+        resolved = _resolve_reference(root_schema, str(schema["$ref"]))
+        return _validate_node(root_schema, resolved, instance, path)
+
+    expected_type = schema.get("type")
+    if expected_type is not None and not _matches_type(str(expected_type), instance):
+        return [f"{path}: expected {expected_type}"]
+
+    errors: list[str] = []
+    if "enum" in schema and instance not in schema["enum"]:
+        errors.append(f"{path}: value is not in the allowed enumeration")
+    if "const" in schema and instance != schema["const"]:
+        errors.append(f"{path}: value does not equal the required constant")
+
+    if isinstance(instance, str):
+        errors.extend(_validate_string(schema, instance, path))
+    elif isinstance(instance, int) and not isinstance(instance, bool):
+        minimum = schema.get("minimum")
+        if minimum is not None and instance < minimum:
+            errors.append(f"{path}: integer is below the minimum")
+    elif isinstance(instance, list):
+        errors.extend(_validate_array(root_schema, schema, instance, path))
+    elif isinstance(instance, dict):
+        errors.extend(_validate_object(root_schema, schema, instance, path))
+
+    if "oneOf" in schema:
+        matching_branches = sum(
+            not _validate_node(root_schema, branch, instance, path)
+            for branch in schema["oneOf"]
+        )
+        if matching_branches != 1:
+            errors.append(f"{path}: expected exactly one oneOf branch to match")
+    return errors
+
+
+def _matches_type(expected_type: str, instance: Any) -> bool:
+    """Return whether *instance* matches a supported JSON Schema primitive."""
+    type_checks = {
+        "array": lambda value: isinstance(value, list),
+        "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+        "object": lambda value: isinstance(value, dict),
+        "string": lambda value: isinstance(value, str),
+    }
+    checker = type_checks.get(expected_type)
+    if checker is None:
+        raise ValueError(f"unsupported schema type: {expected_type}")
+    return checker(instance)
+
+
+def _validate_string(schema: Mapping[str, Any], instance: str, path: str) -> list[str]:
+    """Validate supported string constraints."""
+    errors: list[str] = []
+    minimum_length = schema.get("minLength")
+    maximum_length = schema.get("maxLength")
+    pattern = schema.get("pattern")
+    if minimum_length is not None and len(instance) < minimum_length:
+        errors.append(f"{path}: string is shorter than minLength")
+    if maximum_length is not None and len(instance) > maximum_length:
+        errors.append(f"{path}: string is longer than maxLength")
+    if pattern is not None and re.search(str(pattern), instance) is None:
+        errors.append(f"{path}: string does not match the required pattern")
+    format_name = schema.get("format")
+    if format_name is not None and not _matches_format(str(format_name), instance):
+        errors.append(f"{path}: string does not match format {format_name}")
+    return errors
+
+
+def _matches_format(format_name: str, instance: str) -> bool:
+    """Return whether *instance* satisfies a supported semantic string format."""
+    try:
+        if format_name == "uuid":
+            UUID(instance)
+        elif format_name == "date":
+            date.fromisoformat(instance)
+        elif format_name == "date-time":
+            parsed = datetime.fromisoformat(instance.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return False
+        else:
+            raise ValueError(f"unsupported string format: {format_name}")
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _validate_array(
+    root_schema: Mapping[str, Any],
+    schema: Mapping[str, Any],
+    instance: list[Any],
+    path: str,
+) -> list[str]:
+    """Validate supported array constraints and nested items."""
+    errors: list[str] = []
+    minimum_items = schema.get("minItems")
+    maximum_items = schema.get("maxItems")
+    if minimum_items is not None and len(instance) < minimum_items:
+        errors.append(f"{path}: array has fewer than minItems")
+    if maximum_items is not None and len(instance) > maximum_items:
+        errors.append(f"{path}: array has more than maxItems")
+    if schema.get("uniqueItems") and len({_canonical_value(item) for item in instance}) != len(instance):
+        errors.append(f"{path}: array items must be unique")
+    item_schema = schema.get("items")
+    if isinstance(item_schema, Mapping):
+        for index, item in enumerate(instance):
+            errors.extend(_validate_node(root_schema, item_schema, item, f"{path}[{index}]"))
+    return errors
+
+
+def _canonical_value(value: Any) -> str:
+    """Produce a deterministic comparable representation for JSON values."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _validate_object(
+    root_schema: Mapping[str, Any],
+    schema: Mapping[str, Any],
+    instance: dict[str, Any],
+    path: str,
+) -> list[str]:
+    """Validate supported object constraints and nested properties."""
+    errors: list[str] = []
+    required = schema.get("required", [])
+    for required_name in required:
+        if required_name not in instance:
+            errors.append(f"{path}: required property is missing: {required_name}")
+    properties = schema.get("properties", {})
+    if schema.get("additionalProperties") is False:
+        for property_name in sorted(set(instance) - set(properties)):
+            errors.append(f"{path}: additional property is not allowed: {property_name}")
+    for property_name, property_schema in properties.items():
+        if property_name in instance:
+            errors.extend(
+                _validate_node(
+                    root_schema,
+                    property_schema,
+                    instance[property_name],
+                    f"{path}.{property_name}",
+                )
+            )
+    return errors
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through main().
+    raise SystemExit(main())

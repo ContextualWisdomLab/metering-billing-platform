@@ -1,0 +1,395 @@
+"""Repository contract tests for the initial metering and billing foundation."""
+
+from __future__ import annotations
+
+import io
+import json
+import shutil
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+from scripts.validate_repository import (
+    main,
+    find_mutable_action_references,
+    find_placeholder_tokens,
+    validate_repository,
+    validate_schema_instance,
+    validate_sql_object_names,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class RepositoryContractTests(unittest.TestCase):
+    """Verify repository contracts without contacting external services."""
+
+    def test_repository_contracts_are_valid(self) -> None:
+        """The checked-in repository must satisfy every foundation invariant."""
+        self.assertEqual(validate_repository(ROOT), ())
+
+    def test_missing_required_file_is_reported(self) -> None:
+        """A partial checkout must produce an actionable missing-file error."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            errors = validate_repository(Path(temporary_directory))
+        self.assertIn("missing required file: README.md", errors)
+
+    def test_usage_event_accepts_reported_usage(self) -> None:
+        """Provider-reported usage with an idempotency key is contract-valid."""
+        schema = self._schema("usage-event.schema.json")
+        instance = {
+            "event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+            "source_event_key": "workflow_381:step_04:attempt_01",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "billing_principal_reference": "urn:cwl:tenant_001:billing_principal:019d7002",
+            "credential_reference": "urn:cwl:tenant_001:credential_record:019d7003",
+            "product_code": "contextual_orchestrator",
+            "occurred_at": "2026-08-16T10:27:42.482Z",
+            "measurements": [
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "1810",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+
+    def test_usage_event_rejects_prompt_content(self) -> None:
+        """Billing events must reject undeclared prompt or response content."""
+        schema = self._schema("usage-event.schema.json")
+        instance = {
+            "event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+            "source_event_key": "workflow_381:step_04:attempt_01",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "billing_principal_reference": "urn:cwl:tenant_001:billing_principal:019d7002",
+            "product_code": "contextual_orchestrator",
+            "occurred_at": "2026-08-16T10:27:42.482Z",
+            "measurements": [
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "1810",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+            "prompt": "secret customer content",
+        }
+        self.assertIn(
+            "$: additional property is not allowed: prompt",
+            validate_schema_instance(schema, instance),
+        )
+
+    def test_provider_capability_keeps_roles_separate(self) -> None:
+        """A provider advertises explicit capabilities instead of one giant type."""
+        schema = self._schema("provider-capability.schema.json")
+        instance = {
+            "provider_code": "lemon_squeezy",
+            "provider_roles": ["merchant_of_record"],
+            "capabilities": [
+                "hosted_checkout",
+                "subscription_collection",
+                "metered_usage_push",
+                "settlement_export",
+            ],
+            "effective_from": "2026-08-16T00:00:00Z",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+
+    def test_accounting_proposal_is_balanced_and_not_posted(self) -> None:
+        """Billing may propose a balanced entry but cannot claim legal posting."""
+        schema = self._schema("accounting-journal-proposal.schema.json")
+        proposal = {
+            "proposal_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61d",
+            "idempotency_key": "invoice_019d:issued:v1",
+            "legal_entity_reference": "urn:cwl:entity_001",
+            "accounting_book_code": "k_ifrs_primary",
+            "transaction_currency": "KRW",
+            "accounting_date": "2026-08-31",
+            "proposal_status": "validated",
+            "source_event_references": ["urn:cwl:invoice:019d"],
+            "lines": [
+                {
+                    "line_number": 1,
+                    "account_role_code": "accounts_receivable",
+                    "debit_amount": "110000",
+                    "credit_amount": "0",
+                },
+                {
+                    "line_number": 2,
+                    "account_role_code": "usage_revenue",
+                    "debit_amount": "0",
+                    "credit_amount": "100000",
+                },
+                {
+                    "line_number": 3,
+                    "account_role_code": "tax_payable",
+                    "debit_amount": "0",
+                    "credit_amount": "10000",
+                },
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, proposal), ())
+        self.assertEqual(
+            sum(int(line["debit_amount"]) for line in proposal["lines"]),
+            sum(int(line["credit_amount"]) for line in proposal["lines"]),
+        )
+        invalid = dict(proposal, proposal_status="posted")
+        self.assertIn(
+            "$.proposal_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, invalid),
+        )
+
+    def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
+        """The offline validator covers required, type, reference, and one-of rules."""
+        schema = self._schema("accounting-journal-proposal.schema.json")
+        invalid = {
+            "proposal_id": 7,
+            "idempotency_key": "invoice_019d:issued:v1",
+            "legal_entity_reference": "urn:cwl:entity_001",
+            "accounting_book_code": "k_ifrs_primary",
+            "transaction_currency": "KRW",
+            "accounting_date": "2026-08-31",
+            "proposal_status": "draft",
+            "source_event_references": ["urn:cwl:invoice:019d"],
+            "lines": [
+                {
+                    "line_number": 1,
+                    "account_role_code": "accounts_receivable",
+                    "debit_amount": "0",
+                    "credit_amount": "0",
+                },
+                {
+                    "line_number": 2,
+                    "account_role_code": "usage_revenue",
+                    "debit_amount": "0",
+                    "credit_amount": "1",
+                },
+            ],
+        }
+        errors = validate_schema_instance(schema, invalid)
+        self.assertIn("$.proposal_id: expected string", errors)
+        self.assertIn("$.lines[0]: expected exactly one oneOf branch to match", errors)
+
+    def test_repository_reports_integrated_supply_chain_and_sql_violations(self) -> None:
+        """The aggregate validator reports provider IDs, placeholders, and mutable actions."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            copied_root = Path(temporary_directory) / "repository"
+            shutil.copytree(ROOT, copied_root)
+            migration = copied_root / "database/migrations/0001_initial_billing_core.sql"
+            migration.write_text(
+                migration.read_text(encoding="utf-8")
+                + "\n-- provider_customer_id must not be placed in the core.\n",
+                encoding="utf-8",
+            )
+            readme = copied_root / "README.md"
+            readme.write_text(
+                readme.read_text(encoding="utf-8") + "\nTO" + "DO: unresolved.\n",
+                encoding="utf-8",
+            )
+            requirements = copied_root / "requirements-quality.txt"
+            requirements.write_text("coverage==7.15.4\n", encoding="utf-8")
+            workflow = copied_root / ".github/workflows/ci.yml"
+            workflow.write_text(
+                workflow.read_text(encoding="utf-8")
+                + "\n# invalid fixture\n# uses: actions/checkout@v4\n",
+                encoding="utf-8",
+            )
+            errors = validate_repository(copied_root)
+        self.assertIn("provider-specific identifiers must remain in mapping tables", errors)
+        self.assertIn("quality dependencies must be hash locked", errors)
+        self.assertIn("unresolved placeholder in README.md: TODO", errors)
+        self.assertIn(
+            "mutable GitHub Action reference in .github/workflows/ci.yml: actions/checkout@v4",
+            errors,
+        )
+
+    def test_repository_reports_schema_metadata_and_json_errors(self) -> None:
+        """Malformed, duplicated, and open schema roots are rejected deterministically."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            schemas = root / "schemas"
+            schemas.mkdir()
+            (schemas / "00-invalid.schema.json").write_text("{", encoding="utf-8")
+            malformed = {
+                "$schema": "https://example.invalid/draft",
+                "$id": "http://schemas.invalid/open",
+                "type": "array",
+                "additionalProperties": True,
+            }
+            (schemas / "01-malformed.schema.json").write_text(
+                json.dumps(malformed), encoding="utf-8"
+            )
+            valid = {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$id": "https://schemas.example.test/duplicate",
+                "type": "object",
+                "additionalProperties": False,
+            }
+            for name in ("02-first.schema.json", "03-second.schema.json"):
+                (schemas / name).write_text(json.dumps(valid), encoding="utf-8")
+            errors = validate_repository(root)
+        self.assertIn("invalid JSON in 00-invalid.schema.json", "\n".join(errors))
+        self.assertIn("schema must declare Draft 2020-12: 01-malformed.schema.json", errors)
+        self.assertIn("schema must have an HTTPS $id: 01-malformed.schema.json", errors)
+        self.assertIn("schema root must be an object: 01-malformed.schema.json", errors)
+        self.assertIn(
+            "schema root must reject additional properties: 01-malformed.schema.json",
+            errors,
+        )
+        self.assertIn(
+            "duplicate schema $id: https://schemas.example.test/duplicate", errors
+        )
+
+    def test_offline_schema_validator_covers_scalar_array_and_object_constraints(self) -> None:
+        """Every supported keyword emits stable diagnostics for invalid values."""
+        string_schema = {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 3,
+            "pattern": "^a",
+        }
+        self.assertEqual(
+            validate_schema_instance(string_schema, ""),
+            (
+                "$: string is shorter than minLength",
+                "$: string does not match the required pattern",
+            ),
+        )
+        self.assertEqual(
+            validate_schema_instance(string_schema, "abcd"),
+            ("$: string is longer than maxLength",),
+        )
+
+        array_schema = {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "uniqueItems": True,
+            "items": {"type": "integer", "minimum": 1},
+        }
+        self.assertEqual(
+            validate_schema_instance(array_schema, []),
+            ("$: array has fewer than minItems",),
+        )
+        errors = validate_schema_instance(array_schema, [0, 0, 0, 0])
+        self.assertIn("$: array has more than maxItems", errors)
+        self.assertIn("$: array items must be unique", errors)
+        self.assertIn("$[0]: integer is below the minimum", errors)
+        self.assertEqual(
+            validate_schema_instance({"type": "array", "items": True}, [1]), ()
+        )
+
+        object_schema = {
+            "type": "object",
+            "required": ["known_value"],
+            "properties": {"known_value": {"type": "string"}},
+            "additionalProperties": False,
+        }
+        self.assertEqual(
+            validate_schema_instance(object_schema, {}),
+            ("$: required property is missing: known_value",),
+        )
+
+    def test_offline_schema_validator_covers_formats_types_and_references(self) -> None:
+        """Formats, unsupported types, and malformed local references fail closed."""
+        for format_name, value in (
+            ("uuid", "not-a-uuid"),
+            ("date", "2026-13-40"),
+            ("date-time", "2026-08-16T10:00:00"),
+            ("unknown", "value"),
+        ):
+            self.assertTrue(
+                validate_schema_instance(
+                    {"type": "string", "format": format_name}, value
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "unsupported schema type"):
+            validate_schema_instance({"type": "number"}, 1.5)
+        with self.assertRaisesRegex(ValueError, "only local JSON Pointer"):
+            validate_schema_instance({"$ref": "https://example.test/schema"}, {})
+        with self.assertRaisesRegex(ValueError, "does not resolve to a schema object"):
+            validate_schema_instance(
+                {"$ref": "#/$defs/value", "$defs": {"value": "scalar"}}, {}
+            )
+        escaped_reference_schema = {
+            "$ref": "#/$defs/a~1b~0c",
+            "$defs": {"a/b~c": {"type": "string", "const": "ok"}},
+        }
+        self.assertEqual(
+            validate_schema_instance(escaped_reference_schema, "ok"), ()
+        self.assertIn(
+            "$: value does not equal the required constant",
+            validate_schema_instance(escaped_reference_schema, "not-ok"),
+        )
+        self.assertEqual(validate_schema_instance({"type": "integer"}, True), ("$: expected integer",))
+        self.assertEqual(validate_schema_instance({}, None), ())
+
+    def test_main_returns_process_status_for_valid_and_invalid_roots(self) -> None:
+        """The command entrypoint prints diagnostics and returns a process status."""
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main([str(ROOT)]), 0)
+        self.assertIn("repository contracts valid", output.getvalue())
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main([temporary_directory]), 1)
+        self.assertIn("missing required file: README.md", output.getvalue())
+
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["validate_repository", str(ROOT)]):
+            with redirect_stdout(output):
+                self.assertEqual(main(None), 0)
+
+        output = io.StringIO()
+        with mock.patch("scripts.validate_repository.Path.cwd", return_value=ROOT):
+            with redirect_stdout(output):
+                self.assertEqual(main([]), 0)
+
+    def test_mutable_action_reference_is_rejected(self) -> None:
+        """Mutable action tags cannot produce exact-head supply-chain evidence."""
+        self.assertEqual(
+            find_mutable_action_references("- uses: actions/checkout@v4\n"),
+            ("actions/checkout@v4",),
+        )
+
+    def test_single_word_database_object_is_rejected(self) -> None:
+        """Every schema and table identifier must contain at least two words."""
+        sql = """
+        CREATE SCHEMA finance;
+        CREATE TABLE finance.invoice (
+            invoice_id uuid,
+            status text
+        );
+        """
+        self.assertEqual(
+            validate_sql_object_names(sql),
+            (
+                "schema name must contain at least two snake_case words: finance",
+                "table name must contain at least two snake_case words: invoice",
+                "column name must contain at least two snake_case words: status",
+            ),
+        )
+
+    def test_placeholder_tokens_are_rejected(self) -> None:
+        """Accepted architecture documents cannot retain implementation placeholders."""
+        self.assertEqual(
+            find_placeholder_tokens("Complete text.\nTODO: decide later.\n"),
+            ("TODO",),
+        )
+
+    def _schema(self, schema_name: str) -> dict[str, object]:
+        return json.loads((ROOT / "schemas" / schema_name).read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()

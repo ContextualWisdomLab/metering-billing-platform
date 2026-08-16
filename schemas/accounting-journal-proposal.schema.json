@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/accounting-journal-proposal/v1",
+  "title": "Accounting Journal Proposal",
+  "description": "A balanced billing-originated proposal for an external accounting authority. It is not a posted journal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "proposal_id",
+    "idempotency_key",
+    "legal_entity_reference",
+    "accounting_book_code",
+    "transaction_currency",
+    "accounting_date",
+    "proposal_status",
+    "source_event_references",
+    "lines"
+  ],
+  "properties": {
+    "proposal_id": {"type": "string", "format": "uuid"},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "legal_entity_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "accounting_book_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "transaction_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "accounting_date": {"type": "string", "format": "date"},
+    "proposal_status": {
+      "type": "string",
+      "enum": ["draft", "validated", "exported", "rejected"]
+    },
+    "source_event_references": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^urn:cwl:"}
+    },
+    "lines": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/journal_line"}
+    }
+  },
+  "$defs": {
+    "journal_line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line_number", "account_role_code", "debit_amount", "credit_amount"],
+      "properties": {
+        "line_number": {"type": "integer", "minimum": 1},
+        "account_role_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "debit_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
+        "credit_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
+        "cost_center_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "project_reference": {"type": "string", "pattern": "^urn:cwl:"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "debit_amount": {"pattern": "^[1-9][0-9]*$"},
+            "credit_amount": {"const": "0"}
+          }
+        },
+        {
+          "properties": {
+            "debit_amount": {"const": "0"},
+            "credit_amount": {"pattern": "^[1-9][0-9]*$"}
+          }
+        }
+      ]
+    }
+  }
+}
