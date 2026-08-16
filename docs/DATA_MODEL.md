@@ -10,7 +10,7 @@
 - `meter_definition`: versioned unit and aggregation rule.
 - `meter_quality_rule`: billable, analytics-only, or manual-review disposition by quality.
 - `usage_event`: idempotent source fact.
-- `usage_measurement`: normalized meter quantity and quality.
+- `usage_measurement`: normalized meter quantity and quality, constrained to an explicit meter-specific quality rule.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -19,7 +19,7 @@
 
 ## Temporal rule
 
-Assignments and capabilities use `valid_from`, `valid_to`, and `recorded_at`. Closing an interval supersedes a fact; it does not erase history.
+Assignments and capabilities use `valid_from`, `valid_to`, and `recorded_at`. Closing an interval supersedes a fact; it does not erase history. Composite foreign keys bind credentials, principals, billing accounts, and usage to the same tenant.
 
 ## Monetary rule
 

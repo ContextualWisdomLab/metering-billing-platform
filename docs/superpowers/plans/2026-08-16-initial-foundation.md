@@ -50,6 +50,7 @@
 - [x] **Step 3: Add schemas with closed objects, decimal values encoded as strings, idempotency keys, quality codes, and proposal-only accounting states.**
 - [x] **Step 4: Add the initial 3NF migration with provider-neutral mappings and append-only event records.**
 - [x] **Step 5: Run tests and coverage to green.**
+- [x] **Step 6: Add tenant-scoped composite foreign keys and meter-specific quality-rule enforcement after self-review.**
 
 ### Task 3: Architecture and governance baseline
 
@@ -93,7 +94,7 @@
 ## Verification Evidence
 
 - The first contract-test run failed because `scripts.validate_repository` did not exist, proving the initial red state.
-- The final local suite executes 15 tests.
-- Repository tooling records 209 statements and 124 branches at 100% coverage.
+- The final local suite executes 17 tests.
+- Repository tooling records 223 statements and 130 branches at 100% coverage.
 - `python scripts/validate_repository.py .` reports a valid repository.
 - `python -m compileall -q scripts tests` completes without errors.

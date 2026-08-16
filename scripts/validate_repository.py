@@ -12,6 +12,7 @@ import json
 import re
 import sys
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import UUID
@@ -105,6 +106,26 @@ def validate_schema_instance(
 ) -> tuple[str, ...]:
     """Validate *instance* against the Draft 2020-12 subset used in this repo."""
     return tuple(_validate_node(schema, schema, instance, "$"))
+
+
+def validate_accounting_journal_proposal(
+    schema: Mapping[str, Any], proposal: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Validate schema shape plus balanced, uniquely numbered journal lines."""
+    errors = list(validate_schema_instance(schema, proposal))
+    if errors:
+        return tuple(errors)
+
+    lines = proposal["lines"]
+    line_numbers = [line["line_number"] for line in lines]
+    if len(set(line_numbers)) != len(line_numbers):
+        errors.append("$: journal line numbers must be unique")
+
+    debit_total = sum(Decimal(line["debit_amount"]) for line in lines)
+    credit_total = sum(Decimal(line["credit_amount"]) for line in lines)
+    if debit_total != credit_total:
+        errors.append("$: debit and credit totals must balance")
+    return tuple(errors)
 
 
 def validate_repository(root: Path) -> tuple[str, ...]:

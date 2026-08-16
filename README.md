@@ -20,8 +20,8 @@ CWL products
 
 The first milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, and accounting journal proposals;
-- a normalized PostgreSQL 18 core migration;
+- closed JSON Schema contracts for usage events, provider capabilities, and semantically validated accounting journal proposals;
+- a normalized PostgreSQL 18 core migration with tenant-scoped attribution constraints;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.

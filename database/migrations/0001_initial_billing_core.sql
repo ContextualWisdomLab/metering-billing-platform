@@ -14,7 +14,8 @@ CREATE TABLE billing_core.billing_account (
     billing_account_code text NOT NULL,
     account_status_code text NOT NULL CHECK (account_status_code IN ('active', 'suspended', 'closed')),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE (tenant_account_id, billing_account_code)
+    UNIQUE (tenant_account_id, billing_account_code),
+    UNIQUE (tenant_account_id, billing_account_id)
 );
 
 CREATE TABLE billing_core.billing_principal (
@@ -28,6 +29,7 @@ CREATE TABLE billing_core.billing_principal (
     valid_to timestamptz,
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (tenant_account_id, principal_reference, valid_from),
+    UNIQUE (tenant_account_id, billing_principal_id),
     CHECK (valid_to IS NULL OR valid_to > valid_from)
 );
 
@@ -42,18 +44,26 @@ CREATE TABLE billing_core.credential_record (
     issued_at timestamptz NOT NULL,
     revoked_at timestamptz,
     UNIQUE (tenant_account_id, credential_fingerprint),
+    UNIQUE (tenant_account_id, credential_record_id),
     CHECK (revoked_at IS NULL OR revoked_at >= issued_at)
 );
 
 CREATE TABLE billing_core.credential_assignment (
     credential_assignment_id uuid PRIMARY KEY DEFAULT uuidv7(),
-    credential_record_id uuid NOT NULL REFERENCES billing_core.credential_record (credential_record_id),
-    billing_principal_id uuid NOT NULL REFERENCES billing_core.billing_principal (billing_principal_id),
-    billing_account_id uuid NOT NULL REFERENCES billing_core.billing_account (billing_account_id),
+    tenant_account_id uuid NOT NULL REFERENCES billing_core.tenant_account (tenant_account_id),
+    credential_record_id uuid NOT NULL,
+    billing_principal_id uuid NOT NULL,
+    billing_account_id uuid NOT NULL,
     valid_from timestamptz NOT NULL,
     valid_to timestamptz,
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (credential_record_id, valid_from),
+    FOREIGN KEY (tenant_account_id, credential_record_id)
+        REFERENCES billing_core.credential_record (tenant_account_id, credential_record_id),
+    FOREIGN KEY (tenant_account_id, billing_principal_id)
+        REFERENCES billing_core.billing_principal (tenant_account_id, billing_principal_id),
+    FOREIGN KEY (tenant_account_id, billing_account_id)
+        REFERENCES billing_core.billing_account (tenant_account_id, billing_account_id),
     CHECK (valid_to IS NULL OR valid_to > valid_from)
 );
 
@@ -82,16 +92,22 @@ CREATE TABLE billing_core.meter_quality_rule (
 CREATE TABLE billing_core.usage_event (
     usage_event_id uuid PRIMARY KEY,
     tenant_account_id uuid NOT NULL REFERENCES billing_core.tenant_account (tenant_account_id),
-    billing_account_id uuid NOT NULL REFERENCES billing_core.billing_account (billing_account_id),
-    billing_principal_id uuid NOT NULL REFERENCES billing_core.billing_principal (billing_principal_id),
-    credential_record_id uuid REFERENCES billing_core.credential_record (credential_record_id),
+    billing_account_id uuid NOT NULL,
+    billing_principal_id uuid NOT NULL,
+    credential_record_id uuid,
     source_event_key text NOT NULL,
     product_code text NOT NULL,
     operation_code text,
     occurred_at timestamptz NOT NULL,
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     event_payload_hash text NOT NULL,
-    UNIQUE (tenant_account_id, source_event_key)
+    UNIQUE (tenant_account_id, source_event_key),
+    FOREIGN KEY (tenant_account_id, billing_account_id)
+        REFERENCES billing_core.billing_account (tenant_account_id, billing_account_id),
+    FOREIGN KEY (tenant_account_id, billing_principal_id)
+        REFERENCES billing_core.billing_principal (tenant_account_id, billing_principal_id),
+    FOREIGN KEY (tenant_account_id, credential_record_id)
+        REFERENCES billing_core.credential_record (tenant_account_id, credential_record_id)
 );
 
 CREATE TABLE billing_core.usage_measurement (
@@ -102,7 +118,9 @@ CREATE TABLE billing_core.usage_measurement (
     quality_code text NOT NULL CHECK (
         quality_code IN ('provider_reported', 'locally_measured', 'deterministically_derived', 'estimated', 'reconstructed', 'corrected')
     ),
-    UNIQUE (usage_event_id, meter_definition_id)
+    UNIQUE (usage_event_id, meter_definition_id),
+    FOREIGN KEY (meter_definition_id, quality_code)
+        REFERENCES billing_core.meter_quality_rule (meter_definition_id, quality_code)
 );
 
 CREATE TABLE billing_core.provider_account (

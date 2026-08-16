@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +17,7 @@ from scripts.validate_repository import (
     main,
     find_mutable_action_references,
     find_placeholder_tokens,
+    validate_accounting_journal_proposal,
     validate_repository,
     validate_schema_instance,
     validate_sql_object_names,
@@ -43,7 +45,9 @@ class RepositoryContractTests(unittest.TestCase):
         schema = self._schema("usage-event.schema.json")
         instance = {
             "event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+            "event_contract_version": 1,
             "source_event_key": "workflow_381:step_04:attempt_01",
+            "source_payload_hash": "sha256:" + "d" * 64,
             "tenant_reference": "urn:cwl:tenant_001",
             "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
             "billing_principal_reference": "urn:cwl:tenant_001:billing_principal:019d7002",
@@ -66,7 +70,9 @@ class RepositoryContractTests(unittest.TestCase):
         schema = self._schema("usage-event.schema.json")
         instance = {
             "event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+            "event_contract_version": 1,
             "source_event_key": "workflow_381:step_04:attempt_01",
+            "source_payload_hash": "sha256:" + "d" * 64,
             "tenant_reference": "urn:cwl:tenant_001",
             "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
             "billing_principal_reference": "urn:cwl:tenant_001:billing_principal:019d7002",
@@ -108,55 +114,130 @@ class RepositoryContractTests(unittest.TestCase):
         schema = self._schema("accounting-journal-proposal.schema.json")
         proposal = {
             "proposal_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61d",
+            "proposal_contract_version": 1,
             "idempotency_key": "invoice_019d:issued:v1",
+            "tenant_reference": "urn:cwl:tenant_001",
             "legal_entity_reference": "urn:cwl:entity_001",
-            "accounting_book_code": "k_ifrs_primary",
+            "intended_book_role_code": "primary_statutory",
             "transaction_currency": "KRW",
+            "transaction_date": "2026-08-31",
             "accounting_date": "2026-08-31",
+            "source_payload_hash": "sha256:" + "a" * 64,
+            "proposed_at": "2026-08-31T23:59:59Z",
             "proposal_status": "validated",
             "source_event_references": ["urn:cwl:invoice:019d"],
             "lines": [
                 {
                     "line_number": 1,
                     "account_role_code": "accounts_receivable",
-                    "debit_amount": "110000",
+                    "debit_amount": "110000.25",
                     "credit_amount": "0",
                 },
                 {
                     "line_number": 2,
                     "account_role_code": "usage_revenue",
                     "debit_amount": "0",
-                    "credit_amount": "100000",
+                    "credit_amount": "100000.20",
                 },
                 {
                     "line_number": 3,
                     "account_role_code": "tax_payable",
                     "debit_amount": "0",
-                    "credit_amount": "10000",
+                    "credit_amount": "10000.05",
                 },
             ],
         }
         self.assertEqual(validate_schema_instance(schema, proposal), ())
+        self.assertEqual(validate_accounting_journal_proposal(schema, proposal), ())
         self.assertEqual(
-            sum(int(line["debit_amount"]) for line in proposal["lines"]),
-            sum(int(line["credit_amount"]) for line in proposal["lines"]),
+            sum(Decimal(line["debit_amount"]) for line in proposal["lines"]),
+            sum(Decimal(line["credit_amount"]) for line in proposal["lines"]),
         )
         invalid = dict(proposal, proposal_status="posted")
         self.assertIn(
             "$.proposal_status: value is not in the allowed enumeration",
-            validate_schema_instance(schema, invalid),
+            validate_accounting_journal_proposal(schema, invalid),
         )
+
+    def test_accounting_domain_validation_rejects_imbalance_and_duplicate_lines(self) -> None:
+        """Semantic accounting validation rejects totals or line identities that drift."""
+        schema = self._schema("accounting-journal-proposal.schema.json")
+        base = {
+            "proposal_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61e",
+            "proposal_contract_version": 1,
+            "idempotency_key": "invoice_019d:cash:v1",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "legal_entity_reference": "urn:cwl:entity_001",
+            "intended_book_role_code": "primary_statutory",
+            "transaction_currency": "KRW",
+            "transaction_date": "2026-08-31",
+            "accounting_date": "2026-08-31",
+            "source_payload_hash": "sha256:" + "c" * 64,
+            "proposed_at": "2026-08-31T23:59:59Z",
+            "proposal_status": "validated",
+            "source_event_references": ["urn:cwl:settlement:019d"],
+            "lines": [
+                {
+                    "line_number": 1,
+                    "account_role_code": "cash_clearing",
+                    "debit_amount": "90.50",
+                    "credit_amount": "0",
+                },
+                {
+                    "line_number": 2,
+                    "account_role_code": "provider_settlement_receivable",
+                    "debit_amount": "0",
+                    "credit_amount": "90.50",
+                },
+            ],
+        }
+        self.assertEqual(validate_accounting_journal_proposal(schema, base), ())
+
+        unbalanced = json.loads(json.dumps(base))
+        unbalanced["lines"][1]["credit_amount"] = "90.49"
+        self.assertIn(
+            "$: debit and credit totals must balance",
+            validate_accounting_journal_proposal(schema, unbalanced),
+        )
+
+        duplicated = json.loads(json.dumps(base))
+        duplicated["lines"][1]["line_number"] = 1
+        self.assertIn(
+            "$: journal line numbers must be unique",
+            validate_accounting_journal_proposal(schema, duplicated),
+        )
+
+    def test_migration_enforces_tenant_scoped_references(self) -> None:
+        """Attribution and usage foreign keys cannot cross tenant boundaries."""
+        sql = (ROOT / "database/migrations/0001_initial_billing_core.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "UNIQUE (tenant_account_id, billing_account_id)",
+            "UNIQUE (tenant_account_id, billing_principal_id)",
+            "UNIQUE (tenant_account_id, credential_record_id)",
+            "FOREIGN KEY (tenant_account_id, credential_record_id)",
+            "FOREIGN KEY (tenant_account_id, billing_principal_id)",
+            "FOREIGN KEY (tenant_account_id, billing_account_id)",
+            "FOREIGN KEY (meter_definition_id, quality_code)",
+        ):
+            self.assertIn(expected_fragment, sql)
 
     def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
         """The offline validator covers required, type, reference, and one-of rules."""
         schema = self._schema("accounting-journal-proposal.schema.json")
         invalid = {
             "proposal_id": 7,
+            "proposal_contract_version": 1,
             "idempotency_key": "invoice_019d:issued:v1",
+            "tenant_reference": "urn:cwl:tenant_001",
             "legal_entity_reference": "urn:cwl:entity_001",
-            "accounting_book_code": "k_ifrs_primary",
+            "intended_book_role_code": "primary_statutory",
             "transaction_currency": "KRW",
+            "transaction_date": "2026-08-31",
             "accounting_date": "2026-08-31",
+            "source_payload_hash": "sha256:" + "b" * 64,
+            "proposed_at": "2026-08-31T23:59:59Z",
             "proposal_status": "draft",
             "source_event_references": ["urn:cwl:invoice:019d"],
             "lines": [

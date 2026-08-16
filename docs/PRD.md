@@ -40,6 +40,8 @@ contextual-orchestrator usage
 - All three schemas declare Draft 2020-12 and pass the repository's offline conformance fixtures.
 - Prompt and response text are rejected from usage events.
 - `posted` is rejected from accounting proposal status.
+- Accounting proposals fail semantic validation when line numbers repeat or debit and credit totals differ.
+- Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
 - Repository tooling reaches 100% statement and branch coverage.
