@@ -198,6 +198,17 @@ python3 -c "from metering_billing import CollectionCasePresentmentService"
 
 After a `collection_case` exists, `GET /v1/collection-cases/{collection_case_id}` returns the tenant-scoped statement. Open the collection case, then collect or credit.
 
+## Present a dunning notice
+
+```bash
+python3 -c "from metering_billing import DunningEventPresentmentService"
+# POST /v1/collection-cases/{collection_case_id}/dunning-events
+# GET /v1/dunning-events/{dunning_event_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/dunning-events?tenant_reference=urn:cwl:tenant_001
+```
+
+After a `collection_dunning_event` exists, `GET /v1/dunning-events/{dunning_event_id}` returns the tenant-scoped reminder. `GET /v1/dunning-events` lists `{dunning_events, next_cursor}`. Record the commercial reminder, then collect or credit. This path does not send mail or invent recipient PII.
+
 ## Present a statement in Storybook
 
 ```bash

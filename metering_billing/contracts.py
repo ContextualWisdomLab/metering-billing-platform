@@ -40,6 +40,7 @@ __all__ = (
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
+    "DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -66,6 +67,7 @@ __all__ = (
     "validate_webhook_delivery",
     "validate_webhook_delivery_presentment",
     "validate_webhook_subscription_presentment",
+    "validate_dunning_event_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -107,6 +109,7 @@ WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME = (
     "webhook-subscription-presentment.schema.json"
 )
+DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME = "dunning-event-presentment.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
 AIS_OUTBOX_DRAIN_SCHEMA_NAME = "ais-outbox-drain.schema.json"
@@ -761,6 +764,35 @@ def validate_webhook_delivery(
     elif outcome == "rejected":
         if "rejection_reason_code" not in delivery:
             errors.append("$: rejected deliveries must include rejection_reason_code")
+    return tuple(errors)
+
+
+def validate_dunning_event_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate dunning-event presentment shape plus stored-fact invariants."""
+    schema = load_json_schema(DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    if action is not None and action not in {"collect", "wait"}:
+        errors.append("$: next_operator_action must be collect or wait")
+    for forbidden_name in (
+        "recipient",
+        "email",
+        "phone",
+        "channel",
+        "provider_id",
+        "delivery_status",
+        "body",
+        "content",
+        "sent_at",
+        "scheduled_at",
+        "notice_amount",
+    ):
+        if forbidden_name in statement:
+            errors.append(f"$: dunning presentment must not include {forbidden_name}")
     return tuple(errors)
 
 

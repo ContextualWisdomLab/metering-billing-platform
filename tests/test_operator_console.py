@@ -21,6 +21,7 @@ from metering_billing.contracts import (
     validate_webhook_delivery_presentment,
     validate_tenant_api_credential_presentment,
     validate_webhook_subscription_presentment,
+    validate_dunning_event_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -80,6 +81,10 @@ TENANT_API_CREDENTIAL_FIXTURE_NAMES = (
 WEBHOOK_SUBSCRIPTION_FIXTURE_NAMES = (
     "active_https_callback.json",
     "revoked_https_callback.json",
+)
+DUNNING_NOTICE_FIXTURE_NAMES = (
+    "first_notice_morning.json",
+    "overdue_notice_evening.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -286,6 +291,21 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("revoked_https_callback.json")["next_operator_action"],
             "register",
         )
+        for fixture_name in DUNNING_NOTICE_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_dunning_event_presentment(payload), ())
+            self.assertNotIn("recipient", payload)
+            self.assertNotIn("delivery_status", payload)
+            self.assertNotIn("body", payload)
+            self.assertIn(payload["dunning_notice_code"], {"first_notice", "overdue_notice"})
+        self.assertEqual(
+            self._fixture("first_notice_morning.json")["next_operator_action"],
+            "collect",
+        )
+        self.assertEqual(
+            self._fixture("overdue_notice_evening.json")["dunning_notice_code"],
+            "overdue_notice",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -321,6 +341,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "WebhookDelivery",
             "TenantApiCredential",
             "WebhookSubscription",
+            "DunningNotice",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -337,6 +358,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + WEBHOOK_DELIVERY_FIXTURE_NAMES
             + TENANT_API_CREDENTIAL_FIXTURE_NAMES
             + WEBHOOK_SUBSCRIPTION_FIXTURE_NAMES
+            + DUNNING_NOTICE_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -363,6 +385,7 @@ class OperatorConsoleTests(unittest.TestCase):
             inventory,
         )
         self.assertIn("Issue a key, then send it on every /v1 call; revoke when leaked", inventory)
+        self.assertIn("Record the commercial reminder, then collect or credit", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

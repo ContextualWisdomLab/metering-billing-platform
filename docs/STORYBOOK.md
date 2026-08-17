@@ -28,6 +28,8 @@ Customer copy on every tenant API credential: prefix, status, and the next opera
 
 Customer copy on every webhook subscription: callback URL, status, and the next operator action. Register an https callback, then run deliveries; AIS may keep polling.
 
+Customer copy on every dunning notice: notice code, sequence, and the next operator action. Record the commercial reminder, then collect or credit.
+
 ## Stories
 
 | Story | Module | Fixtures |
@@ -48,6 +50,7 @@ Customer copy on every webhook subscription: callback URL, status, and the next 
 | WebhookDelivery | `src/webhook_delivery.js` | `delivered_morning.json`, `failed_callback.json` |
 | TenantApiCredential | `src/tenant_api_credential.js` | `active_operator_key.json`, `revoked_leaked_key.json` |
 | WebhookSubscription | `src/webhook_subscription.js` | `active_https_callback.json`, `revoked_https_callback.json` |
+| DunningNotice | `src/dunning_notice.js` | `first_notice_morning.json`, `overdue_notice_evening.json` |
 
 The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is not a one-off style.
 
@@ -83,5 +86,7 @@ The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is no
 | `revoked_leaked_key.json` | Revoked inventory key | prefix `cwlak_fake002`, action `issue` |
 | `active_https_callback.json` | Active https callback | URL `https://hooks.example.test/cwl`, action `run_deliveries` |
 | `revoked_https_callback.json` | Revoked https callback | URL `https://hooks.example.test/cwl-revoked`, action `register` |
+| `first_notice_morning.json` | First commercial reminder | notice `first_notice`, action `collect` |
+| `overdue_notice_evening.json` | Overdue commercial reminder | notice `overdue_notice`, action `collect` |
 
-Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, `schemas/posting-receipt-observation-presentment.schema.json`, `schemas/webhook-delivery-presentment.schema.json`, `schemas/tenant-api-credential-presentment.schema.json`, and `schemas/webhook-subscription-presentment.schema.json`.  They are never IEEE binary floats.
+Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, `schemas/posting-receipt-observation-presentment.schema.json`, `schemas/webhook-delivery-presentment.schema.json`, `schemas/tenant-api-credential-presentment.schema.json`, `schemas/webhook-subscription-presentment.schema.json`, and `schemas/dunning-event-presentment.schema.json`.  They are never IEEE binary floats.

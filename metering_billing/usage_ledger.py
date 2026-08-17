@@ -1706,6 +1706,15 @@ class MemoryUsageLedger:
             if collection_case.tenant_account_id == tenant_account_id
         )
 
+    def get_collection_dunning_event(
+        self, collection_dunning_event_id: UUID
+    ) -> StoredCollectionDunningEvent | None:
+        """Return one collection dunning event by internal identifier, if present."""
+        for event in self.collection_dunning_events:
+            if event.collection_dunning_event_id == collection_dunning_event_id:
+                return event
+        return None
+
     def list_collection_dunning_events(
         self, collection_case_id: UUID
     ) -> tuple[StoredCollectionDunningEvent, ...]:
@@ -1716,6 +1725,16 @@ class MemoryUsageLedger:
             if event.collection_case_id == collection_case_id
         ]
         return tuple(sorted(matched, key=lambda event: event.dunning_event_number))
+
+    def list_collection_dunning_events_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionDunningEvent, ...]:
+        """Return dunning events limited to one tenant."""
+        return tuple(
+            event
+            for event in self.collection_dunning_events
+            if event.tenant_account_id == tenant_account_id
+        )
 
     def find_collection_dunning_event(
         self, collection_case_id: UUID, dunning_notice_code: str

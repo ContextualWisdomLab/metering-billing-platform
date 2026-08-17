@@ -57,9 +57,12 @@ The application is a thin WSGI adapter:
     unpublished pages skip receipt GETs.  Matched rows use the stored
     Billing idempotency key, never the payload URN.  Observations stay
     observations; ``proposal_status`` stays ``validated``.
-13. Let an operator GET a stored collection case as a commercial statement.
+    13. Let an operator GET a stored collection case as a commercial statement.
     Open the collection case, then collect or credit.  The read does not
-    post, call AIS, capture payment, or start a web UI.
+    post, call AIS, capture payment, or start a web UI.  GET one stored
+    ``collection_dunning_event`` or list ``{dunning_events, next_cursor}``.
+    ``POST /v1/collection-cases/{collection_case_id}/dunning-events`` stays
+    the #10 record.  The read does not send mail or capture payment.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -92,6 +95,7 @@ from metering_billing.collection_case import CollectionCaseService
 from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
+    DunningEventPresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
     RateCardPresentmentQueryError,
     UsageEventPresentmentQueryError,
@@ -119,6 +123,7 @@ from metering_billing.tax_assessment import TaxAssessmentService
 from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
+from metering_billing.dunning_event_presentment import DunningEventPresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
 from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
@@ -154,6 +159,8 @@ COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36}
 COLLECTION_DUNNING_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/dunning-events$"
 )
+DUNNING_EVENT_COLLECTION_PATH = "/v1/dunning-events"
+DUNNING_EVENT_ITEM_PATH = re.compile(r"^/v1/dunning-events/([0-9a-fA-F-]{36})$")
 PAYMENT_INTENT_COLLECTION_PATH = "/v1/payment-intents"
 PAYMENT_INTENT_ITEM_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})$")
 PAYMENT_CANCEL_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})/cancel$")
@@ -261,6 +268,7 @@ def create_http_app(
     assessments = TaxAssessmentService(shared_ledger)
     presentments = InvoicePresentmentService(shared_ledger)
     case_presentments = CollectionCasePresentmentService(shared_ledger)
+    dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
     credit_presentments = CreditAdjustmentPresentmentService(shared_ledger)
@@ -881,6 +889,39 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_dunning_events", "get_dunning_event"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_dunning_events":
+                    page = dunning_presentments.list_dunning_events(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = dunning_presentments.present_dunning_event(
+                    tenant_reference,
+                    _parse_uuid(path_values["dunning_event_id"], "dunning_event_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except DunningEventPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "dunning_event_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {"list_collection_cases", "get_collection_case"}:
             try:
                 query = _read_query(environ)
@@ -1095,6 +1136,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if dunning_match is not None:
         if method == "POST":
             return "dunning_events", {"collection_case_id": dunning_match.group(1)}
+        return "method_not_allowed", {}
+    if path == DUNNING_EVENT_COLLECTION_PATH:
+        if method == "GET":
+            return "list_dunning_events", {}
+        return "method_not_allowed", {}
+    dunning_event_match = DUNNING_EVENT_ITEM_PATH.fullmatch(path)
+    if dunning_event_match is not None:
+        if method == "GET":
+            return "get_dunning_event", {
+                "dunning_event_id": dunning_event_match.group(1)
+            }
         return "method_not_allowed", {}
     if path == COLLECTION_CASE_COLLECTION_PATH:
         if method == "POST":
@@ -1434,6 +1486,8 @@ def _dispatch_write(
         )
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "dunning_events":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
         notice_code = payload.get("dunning_notice_code")
         if not isinstance(notice_code, str):
             raise HttpRequestError("request_invalid")

@@ -28,6 +28,7 @@ from metering_billing.contracts import (
     validate_tenant_api_credential,
     validate_tenant_api_credential_presentment,
     validate_webhook_subscription_presentment,
+    validate_dunning_event_presentment,
     validate_webhook_delivery,
     validate_webhook_subscription,
 )
@@ -1628,6 +1629,58 @@ class RepositoryContractTests(unittest.TestCase):
             validate_webhook_subscription_presentment(revoked_wait),
         )
         self.assertNotEqual(validate_webhook_subscription_presentment([]), ())
+
+    def test_dunning_event_presentment_accepts_metadata_and_rejects_delivery(
+        self,
+    ) -> None:
+        """A dunning statement records notice code and cannot invent a send channel."""
+        schema = self._schema("dunning-event-presentment.schema.json")
+        instance = {
+            "dunning_event_presentment_contract_version": 1,
+            "dunning_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfba0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf631",
+            "dunning_event_number": 1,
+            "dunning_notice_code": "first_notice",
+            "occurred_at": "2026-08-17T21:05:00Z",
+            "next_operator_action": "collect",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_dunning_event_presentment(instance), ())
+        leaked = dict(instance)
+        leaked["recipient"] = "buyer@example.test"
+        self.assertIn(
+            "$: additional property is not allowed: recipient",
+            validate_schema_instance(schema, leaked),
+        )
+        self.assertIn(
+            "$: dunning presentment must not include recipient",
+            validate_dunning_event_presentment(leaked),
+        )
+        sent = dict(instance)
+        sent["delivery_status"] = "sent"
+        self.assertIn(
+            "$: dunning presentment must not include delivery_status",
+            validate_dunning_event_presentment(sent),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "send"
+        self.assertIn(
+            "$: next_operator_action must be collect or wait",
+            validate_dunning_event_presentment(wait_action),
+        )
+        settled = {
+            "dunning_event_presentment_contract_version": 1,
+            "dunning_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfbb0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf631",
+            "dunning_event_number": 1,
+            "dunning_notice_code": "first_notice",
+            "occurred_at": "2026-08-17T21:05:00Z",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_dunning_event_presentment(settled), ())
+        self.assertNotEqual(validate_dunning_event_presentment([]), ())
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:
         """Issue may return the secret once; hashes and rejected secrets are forbidden."""

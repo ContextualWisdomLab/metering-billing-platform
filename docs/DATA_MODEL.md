@@ -98,7 +98,7 @@ Presentment does not add a table.  `GET /v1/invoice-drafts/{invoice_draft_id}` p
 
 ## Collection-case-presentment projection
 
-Collection presentment does not add a table.  `GET /v1/collection-cases/{collection_case_id}` projects stored `collection_case` and `collection_dunning_event` rows plus accepted credits on the same draft.  `collection_outstanding` is the exact stored outstanding.  `collection_case_status` stays `open`, `dunning`, or `settled`.  Next operator action is `collect`, `credit`, or `wait`.
+Collection presentment does not add a table.  `GET /v1/collection-cases/{collection_case_id}` projects stored `collection_case` and `collection_dunning_event` rows plus accepted credits on the same draft.  `collection_outstanding` is the exact stored outstanding.  `collection_case_status` stays `open`, `dunning`, or `settled`.  Next operator action is `collect`, `credit`, or `wait`.  Dunning-event presentment also does not add a table.  `GET /v1/dunning-events/{dunning_event_id}` projects one stored `collection_dunning_event`.  `GET /v1/dunning-events` lists `{dunning_events, next_cursor}` ordered by `occurred_at` then `collection_dunning_event_id`.
 
 ## Payment-intent-presentment projection
 

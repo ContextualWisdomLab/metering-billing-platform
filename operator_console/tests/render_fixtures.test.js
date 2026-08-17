@@ -69,6 +69,11 @@ import {
   WEBHOOK_SUBSCRIPTION_CUSTOMER_COPY,
   nextOperatorActionCopy as nextWebhookSubscriptionActionCopy,
 } from "../src/webhook_subscription.js";
+import {
+  renderDunningNotice,
+  DUNNING_NOTICE_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextDunningNoticeActionCopy,
+} from "../src/dunning_notice.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -399,6 +404,33 @@ test("revoked https callback shows register", () => {
   assert.match(html, /revoked/);
   assert.match(html, /Register a callback/);
   assert.equal(statement.next_operator_action, "register");
+});
+
+test("first notice morning shows collect and never invents a send channel", () => {
+  const statement = loadFixture("first_notice_morning.json");
+  const html = renderDunningNotice(statement);
+  assert.match(html, /first_notice/);
+  assert.match(html, /Collect or credit/);
+  assert.match(html, /Record the commercial reminder, then collect or credit/);
+  assert.equal(
+    DUNNING_NOTICE_CUSTOMER_COPY,
+    "Record the commercial reminder, then collect or credit.",
+  );
+  assert.equal(nextDunningNoticeActionCopy("collect"), "Collect or credit");
+  assert.equal(nextDunningNoticeActionCopy("wait"), "Wait");
+  assert.equal(nextDunningNoticeActionCopy("unknown"), "Collect or credit");
+  assert.equal(statement.next_operator_action, "collect");
+  assert.ok(!("recipient" in statement));
+  assert.ok(!("delivery_status" in statement));
+  assert.ok(!("body" in statement));
+});
+
+test("overdue notice evening shows collect", () => {
+  const statement = loadFixture("overdue_notice_evening.json");
+  const html = renderDunningNotice(statement);
+  assert.match(html, /overdue_notice/);
+  assert.match(html, /Collect or credit/);
+  assert.equal(statement.next_operator_action, "collect");
 });
 
 test("failed callback webhook shows run deliveries", () => {
