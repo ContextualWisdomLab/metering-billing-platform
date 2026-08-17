@@ -59,6 +59,11 @@ import {
   WEBHOOK_DELIVERY_CUSTOMER_COPY,
   nextOperatorActionCopy as nextWebhookDeliveryActionCopy,
 } from "../src/webhook_delivery.js";
+import {
+  renderTenantApiCredential,
+  TENANT_API_CREDENTIAL_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextTenantApiCredentialActionCopy,
+} from "../src/tenant_api_credential.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -330,6 +335,33 @@ test("delivered morning webhook shows wait and never leaks a secret", () => {
   assert.ok(!("webhook_secret" in statement));
   assert.ok(!("payload_json" in statement));
   assert.ok(!("delivery_status" in statement));
+});
+
+test("active operator key shows prefix and wait", () => {
+  const statement = loadFixture("active_operator_key.json");
+  const html = renderTenantApiCredential(statement);
+  assert.match(html, /cwlak_fake001/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Issue a key, then send it on every \/v1 call; revoke when leaked/);
+  assert.equal(
+    TENANT_API_CREDENTIAL_CUSTOMER_COPY,
+    "Issue a key, then send it on every /v1 call; revoke when leaked.",
+  );
+  assert.equal(nextTenantApiCredentialActionCopy("wait"), "Wait");
+  assert.equal(nextTenantApiCredentialActionCopy("issue"), "Issue a key");
+  assert.equal(nextTenantApiCredentialActionCopy("unknown"), "Issue a key");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.ok(!("api_credential_secret" in statement));
+  assert.ok(!("credential_secret_hash" in statement));
+});
+
+test("revoked leaked key shows issue", () => {
+  const statement = loadFixture("revoked_leaked_key.json");
+  const html = renderTenantApiCredential(statement);
+  assert.match(html, /cwlak_fake002/);
+  assert.match(html, /revoked/);
+  assert.match(html, /Issue a key/);
+  assert.equal(statement.next_operator_action, "issue");
 });
 
 test("failed callback webhook shows run deliveries", () => {

@@ -247,6 +247,14 @@ class TenantApiCredentialRejectionReasonCode(StrEnum):
     API_CREDENTIAL_INVALID = "api_credential_invalid"
 
 
+class TenantApiCredentialPresentmentQueryError(ValueError):
+    """Raised when a stored API credential cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class TenantApiCredentialQueryError(ValueError):
     """Raised when a stored API credential cannot be authorized or decoded."""
 

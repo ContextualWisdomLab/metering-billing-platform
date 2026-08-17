@@ -1,0 +1,12 @@
+{
+  "tenant_api_credential_presentment_contract_version": 1,
+  "tenant_api_credential_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf9b0",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "credential_label": "operator_key",
+  "credential_prefix": "cwlak_fake002",
+  "credential_status": "revoked",
+  "tenant_api_credential_contract_version": 1,
+  "issued_at": "2026-08-17T21:00:00Z",
+  "revoked_at": "2026-08-17T22:00:00Z",
+  "next_operator_action": "issue"
+}

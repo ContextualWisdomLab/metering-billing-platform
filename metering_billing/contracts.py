@@ -60,6 +60,7 @@ __all__ = (
     "validate_tax_assessment_presentment",
     "validate_posting_receipt_observation_presentment",
     "validate_tenant_api_credential",
+    "validate_tenant_api_credential_presentment",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
     "validate_webhook_delivery_presentment",
@@ -97,6 +98,9 @@ POSTING_RECEIPT_OBSERVATION_PRESENTMENT_SCHEMA_NAME = (
     "posting-receipt-observation-presentment.schema.json"
 )
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
+TENANT_API_CREDENTIAL_PRESENTMENT_SCHEMA_NAME = (
+    "tenant-api-credential-presentment.schema.json"
+)
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
@@ -669,6 +673,34 @@ def validate_tenant_api_credential(
             errors.append("$: rejected credentials must include rejection_reason_code")
         if "api_credential_secret" in credential:
             errors.append("$: rejected credentials must not include api_credential_secret")
+    return tuple(errors)
+
+
+def validate_tenant_api_credential_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate credential presentment shape plus metadata-only invariants."""
+    schema = load_json_schema(
+        TENANT_API_CREDENTIAL_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    status_code = statement.get("credential_status")
+    if action is not None and action not in {"wait", "issue"}:
+        errors.append("$: next_operator_action must be wait or issue")
+    if status_code == "active" and action is not None and action != "wait":
+        errors.append("$: active credential must wait")
+    if status_code == "revoked" and action is not None and action != "issue":
+        errors.append("$: revoked credential must issue")
+    for forbidden_name in (
+        "api_credential_secret",
+        "credential_secret_hash",
+        "tenant_api_credential_outcome_code",
+    ):
+        if forbidden_name in statement:
+            errors.append(f"$: credential presentment must not include {forbidden_name}")
     return tuple(errors)
 
 

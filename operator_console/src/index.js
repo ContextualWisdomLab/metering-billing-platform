@@ -54,3 +54,8 @@ export {
   WEBHOOK_DELIVERY_CUSTOMER_COPY,
   nextOperatorActionCopy as nextWebhookDeliveryActionCopy,
 } from "./webhook_delivery.js";
+export {
+  renderTenantApiCredential,
+  TENANT_API_CREDENTIAL_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextTenantApiCredentialActionCopy,
+} from "./tenant_api_credential.js";

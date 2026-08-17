@@ -42,9 +42,11 @@ The application is a thin WSGI adapter:
 9. Let an operator GET a stored invoice draft as a commercial statement.
    Open the draft statement, then collect or credit.  The read does not
    post, call AIS, or start a web UI.
-10. Let an operator issue a tenant API credential.  After one active key
+    10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
-    Issue a key, then send it on every ``/v1`` call; revoke when leaked.
+    GET one stored credential or list ``{tenant_api_credentials,
+    next_cursor}``.  Issue a key, then send it on every ``/v1`` call;
+    revoke when leaked.
     11. Let an operator register an https webhook callback, then run deliveries.
     GET one stored ``webhook_delivery_attempt`` or list
     ``{webhook_deliveries, next_cursor}``.  AIS may keep polling journal
@@ -102,6 +104,7 @@ from metering_billing.errors import (
     PostingReceiptObservationPresentmentQueryError,
     RateCardQueryError,
     InvoicePresentmentQueryError,
+    TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
     TaxRateQueryError,
@@ -127,6 +130,9 @@ from metering_billing.posting_receipt_observation_presentment import (
 from metering_billing.webhook_delivery_presentment import WebhookDeliveryPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
+from metering_billing.tenant_api_credential_presentment import (
+    TenantApiCredentialPresentmentService,
+)
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -188,6 +194,9 @@ INVOICE_DRAFT_ITEM_PATH = re.compile(r"^/v1/invoice-drafts/([0-9a-fA-F-]{36})$")
 TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
 TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
     r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})/revoke$"
+)
+TENANT_API_CREDENTIAL_ITEM_PATH = re.compile(
+    r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})$"
 )
 WEBHOOK_SUBSCRIPTION_COLLECTION_PATH = "/v1/webhook-subscriptions"
 WEBHOOK_SUBSCRIPTION_REVOKE_PATH = re.compile(
@@ -254,6 +263,7 @@ def create_http_app(
     observation_presentments = PostingReceiptObservationPresentmentService(shared_ledger)
     delivery_presentments = WebhookDeliveryPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
+    credential_presentments = TenantApiCredentialPresentmentService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
     drains = AisOutboxDrainService(shared_ledger, ais_client=resolved_ais_client)
@@ -285,18 +295,47 @@ def create_http_app(
             return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "healthz":
             return _send_json(start_response, 200, {"status": "ok"})
-        if route_name in {
-            "list_tenant_api_credentials",
-            "tenant_api_credentials",
-            "revoke_tenant_api_credential",
-        }:
+        if route_name in {"list_tenant_api_credentials", "get_tenant_api_credential"}:
             try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
                 if route_name == "list_tenant_api_credentials":
-                    query = _read_query(environ)
-                    tenant_reference = _authorized_tenant(environ, query)
-                    page = credentials.list_credentials(tenant_reference)
+                    page = credential_presentments.list_tenant_api_credentials(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
                     return _send_json(start_response, 200, page.as_contract_dict())
+                result = credential_presentments.present_tenant_api_credential(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["tenant_api_credential_id"],
+                        "tenant_api_credential_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except TenantApiCredentialPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "api_credential_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"tenant_api_credentials", "revoke_tenant_api_credential"}:
+            try:
                 payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
                 if route_name == "tenant_api_credentials":
                     tenant_reference = _authorized_tenant(
                         environ, payload, require_credential=False
@@ -991,6 +1030,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "POST":
             return "revoke_tenant_api_credential", {
                 "tenant_api_credential_id": revoke_match.group(1)
+            }
+        return "method_not_allowed", {}
+    credential_match = TENANT_API_CREDENTIAL_ITEM_PATH.fullmatch(path)
+    if credential_match is not None:
+        if method == "GET":
+            return "get_tenant_api_credential", {
+                "tenant_api_credential_id": credential_match.group(1)
             }
         return "method_not_allowed", {}
     dunning_match = COLLECTION_DUNNING_PATH.fullmatch(path)

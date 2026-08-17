@@ -77,6 +77,7 @@ from metering_billing.contracts import (
     validate_webhook_delivery_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
+    validate_tenant_api_credential_presentment,
     validate_ais_outbox_drain,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -118,6 +119,7 @@ from metering_billing.errors import (
     TaxAssessmentPresentmentQueryError,
     PaymentReceiptPresentmentQueryError,
     TenantApiCredentialOutcomeCode,
+    TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TenantApiCredentialRejectionReasonCode,
     AisOutboxDrainOutcomeCode,
@@ -147,6 +149,9 @@ from metering_billing.http_app import create_http_app
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
+from metering_billing.tenant_api_credential_presentment import (
+    TenantApiCredentialPresentmentService,
+)
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.webhook_delivery_presentment import WebhookDeliveryPresentmentService
 from metering_billing.payload_integrity import compute_source_payload_hash
@@ -246,6 +251,8 @@ __all__ = (
     "InvoicePresentmentQueryError",
     "InvoicePresentmentService",
     "TenantApiCredentialOutcomeCode",
+    "TenantApiCredentialPresentmentQueryError",
+    "TenantApiCredentialPresentmentService",
     "TenantApiCredentialQueryError",
     "TenantApiCredentialRejectionReasonCode",
     "TenantApiCredentialService",
@@ -303,6 +310,7 @@ __all__ = (
     "validate_webhook_delivery_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
+    "validate_tenant_api_credential_presentment",
     "validate_ais_outbox_drain",
     "validate_webhook_delivery",
     "validate_webhook_subscription",

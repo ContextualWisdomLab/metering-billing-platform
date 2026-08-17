@@ -26,6 +26,7 @@ from metering_billing.contracts import (
     validate_posting_receipt_observation_presentment,
     validate_webhook_delivery_presentment,
     validate_tenant_api_credential,
+    validate_tenant_api_credential_presentment,
     validate_webhook_delivery,
     validate_webhook_subscription,
 )
@@ -1490,6 +1491,71 @@ class RepositoryContractTests(unittest.TestCase):
             validate_webhook_delivery_presentment(failed_wait),
         )
         self.assertNotEqual(validate_webhook_delivery_presentment([]), ())
+
+    def test_tenant_api_credential_presentment_accepts_metadata_and_rejects_secret(
+        self,
+    ) -> None:
+        """A credential statement records prefix and status and cannot leak a secret."""
+        schema = self._schema("tenant-api-credential-presentment.schema.json")
+        instance = {
+            "tenant_api_credential_presentment_contract_version": 1,
+            "tenant_api_credential_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf9a0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "credential_label": "operator_key",
+            "credential_prefix": "cwlak_fake001",
+            "credential_status": "active",
+            "tenant_api_credential_contract_version": 1,
+            "issued_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_tenant_api_credential_presentment(instance), ())
+        leaked = dict(instance)
+        leaked["api_credential_secret"] = "cwlak_must_not_leak"
+        self.assertIn(
+            "$: additional property is not allowed: api_credential_secret",
+            validate_schema_instance(schema, leaked),
+        )
+        self.assertIn(
+            "$: credential presentment must not include api_credential_secret",
+            validate_tenant_api_credential_presentment(leaked),
+        )
+        hashed = dict(instance)
+        hashed["credential_secret_hash"] = "hmac-sha256:" + ("a" * 64)
+        self.assertIn(
+            "$: credential presentment must not include credential_secret_hash",
+            validate_tenant_api_credential_presentment(hashed),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "rotate"
+        self.assertIn(
+            "$: next_operator_action must be wait or issue",
+            validate_tenant_api_credential_presentment(wait_action),
+        )
+        self.assertIn(
+            "$: active credential must wait",
+            validate_tenant_api_credential_presentment(wait_action),
+        )
+        revoked = {
+            "tenant_api_credential_presentment_contract_version": 1,
+            "tenant_api_credential_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf9b0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "credential_label": "operator_key",
+            "credential_prefix": "cwlak_fake002",
+            "credential_status": "revoked",
+            "tenant_api_credential_contract_version": 1,
+            "issued_at": "2026-08-17T21:00:00Z",
+            "revoked_at": "2026-08-17T22:00:00Z",
+            "next_operator_action": "issue",
+        }
+        self.assertEqual(validate_tenant_api_credential_presentment(revoked), ())
+        revoked_wait = dict(revoked)
+        revoked_wait["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: revoked credential must issue",
+            validate_tenant_api_credential_presentment(revoked_wait),
+        )
+        self.assertNotEqual(validate_tenant_api_credential_presentment([]), ())
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:
         """Issue may return the secret once; hashes and rejected secrets are forbidden."""

@@ -172,7 +172,11 @@ contextual-orchestrator usage
 - After one or more active keys exist, every `/v1` write and GET except credential issue requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals `X-CWL-Tenant-Reference` / `tenant_reference`. A mismatch is HTTP 422.
 - Zero active keys keep the existing tenant pin (bootstrap window). AIS `X-CWL-Tenant-Reference` pull stays up until a key is issued for that tenant.
 - `GET /healthz` stays unauthenticated.
-- `POST /v1/tenant-api-credentials` may use the tenant pin alone. `GET /v1/tenant-api-credentials` lists id, label, prefix, status, and issued_at and never the secret or hash. `POST /v1/tenant-api-credentials/{id}/revoke` revokes.
+- `POST /v1/tenant-api-credentials` may use the tenant pin alone. PAN, CVC, and provider secrets are refused on issue and revoke.
+- A known stored `tenant_api_credential` presents one tenant-scoped metadata statement with `tenant_api_credential_id`, `credential_label`, `credential_prefix`, `credential_status`, timestamps, contract version, and `next_operator_action` (`wait` while active, otherwise `issue`).
+- `GET /v1/tenant-api-credentials/{tenant_api_credential_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak. GET never reconstructs a secret.
+- `GET /v1/tenant-api-credentials` lists summaries as `{tenant_api_credentials, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{tenant_api_credential_id}`.
+- `POST /v1/tenant-api-credentials/{id}/revoke` revokes. Presentment never returns `api_credential_secret`, `credential_secret_hash`, a verifier, or a bearer token.
 - Missing tenant, missing key after bootstrap closes, unknown or revoked key, and cross-tenant key use fail closed.
 - Operators issue a key, then send it on every `/v1` call; revoke when leaked. This slice does not log the secret, put it on AIS contracts, change journal/tax/credit/presentment shapes, or start a web UI.
 
@@ -291,4 +295,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, AIS outbox drain, tax-assessment presentment, posting-receipt observation presentment, and webhook-delivery presentment reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, AIS outbox drain, tax-assessment presentment, posting-receipt observation presentment, webhook-delivery presentment, and tenant-api-credential presentment reach 100% statement and branch coverage.

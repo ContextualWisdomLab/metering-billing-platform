@@ -302,7 +302,7 @@ class TenantApiCredentialTests(unittest.TestCase):
         self.assertEqual(unknown_revoke_status, 404)
         self.assertEqual(unknown_revoke_body["rejection_reason_code"], "api_credential_not_found")
         with mock.patch(
-            "metering_billing.http_app.TenantApiCredentialService.list_credentials",
+            "metering_billing.http_app.TenantApiCredentialPresentmentService.list_tenant_api_credentials",
             side_effect=ValueError("closed"),
         ):
             value_status, value_body = invoke_http(
