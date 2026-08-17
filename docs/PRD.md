@@ -59,7 +59,7 @@ contextual-orchestrator usage
 - Another tenant cannot see or collect the first tenant's case.
 - Dunning events append commercial reminders (`first_notice`, `overdue_notice`) without capturing money.
 - Missing drafts, cross-tenant IDs, float money, and zero outstanding fail closed.
-- Status stays `open` or `dunning`. Operators open the case, then send a dunning notice.
+- Status stays `open` or `dunning` until a receipt settles remaining outstanding to zero.
 
 ## Payment-intent acceptance
 
@@ -67,7 +67,18 @@ contextual-orchestrator usage
 - A second project of the same tenant, `collection_case_id`, source-payload hash, and contract version returns the same `payment_intent_id`.
 - Another tenant cannot see or project the first tenant's case.
 - Missing cases, cross-tenant IDs, float money, and zero amounts fail closed.
-- Status stays `projected`, `cancelled`, or `rejected`. Operators next bind a provider projection or cancel the intent.
+- Status stays `projected`, `cancelled`, or `rejected`. Operators next record a commercial receipt or cancel the intent.
+
+## Payment-settlement acceptance
+
+- A known projected intent records one payment receipt whose exact amount is applied against that intent.
+- A full receipt of the intent amount zeros collection outstanding and marks the case `settled`.
+- A partial receipt leaves residual outstanding and leaves the case `open` or `dunning`.
+- A second receipt of the same tenant, `payment_intent_id`, received amount, source-payload hash, and contract version returns the same `payment_receipt_id`.
+- Another tenant cannot see or settle the first tenant's intent.
+- Cancel flips a projected intent to `cancelled` without writing a receipt or changing outstanding. Cancel replay is idempotent. A cancelled intent cannot later receive a receipt.
+- Missing intents, cross-tenant IDs, float money, zero or negative amounts, over-application, and non-projected intents fail closed.
+- Status stays `applied`. Operators next emit a cash journal proposal to AIS, or record another partial receipt. This slice does not emit an `accounting_journal_proposal`.
 
 ## Usage-ingestion acceptance
 
@@ -87,4 +98,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, and payment-intent reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, and payment-settlement reach 100% statement and branch coverage.

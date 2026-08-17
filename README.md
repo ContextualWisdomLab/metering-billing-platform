@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, and semantically validated accounting journal proposals;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, and payment-intent migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, and projects provider-neutral payment intents;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, and semantically validated accounting journal proposals;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, and payment-receipt migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, and applies commercial payment receipts;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -85,6 +85,14 @@ python3 -c "from metering_billing import PaymentIntentService"
 
 After a `collection_case` exists, call `PaymentIntentService.project_payment_intent` with the tenant and `collection_case_id`. The intent amount equals the exact case outstanding. An identical replay returns the same `payment_intent_id`. Status stays `projected`. The intent does not capture, settle, store a card PAN, or post a journal.
 
+## Record a payment receipt
+
+```bash
+python3 -c "from metering_billing import PaymentSettlementService"
+```
+
+After a projected `payment_intent` exists, call `PaymentSettlementService.record_payment_receipt` with the tenant, `payment_intent_id`, and exact `received_amount`. The receipt status is `applied`. The linked collection-case outstanding is reduced by the same amount; remaining zero marks the case `settled`. An identical replay returns the same `payment_receipt_id`. Call `cancel_payment_intent` to flip a projected intent to `cancelled` without writing a receipt. The receipt does not capture via a provider, emit an `accounting_journal_proposal`, or post a journal.
+
 ## Next action
 
-Bind a payment-provider projection later, or cancel the intent. Do not mark the intent captured, settled, or posted, and do not add a named provider adapter until that later increment.
+Emit a cash journal proposal to AIS, or record another partial receipt. Do not mark the receipt captured or posted, and do not add a named provider adapter until a later increment.

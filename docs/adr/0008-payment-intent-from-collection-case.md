@@ -23,4 +23,4 @@ This path must not capture money, settle, post a journal, or call a named paymen
 
 - Known collection-case outstanding reproduces one exact projected amount.
 - Tenants cannot see or project each other's cases.
-- Operators next bind a payment-provider projection or cancel the intent.  Capture remains a later increment.
+- Operators next record a commercial receipt or cancel the intent.  Capture via a named provider remains a later increment.  Receipt application and cancel are implemented in ADR 0009.

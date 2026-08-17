@@ -292,7 +292,11 @@ class StoredCollectionDunningEvent:
 
 @dataclass(frozen=True)
 class StoredCollectionCase:
-    """Append-only commercial collection case for one tenant invoice draft."""
+    """Commercial collection case for one tenant invoice draft.
+
+    Opening is append-only.  Applied receipts reduce ``outstanding_amount`` and
+    may mark the current row ``settled``.
+    """
 
     collection_case_id: UUID
     tenant_account_id: UUID
@@ -305,7 +309,11 @@ class StoredCollectionCase:
 
 @dataclass(frozen=True)
 class StoredPaymentIntent:
-    """Append-only provider-neutral payment intent for one collection case."""
+    """Provider-neutral payment intent for one collection case.
+
+    Projection is append-only.  Cancellation replaces the current status of the
+    same identity row without writing a receipt.
+    """
 
     payment_intent_id: UUID
     tenant_account_id: UUID
@@ -316,6 +324,22 @@ class StoredPaymentIntent:
     payment_amount: Decimal
     source_payload_hash: str
     projected_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredPaymentReceipt:
+    """Append-only commercial receipt applied against one projected intent."""
+
+    payment_receipt_id: UUID
+    tenant_account_id: UUID
+    payment_intent_id: UUID
+    collection_case_id: UUID
+    settlement_contract_version: int
+    currency_code: str
+    payment_receipt_status: str
+    received_amount: Decimal
+    source_payload_hash: str
+    received_at: datetime
 
 
 @dataclass(frozen=True)
@@ -370,6 +394,8 @@ class MemoryUsageLedger:
     collection_dunning_number_index: dict[tuple[UUID, int], UUID] = field(default_factory=dict)
     payment_intents: dict[UUID, StoredPaymentIntent] = field(default_factory=dict)
     payment_intent_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
+    payment_receipts: dict[UUID, StoredPaymentReceipt] = field(default_factory=dict)
+    payment_receipt_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -965,6 +991,125 @@ class MemoryUsageLedger:
             payment_intent
             for payment_intent in self.payment_intents.values()
             if payment_intent.tenant_account_id == tenant_account_id
+        )
+
+    def apply_collection_settlement(
+        self, collection_case_id: UUID, applied_amount: Decimal
+    ) -> StoredCollectionCase:
+        """Reduce case outstanding by an applied receipt amount.
+
+        Remaining zero marks the current case ``settled``.  Receipts remain the
+        immutable history; this method updates the current commercial balance.
+        """
+        stored = self.collection_cases.get(collection_case_id)
+        if stored is None:
+            raise ValueError("collection settlement requires a stored collection case")
+        applied = parse_exact_decimal(format_exact_decimal(applied_amount))
+        if applied <= 0:
+            raise ValueError("collection settlement amount must be a positive exact decimal")
+        if applied > stored.outstanding_amount:
+            raise ValueError("collection settlement amount cannot exceed outstanding")
+        remaining_amount = stored.outstanding_amount - applied
+        updated = StoredCollectionCase(
+            collection_case_id=stored.collection_case_id,
+            tenant_account_id=stored.tenant_account_id,
+            invoice_draft_id=stored.invoice_draft_id,
+            currency_code=stored.currency_code,
+            collection_case_status=(
+                "settled" if remaining_amount == 0 else stored.collection_case_status
+            ),
+            outstanding_amount=remaining_amount,
+            opened_at=stored.opened_at,
+        )
+        self.collection_cases[updated.collection_case_id] = updated
+        return updated
+
+    def cancel_stored_payment_intent(self, payment_intent_id: UUID) -> StoredPaymentIntent:
+        """Flip a projected intent to cancelled without writing a receipt."""
+        stored = self.payment_intents.get(payment_intent_id)
+        if stored is None:
+            raise ValueError("payment intent cancellation requires a stored payment intent")
+        if stored.payment_intent_status == "cancelled":
+            return stored
+        if stored.payment_intent_status != "projected":
+            raise ValueError("only projected payment intents can be cancelled")
+        updated = StoredPaymentIntent(
+            payment_intent_id=stored.payment_intent_id,
+            tenant_account_id=stored.tenant_account_id,
+            collection_case_id=stored.collection_case_id,
+            payment_intent_contract_version=stored.payment_intent_contract_version,
+            currency_code=stored.currency_code,
+            payment_intent_status="cancelled",
+            payment_amount=stored.payment_amount,
+            source_payload_hash=stored.source_payload_hash,
+            projected_at=stored.projected_at,
+        )
+        self.payment_intents[updated.payment_intent_id] = updated
+        return updated
+
+    def get_payment_receipt(self, payment_receipt_id: UUID) -> StoredPaymentReceipt | None:
+        """Return a stored payment receipt by internal identifier."""
+        return self.payment_receipts.get(payment_receipt_id)
+
+    def find_payment_receipt(
+        self,
+        tenant_account_id: UUID,
+        payment_intent_id: UUID,
+        source_payload_hash: str,
+        settlement_contract_version: int,
+    ) -> StoredPaymentReceipt | None:
+        """Return the receipt for one tenant-scoped intent snapshot, if it exists."""
+        payment_receipt_id = self.payment_receipt_index.get(
+            (
+                tenant_account_id,
+                payment_intent_id,
+                source_payload_hash,
+                settlement_contract_version,
+            )
+        )
+        if payment_receipt_id is None:
+            return None
+        return self.payment_receipts[payment_receipt_id]
+
+    def insert_payment_receipt(self, payment_receipt: StoredPaymentReceipt) -> StoredPaymentReceipt:
+        """Append an immutable applied receipt.  Existing identity rows are never updated."""
+        if payment_receipt.payment_receipt_status != "applied":
+            raise ValueError("payment receipts cannot be captured or posted")
+        received_amount = parse_exact_decimal(format_exact_decimal(payment_receipt.received_amount))
+        if received_amount <= 0:
+            raise ValueError("payment receipt amount must be a positive exact decimal")
+        identity_key = (
+            payment_receipt.tenant_account_id,
+            payment_receipt.payment_intent_id,
+            payment_receipt.source_payload_hash,
+            payment_receipt.settlement_contract_version,
+        )
+        if payment_receipt.payment_receipt_id in self.payment_receipts:
+            raise ValueError("payment receipts are immutable and cannot be replaced")
+        if identity_key in self.payment_receipt_index:
+            raise ValueError("payment receipts are immutable and cannot be replaced")
+        persisted = StoredPaymentReceipt(
+            payment_receipt_id=payment_receipt.payment_receipt_id,
+            tenant_account_id=payment_receipt.tenant_account_id,
+            payment_intent_id=payment_receipt.payment_intent_id,
+            collection_case_id=payment_receipt.collection_case_id,
+            settlement_contract_version=payment_receipt.settlement_contract_version,
+            currency_code=payment_receipt.currency_code,
+            payment_receipt_status=payment_receipt.payment_receipt_status,
+            received_amount=received_amount,
+            source_payload_hash=payment_receipt.source_payload_hash,
+            received_at=payment_receipt.received_at,
+        )
+        self.payment_receipts[persisted.payment_receipt_id] = persisted
+        self.payment_receipt_index[identity_key] = persisted.payment_receipt_id
+        return persisted
+
+    def list_payment_receipts(self, tenant_account_id: UUID) -> tuple[StoredPaymentReceipt, ...]:
+        """Return payment receipts limited to one tenant."""
+        return tuple(
+            payment_receipt
+            for payment_receipt in self.payment_receipts.values()
+            if payment_receipt.tenant_account_id == tenant_account_id
         )
 
     def list_rating_runs(self, tenant_account_id: UUID) -> tuple[StoredRatingRun, ...]:

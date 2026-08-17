@@ -4,6 +4,11 @@
 
 ### Added
 
+- Importable `metering_billing` payment-settlement service that applies an exact commercial receipt against a projected payment intent and reduces collection outstanding.
+- Idempotent payment-receipt identity on `(tenant, payment_intent_id, source_payload_hash, settlement_contract_version)` so a replay returns the same `payment_receipt_id`.
+- Append-only `payment_receipt` persistence.  Status stays `applied`.  A full receipt settles the collection case; a partial receipt leaves residual outstanding.
+- `cancel_payment_intent` flips a projected intent to `cancelled` without writing a receipt or changing outstanding.
+- ADR 0009 for commercial settlement without provider capture, PAN storage, cash journal export, or AIS posting.
 - Importable `metering_billing` payment-intent service that projects a provider-neutral initiation record from a stored collection case.
 - Idempotent payment-intent identity on `(tenant, collection_case_id, source_payload_hash, payment_intent_contract_version)` so a replay returns the same `payment_intent_id`.
 - Append-only `payment_intent` persistence.  Status stays `projected`, `cancelled`, or `rejected`.

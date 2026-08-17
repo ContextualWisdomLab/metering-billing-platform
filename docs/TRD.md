@@ -33,6 +33,8 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.PaymentIntentService` projects a provider-neutral payment intent from a stored collection case. The intent does not capture, settle, store a card PAN, or post a journal.
 
+`metering_billing.PaymentSettlementService` applies a commercial payment receipt against a projected intent and reduces collection outstanding. Receipts stay `applied` and do not capture via a provider, emit an `accounting_journal_proposal`, or post a journal. AIS is not the consumer of the receipt.
+
 ## Security
 
 - No card number, CVC, provider secret, PAT plaintext, prompt, or response is accepted in billing contracts.

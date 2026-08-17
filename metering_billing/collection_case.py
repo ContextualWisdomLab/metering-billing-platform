@@ -37,6 +37,7 @@ Clock = Callable[[], datetime]
 COLLECTION_CASE_CONTRACT_VERSION = 1
 COLLECTION_CASE_OPEN_STATUS = "open"
 COLLECTION_CASE_DUNNING_STATUS = "dunning"
+COLLECTION_CASE_SETTLED_STATUS = "settled"
 DUNNING_NOTICE_CODES = frozenset({"first_notice", "overdue_notice"})
 
 
@@ -262,9 +263,7 @@ def _from_stored(
         invoice_draft_id=stored.invoice_draft_id,
         tenant_reference=tenant_reference,
         currency_code=stored.currency_code,
-        collection_case_status=(
-            COLLECTION_CASE_DUNNING_STATUS if dunning_events else stored.collection_case_status
-        ),
+        collection_case_status=_derived_collection_case_status(stored, dunning_events),
         outstanding_amount=stored.outstanding_amount,
         rejection_reason_code=None,
         dunning_events=tuple(
@@ -277,6 +276,18 @@ def _from_stored(
             for event in dunning_events
         ),
     )
+
+
+def _derived_collection_case_status(
+    stored: StoredCollectionCase,
+    dunning_events: tuple[StoredCollectionDunningEvent, ...],
+) -> str:
+    """Prefer ``settled`` over dunning so a paid case does not reopen as a reminder."""
+    if stored.collection_case_status == COLLECTION_CASE_SETTLED_STATUS:
+        return COLLECTION_CASE_SETTLED_STATUS
+    if dunning_events:
+        return COLLECTION_CASE_DUNNING_STATUS
+    return stored.collection_case_status
 
 
 def _format_occurred_at(occurred_at: datetime) -> str:

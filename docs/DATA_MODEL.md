@@ -20,9 +20,10 @@
 - `invoice_draft_line`: append-only draft line copied from a rating line.
 - `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft.
 - `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
-- `collection_case`: append-only commercial collection case for one tenant invoice draft.
+- `collection_case`: commercial collection case for one tenant invoice draft; receipts update outstanding and may mark the case settled.
 - `collection_dunning_event`: append-only commercial reminder that does not capture money.
-- `payment_intent`: append-only provider-neutral payment initiation projection for one collection case.
+- `payment_intent`: provider-neutral payment initiation projection for one collection case; cancellation updates current status.
+- `payment_receipt`: append-only commercial receipt applied against one projected payment intent.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -39,7 +40,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, credits, spend reservations, issued invoices, provider webhooks, refunds, disputes, settlements, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, or payment-intent keys.
+Subsequent migrations add contracts, credits, spend reservations, issued invoices, provider webhooks, refunds, disputes, cash journal proposals from receipts, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, or payment-receipt keys.
 
 ## Usage identity
 
@@ -59,8 +60,12 @@ A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id
 
 ## Collection-case identity
 
-A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding is the exact invoice-draft total.  Status is `open` or `dunning` only.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
+A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
 
 ## Payment-intent identity
 
 A stored payment intent is identified by `(tenant_account_id, collection_case_id, source_payload_hash, payment_intent_contract_version)`.  The hash covers the case outstanding, currency, and stored status snapshot.  Status is `projected`, `cancelled`, or `rejected` only.  Provider charge IDs and card PAN are not stored.
+
+## Payment-receipt identity
+
+A stored payment receipt is identified by `(tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)`.  The hash covers the intent amount, currency, status, and received amount.  Status is `applied` only.  Provider charge IDs and card PAN are not stored.  Receipts do not emit an `accounting_journal_proposal`.

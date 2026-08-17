@@ -1,16 +1,17 @@
-"""Importable commercial contracts, usage, rating, draft, export, collection, and intent services.
+"""Importable commercial contracts, usage, rating, draft, export, collection, intent, and settlement services.
 
 This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, rate tenant-scoped windows, draft invoice-intent
-documents, emit journal proposals, open collection cases, and project
-provider-neutral payment intents without taking a payment-provider
-dependency.
+documents, emit journal proposals, open collection cases, project
+provider-neutral payment intents, and apply commercial payment receipts
+without taking a payment-provider dependency.
 
 The package never posts statutory journals.  Accounting exports remain
 ``accounting_journal_proposal`` documents with proposal-only statuses.
-Collection cases stay in commercial ``open`` or ``dunning`` status.
-Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
+Collection cases stay in commercial ``open``, ``dunning``, or ``settled``
+status.  Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
+Payment receipts stay ``applied`` and do not post to AIS.
 """
 
 from metering_billing.accounting_export import AccountingExportService
@@ -20,6 +21,7 @@ from metering_billing.contracts import (
     COLLECTION_CASE_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
+    PAYMENT_RECEIPT_SCHEMA_NAME,
     RATING_RUN_SCHEMA_NAME,
     USAGE_EVENT_SCHEMA_NAME,
     USAGE_INGESTION_RECEIPT_SCHEMA_NAME,
@@ -29,6 +31,7 @@ from metering_billing.contracts import (
     validate_invoice_draft,
     validate_journal_proposal,
     validate_payment_intent,
+    validate_payment_receipt,
     validate_rating_run,
     validate_usage_event,
 )
@@ -42,6 +45,8 @@ from metering_billing.errors import (
     JournalProposalRejectionReasonCode,
     PaymentIntentOutcomeCode,
     PaymentIntentRejectionReasonCode,
+    PaymentSettlementOutcomeCode,
+    PaymentSettlementRejectionReasonCode,
     RatingOutcomeCode,
     RatingRejectionReasonCode,
     RejectionReasonCode,
@@ -50,6 +55,7 @@ from metering_billing.exact_decimal import format_exact_decimal, parse_exact_dec
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
+from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
 from metering_billing.usage_ingestion import UsageIngestionService
 from metering_billing.usage_ledger import MemoryUsageLedger
@@ -60,6 +66,7 @@ __all__ = (
     "COLLECTION_CASE_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
+    "PAYMENT_RECEIPT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
     "USAGE_INGESTION_RECEIPT_SCHEMA_NAME",
@@ -77,6 +84,9 @@ __all__ = (
     "PaymentIntentOutcomeCode",
     "PaymentIntentRejectionReasonCode",
     "PaymentIntentService",
+    "PaymentSettlementOutcomeCode",
+    "PaymentSettlementRejectionReasonCode",
+    "PaymentSettlementService",
     "RatingOutcomeCode",
     "RatingRejectionReasonCode",
     "RejectionReasonCode",
@@ -93,6 +103,7 @@ __all__ = (
     "validate_invoice_draft",
     "validate_journal_proposal",
     "validate_payment_intent",
+    "validate_payment_receipt",
     "validate_rating_run",
     "validate_usage_event",
 )

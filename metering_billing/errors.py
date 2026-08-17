@@ -1,4 +1,4 @@
-"""Typed outcomes and rejection reasons for usage, rating, drafts, exports, collections, and intents.
+"""Typed outcomes and rejection reasons for usage, rating, drafts, exports, collections, intents, and settlement.
 
 Reason codes are stable operational vocabulary.  They are safe to persist in
 audit receipts and do not require masking: they describe control failures, not
@@ -123,6 +123,24 @@ class PaymentIntentRejectionReasonCode(StrEnum):
     TENANT_NOT_FOUND = "tenant_not_found"
     COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
     PAYMENT_AMOUNT_INVALID = "payment_amount_invalid"
+
+
+class PaymentSettlementOutcomeCode(StrEnum):
+    """Terminal result of recording a receipt or cancelling a projected intent."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class PaymentSettlementRejectionReasonCode(StrEnum):
+    """Why a settlement request was refused without capturing money or posting."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    PAYMENT_INTENT_NOT_FOUND = "payment_intent_not_found"
+    PAYMENT_INTENT_NOT_PROJECTED = "payment_intent_not_projected"
+    PAYMENT_AMOUNT_INVALID = "payment_amount_invalid"
+    PAYMENT_AMOUNT_EXCEEDS_OUTSTANDING = "payment_amount_exceeds_outstanding"
 
 
 class ExactDecimalError(ValueError):

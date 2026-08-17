@@ -458,6 +458,8 @@ class RepositoryContractTests(unittest.TestCase):
             "$.collection_case_status: value is not in the allowed enumeration",
             validate_schema_instance(schema, paid),
         )
+        settled = dict(instance, collection_case_status="settled", outstanding_amount="0")
+        self.assertEqual(validate_schema_instance(schema, settled), ())
 
     def test_collection_case_migration_persists_append_only_cases_and_notices(self) -> None:
         """The collection-case migration must stay tenant-scoped and commercial-only."""
@@ -507,6 +509,48 @@ class RepositoryContractTests(unittest.TestCase):
             "FOREIGN KEY (tenant_account_id, collection_case_id)",
             "payment_intent_status text NOT NULL CHECK (payment_intent_status IN ('projected', 'cancelled', 'rejected'))",
             "payment_amount numeric(38, 12)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
+    def test_payment_receipt_accepts_applied_status_only(self) -> None:
+        """A payment-receipt contract records exact amounts and applied-only status."""
+        schema = self._schema("payment-receipt.schema.json")
+        instance = {
+            "settlement_contract_version": 1,
+            "payment_settlement_outcome_code": "accepted",
+            "payment_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf650",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "payment_intent_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf640",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "currency_code": "USD",
+            "payment_receipt_status": "applied",
+            "received_amount": "0.003705",
+            "remaining_outstanding_amount": "0",
+            "collection_case_status": "settled",
+            "source_payload_hash": "sha256:" + "1" * 64,
+            "received_at": "2026-08-17T20:15:00Z",
+            "next_operator_action": "Emit a cash journal proposal to AIS.",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        captured = dict(instance, payment_receipt_status="captured")
+        self.assertIn(
+            "$.payment_receipt_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, captured),
+        )
+
+    def test_payment_receipt_migration_persists_append_only_applied_receipts(self) -> None:
+        """The payment-receipt migration must stay tenant-scoped and capture-free."""
+        sql = (ROOT / "database/migrations/0008_payment_receipt.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.payment_receipt",
+            "UNIQUE (tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)",
+            "UNIQUE (tenant_account_id, payment_receipt_id)",
+            "FOREIGN KEY (tenant_account_id, payment_intent_id)",
+            "FOREIGN KEY (tenant_account_id, collection_case_id)",
+            "payment_receipt_status text NOT NULL CHECK (payment_receipt_status IN ('applied'))",
+            "received_amount numeric(38, 12)",
+            "CHECK (collection_case_status IN ('open', 'dunning', 'settled'))",
+            "CHECK (outstanding_amount >= 0)",
         ):
             self.assertIn(expected_fragment, sql)
 

@@ -25,4 +25,5 @@
 - Export a journal proposal through `metering_billing.AccountingExportService` so a tenant and `invoice_draft_id` replay the same `proposal_id`.  Proposals stay proposal-only; this repository does not post journals.
 - Open a collection case through `metering_billing.CollectionCaseService` so a tenant and `invoice_draft_id` replay the same `collection_case_id`.  Dunning events are commercial reminders; they do not capture payment or post journals.
 - Project a payment intent through `metering_billing.PaymentIntentService` so a tenant and `collection_case_id` replay the same `payment_intent_id`.  Intents stay projected; they do not capture, settle, or post.
+- Record a payment receipt through `metering_billing.PaymentSettlementService` so a tenant, `payment_intent_id`, received amount, source-payload hash, and contract version replay the same `payment_receipt_id`.  Receipts stay `applied`; they do not capture via a provider or post journals.  Cancel a projected intent without writing a receipt or changing outstanding.
 - Leave principal, account, and project identifiers usable for invoicing.  Purpose-limit access; do not mask operational billing identifiers.

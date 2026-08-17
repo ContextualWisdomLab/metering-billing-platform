@@ -23,6 +23,7 @@ __all__ = (
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
+    "PAYMENT_RECEIPT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
@@ -33,6 +34,7 @@ __all__ = (
     "validate_collection_case",
     "validate_invoice_draft",
     "validate_payment_intent",
+    "validate_payment_receipt",
     "validate_journal_proposal",
     "validate_rating_run",
     "validate_schema_instance",
@@ -46,6 +48,7 @@ RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 COLLECTION_CASE_SCHEMA_NAME = "collection-case.schema.json"
 PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
+PAYMENT_RECEIPT_SCHEMA_NAME = "payment-receipt.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 
@@ -310,6 +313,56 @@ def _missing_success_payment_intent_fields(
     ):
         if field_name not in payment_intent:
             missing.append(f"$: {outcome} payment intents must include {field_name}")
+    return tuple(missing)
+
+
+def validate_payment_receipt(
+    payment_receipt: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate payment-receipt shape plus identity and applied-only status."""
+    schema = load_json_schema(PAYMENT_RECEIPT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, payment_receipt))
+    if not isinstance(payment_receipt, Mapping):
+        return tuple(errors)
+    outcome = payment_receipt.get("payment_settlement_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_payment_receipt_fields(payment_receipt, str(outcome)))
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in payment_receipt:
+            errors.append("$: rejected payment receipts must include rejection_reason_code")
+    return tuple(errors)
+
+
+def _missing_success_payment_receipt_fields(
+    payment_receipt: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay settlement lacks identity."""
+    missing: list[str] = []
+    if (
+        payment_receipt.get("payment_intent_status") == "cancelled"
+        and "payment_receipt_id" not in payment_receipt
+    ):
+        required_fields = (
+            "payment_intent_id",
+            "collection_case_id",
+            "remaining_outstanding_amount",
+            "collection_case_status",
+            "next_operator_action",
+        )
+    else:
+        required_fields = (
+            "payment_receipt_id",
+            "payment_intent_id",
+            "collection_case_id",
+            "received_amount",
+            "remaining_outstanding_amount",
+            "currency_code",
+            "payment_receipt_status",
+            "source_payload_hash",
+        )
+    for field_name in required_fields:
+        if field_name not in payment_receipt:
+            missing.append(f"$: {outcome} payment receipts must include {field_name}")
     return tuple(missing)
 
 

@@ -71,11 +71,15 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## Collection case
 
-`metering_billing.CollectionCaseService` opens an append-only commercial collection case from one stored invoice draft.  Identity is `(tenant_account_id, invoice_draft_id)`.  Outstanding equals the exact draft total.  An identical replay returns the same `collection_case_id`.  Status stays `open` or `dunning`.  Dunning events are commercial reminders (`first_notice`, `overdue_notice`) and do not capture money or change AIS books.
+`metering_billing.CollectionCaseService` opens an append-only commercial collection case from one stored invoice draft.  Identity is `(tenant_account_id, invoice_draft_id)`.  Outstanding equals the exact draft total.  An identical replay returns the same `collection_case_id`.  Status stays `open` or `dunning` until a receipt settles remaining outstanding to zero.  Dunning events are commercial reminders (`first_notice`, `overdue_notice`) and do not capture money or change AIS books.
 
 ## Payment intent
 
-`metering_billing.PaymentIntentService` projects one provider-neutral `payment_intent` from a stored collection case.  Identity is `(tenant_account_id, collection_case_id, source_payload_hash, payment_intent_contract_version)`.  The hash covers the case outstanding, currency, and stored status snapshot.  Amount equals the exact case outstanding.  An identical replay returns the same `payment_intent_id`.  Status stays `projected`, `cancelled`, or `rejected` and is never `captured`, `settled`, or `posted`.  This path does not store a card PAN, call a named provider, change collection outstanding, or post a journal.  The operator next binds a payment-provider projection or cancels the intent.
+`metering_billing.PaymentIntentService` projects one provider-neutral `payment_intent` from a stored collection case.  Identity is `(tenant_account_id, collection_case_id, source_payload_hash, payment_intent_contract_version)`.  The hash covers the case outstanding, currency, and stored status snapshot.  Amount equals the exact case outstanding.  An identical replay returns the same `payment_intent_id`.  Status stays `projected`, `cancelled`, or `rejected` and is never `captured`, `settled`, or `posted`.  This path does not store a card PAN, call a named provider, change collection outstanding, or post a journal.  The operator next records a commercial receipt or cancels the intent.
+
+## Payment settlement
+
+`metering_billing.PaymentSettlementService` applies one commercial `payment_receipt` against a stored projected payment intent.  Identity is `(tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)`.  The hash covers the intent amount, currency, status, and received amount.  Receipt status is `applied` only.  The linked collection-case outstanding is reduced by the same exact amount; remaining zero marks the case `settled`.  An identical replay returns the same `payment_receipt_id`.  `cancel_payment_intent` flips a projected intent to `cancelled` without writing a receipt or changing outstanding.  This path does not store a card PAN, call a named provider, emit an `accounting_journal_proposal`, or post a journal.  The operator next emits a cash journal proposal to AIS, or records another partial receipt.
 
 ## Failure policy
 
