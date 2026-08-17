@@ -88,20 +88,21 @@ class RatingRunResult:
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the closed JSON object published in the rating-run schema."""
+        outcome = self.rating_outcome_code
+        outcome_text = outcome.value if isinstance(outcome, RatingOutcomeCode) else str(outcome)
         payload: dict[str, object] = {
             "rating_contract_version": self.rating_contract_version,
-            "rating_outcome_code": self.rating_outcome_code.value,
+            "rating_outcome_code": outcome_text,
         }
-        outcome = self.rating_outcome_code
-        if outcome is RatingOutcomeCode.REJECTED:
+        if outcome_text == RatingOutcomeCode.REJECTED:
             payload["rejection_reason_code"] = (
                 self.rejection_reason_code.value
                 if self.rejection_reason_code is not None
                 else "tenant_not_found"
             )
             return payload
-        if outcome is not RatingOutcomeCode.ACCEPTED and outcome is not RatingOutcomeCode.DUPLICATE_REPLAY:
-            raise ValueError(f"unsupported rating outcome: {outcome}")
+        if outcome_text != RatingOutcomeCode.ACCEPTED and outcome_text != RatingOutcomeCode.DUPLICATE_REPLAY:
+            raise ValueError(f"unsupported rating outcome: {outcome_text}")
         payload["rating_run_id"] = str(self.rating_run_id)
         payload["tenant_reference"] = self.tenant_reference
         payload["rate_card_code"] = self.rate_card_code
