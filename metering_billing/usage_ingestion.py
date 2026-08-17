@@ -36,6 +36,7 @@ from metering_billing.payload_integrity import source_payload_hash_errors
 from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
+    StoredIngestionReceipt,
     StoredUsageEvent,
     StoredUsageMeasurement,
     generate_record_id,
@@ -115,6 +116,16 @@ class UsageIngestionService:
         time_window: TimeWindow | None = None,
     ) -> EventIngestionReceipt:
         """Ingest one event.  Replays of the same fact return the stored row."""
+        receipt = self._decide_usage_event(event, time_window)
+        self._persist_ingestion_receipt(receipt)
+        return receipt
+
+    def _decide_usage_event(
+        self,
+        event: Any,
+        time_window: TimeWindow | None,
+    ) -> EventIngestionReceipt:
+        """Decide accept, replay, or reject without writing an audit receipt."""
         source_event_key, event_contract_version, source_payload_hash, tenant_reference = (
             _extract_identity(event)
         )
@@ -345,6 +356,43 @@ class UsageIngestionService:
             tenant.tenant_account_id,
             time_window.window_started_at,
             time_window.window_ended_at,
+        )
+
+    def query_ingestion_receipts(
+        self, tenant_reference: str | None = None
+    ) -> tuple[StoredIngestionReceipt, ...]:
+        """Return append-only ingest receipts, optionally for one tenant."""
+        if tenant_reference is None:
+            return self.ledger.list_ingestion_receipts()
+        tenant, error = self.ledger.resolve_tenant(tenant_reference)
+        if error is not None:
+            return ()
+        assert tenant is not None
+        return self.ledger.list_ingestion_receipts(tenant.tenant_account_id)
+
+    def _persist_ingestion_receipt(self, receipt: EventIngestionReceipt) -> StoredIngestionReceipt:
+        """Write the SQL-shaped audit row for one ingest attempt."""
+        tenant_account_id = None
+        if receipt.tenant_reference is not None:
+            tenant, error = self.ledger.resolve_tenant(receipt.tenant_reference)
+            if error is None:
+                tenant_account_id = tenant.tenant_account_id
+        return self.ledger.append_ingestion_receipt(
+            StoredIngestionReceipt(
+                usage_ingestion_receipt_id=generate_record_id(),
+                tenant_account_id=tenant_account_id,
+                usage_event_id=receipt.usage_event_id,
+                source_event_key=receipt.source_event_key,
+                event_contract_version=receipt.event_contract_version,
+                source_payload_hash=receipt.source_payload_hash,
+                ingestion_outcome_code=receipt.ingestion_outcome_code.value,
+                rejection_reason_code=(
+                    receipt.rejection_reason_code.value
+                    if receipt.rejection_reason_code is not None
+                    else None
+                ),
+                recorded_at=self._clock(),
+            )
         )
 
     def _build_measurements(

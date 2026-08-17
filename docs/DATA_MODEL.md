@@ -11,7 +11,7 @@
 - `meter_quality_rule`: billable, analytics-only, or manual-review disposition by quality.
 - `usage_event`: idempotent source fact identified by tenant-scoped `source_event_key` and by `(event_payload_hash, event_contract_version)`. The producer `event_id` is stored as `producer_event_id`, not as the internal primary key.
 - `usage_measurement`: normalized meter quantity and quality, constrained to an explicit meter-specific quality rule.
-- `usage_ingestion_receipt`: append-only accepted, replay, or rejected outcome for one ingest attempt.
+- `usage_ingestion_receipt`: append-only accepted, replay, or rejected outcome for every ingest attempt, including rejected cross-tenant and schema failures.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.

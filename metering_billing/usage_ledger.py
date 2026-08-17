@@ -152,6 +152,21 @@ class StoredUsageEvent:
     measurements: tuple[StoredUsageMeasurement, ...]
 
 
+@dataclass(frozen=True)
+class StoredIngestionReceipt:
+    """Append-only audit row for one ingest attempt."""
+
+    usage_ingestion_receipt_id: UUID
+    tenant_account_id: UUID | None
+    usage_event_id: UUID | None
+    source_event_key: str
+    event_contract_version: int | None
+    source_payload_hash: str | None
+    ingestion_outcome_code: str
+    rejection_reason_code: str | None
+    recorded_at: datetime
+
+
 @dataclass
 class MemoryUsageLedger:
     """Mutable catalog plus append-only usage tables with tenant isolation."""
@@ -167,6 +182,7 @@ class MemoryUsageLedger:
     source_event_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
     payload_hash_index: dict[tuple[UUID, str, int], UUID] = field(default_factory=dict)
     producer_event_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    usage_ingestion_receipts: list[StoredIngestionReceipt] = field(default_factory=list)
     accounting_export_records: list[dict[str, str]] = field(default_factory=list)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
@@ -484,6 +500,23 @@ class MemoryUsageLedger:
         self.payload_hash_index[hash_key] = event.usage_event_id
         self.producer_event_index[producer_key] = event.usage_event_id
         return event
+
+    def append_ingestion_receipt(self, receipt: StoredIngestionReceipt) -> StoredIngestionReceipt:
+        """Append an immutable ingest-attempt receipt.  Receipts are never updated."""
+        self.usage_ingestion_receipts.append(receipt)
+        return receipt
+
+    def list_ingestion_receipts(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredIngestionReceipt, ...]:
+        """Return receipts, optionally limited to one tenant."""
+        if tenant_account_id is None:
+            return tuple(self.usage_ingestion_receipts)
+        return tuple(
+            receipt
+            for receipt in self.usage_ingestion_receipts
+            if receipt.tenant_account_id == tenant_account_id
+        )
 
     def list_usage_events_in_window(
         self, tenant_account_id: UUID, window_started_at: datetime, window_ended_at: datetime

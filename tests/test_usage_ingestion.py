@@ -203,6 +203,14 @@ class UsageIngestionTests(unittest.TestCase):
             stored_after_first,
         )
         self.assertEqual(len(service.ledger.accounting_export_records), 0)
+        receipts = service.query_ingestion_receipts(TENANT_ONE)
+        self.assertEqual(len(receipts), 6)
+        self.assertEqual(
+            [row.ingestion_outcome_code for row in receipts],
+            ["accepted", "accepted", "accepted", "duplicate_replay", "duplicate_replay", "duplicate_replay"],
+        )
+        self.assertEqual(len(service.query_ingestion_receipts()), 6)
+        self.assertEqual(service.query_ingestion_receipts("urn:cwl:missing_tenant"), ())
 
     def test_time_window_query_stays_inside_tenant_and_bounds(self) -> None:
         """A half-open window returns only that tenant's in-range events."""
@@ -379,6 +387,10 @@ class UsageIngestionTests(unittest.TestCase):
         self.assertEqual(service.ledger.usage_events, {})
         self.assertEqual(validate_event_contract(make_event()), ())
         self.assertEqual(validate_usage_event(make_event()), ())
+        audit_rows = service.query_ingestion_receipts()
+        self.assertGreaterEqual(len(audit_rows), 3)
+        self.assertTrue(all(row.ingestion_outcome_code == "rejected" for row in audit_rows))
+        self.assertIsNone(audit_rows[0].tenant_account_id)
 
     def test_missing_and_inactive_attribution_fail_closed(self) -> None:
         """Unknown, inactive, or expired attribution cannot create usage."""
