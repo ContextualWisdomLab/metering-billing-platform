@@ -59,3 +59,8 @@ export {
   TENANT_API_CREDENTIAL_CUSTOMER_COPY,
   nextOperatorActionCopy as nextTenantApiCredentialActionCopy,
 } from "./tenant_api_credential.js";
+export {
+  renderWebhookSubscription,
+  WEBHOOK_SUBSCRIPTION_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextWebhookSubscriptionActionCopy,
+} from "./webhook_subscription.js";

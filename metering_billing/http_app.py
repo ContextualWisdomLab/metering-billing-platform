@@ -48,10 +48,11 @@ The application is a thin WSGI adapter:
     next_cursor}``.  Issue a key, then send it on every ``/v1`` call;
     revoke when leaked.
     11. Let an operator register an https webhook callback, then run deliveries.
-    GET one stored ``webhook_delivery_attempt`` or list
-    ``{webhook_deliveries, next_cursor}``.  AIS may keep polling journal
-    proposals.  This path does not flip ``proposal_status`` or call AIS
-    posting-receipt.
+    GET one stored ``webhook_subscription`` or list
+    ``{webhook_subscriptions, next_cursor}``.  GET one stored
+    ``webhook_delivery_attempt`` or list ``{webhook_deliveries,
+    next_cursor}``.  AIS may keep polling journal proposals.  This path
+    does not flip ``proposal_status`` or call AIS posting-receipt.
 12. Let an operator drain AIS ``posting_receipt`` outbox events.  Empty
     unpublished pages skip receipt GETs.  Matched rows use the stored
     Billing idempotency key, never the payload URN.  Observations stay
@@ -110,6 +111,7 @@ from metering_billing.errors import (
     TaxRateQueryError,
     TimeWindowError,
     WebhookDeliveryPresentmentQueryError,
+    WebhookSubscriptionPresentmentQueryError,
     WebhookSubscriptionQueryError,
 )
 from metering_billing.rate_card import RateCardService
@@ -128,6 +130,9 @@ from metering_billing.posting_receipt_observation_presentment import (
     PostingReceiptObservationPresentmentService,
 )
 from metering_billing.webhook_delivery_presentment import WebhookDeliveryPresentmentService
+from metering_billing.webhook_subscription_presentment import (
+    WebhookSubscriptionPresentmentService,
+)
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.tenant_api_credential_presentment import (
@@ -202,6 +207,9 @@ WEBHOOK_SUBSCRIPTION_COLLECTION_PATH = "/v1/webhook-subscriptions"
 WEBHOOK_SUBSCRIPTION_REVOKE_PATH = re.compile(
     r"^/v1/webhook-subscriptions/([0-9a-fA-F-]{36})/revoke$"
 )
+WEBHOOK_SUBSCRIPTION_ITEM_PATH = re.compile(
+    r"^/v1/webhook-subscriptions/([0-9a-fA-F-]{36})$"
+)
 WEBHOOK_DELIVERY_COLLECTION_PATH = "/v1/webhook-deliveries"
 WEBHOOK_DELIVERY_ITEM_PATH = re.compile(r"^/v1/webhook-deliveries/([0-9a-fA-F-]{36})$")
 AIS_OUTBOX_DRAIN_COLLECTION_PATH = "/v1/ais-outbox-drains"
@@ -265,6 +273,7 @@ def create_http_app(
     credentials = TenantApiCredentialService(shared_ledger)
     credential_presentments = TenantApiCredentialPresentmentService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
+    subscription_presentments = WebhookSubscriptionPresentmentService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
     drains = AisOutboxDrainService(shared_ledger, ais_client=resolved_ais_client)
 
@@ -369,21 +378,55 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_webhook_subscriptions", "get_webhook_subscription"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_webhook_subscriptions":
+                    page = subscription_presentments.list_webhook_subscriptions(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = subscription_presentments.present_webhook_subscription(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["webhook_subscription_id"],
+                        "webhook_subscription_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except WebhookSubscriptionPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "webhook_subscription_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {
-            "list_webhook_subscriptions",
             "webhook_subscriptions",
             "revoke_webhook_subscription",
             "webhook_deliveries",
         }:
             try:
-                if route_name == "list_webhook_subscriptions":
-                    query = _read_query(environ)
-                    tenant_reference = _authorized_tenant(environ, query)
-                    page = webhooks.list_subscriptions(tenant_reference)
-                    return _send_json(start_response, 200, page.as_contract_dict())
                 payload = _read_json_object(environ)
                 tenant_reference = _authorized_tenant(environ, payload)
                 if route_name == "webhook_subscriptions":
+                    if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                        raise HttpRequestError("request_invalid")
                     result = webhooks.register_subscription(
                         tenant_reference,
                         payload.get("callback_url"),
@@ -399,6 +442,8 @@ def create_http_app(
                     return _send_json(
                         start_response, _status_for_result(result), result.as_contract_dict()
                     )
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
                 result = webhooks.revoke_subscription(
                     tenant_reference,
                     _parse_uuid(path_values["webhook_subscription_id"], "webhook_subscription_id"),
@@ -1023,6 +1068,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "POST":
             return "revoke_webhook_subscription", {
                 "webhook_subscription_id": webhook_revoke_match.group(1)
+            }
+        return "method_not_allowed", {}
+    webhook_subscription_match = WEBHOOK_SUBSCRIPTION_ITEM_PATH.fullmatch(path)
+    if webhook_subscription_match is not None:
+        if method == "GET":
+            return "get_webhook_subscription", {
+                "webhook_subscription_id": webhook_subscription_match.group(1)
             }
         return "method_not_allowed", {}
     revoke_match = TENANT_API_CREDENTIAL_REVOKE_PATH.fullmatch(path)

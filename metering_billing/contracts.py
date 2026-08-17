@@ -39,6 +39,7 @@ __all__ = (
     "RATING_RUN_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
+    "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -64,6 +65,7 @@ __all__ = (
     "validate_webhook_subscription",
     "validate_webhook_delivery",
     "validate_webhook_delivery_presentment",
+    "validate_webhook_subscription_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -102,6 +104,9 @@ TENANT_API_CREDENTIAL_PRESENTMENT_SCHEMA_NAME = (
     "tenant-api-credential-presentment.schema.json"
 )
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
+WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME = (
+    "webhook-subscription-presentment.schema.json"
+)
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
 AIS_OUTBOX_DRAIN_SCHEMA_NAME = "ais-outbox-drain.schema.json"
@@ -756,6 +761,36 @@ def validate_webhook_delivery(
     elif outcome == "rejected":
         if "rejection_reason_code" not in delivery:
             errors.append("$: rejected deliveries must include rejection_reason_code")
+    return tuple(errors)
+
+
+def validate_webhook_subscription_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate subscription presentment shape plus metadata-only invariants."""
+    schema = load_json_schema(
+        WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    status_code = statement.get("subscription_status")
+    if action is not None and action not in {"run_deliveries", "register"}:
+        errors.append("$: next_operator_action must be run_deliveries or register")
+    if status_code == "active" and action is not None and action != "run_deliveries":
+        errors.append("$: active subscription must run_deliveries")
+    if status_code == "revoked" and action is not None and action != "register":
+        errors.append("$: revoked subscription must register")
+    for forbidden_name in (
+        "webhook_secret",
+        "webhook_secret_hash",
+        "webhook_secret_prefix",
+        "payload_json",
+        "webhook_subscription_outcome_code",
+    ):
+        if forbidden_name in statement:
+            errors.append(f"$: subscription presentment must not include {forbidden_name}")
     return tuple(errors)
 
 

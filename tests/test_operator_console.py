@@ -20,6 +20,7 @@ from metering_billing.contracts import (
     validate_posting_receipt_observation_presentment,
     validate_webhook_delivery_presentment,
     validate_tenant_api_credential_presentment,
+    validate_webhook_subscription_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -75,6 +76,10 @@ WEBHOOK_DELIVERY_FIXTURE_NAMES = (
 TENANT_API_CREDENTIAL_FIXTURE_NAMES = (
     "active_operator_key.json",
     "revoked_leaked_key.json",
+)
+WEBHOOK_SUBSCRIPTION_FIXTURE_NAMES = (
+    "active_https_callback.json",
+    "revoked_https_callback.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -265,6 +270,22 @@ class OperatorConsoleTests(unittest.TestCase):
             self.assertTrue(str(payload["credential_prefix"]).startswith("cwlak_fake"))
         self.assertEqual(self._fixture("active_operator_key.json")["next_operator_action"], "wait")
         self.assertEqual(self._fixture("revoked_leaked_key.json")["next_operator_action"], "issue")
+        for fixture_name in WEBHOOK_SUBSCRIPTION_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_webhook_subscription_presentment(payload), ())
+            self.assertNotIn("webhook_secret", payload)
+            self.assertNotIn("webhook_secret_hash", payload)
+            self.assertNotIn("webhook_secret_prefix", payload)
+            self.assertNotIn("payload_json", payload)
+            self.assertTrue(str(payload["callback_url"]).startswith("https://hooks.example.test/"))
+        self.assertEqual(
+            self._fixture("active_https_callback.json")["next_operator_action"],
+            "run_deliveries",
+        )
+        self.assertEqual(
+            self._fixture("revoked_https_callback.json")["next_operator_action"],
+            "register",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -299,6 +320,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "PostingReceiptObservation",
             "WebhookDelivery",
             "TenantApiCredential",
+            "WebhookSubscription",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -314,6 +336,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + POSTING_RECEIPT_OBSERVATION_FIXTURE_NAMES
             + WEBHOOK_DELIVERY_FIXTURE_NAMES
             + TENANT_API_CREDENTIAL_FIXTURE_NAMES
+            + WEBHOOK_SUBSCRIPTION_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)

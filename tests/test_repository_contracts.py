@@ -27,6 +27,7 @@ from metering_billing.contracts import (
     validate_webhook_delivery_presentment,
     validate_tenant_api_credential,
     validate_tenant_api_credential_presentment,
+    validate_webhook_subscription_presentment,
     validate_webhook_delivery,
     validate_webhook_subscription,
 )
@@ -1556,6 +1557,77 @@ class RepositoryContractTests(unittest.TestCase):
             validate_tenant_api_credential_presentment(revoked_wait),
         )
         self.assertNotEqual(validate_tenant_api_credential_presentment([]), ())
+
+    def test_webhook_subscription_presentment_accepts_metadata_and_rejects_secret(
+        self,
+    ) -> None:
+        """A subscription statement records URL and status and cannot leak a secret."""
+        schema = self._schema("webhook-subscription-presentment.schema.json")
+        instance = {
+            "webhook_subscription_presentment_contract_version": 1,
+            "webhook_subscription_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfaa0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "callback_url": "https://hooks.example.test/cwl",
+            "event_type_codes": ["journal_proposal.validated"],
+            "subscription_status": "active",
+            "webhook_subscription_contract_version": 1,
+            "issued_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "run_deliveries",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_webhook_subscription_presentment(instance), ())
+        leaked = dict(instance)
+        leaked["webhook_secret"] = "cwlwh_must_not_leak"
+        self.assertIn(
+            "$: additional property is not allowed: webhook_secret",
+            validate_schema_instance(schema, leaked),
+        )
+        self.assertIn(
+            "$: subscription presentment must not include webhook_secret",
+            validate_webhook_subscription_presentment(leaked),
+        )
+        hashed = dict(instance)
+        hashed["webhook_secret_hash"] = "hmac-sha256:" + ("a" * 64)
+        self.assertIn(
+            "$: subscription presentment must not include webhook_secret_hash",
+            validate_webhook_subscription_presentment(hashed),
+        )
+        prefixed = dict(instance)
+        prefixed["webhook_secret_prefix"] = "cwlwh_fake001"
+        self.assertIn(
+            "$: subscription presentment must not include webhook_secret_prefix",
+            validate_webhook_subscription_presentment(prefixed),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: next_operator_action must be run_deliveries or register",
+            validate_webhook_subscription_presentment(wait_action),
+        )
+        self.assertIn(
+            "$: active subscription must run_deliveries",
+            validate_webhook_subscription_presentment(wait_action),
+        )
+        revoked = {
+            "webhook_subscription_presentment_contract_version": 1,
+            "webhook_subscription_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfab0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "callback_url": "https://hooks.example.test/cwl-revoked",
+            "event_type_codes": ["journal_proposal.validated"],
+            "subscription_status": "revoked",
+            "webhook_subscription_contract_version": 1,
+            "issued_at": "2026-08-17T21:00:00Z",
+            "revoked_at": "2026-08-17T22:00:00Z",
+            "next_operator_action": "register",
+        }
+        self.assertEqual(validate_webhook_subscription_presentment(revoked), ())
+        revoked_wait = dict(revoked)
+        revoked_wait["next_operator_action"] = "run_deliveries"
+        self.assertIn(
+            "$: revoked subscription must register",
+            validate_webhook_subscription_presentment(revoked_wait),
+        )
+        self.assertNotEqual(validate_webhook_subscription_presentment([]), ())
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:
         """Issue may return the secret once; hashes and rejected secrets are forbidden."""

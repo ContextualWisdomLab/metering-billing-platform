@@ -288,6 +288,14 @@ class WebhookSubscriptionQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class WebhookSubscriptionPresentmentQueryError(ValueError):
+    """Raised when a stored webhook subscription cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class WebhookDeliveryOutcomeCode(StrEnum):
     """Terminal result of one explicit webhook delivery run."""
 

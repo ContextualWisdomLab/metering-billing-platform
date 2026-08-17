@@ -709,7 +709,7 @@ class WebhookOutboxTests(unittest.TestCase):
             ok_server.shutdown()
             ok_server.server_close()
         with mock.patch(
-            "metering_billing.http_app.WebhookSubscriptionService.list_subscriptions",
+            "metering_billing.http_app.WebhookSubscriptionPresentmentService.list_webhook_subscriptions",
             side_effect=ValueError("closed"),
         ):
             value_status, value_body = invoke_http(

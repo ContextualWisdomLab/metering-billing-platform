@@ -64,6 +64,11 @@ import {
   TENANT_API_CREDENTIAL_CUSTOMER_COPY,
   nextOperatorActionCopy as nextTenantApiCredentialActionCopy,
 } from "../src/tenant_api_credential.js";
+import {
+  renderWebhookSubscription,
+  WEBHOOK_SUBSCRIPTION_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextWebhookSubscriptionActionCopy,
+} from "../src/webhook_subscription.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -362,6 +367,38 @@ test("revoked leaked key shows issue", () => {
   assert.match(html, /revoked/);
   assert.match(html, /Issue a key/);
   assert.equal(statement.next_operator_action, "issue");
+});
+
+test("active https callback shows run deliveries and never leaks a secret", () => {
+  const statement = loadFixture("active_https_callback.json");
+  const html = renderWebhookSubscription(statement);
+  assert.match(html, /https:\/\/hooks\.example\.test\/cwl/);
+  assert.match(html, /Run deliveries/);
+  assert.match(
+    html,
+    /Register an https callback, then run deliveries; AIS may keep polling/,
+  );
+  assert.equal(
+    WEBHOOK_SUBSCRIPTION_CUSTOMER_COPY,
+    "Register an https callback, then run deliveries; AIS may keep polling.",
+  );
+  assert.equal(nextWebhookSubscriptionActionCopy("run_deliveries"), "Run deliveries");
+  assert.equal(nextWebhookSubscriptionActionCopy("register"), "Register a callback");
+  assert.equal(nextWebhookSubscriptionActionCopy("unknown"), "Register a callback");
+  assert.equal(statement.next_operator_action, "run_deliveries");
+  assert.ok(!("webhook_secret" in statement));
+  assert.ok(!("webhook_secret_hash" in statement));
+  assert.ok(!("webhook_secret_prefix" in statement));
+  assert.ok(!("payload_json" in statement));
+});
+
+test("revoked https callback shows register", () => {
+  const statement = loadFixture("revoked_https_callback.json");
+  const html = renderWebhookSubscription(statement);
+  assert.match(html, /https:\/\/hooks\.example\.test\/cwl-revoked/);
+  assert.match(html, /revoked/);
+  assert.match(html, /Register a callback/);
+  assert.equal(statement.next_operator_action, "register");
 });
 
 test("failed callback webhook shows run deliveries", () => {
