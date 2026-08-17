@@ -445,6 +445,8 @@ class StoredCreditAdjustment:
     credit_reason_code: str
     currency_code: str
     credit_amount: Decimal
+    tax_exclusive_amount: Decimal
+    tax_amount: Decimal
     source_payload_hash: str
     recorded_at: datetime
 
@@ -1343,6 +1345,12 @@ class MemoryUsageLedger:
         credit_amount = parse_exact_decimal(format_exact_decimal(credit.credit_amount))
         if credit_amount <= 0:
             raise ValueError("credit amount must be a positive exact decimal")
+        tax_exclusive_amount = parse_exact_decimal(
+            format_exact_decimal(credit.tax_exclusive_amount)
+        )
+        tax_amount = parse_exact_decimal(format_exact_decimal(credit.tax_amount))
+        if tax_exclusive_amount + tax_amount != credit_amount:
+            raise ValueError("credit tax split must sum to credit_amount")
         existing_by_id = self.credit_adjustments.get(credit.credit_adjustment_id)
         if existing_by_id is not None:
             if (
@@ -1373,6 +1381,8 @@ class MemoryUsageLedger:
             credit_reason_code=credit.credit_reason_code,
             currency_code=credit.currency_code,
             credit_amount=credit_amount,
+            tax_exclusive_amount=tax_exclusive_amount,
+            tax_amount=tax_amount,
             source_payload_hash=credit.source_payload_hash,
             recorded_at=credit.recorded_at,
         )

@@ -478,6 +478,8 @@ class CreditAdjustmentTests(unittest.TestCase):
             credit_reason_code="goodwill",
             currency_code=invoice_draft.currency_code,
             credit_amount=PARTIAL_CREDIT_AMOUNT,
+            tax_exclusive_amount=PARTIAL_CREDIT_AMOUNT,
+            tax_amount=Decimal("0"),
             source_payload_hash=compute_credit_payload_hash(
                 {
                     "invoice_draft_id": str(invoice_draft_id),
@@ -505,6 +507,10 @@ class CreditAdjustmentTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             ledger.insert_credit_adjustment(replace(first, credit_reason_code="tax_refund"))
+        with self.assertRaises(ValueError):
+            ledger.insert_credit_adjustment(
+                replace(first, tax_exclusive_amount=Decimal("1"), tax_amount=Decimal("1"))
+            )
         with self.assertRaises(ValueError):
             ledger.insert_credit_adjustment(
                 replace(

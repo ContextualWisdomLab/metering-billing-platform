@@ -21,7 +21,7 @@ CWL products
 The current milestone contains:
 
 - closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, and tax-assessment migrations with tenant-scoped attribution constraints;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, and credit-tax-unwind migrations with tenant-scoped attribution constraints;
 - an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
@@ -137,7 +137,7 @@ python3 -c "from metering_billing import CreditAdjustmentService"
 # GET /v1/credit-adjustments/{credit_adjustment_id}
 ```
 
-After an `invoice_draft` exists, call `CreditAdjustmentService.record_credit_adjustment` with the tenant, `invoice_draft_id`, exact `credit_amount`, and a closed `credit_reason_code` (`rating_correction`, `goodwill`, or `billing_error`). The credit cannot exceed remaining adjustable consideration. If a collection case exists, outstanding is reduced by the same amount; remaining zero marks the case `settled`. The path emits one validated journal proposal that debits `usage_revenue` and credits `accounts_receivable`. An identical replay returns the same `credit_adjustment_id` and `proposal_id`. Record the credit, then let AIS pull the validated proposal. This path does not post, call AIS, tax, refund-to-card, or chargeback.
+After an `invoice_draft` exists, call `CreditAdjustmentService.record_credit_adjustment` with the tenant, `invoice_draft_id`, exact `credit_amount`, and a closed `credit_reason_code` (`rating_correction`, `goodwill`, or `billing_error`). The credit cannot exceed remaining adjustable consideration. If a collection case exists, outstanding is reduced by the same inclusive amount; remaining zero marks the case `settled`. When a tax assessment exists, the credit is split proportionally and the journal debits `usage_revenue` and `tax_payable` and credits `accounts_receivable`. Untaxed credits stay two-line. An identical replay returns the same `credit_adjustment_id` and `proposal_id`. Record the credit; AIS pulls the validated three-line unwind. This path does not post, call AIS, refund-to-card, or chargeback.
 
 ## Publish a tax rate and assess a draft
 
@@ -149,4 +149,4 @@ Call `TaxRateService.publish_tax_rate` with a tenant, a closed `tax_code` (`vat`
 
 ## Next action
 
-Publish a tax rate, assess the draft, then propose the journal and let AIS pull. Do not call an OSS tax engine, do not store exemption certificates, and do not start operator UI in this slice.
+Record the credit; AIS pulls the validated three-line unwind. Do not call an OSS tax engine, do not store exemption certificates, and do not start operator UI in this slice.

@@ -272,6 +272,7 @@ class CreditAdjustmentRejectionReasonCode(StrEnum):
     CREDIT_REASON_INVALID = "credit_reason_invalid"
     CREDIT_EXCEEDS_REMAINING = "credit_exceeds_remaining"
     CREDIT_EXCEEDS_OUTSTANDING = "credit_exceeds_outstanding"
+    TAX_SPLIT_INVALID = "tax_split_invalid"
 
 
 class CreditAdjustmentQueryError(ValueError):

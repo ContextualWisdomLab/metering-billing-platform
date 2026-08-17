@@ -415,6 +415,19 @@ def validate_credit_adjustment(
     outcome = credit_adjustment.get("credit_adjustment_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
         errors.extend(_missing_success_credit_adjustment_fields(credit_adjustment, str(outcome)))
+        credit_amount = credit_adjustment.get("credit_amount")
+        exclusive = credit_adjustment.get("tax_exclusive_amount")
+        tax_amount = credit_adjustment.get("tax_amount")
+        if (
+            isinstance(credit_amount, str)
+            and isinstance(exclusive, str)
+            and isinstance(tax_amount, str)
+        ):
+            try:
+                if Decimal(exclusive) + Decimal(tax_amount) != Decimal(credit_amount):
+                    errors.append("$: tax_exclusive_amount plus tax_amount must equal credit_amount")
+            except Exception:
+                errors.append("$: credit tax amounts must be exact decimals")
     elif outcome == "rejected":
         if "rejection_reason_code" not in credit_adjustment:
             errors.append("$: rejected credit adjustments must include rejection_reason_code")
@@ -430,6 +443,8 @@ def _missing_success_credit_adjustment_fields(
         "credit_adjustment_id",
         "invoice_draft_id",
         "credit_amount",
+        "tax_exclusive_amount",
+        "tax_amount",
         "remaining_adjustable_amount",
         "proposal_id",
         "source_payload_hash",

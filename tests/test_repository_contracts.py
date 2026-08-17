@@ -581,6 +581,8 @@ class RepositoryContractTests(unittest.TestCase):
             "credit_adjustment_status": "recorded",
             "credit_reason_code": "rating_correction",
             "credit_amount": "0.001000",
+            "tax_exclusive_amount": "0.001000",
+            "tax_amount": "0",
             "remaining_adjustable_amount": "0.002705",
             "remaining_outstanding_amount": "0.002705",
             "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
@@ -621,6 +623,18 @@ class RepositoryContractTests(unittest.TestCase):
             "ADD COLUMN credit_adjustment_id uuid",
             "CREATE UNIQUE INDEX journal_proposal_credit_identity",
             "credit_adjustment_id IS NOT NULL",
+        ):
+            self.assertIn(expected_fragment, sql)
+
+    def test_credit_tax_unwind_migration_stores_split_on_credit_adjustment(self) -> None:
+        """Tax unwind columns stay on credit_adjustment and must sum to the credit."""
+        sql = (ROOT / "database/migrations/0014_credit_tax_unwind.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ADD COLUMN tax_exclusive_amount numeric(38, 12) NOT NULL DEFAULT 0",
+            "ADD COLUMN tax_amount numeric(38, 12) NOT NULL DEFAULT 0",
+            "CHECK (tax_exclusive_amount + tax_amount = credit_amount)",
         ):
             self.assertIn(expected_fragment, sql)
 

@@ -144,10 +144,11 @@ contextual-orchestrator usage
 - A partial credit leaves residual adjustable consideration and, when a case exists, residual outstanding.
 - A second credit of the same tenant, `invoice_draft_id`, amount, reason, source-payload hash, and contract version returns the same `credit_adjustment_id` and `proposal_id`.
 - Another tenant cannot see or credit the first tenant's draft.
-- The paired journal proposal debits `usage_revenue` and credits `accounts_receivable`. Status stays `validated` and is never `posted`.
+- A taxed credit splits inclusive `credit_amount` proportionally: `credit_tax_amount = round_half_even(credit_amount * tax_amount / tax_inclusive_amount)`. Exclusive plus tax equals the credit. A full inclusive credit reconstructs the original exclusive and tax.
+- The paired journal proposal for a taxed credit debits `usage_revenue` and `tax_payable` and credits `accounts_receivable`. Untaxed credits stay two-line revenue/AR. Status stays `validated` and is never `posted`.
 - Closed reasons are `rating_correction`, `goodwill`, and `billing_error`. Unknown codes fail closed.
-- Missing drafts, cross-tenant IDs, float money, zero or negative amounts, over-remaining amounts, and credits that exceed case outstanding fail closed.
-- Operators record the credit, then let AIS pull the validated proposal. This slice does not call AIS, post, tax, refund-to-card, or chargeback.
+- Missing drafts, cross-tenant IDs, float money, zero or negative amounts, over-remaining amounts, credits that exceed case outstanding, and invalid tax splits fail closed.
+- Operators record the credit; AIS pulls the validated three-line unwind. This slice does not call AIS, post, emit journal-reversals, refund-to-card, or chargeback.
 
 ## Usage-ingestion acceptance
 
@@ -167,4 +168,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, and tax assessment reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, and tax-payable unwind reach 100% statement and branch coverage.

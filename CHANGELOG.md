@@ -4,10 +4,12 @@
 
 ### Added
 
+- Taxed `credit_adjustment` rows store `tax_exclusive_amount` and `tax_amount` using the proportional split `round_half_even(credit_amount * tax_amount / tax_inclusive_amount)`.  A full inclusive credit reconstructs the original exclusive and tax.  The paired journal debits `usage_revenue` and `tax_payable` and credits `accounts_receivable` when tax is positive.  Untaxed credits stay two-line.  The credit idempotency key is unchanged; the hash includes the tax split when the draft is taxed.  Record the credit; AIS pulls the validated three-line unwind.
+- ADR 0017 for tax-payable unwind without AIS journal-reversals or operator UI.
 - `TaxRateService.publish_tax_rate` writes one tenant-scoped `tax_rate_schedule` and one immutable `tax_rate_version`.  Closed codes are `vat`, `gst`, and `sales_tax`.  `tax_rate` is an exact `Decimal` in `[0, 1]`.  The same tenant, code, rate, and contract version replay the stored version.
 - `TaxAssessmentService.assess_tax` applies a persisted version to a stored invoice draft.  `tax_exclusive_amount` is the drafted subtotal.  `tax_amount` is half-even rounded to the documented ISO 4217 minor units (`0` for JPY/KRW, `2` for listed two-decimal currencies).  Unknown currencies and assess-after-collection fail closed.
 - `propose_journal` on a taxed draft emits a balanced three-line proposal: debit `accounts_receivable` inclusive, credit `usage_revenue` exclusive, credit `tax_payable` tax.  A half-even product that rounds to zero omits the `tax_payable` line so every persisted line stays debit XOR credit; the hash still includes the tax facts.  Untaxed drafts keep the two-line AR/revenue proposal.  The invoice-draft idempotency key is unchanged; the hash includes tax lines when assessed.  AIS must map `tax_payable`.
-- `open_collection_case` uses `tax_inclusive_amount` when an assessment exists.  Credit `remaining_adjustable` is inclusive when assessed; the credit journal stays two-line revenue/AR.  Tax-payable unwind is next.
+- `open_collection_case` uses `tax_inclusive_amount` when an assessment exists.  Credit `remaining_adjustable` is inclusive when assessed.
 - `POST /v1/tax-rates`, `GET /v1/tax-rates`, `GET /v1/tax-rate-versions/{tax_rate_version}`, `POST /v1/tax-assessments`, and `GET /v1/tax-assessments/{tax_assessment_id}` on the existing WSGI app.
 - ADR 0016 for commercial tax assessment without an OSS engine, exemptions, or UI.
 - `RateCardService.publish_rate_card` writes one tenant-scoped `rate_card` and one immutable `rate_card_version` with exact-decimal `rate_card_line` rows.  The same tenant, card name, canonical line hash, and contract version replay the stored version.  A later distinct line set increments the version.  A published version is never edited.

@@ -5,9 +5,10 @@ The service is the buyer-facing credit path:
 1. Resolve the tenant and that tenant's stored ``invoice_draft``.
 2. Accept an exact positive ``credit_amount`` that does not exceed remaining
    adjustable consideration on the draft.
-3. If a collection case exists, reduce outstanding by the same amount.
-4. Emit one balanced ``accounting_journal_proposal`` that debits
-   ``usage_revenue`` and credits ``accounts_receivable``.
+3. If a collection case exists, reduce outstanding by the same inclusive
+   amount.
+4. When a tax assessment exists, split the inclusive credit proportionally
+   and emit a three-line unwind.  Untaxed credits stay two-line.
 5. Replay the same tenant, draft, amount, reason, payload hash, and version.
 
 The credit is a commercial consideration adjustment, not a posted reversal and
@@ -32,6 +33,7 @@ from metering_billing.accounting_export import (
     PROPOSAL_STATUS,
     RECEIVABLE_ACCOUNT_ROLE_CODE,
     REVENUE_ACCOUNT_ROLE_CODE,
+    TAX_PAYABLE_ACCOUNT_ROLE_CODE,
     compute_proposal_payload_hash,
     parse_proposal_amount,
 )
@@ -43,6 +45,7 @@ from metering_billing.errors import (
 )
 from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.invoice_draft import parse_invoice_amount
+from metering_billing.tax_assessment import CurrencyExponentError, round_tax_amount
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredCollectionCase,
@@ -58,7 +61,46 @@ Clock = Callable[[], datetime]
 CREDIT_ADJUSTMENT_CONTRACT_VERSION = 1
 CREDIT_ADJUSTMENT_STATUS = "recorded"
 ALLOWED_CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
-CREDIT_JOURNAL_ACTION = "Let AIS pull the validated credit journal proposal."
+CREDIT_JOURNAL_ACTION = "Record the credit; AIS pulls the validated three-line unwind."
+
+
+class CreditSplitError(ValueError):
+    """Raised when an inclusive credit cannot be split into exclusive and tax."""
+
+
+def split_inclusive_credit(
+    credit_amount: Any,
+    tax_amount: Any,
+    tax_inclusive_amount: Any,
+    currency_code: str,
+) -> tuple[Decimal, Decimal]:
+    """Split an inclusive credit into exclusive and tax amounts.
+
+    ``credit_tax_amount`` is ``round_half_even(credit_amount * tax_amount /
+    tax_inclusive_amount)`` to the currency minor units.  Exclusive is the
+    remainder so the parts always sum to ``credit_amount``.  A full credit of
+    the assessed inclusive amount therefore reconstructs the original
+    ``tax_amount`` exactly (IFRS Foundation, 2024; International Organization
+    for Standardization, 2015).
+    """
+    parsed_credit = parse_credit_amount(credit_amount)
+    try:
+        parsed_tax = parse_invoice_amount(tax_amount)
+        parsed_inclusive = parse_invoice_amount(tax_inclusive_amount)
+    except ExactDecimalError as error:
+        raise CreditSplitError("tax split amounts must be exact decimals") from error
+    if parsed_inclusive <= 0 or parsed_tax < 0 or parsed_tax > parsed_inclusive:
+        raise CreditSplitError("tax split inputs are not a valid inclusive assessment")
+    try:
+        credit_tax_amount = round_tax_amount(
+            parsed_credit * parsed_tax / parsed_inclusive, currency_code
+        )
+    except CurrencyExponentError as error:
+        raise CreditSplitError("currency exponent is unknown") from error
+    credit_tax_exclusive = parsed_credit - credit_tax_amount
+    if credit_tax_exclusive < 0 or credit_tax_exclusive + credit_tax_amount != parsed_credit:
+        raise CreditSplitError("tax split does not sum to the credit")
+    return credit_tax_exclusive, credit_tax_amount
 
 
 def parse_credit_amount(value: Any) -> Decimal:
@@ -109,6 +151,8 @@ class CreditAdjustmentResult:
     recorded_at: datetime | None
     next_operator_action: str
     rejection_reason_code: CreditAdjustmentRejectionReasonCode | None
+    tax_exclusive_amount: Decimal | None = None
+    tax_amount: Decimal | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the published credit, or a sparse rejected operational result."""
@@ -148,6 +192,14 @@ class CreditAdjustmentResult:
             "credit_adjustment_status": CREDIT_ADJUSTMENT_STATUS,
             "credit_reason_code": self.credit_reason_code,
             "credit_amount": format_exact_decimal(self.credit_amount),
+            "tax_exclusive_amount": format_exact_decimal(
+                self.tax_exclusive_amount
+                if self.tax_exclusive_amount is not None
+                else self.credit_amount
+            ),
+            "tax_amount": format_exact_decimal(
+                self.tax_amount if self.tax_amount is not None else Decimal("0")
+            ),
             "remaining_adjustable_amount": format_exact_decimal(self.remaining_adjustable_amount),
             "proposal_id": str(self.proposal_id),
             "proposal_status": self.proposal_status,
@@ -207,9 +259,21 @@ class CreditAdjustmentService:
             return _rejected(CreditAdjustmentRejectionReasonCode.CREDIT_AMOUNT_INVALID)
         if parsed_amount <= 0:
             return _rejected(CreditAdjustmentRejectionReasonCode.CREDIT_AMOUNT_INVALID)
+        try:
+            tax_exclusive_amount, tax_amount, taxed = _credit_split_for_draft(
+                self.ledger, tenant.tenant_account_id, invoice_draft, parsed_amount
+            )
+        except CreditSplitError:
+            return _rejected(CreditAdjustmentRejectionReasonCode.TAX_SPLIT_INVALID)
 
         source_payload_hash = compute_credit_payload_hash(
-            _canonical_credit_snapshot(invoice_draft, parsed_amount, credit_reason_code)
+            _canonical_credit_snapshot(
+                invoice_draft,
+                parsed_amount,
+                credit_reason_code,
+                tax_exclusive_amount if taxed else None,
+                tax_amount if taxed else None,
+            )
         )
         existing = self.ledger.find_credit_adjustment(
             tenant.tenant_account_id,
@@ -259,6 +323,8 @@ class CreditAdjustmentService:
                 credit_reason_code=credit_reason_code,
                 currency_code=invoice_draft.currency_code,
                 credit_amount=parsed_amount,
+                tax_exclusive_amount=tax_exclusive_amount,
+                tax_amount=tax_amount,
                 source_payload_hash=source_payload_hash,
                 recorded_at=self._clock(),
             )
@@ -326,15 +392,47 @@ def _canonical_credit_snapshot(
     invoice_draft: StoredInvoiceDraft,
     credit_amount: Decimal,
     credit_reason_code: str,
+    tax_exclusive_amount: Decimal | None = None,
+    tax_amount: Decimal | None = None,
 ) -> dict[str, object]:
-    """Return draft, amount, reason, and currency facts for credit identity."""
-    return {
+    """Return draft, amount, reason, currency, and taxed-split facts."""
+    payload: dict[str, object] = {
         "invoice_draft_id": str(invoice_draft.invoice_draft_id),
         "credit_amount": format_exact_decimal(credit_amount),
         "credit_reason_code": credit_reason_code,
         "currency_code": invoice_draft.currency_code,
         "credit_adjustment_contract_version": CREDIT_ADJUSTMENT_CONTRACT_VERSION,
     }
+    if tax_exclusive_amount is not None and tax_amount is not None:
+        payload["tax_exclusive_amount"] = format_exact_decimal(tax_exclusive_amount)
+        payload["tax_amount"] = format_exact_decimal(tax_amount)
+    return payload
+
+
+def _credit_split_for_draft(
+    ledger: MemoryUsageLedger,
+    tenant_account_id: UUID,
+    invoice_draft: StoredInvoiceDraft,
+    credit_amount: Decimal,
+) -> tuple[Decimal, Decimal, bool]:
+    """Return exclusive, tax, and whether an assessment supplied the split."""
+    assessment = ledger.find_tax_assessment_for_draft(
+        tenant_account_id, invoice_draft.invoice_draft_id
+    )
+    if assessment is None:
+        return credit_amount, Decimal("0"), False
+    try:
+        exclusive = parse_invoice_amount(assessment.tax_exclusive_amount)
+        tax = parse_invoice_amount(assessment.tax_amount)
+        inclusive = parse_invoice_amount(assessment.tax_inclusive_amount)
+    except ExactDecimalError as error:
+        raise CreditSplitError("assessment amounts are not exact decimals") from error
+    if exclusive + tax != inclusive:
+        raise CreditSplitError("assessment amounts do not sum")
+    credit_exclusive, credit_tax = split_inclusive_credit(
+        credit_amount, tax, inclusive, invoice_draft.currency_code
+    )
+    return credit_exclusive, credit_tax, True
 
 
 def _remaining_adjustable(
@@ -343,8 +441,8 @@ def _remaining_adjustable(
     """Return inclusive (or draft) total minus already-recorded credits.
 
     When a tax assessment exists the adjustable base is
-    ``tax_inclusive_amount``.  The paired credit journal stays a two-line
-    revenue debit / AR credit; tax-payable unwind is a later slice.
+    ``tax_inclusive_amount``.  The paired credit journal unwinds
+    ``tax_payable`` when the assessed tax split is positive.
     """
     assessment = ledger.find_tax_assessment_for_draft(
         tenant_account_id, invoice_draft.invoice_draft_id
@@ -367,7 +465,6 @@ def _remaining_adjustable(
 
 def _credit_journal_hash(tenant_reference: str, credit: StoredCreditAdjustment) -> str:
     """Return the journal-proposal payload hash for one stored credit."""
-    amount_text = format_exact_decimal(credit.credit_amount)
     commercial_date = credit.recorded_at.astimezone(UTC).date().isoformat()
     source_event_reference = (
         f"{tenant_reference}:credit_adjustment:{credit.credit_adjustment_id}"
@@ -383,22 +480,51 @@ def _credit_journal_hash(tenant_reference: str, credit: StoredCreditAdjustment) 
         "accounting_date": commercial_date,
         "proposal_status": PROPOSAL_STATUS,
         "source_event_references": [source_event_reference],
-        "lines": [
-            {
-                "line_number": 1,
-                "account_role_code": REVENUE_ACCOUNT_ROLE_CODE,
-                "debit_amount": amount_text,
-                "credit_amount": "0",
-            },
-            {
-                "line_number": 2,
-                "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
-                "debit_amount": "0",
-                "credit_amount": amount_text,
-            },
-        ],
+        "lines": _credit_journal_line_payloads(credit),
     }
     return compute_proposal_payload_hash(payload)
+
+
+def _credit_journal_line_payloads(credit: StoredCreditAdjustment) -> list[dict[str, object]]:
+    """Return canonical journal lines, including tax unwind when tax is positive."""
+    exclusive_text = format_exact_decimal(credit.tax_exclusive_amount)
+    tax_text = format_exact_decimal(credit.tax_amount)
+    inclusive_text = format_exact_decimal(credit.credit_amount)
+    lines: list[dict[str, object]] = [
+        {
+            "line_number": 1,
+            "account_role_code": REVENUE_ACCOUNT_ROLE_CODE,
+            "debit_amount": exclusive_text,
+            "credit_amount": "0",
+        }
+    ]
+    if credit.tax_amount > 0:
+        lines.append(
+            {
+                "line_number": 2,
+                "account_role_code": TAX_PAYABLE_ACCOUNT_ROLE_CODE,
+                "debit_amount": tax_text,
+                "credit_amount": "0",
+            }
+        )
+        lines.append(
+            {
+                "line_number": 3,
+                "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
+                "debit_amount": "0",
+                "credit_amount": inclusive_text,
+            }
+        )
+        return lines
+    lines.append(
+        {
+            "line_number": 2,
+            "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
+            "debit_amount": "0",
+            "credit_amount": inclusive_text,
+        }
+    )
+    return lines
 
 
 def _insert_credit_journal(
@@ -407,34 +533,63 @@ def _insert_credit_journal(
     credit: StoredCreditAdjustment,
     invoice_draft: StoredInvoiceDraft,
 ) -> StoredJournalProposal:
-    """Persist the balanced revenue-debit / AR-credit proposal for one credit."""
-    amount = parse_proposal_amount(credit.credit_amount)
+    """Persist the balanced credit journal, with tax-payable unwind when taxed."""
+    exclusive = parse_proposal_amount(credit.tax_exclusive_amount)
+    tax_amount = parse_proposal_amount(credit.tax_amount)
+    inclusive = parse_proposal_amount(credit.credit_amount)
     journal_proposal_id = generate_record_id()
     source_payload_hash = _credit_journal_hash(tenant_reference, credit)
     commercial_date = credit.recorded_at.astimezone(UTC).date().isoformat()
     source_event_reference = (
         f"{tenant_reference}:credit_adjustment:{credit.credit_adjustment_id}"
     )
-    lines = (
+    stored_lines = [
         StoredJournalProposalLine(
             journal_proposal_line_id=generate_record_id(),
             journal_proposal_id=journal_proposal_id,
             tenant_account_id=credit.tenant_account_id,
             line_number=1,
             account_role_code=REVENUE_ACCOUNT_ROLE_CODE,
-            debit_amount=amount,
+            debit_amount=exclusive,
             credit_amount=Decimal("0"),
-        ),
-        StoredJournalProposalLine(
-            journal_proposal_line_id=generate_record_id(),
-            journal_proposal_id=journal_proposal_id,
-            tenant_account_id=credit.tenant_account_id,
-            line_number=2,
-            account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
-            debit_amount=Decimal("0"),
-            credit_amount=amount,
-        ),
-    )
+        )
+    ]
+    if tax_amount > 0:
+        stored_lines.append(
+            StoredJournalProposalLine(
+                journal_proposal_line_id=generate_record_id(),
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=credit.tenant_account_id,
+                line_number=2,
+                account_role_code=TAX_PAYABLE_ACCOUNT_ROLE_CODE,
+                debit_amount=tax_amount,
+                credit_amount=Decimal("0"),
+            )
+        )
+        stored_lines.append(
+            StoredJournalProposalLine(
+                journal_proposal_line_id=generate_record_id(),
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=credit.tenant_account_id,
+                line_number=3,
+                account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
+                debit_amount=Decimal("0"),
+                credit_amount=inclusive,
+            )
+        )
+    else:
+        stored_lines.append(
+            StoredJournalProposalLine(
+                journal_proposal_line_id=generate_record_id(),
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=credit.tenant_account_id,
+                line_number=2,
+                account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
+                debit_amount=Decimal("0"),
+                credit_amount=inclusive,
+            )
+        )
+    lines = tuple(stored_lines)
     return ledger.insert_journal_proposal(
         StoredJournalProposal(
             journal_proposal_id=journal_proposal_id,
@@ -504,6 +659,8 @@ def _from_stored(
         tenant_reference=tenant_reference,
         currency_code=stored.currency_code,
         credit_amount=stored.credit_amount,
+        tax_exclusive_amount=stored.tax_exclusive_amount,
+        tax_amount=stored.tax_amount,
         credit_reason_code=stored.credit_reason_code,
         remaining_adjustable_amount=remaining_adjustable_amount,
         remaining_outstanding_amount=(

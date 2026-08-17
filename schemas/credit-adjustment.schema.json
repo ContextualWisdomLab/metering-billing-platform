@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.contextualwisdomlab.org/metering-billing/credit-adjustment/v1",
   "title": "Credit Adjustment",
-  "description": "Commercial credit adjustment against one tenant invoice draft. Replays acknowledge the stored credit_adjustment_id and proposal_id. The paired journal proposal stays validated and is never posted.",
+  "description": "Commercial credit adjustment against one tenant invoice draft. tax_exclusive_amount plus tax_amount equals credit_amount. Untaxed credits expose tax_amount 0. Replays acknowledge the stored credit_adjustment_id and proposal_id. The paired journal proposal stays validated and is never posted.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,6 +25,16 @@
       "enum": ["rating_correction", "goodwill", "billing_error"]
     },
     "credit_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_exclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_amount": {
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
       "maxLength": 39
@@ -61,7 +71,8 @@
         "credit_amount_invalid",
         "credit_reason_invalid",
         "credit_exceeds_remaining",
-        "credit_exceeds_outstanding"
+        "credit_exceeds_outstanding",
+        "tax_split_invalid"
       ]
     }
   }

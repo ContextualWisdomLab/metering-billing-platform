@@ -46,7 +46,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, or tax-assessment keys.
+Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, or credit-tax-unwind keys.
 
 ## Usage identity
 
@@ -86,7 +86,7 @@ A stored posting-receipt observation is identified by `(tenant_account_id, idemp
 
 ## Credit-adjustment identity
 
-A stored credit adjustment is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)`.  Internal primary key is `credit_adjustment_id`.  The hash covers the draft, exact credit amount, closed reason, and currency.  Status is `recorded` only.  Remaining adjustable is the tax-inclusive amount when an assessment exists, otherwise the draft total, minus prior accepted credits.  If a collection case exists, outstanding is reduced by the same amount and cannot go negative.  The paired journal stays two-line revenue/AR; tax-payable unwind is a later slice.
+A stored credit adjustment is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)`.  Internal primary key is `credit_adjustment_id`.  The hash covers the draft, exact credit amount, closed reason, currency, and the tax split when the draft is taxed.  Status is `recorded` only.  Remaining adjustable is the tax-inclusive amount when an assessment exists, otherwise the draft total, minus prior accepted credits.  If a collection case exists, outstanding is reduced by the same inclusive amount and cannot go negative.  `tax_exclusive_amount` plus `tax_amount` equals `credit_amount`.  A taxed journal debits `usage_revenue` and `tax_payable` and credits `accounts_receivable`.
 
 ## Tax-assessment identity
 
