@@ -406,11 +406,15 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(
             validate_schema_instance(escaped_reference_schema, "ok"), ()
+        )
         self.assertIn(
             "$: value does not equal the required constant",
             validate_schema_instance(escaped_reference_schema, "not-ok"),
         )
-        self.assertEqual(validate_schema_instance({"type": "integer"}, True), ("$: expected integer",))
+        self.assertEqual(
+            validate_schema_instance({"type": "integer"}, True),
+            ("$: expected integer",),
+        )
         self.assertEqual(validate_schema_instance({}, None), ())
 
     def test_main_returns_process_status_for_valid_and_invalid_roots(self) -> None:
