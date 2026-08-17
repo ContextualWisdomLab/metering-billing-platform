@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/webhook-delivery-presentment/v1",
+  "title": "Webhook Delivery Presentment",
+  "description": "Tenant-scoped commercial delivery-attempt statement projected from a stored webhook_delivery_attempt. Next operator action is wait after a stored success, otherwise run_deliveries. The document is not a delivery run, webhook secret, or signed raw body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "webhook_delivery_presentment_contract_version",
+    "delivery_attempt_id",
+    "tenant_reference",
+    "webhook_subscription_id",
+    "outbox_event_id",
+    "event_type_code",
+    "source_id",
+    "attempt_number",
+    "attempted_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "webhook_delivery_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "delivery_attempt_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "webhook_subscription_id": {"type": "string", "format": "uuid"},
+    "outbox_event_id": {"type": "string", "format": "uuid"},
+    "event_type_code": {"type": "string", "minLength": 1},
+    "source_id": {"type": "string", "format": "uuid"},
+    "attempt_number": {"type": "integer", "minimum": 1},
+    "http_status": {"type": "integer", "minimum": 100, "maximum": 599},
+    "failure_reason_code": {"type": "string", "minLength": 1},
+    "attempted_at": {"type": "string", "format": "date-time"},
+    "delivered_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait", "run_deliveries"]
+    }
+  }
+}

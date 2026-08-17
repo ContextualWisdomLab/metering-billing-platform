@@ -54,6 +54,11 @@ import {
   POSTING_RECEIPT_OBSERVATION_CUSTOMER_COPY,
   nextOperatorActionCopy as nextPostingReceiptObservationActionCopy,
 } from "../src/posting_receipt_observation.js";
+import {
+  renderWebhookDelivery,
+  WEBHOOK_DELIVERY_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextWebhookDeliveryActionCopy,
+} from "../src/webhook_delivery.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -303,6 +308,42 @@ test("observed posted morning shows posted and wait", () => {
   assert.equal(nextPostingReceiptObservationActionCopy("wait"), "Wait");
   assert.equal(nextPostingReceiptObservationActionCopy("pull"), "Store the observation");
   assert.equal(statement.posting_status_code, "posted");
+});
+
+test("delivered morning webhook shows wait and never leaks a secret", () => {
+  const statement = loadFixture("delivered_morning.json");
+  const html = renderWebhookDelivery(statement);
+  assert.match(html, /019d7b92-1aa0-7a7f-b61c-962c0f4bf8a0/);
+  assert.match(html, />Wait</);
+  assert.match(
+    html,
+    /Register an https callback, then run deliveries; AIS may keep polling/,
+  );
+  assert.equal(
+    WEBHOOK_DELIVERY_CUSTOMER_COPY,
+    "Register an https callback, then run deliveries; AIS may keep polling.",
+  );
+  assert.equal(nextWebhookDeliveryActionCopy("wait"), "Wait");
+  assert.equal(nextWebhookDeliveryActionCopy("run_deliveries"), "Run deliveries");
+  assert.equal(nextWebhookDeliveryActionCopy("unknown"), "Run deliveries");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.ok(!("webhook_secret" in statement));
+  assert.ok(!("payload_json" in statement));
+  assert.ok(!("delivery_status" in statement));
+});
+
+test("failed callback webhook shows run deliveries", () => {
+  const statement = loadFixture("failed_callback.json");
+  const html = renderWebhookDelivery(statement);
+  assert.match(html, /webhook_http_error/);
+  assert.match(html, /Run deliveries/);
+  assert.equal(statement.next_operator_action, "run_deliveries");
+  const actionOnly = renderWebhookDelivery({
+    delivery_attempt_id: statement.delivery_attempt_id,
+    tenant_reference: statement.tenant_reference,
+    next_operator_action: "run_deliveries",
+  });
+  assert.match(actionOnly, /run_deliveries/);
 });
 
 test("observed held receipt keeps AIS held status", () => {

@@ -62,6 +62,7 @@ __all__ = (
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
+    "validate_webhook_delivery_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -98,6 +99,7 @@ POSTING_RECEIPT_OBSERVATION_PRESENTMENT_SCHEMA_NAME = (
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
+WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
 AIS_OUTBOX_DRAIN_SCHEMA_NAME = "ais-outbox-drain.schema.json"
 COLLECTION_CASE_SCHEMA_NAME = "collection-case.schema.json"
 PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
@@ -722,6 +724,34 @@ def validate_webhook_delivery(
     elif outcome == "rejected":
         if "rejection_reason_code" not in delivery:
             errors.append("$: rejected deliveries must include rejection_reason_code")
+    return tuple(errors)
+
+
+def validate_webhook_delivery_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate delivery presentment shape plus stored-outcome actions."""
+    schema = load_json_schema(WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    if action is not None and action not in {"wait", "run_deliveries"}:
+        errors.append("$: next_operator_action must be wait or run_deliveries")
+    if "delivered_at" in statement and action is not None and action != "wait":
+        errors.append("$: delivered attempt must wait")
+    if "delivered_at" not in statement and action is not None and action != "run_deliveries":
+        errors.append("$: failed attempt must run_deliveries")
+    for forbidden_name in (
+        "webhook_secret",
+        "webhook_secret_hash",
+        "payload_json",
+        "payload_hash",
+        "delivery_status",
+        "webhook_delivery_status",
+    ):
+        if forbidden_name in statement:
+            errors.append(f"$: delivery presentment must not include {forbidden_name}")
     return tuple(errors)
 
 

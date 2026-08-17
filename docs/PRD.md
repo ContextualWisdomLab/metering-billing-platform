@@ -183,8 +183,12 @@ contextual-orchestrator usage
 - The secret is returned once. `GET /v1/webhook-subscriptions` lists id, URL, event types, prefix, status, and issued_at and never the secret or hash.
 - When a journal proposal is validated, a payment receipt is applied, or a credit is recorded, one `webhook_outbox_event` is appended. Replay of the commercial fact does not enqueue a second row.
 - Event types in this slice are `journal_proposal.validated`, `payment_receipt.applied`, and `credit_adjustment.recorded`. The payload is a thin envelope around the published contract.
-- `WebhookDeliveryService.deliver_due_events` and `POST /v1/webhook-deliveries` POST JSON to active same-tenant subscriptions and sign the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`.
+- `WebhookDeliveryService.deliver_due_events` and `POST /v1/webhook-deliveries` POST JSON to active same-tenant subscriptions and sign the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`. PAN, CVC, and provider secrets are refused on the write.
 - Delivery attempts are append-only. Success marks the outbox event delivered. Later explicit runs may retry. There is no scheduler.
+- A known stored `webhook_delivery_attempt` presents one tenant-scoped statement with `delivery_attempt_id`, `webhook_subscription_id`, `event_type_code`, `source_id`, `attempt_number`, stored HTTP status or failure, timestamps, and `next_operator_action` (`wait` after stored success, otherwise `run_deliveries`).
+- `GET /v1/webhook-deliveries/{delivery_attempt_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak. GET never resends.
+- `GET /v1/webhook-deliveries` lists summaries as `{webhook_deliveries, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{attempted_at}|{delivery_attempt_id}`.
+- Presentment never returns `webhook_secret`, `webhook_secret_hash`, `payload_json`, or a signed raw body. It does not invent `delivery_status`.
 - Revoked subscriptions are not POSTed. Missing tenant, insecure production callbacks, unknown event types, and secret leakage on list JSON fail closed.
 - AIS pull stays bootstrap. Operators register an https callback, then run deliveries; AIS may keep polling. This slice does not flip `proposal_status`, call AIS posting-receipt, or emit statutory IDs.
 
@@ -287,4 +291,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, AIS outbox drain, tax-assessment presentment, and posting-receipt observation presentment reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, AIS outbox drain, tax-assessment presentment, posting-receipt observation presentment, and webhook-delivery presentment reach 100% statement and branch coverage.

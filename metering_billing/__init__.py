@@ -74,6 +74,7 @@ from metering_billing.contracts import (
     validate_rating_run_presentment,
     validate_tax_assessment_presentment,
     validate_posting_receipt_observation_presentment,
+    validate_webhook_delivery_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_ais_outbox_drain,
@@ -122,6 +123,7 @@ from metering_billing.errors import (
     AisOutboxDrainOutcomeCode,
     AisOutboxDrainRejectionReasonCode,
     WebhookDeliveryOutcomeCode,
+    WebhookDeliveryPresentmentQueryError,
     WebhookDeliveryRejectionReasonCode,
     WebhookSubscriptionOutcomeCode,
     WebhookSubscriptionQueryError,
@@ -146,6 +148,7 @@ from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
+from metering_billing.webhook_delivery_presentment import WebhookDeliveryPresentmentService
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
@@ -215,6 +218,8 @@ __all__ = (
     "TaxAssessmentPresentmentService",
     "PostingReceiptObservationPresentmentQueryError",
     "PostingReceiptObservationPresentmentService",
+    "WebhookDeliveryPresentmentQueryError",
+    "WebhookDeliveryPresentmentService",
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
     "CollectionCaseService",
@@ -295,6 +300,7 @@ __all__ = (
     "validate_rating_run_presentment",
     "validate_tax_assessment_presentment",
     "validate_posting_receipt_observation_presentment",
+    "validate_webhook_delivery_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_ais_outbox_drain",

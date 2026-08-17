@@ -45,9 +45,11 @@ The application is a thin WSGI adapter:
 10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
     Issue a key, then send it on every ``/v1`` call; revoke when leaked.
-11. Let an operator register an https webhook callback, then run deliveries.
-    AIS may keep polling journal proposals.  This path does not flip
-    ``proposal_status`` or call AIS posting-receipt.
+    11. Let an operator register an https webhook callback, then run deliveries.
+    GET one stored ``webhook_delivery_attempt`` or list
+    ``{webhook_deliveries, next_cursor}``.  AIS may keep polling journal
+    proposals.  This path does not flip ``proposal_status`` or call AIS
+    posting-receipt.
 12. Let an operator drain AIS ``posting_receipt`` outbox events.  Empty
     unpublished pages skip receipt GETs.  Matched rows use the stored
     Billing idempotency key, never the payload URN.  Observations stay
@@ -104,6 +106,7 @@ from metering_billing.errors import (
     TaxAssessmentQueryError,
     TaxRateQueryError,
     TimeWindowError,
+    WebhookDeliveryPresentmentQueryError,
     WebhookSubscriptionQueryError,
 )
 from metering_billing.rate_card import RateCardService
@@ -121,6 +124,7 @@ from metering_billing.tax_assessment_presentment import TaxAssessmentPresentment
 from metering_billing.posting_receipt_observation_presentment import (
     PostingReceiptObservationPresentmentService,
 )
+from metering_billing.webhook_delivery_presentment import WebhookDeliveryPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
@@ -190,6 +194,7 @@ WEBHOOK_SUBSCRIPTION_REVOKE_PATH = re.compile(
     r"^/v1/webhook-subscriptions/([0-9a-fA-F-]{36})/revoke$"
 )
 WEBHOOK_DELIVERY_COLLECTION_PATH = "/v1/webhook-deliveries"
+WEBHOOK_DELIVERY_ITEM_PATH = re.compile(r"^/v1/webhook-deliveries/([0-9a-fA-F-]{36})$")
 AIS_OUTBOX_DRAIN_COLLECTION_PATH = "/v1/ais-outbox-drains"
 API_KEY_HEADER_ENVIRON = "HTTP_X_CWL_API_KEY"
 AUTHORIZATION_HEADER_ENVIRON = "HTTP_AUTHORIZATION"
@@ -247,6 +252,7 @@ def create_http_app(
     rating_presentments = RatingRunPresentmentService(shared_ledger)
     tax_assessment_presentments = TaxAssessmentPresentmentService(shared_ledger)
     observation_presentments = PostingReceiptObservationPresentmentService(shared_ledger)
+    delivery_presentments = WebhookDeliveryPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -348,6 +354,8 @@ def create_http_app(
                         start_response, _status_for_result(result), result.as_contract_dict()
                     )
                 if route_name == "webhook_deliveries":
+                    if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                        raise HttpRequestError("request_invalid")
                     result = deliveries.deliver_due_events(tenant_reference)
                     return _send_json(
                         start_response, _status_for_result(result), result.as_contract_dict()
@@ -360,6 +368,41 @@ def create_http_app(
             except WebhookSubscriptionQueryError as error:
                 status_code = (
                     404 if error.rejection_reason_code == "webhook_subscription_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_webhook_deliveries", "get_webhook_delivery"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_webhook_deliveries":
+                    page = delivery_presentments.list_webhook_deliveries(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = delivery_presentments.present_webhook_delivery(
+                    tenant_reference,
+                    _parse_uuid(path_values["delivery_attempt_id"], "delivery_attempt_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except WebhookDeliveryPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "webhook_delivery_not_found"
+                    else 422
                 )
                 return _send_json(
                     start_response,
@@ -922,6 +965,15 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == WEBHOOK_DELIVERY_COLLECTION_PATH:
         if method == "POST":
             return "webhook_deliveries", {}
+        if method == "GET":
+            return "list_webhook_deliveries", {}
+        return "method_not_allowed", {}
+    webhook_delivery_match = WEBHOOK_DELIVERY_ITEM_PATH.fullmatch(path)
+    if webhook_delivery_match is not None:
+        if method == "GET":
+            return "get_webhook_delivery", {
+                "delivery_attempt_id": webhook_delivery_match.group(1)
+            }
         return "method_not_allowed", {}
     if path == AIS_OUTBOX_DRAIN_COLLECTION_PATH:
         if method == "POST":

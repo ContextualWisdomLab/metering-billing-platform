@@ -1,9 +1,9 @@
 {
   "name": "@cwl/operator-console",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "private": true,
   "type": "module",
-  "description": "Operator presentment Storybook for invoice-draft, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, tax-assessment, and posting-receipt-observation statement contracts.",
+  "description": "Operator presentment Storybook for invoice-draft, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, tax-assessment, posting-receipt-observation, and webhook-delivery statement contracts.",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",

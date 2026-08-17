@@ -24,6 +24,7 @@ from metering_billing.contracts import (
     validate_rating_run_presentment,
     validate_tax_assessment_presentment,
     validate_posting_receipt_observation_presentment,
+    validate_webhook_delivery_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -1418,6 +1419,77 @@ class RepositoryContractTests(unittest.TestCase):
             ],
             [],
         )
+
+    def test_webhook_delivery_presentment_accepts_outcome_and_rejects_secret(self) -> None:
+        """A delivery statement records stored outcome and cannot leak a secret."""
+        schema = self._schema("webhook-delivery-presentment.schema.json")
+        instance = {
+            "webhook_delivery_presentment_contract_version": 1,
+            "delivery_attempt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8a0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "webhook_subscription_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8b0",
+            "outbox_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8c0",
+            "event_type_code": "journal_proposal.validated",
+            "source_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8d0",
+            "attempt_number": 1,
+            "http_status": 200,
+            "attempted_at": "2026-08-17T21:00:00Z",
+            "delivered_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_webhook_delivery_presentment(instance), ())
+        leaked = dict(instance)
+        leaked["webhook_secret"] = "cwlwhsec_must_not_leak"
+        self.assertIn(
+            "$: additional property is not allowed: webhook_secret",
+            validate_schema_instance(schema, leaked),
+        )
+        self.assertIn(
+            "$: delivery presentment must not include webhook_secret",
+            validate_webhook_delivery_presentment(leaked),
+        )
+        invented = dict(instance)
+        invented["delivery_status"] = "delivered"
+        self.assertIn(
+            "$: additional property is not allowed: delivery_status",
+            validate_schema_instance(schema, invented),
+        )
+        self.assertIn(
+            "$: delivery presentment must not include delivery_status",
+            validate_webhook_delivery_presentment(invented),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "retry"
+        self.assertIn(
+            "$: next_operator_action must be wait or run_deliveries",
+            validate_webhook_delivery_presentment(wait_action),
+        )
+        self.assertIn(
+            "$: delivered attempt must wait",
+            validate_webhook_delivery_presentment(wait_action),
+        )
+        failed = {
+            "webhook_delivery_presentment_contract_version": 1,
+            "delivery_attempt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8e0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "webhook_subscription_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8f0",
+            "outbox_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf900",
+            "event_type_code": "journal_proposal.validated",
+            "source_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf910",
+            "attempt_number": 1,
+            "failure_reason_code": "webhook_http_error",
+            "attempted_at": "2026-08-17T22:00:00Z",
+            "next_operator_action": "run_deliveries",
+        }
+        self.assertEqual(validate_webhook_delivery_presentment(failed), ())
+        failed_wait = dict(failed)
+        failed_wait["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: failed attempt must run_deliveries",
+            validate_webhook_delivery_presentment(failed_wait),
+        )
+        self.assertNotEqual(validate_webhook_delivery_presentment([]), ())
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:
         """Issue may return the secret once; hashes and rejected secrets are forbidden."""

@@ -293,6 +293,14 @@ class WebhookDeliveryRejectionReasonCode(StrEnum):
     TENANT_NOT_FOUND = "tenant_not_found"
 
 
+class WebhookDeliveryPresentmentQueryError(ValueError):
+    """Raised when a stored webhook delivery cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class JournalProposalOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one accounting journal proposal."""
 

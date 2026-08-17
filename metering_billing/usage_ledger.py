@@ -2291,6 +2291,33 @@ class MemoryUsageLedger:
             )
         )
 
+    def get_webhook_delivery_attempt(
+        self, delivery_attempt_id: UUID
+    ) -> StoredWebhookDeliveryAttempt | None:
+        """Return one delivery attempt by internal identifier, if present."""
+        for attempt in self.webhook_delivery_attempts:
+            if attempt.delivery_attempt_id == delivery_attempt_id:
+                return attempt
+        return None
+
+    def get_webhook_outbox_event(
+        self, outbox_event_id: UUID
+    ) -> StoredWebhookOutboxEvent | None:
+        """Return one outbox event by internal identifier, if present."""
+        return self.webhook_outbox_events.get(outbox_event_id)
+
+    def list_webhook_delivery_attempts_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredWebhookDeliveryAttempt, ...]:
+        """Return delivery attempts whose outbox event belongs to one tenant."""
+        return tuple(
+            attempt
+            for attempt in self.webhook_delivery_attempts
+            if (outbox := self.webhook_outbox_events.get(attempt.outbox_event_id))
+            is not None
+            and outbox.tenant_account_id == tenant_account_id
+        )
+
     def require_tenant(self, tenant_reference: str) -> TenantAccount:
         """Return the tenant or raise if the catalog does not contain it."""
         tenant = self.tenant_accounts.get(tenant_reference)

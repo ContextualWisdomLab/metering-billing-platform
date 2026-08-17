@@ -18,6 +18,7 @@ from metering_billing.contracts import (
     validate_rating_run_presentment,
     validate_tax_assessment_presentment,
     validate_posting_receipt_observation_presentment,
+    validate_webhook_delivery_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -65,6 +66,10 @@ TAX_ASSESSMENT_FIXTURE_NAMES = (
 POSTING_RECEIPT_OBSERVATION_FIXTURE_NAMES = (
     "observed_posted_morning.json",
     "observed_held_receipt.json",
+)
+WEBHOOK_DELIVERY_FIXTURE_NAMES = (
+    "delivered_morning.json",
+    "failed_callback.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -235,6 +240,18 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("observed_held_receipt.json")["posting_status_code"],
             "held",
         )
+        for fixture_name in WEBHOOK_DELIVERY_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_webhook_delivery_presentment(payload), ())
+            self.assertNotIn("webhook_secret", payload)
+            self.assertNotIn("webhook_secret_hash", payload)
+            self.assertNotIn("payload_json", payload)
+            self.assertNotIn("delivery_status", payload)
+        self.assertEqual(self._fixture("delivered_morning.json")["next_operator_action"], "wait")
+        self.assertEqual(
+            self._fixture("failed_callback.json")["next_operator_action"],
+            "run_deliveries",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -267,6 +284,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "RatingRun",
             "TaxAssessment",
             "PostingReceiptObservation",
+            "WebhookDelivery",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -280,6 +298,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + RATING_RUN_FIXTURE_NAMES
             + TAX_ASSESSMENT_FIXTURE_NAMES
             + POSTING_RECEIPT_OBSERVATION_FIXTURE_NAMES
+            + WEBHOOK_DELIVERY_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -299,6 +318,10 @@ class OperatorConsoleTests(unittest.TestCase):
         )
         self.assertIn(
             "Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty",
+            inventory,
+        )
+        self.assertIn(
+            "Register an https callback, then run deliveries; AIS may keep polling",
             inventory,
         )
 

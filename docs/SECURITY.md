@@ -34,7 +34,7 @@ A tenant with zero active credentials keeps the existing tenant pin.  AIS can ke
 
 ## Stored secrets
 
-NIST SP 800-63B requires verifier secrets to be stored as a salted or keyed hash, never in recoverable form (National Institute of Standards and Technology, 2020).  This repository persists `hmac-sha256:` HMAC-SHA256(pepper, secret) on `tenant_api_credential` and `webhook_subscription`.  The plaintext secret is returned once on issue or register and is never logged, listed, or placed on AIS contracts.
+NIST SP 800-63B requires verifier secrets to be stored as a salted or keyed hash, never in recoverable form (National Institute of Standards and Technology, 2020).  This repository persists `hmac-sha256:` HMAC-SHA256(pepper, secret) on `tenant_api_credential` and `webhook_subscription`.  The plaintext secret is returned once on issue or register and is never logged, listed, placed on AIS contracts, or returned from webhook-delivery presentment.
 
 OWASP API authentication treats leaked keys as revocable bearer credentials (OWASP, 2023).  `revoke_credential` is idempotent.  Unknown and revoked keys are indistinguishable (`api_credential_invalid`).
 

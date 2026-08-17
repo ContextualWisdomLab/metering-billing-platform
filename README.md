@@ -170,9 +170,11 @@ python3 -c "from metering_billing import WebhookSubscriptionService, WebhookDeli
 # GET /v1/webhook-subscriptions
 # POST /v1/webhook-subscriptions/{id}/revoke
 # POST /v1/webhook-deliveries
+# GET /v1/webhook-deliveries/{delivery_attempt_id}
+# GET /v1/webhook-deliveries
 ```
 
-Register an https callback, then run deliveries; AIS may keep polling. `WebhookSubscriptionService.register_subscription` accepts a tenant, https `callback_url`, and a closed event-type set (`journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`). http is allowed only for localhost tests. The secret is returned once. Replay of the same tenant, URL, event set, and contract version returns the same `webhook_subscription_id`. `GET /v1/webhook-subscriptions` lists metadata and never the secret or hash. Accepted commercial facts append `webhook_outbox_event` rows. `POST /v1/webhook-deliveries` POSTs the envelope and signs the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`. This path does not flip `proposal_status` or call AIS posting-receipt.
+Register an https callback, then run deliveries; AIS may keep polling. `WebhookSubscriptionService.register_subscription` accepts a tenant, https `callback_url`, and a closed event-type set (`journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`). http is allowed only for localhost tests. The secret is returned once. Replay of the same tenant, URL, event set, and contract version returns the same `webhook_subscription_id`. `GET /v1/webhook-subscriptions` lists metadata and never the secret or hash. Accepted commercial facts append `webhook_outbox_event` rows. `POST /v1/webhook-deliveries` POSTs the envelope and signs the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`. `GET /v1/webhook-deliveries/{delivery_attempt_id}` and `GET /v1/webhook-deliveries` present stored `webhook_delivery_attempt` rows as `{webhook_deliveries, next_cursor}` and never resend or return the secret, hash, or signed body. This path does not flip `proposal_status` or call AIS posting-receipt.
 
 ## Present an invoice draft
 

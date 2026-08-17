@@ -33,7 +33,7 @@
 - `tenant_api_credential`: append-only HTTP API credential for one tenant. Stores `credential_prefix` and a keyed `credential_secret_hash` only; never the plaintext secret. Status is `active` or `revoked`.
 - `webhook_subscription`: tenant-scoped https callback. Stores `webhook_secret_prefix` and a keyed `webhook_secret_hash` only; never the plaintext secret. Status is `active` or `revoked`.
 - `webhook_outbox_event`: append-only commercial fact (`journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`) identified by `(tenant_account_id, event_type_code, source_id, payload_hash)`.
-- `webhook_delivery_attempt`: append-only POST attempt against one outbox event and subscription.
+- `webhook_delivery_attempt`: append-only POST attempt against one outbox event and subscription. Identity is `delivery_attempt_id`. Presentment is a read of this row plus the parent `webhook_outbox_event` event type and `source_id`; it never returns `payload_json` or the webhook secret.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
