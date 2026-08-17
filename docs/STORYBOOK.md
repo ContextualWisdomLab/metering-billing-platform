@@ -20,6 +20,8 @@ Customer copy on every rating run: rated total and the next operator action. Rat
 
 Customer copy on every tax assessment: tax-inclusive amount and the next operator action. Publish a tax rate, assess the draft, then propose the journal and let AIS pull.
 
+Customer copy on every posting-receipt observation: AIS posting status and the next operator action. Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.
+
 ## Stories
 
 | Story | Module | Fixtures |
@@ -36,6 +38,7 @@ Customer copy on every tax assessment: tax-inclusive amount and the next operato
 | UsageEvent | `src/usage_event.js` | `stored_morning_usage.json`, `stored_partial_token_usage.json` |
 | RatingRun | `src/rating_run.js` | `rated_morning_window.json`, `rated_partial_window.json` |
 | TaxAssessment | `src/tax_assessment.js` | `assessed_morning_vat.json`, `assessed_partial_vat.json` |
+| PostingReceiptObservation | `src/posting_receipt_observation.js` | `observed_posted_morning.json`, `observed_held_receipt.json` |
 
 The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is not a one-off style.
 
@@ -63,5 +66,7 @@ The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is no
 | `rated_partial_window.json` | Partial token window | `rated_total_amount` `0.000085`, action `draft_invoice` |
 | `assessed_morning_vat.json` | Known 10 percent VAT | `tax_inclusive_amount` `110.00`, action `propose_journal` |
 | `assessed_partial_vat.json` | Partial 10 percent VAT | `tax_inclusive_amount` `22.00`, action `propose_journal` |
+| `observed_posted_morning.json` | AIS posted observation | `posting_status_code` `posted`, action `wait` |
+| `observed_held_receipt.json` | AIS held observation | `posting_status_code` `held`, action `wait` |
 
-Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, and `schemas/tax-assessment-presentment.schema.json`.  They are never IEEE binary floats.
+Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, and `schemas/posting-receipt-observation-presentment.schema.json`.  They are never IEEE binary floats.

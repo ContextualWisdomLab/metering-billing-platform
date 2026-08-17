@@ -49,6 +49,11 @@ import {
   TAX_ASSESSMENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextTaxAssessmentActionCopy,
 } from "../src/tax_assessment.js";
+import {
+  renderPostingReceiptObservation,
+  POSTING_RECEIPT_OBSERVATION_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextPostingReceiptObservationActionCopy,
+} from "../src/posting_receipt_observation.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -280,6 +285,32 @@ test("assessed partial vat keeps inclusive as a string", () => {
   assert.match(html, /22\.00 USD/);
   assert.equal(statement.next_operator_action, "propose_journal");
   assert.equal(typeof statement.tax_inclusive_amount, "string");
+});
+
+test("observed posted morning shows posted and wait", () => {
+  const statement = loadFixture("observed_posted_morning.json");
+  const html = renderPostingReceiptObservation(statement);
+  assert.match(html, /posted/);
+  assert.match(html, />Wait</);
+  assert.match(
+    html,
+    /Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty/,
+  );
+  assert.equal(
+    POSTING_RECEIPT_OBSERVATION_CUSTOMER_COPY,
+    "Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.",
+  );
+  assert.equal(nextPostingReceiptObservationActionCopy("wait"), "Wait");
+  assert.equal(nextPostingReceiptObservationActionCopy("pull"), "Store the observation");
+  assert.equal(statement.posting_status_code, "posted");
+});
+
+test("observed held receipt keeps AIS held status", () => {
+  const statement = loadFixture("observed_held_receipt.json");
+  const html = renderPostingReceiptObservation(statement);
+  assert.match(html, /held/);
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.posting_status_code, "held");
 });
 
 test("float money fails closed", () => {

@@ -23,6 +23,7 @@ from metering_billing.contracts import (
     validate_usage_event_presentment,
     validate_rating_run_presentment,
     validate_tax_assessment_presentment,
+    validate_posting_receipt_observation_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -1352,6 +1353,68 @@ class RepositoryContractTests(unittest.TestCase):
                 error
                 for error in validate_tax_assessment_presentment(numeric_rate)
                 if "exact decimal" in error
+            ],
+            [],
+        )
+
+    def test_posting_receipt_observation_presentment_accepts_status_and_rejects_outcome(
+        self,
+    ) -> None:
+        """An observation statement records AIS status and cannot claim a write outcome."""
+        schema = self._schema("posting-receipt-observation-presentment.schema.json")
+        instance = {
+            "posting_receipt_observation_presentment_contract_version": 1,
+            "posting_receipt_observation_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf7a0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "source_proposal_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf7b0",
+            "idempotency_key": "urn:cwl:tenant_001:invoice:key",
+            "receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf7c0",
+            "receipt_contract_version": 1,
+            "source_payload_hash": "sha256:" + ("f" * 64),
+            "posting_status_code": "posted",
+            "recorded_at": "2026-08-17T18:00:00Z",
+            "observed_at": "2026-08-17T21:00:00Z",
+            "posted_at": "2026-08-17T18:05:00Z",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_posting_receipt_observation_presentment(instance), ())
+        posted = dict(instance)
+        posted["posting_receipt_observation_outcome_code"] = "accepted"
+        self.assertIn(
+            "$: additional property is not allowed: posting_receipt_observation_outcome_code",
+            validate_schema_instance(schema, posted),
+        )
+        flipped = dict(instance)
+        flipped["proposal_status"] = "posted"
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, flipped),
+        )
+        self.assertIn(
+            "$: observation presentment must not claim proposal_status",
+            validate_posting_receipt_observation_presentment(flipped),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "post"
+        self.assertIn(
+            "$: stored observation must wait",
+            validate_posting_receipt_observation_presentment(wait_action),
+        )
+        self.assertNotEqual(validate_posting_receipt_observation_presentment([]), ())
+        invented_status = dict(instance)
+        invented_status["posting_status_code"] = "billing_posted"
+        self.assertIn(
+            "$: posting_status_code must remain an AIS-owned receipt status",
+            validate_posting_receipt_observation_presentment(invented_status),
+        )
+        numeric_status = dict(instance)
+        numeric_status["posting_status_code"] = 1
+        self.assertEqual(
+            [
+                error
+                for error in validate_posting_receipt_observation_presentment(numeric_status)
+                if "AIS-owned" in error
             ],
             [],
         )

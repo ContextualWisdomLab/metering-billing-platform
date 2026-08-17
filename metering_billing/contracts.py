@@ -58,6 +58,7 @@ __all__ = (
     "validate_usage_event_presentment",
     "validate_rating_run_presentment",
     "validate_tax_assessment_presentment",
+    "validate_posting_receipt_observation_presentment",
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
@@ -91,6 +92,9 @@ RATE_CARD_PRESENTMENT_SCHEMA_NAME = "rate-card-presentment.schema.json"
 USAGE_EVENT_PRESENTMENT_SCHEMA_NAME = "usage-event-presentment.schema.json"
 RATING_RUN_PRESENTMENT_SCHEMA_NAME = "rating-run-presentment.schema.json"
 TAX_ASSESSMENT_PRESENTMENT_SCHEMA_NAME = "tax-assessment-presentment.schema.json"
+POSTING_RECEIPT_OBSERVATION_PRESENTMENT_SCHEMA_NAME = (
+    "posting-receipt-observation-presentment.schema.json"
+)
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
@@ -574,6 +578,32 @@ def validate_tax_assessment_presentment(
             errors.append("$: tax amounts must be exact decimals")
     if action is not None and action != "propose_journal":
         errors.append("$: stored tax must propose a journal")
+    return tuple(errors)
+
+
+def validate_posting_receipt_observation_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate observation presentment shape plus wait-only action."""
+    schema = load_json_schema(
+        POSTING_RECEIPT_OBSERVATION_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    status_code = statement.get("posting_status_code")
+    if action is not None and action != "wait":
+        errors.append("$: stored observation must wait")
+    if isinstance(status_code, str) and status_code not in {
+        "posted",
+        "held",
+        "rejected",
+        "reversed",
+    }:
+        errors.append("$: posting_status_code must remain an AIS-owned receipt status")
+    if "proposal_status" in statement:
+        errors.append("$: observation presentment must not claim proposal_status")
     return tuple(errors)
 
 

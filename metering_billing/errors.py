@@ -349,6 +349,14 @@ class PostingReceiptObservationQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class PostingReceiptObservationPresentmentQueryError(ValueError):
+    """Raised when a stored observation cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class AisOutboxDrainOutcomeCode(StrEnum):
     """Terminal result of one explicit AIS outbox drain."""
 

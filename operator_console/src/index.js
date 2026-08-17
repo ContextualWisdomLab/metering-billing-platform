@@ -44,3 +44,8 @@ export {
   TAX_ASSESSMENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextTaxAssessmentActionCopy,
 } from "./tax_assessment.js";
+export {
+  renderPostingReceiptObservation,
+  POSTING_RECEIPT_OBSERVATION_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextPostingReceiptObservationActionCopy,
+} from "./posting_receipt_observation.js";

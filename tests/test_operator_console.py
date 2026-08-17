@@ -17,6 +17,7 @@ from metering_billing.contracts import (
     validate_usage_event_presentment,
     validate_rating_run_presentment,
     validate_tax_assessment_presentment,
+    validate_posting_receipt_observation_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -60,6 +61,10 @@ RATING_RUN_FIXTURE_NAMES = (
 TAX_ASSESSMENT_FIXTURE_NAMES = (
     "assessed_morning_vat.json",
     "assessed_partial_vat.json",
+)
+POSTING_RECEIPT_OBSERVATION_FIXTURE_NAMES = (
+    "observed_posted_morning.json",
+    "observed_held_receipt.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -217,6 +222,19 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("assessed_partial_vat.json")["tax_inclusive_amount"],
             "22.00",
         )
+        for fixture_name in POSTING_RECEIPT_OBSERVATION_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_posting_receipt_observation_presentment(payload), ())
+            self.assertEqual(payload["next_operator_action"], "wait")
+            self.assertNotIn("proposal_status", payload)
+        self.assertEqual(
+            self._fixture("observed_posted_morning.json")["posting_status_code"],
+            "posted",
+        )
+        self.assertEqual(
+            self._fixture("observed_held_receipt.json")["posting_status_code"],
+            "held",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -248,6 +266,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "UsageEvent",
             "RatingRun",
             "TaxAssessment",
+            "PostingReceiptObservation",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -260,6 +279,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + USAGE_EVENT_FIXTURE_NAMES
             + RATING_RUN_FIXTURE_NAMES
             + TAX_ASSESSMENT_FIXTURE_NAMES
+            + POSTING_RECEIPT_OBSERVATION_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -275,6 +295,10 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Rate a window, then draft an invoice", inventory)
         self.assertIn(
             "Publish a tax rate, assess the draft, then propose the journal and let AIS pull",
+            inventory,
+        )
+        self.assertIn(
+            "Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty",
             inventory,
         )
 

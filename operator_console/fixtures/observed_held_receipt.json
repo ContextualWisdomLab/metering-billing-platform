@@ -1,0 +1,14 @@
+{
+  "posting_receipt_observation_presentment_contract_version": 1,
+  "posting_receipt_observation_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf7a1",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "source_proposal_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf7b1",
+  "idempotency_key": "urn:cwl:tenant_001:cash_receipt:019d7b92-1aa0-7a7f-b61c-962c0f4bf7b1:hash:v1",
+  "receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf7c1",
+  "receipt_contract_version": 1,
+  "source_payload_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "posting_status_code": "held",
+  "recorded_at": "2026-08-17T18:00:00Z",
+  "observed_at": "2026-08-17T22:00:00Z",
+  "next_operator_action": "wait"
+}

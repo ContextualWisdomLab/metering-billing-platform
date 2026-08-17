@@ -32,6 +32,10 @@ The application is a thin WSGI adapter:
    write stays the existing #19 assess command and refuses PAN and
    provider secrets.  Publish a tax rate, assess the draft, then propose
    the journal and let AIS pull.
+   Let a buyer GET a stored posting-receipt observation as a commercial
+   statement.  The write stays the existing #16 pull and refuses PAN and
+   provider secrets.  Drain AIS outbox, then store the receipt
+   observation.
 8. Let a buyer POST a tax rate, assess a draft, and GET those records.
    Publish a tax rate, assess the draft, then propose the journal and let
    AIS pull.  AIS must map ``tax_payable``.
@@ -93,6 +97,7 @@ from metering_billing.errors import (
     ExactDecimalError,
     JournalProposalQueryError,
     PostingReceiptObservationQueryError,
+    PostingReceiptObservationPresentmentQueryError,
     RateCardQueryError,
     InvoicePresentmentQueryError,
     TenantApiCredentialQueryError,
@@ -113,6 +118,9 @@ from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.usage_event_presentment import UsageEventPresentmentService
 from metering_billing.rating_run_presentment import RatingRunPresentmentService
 from metering_billing.tax_assessment_presentment import TaxAssessmentPresentmentService
+from metering_billing.posting_receipt_observation_presentment import (
+    PostingReceiptObservationPresentmentService,
+)
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
@@ -238,6 +246,7 @@ def create_http_app(
     usage_presentments = UsageEventPresentmentService(shared_ledger)
     rating_presentments = RatingRunPresentmentService(shared_ledger)
     tax_assessment_presentments = TaxAssessmentPresentmentService(shared_ledger)
+    observation_presentments = PostingReceiptObservationPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -398,14 +407,30 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
-        if route_name == "get_posting_receipt_observation":
+        if route_name in {"list_posting_receipt_observations", "get_posting_receipt_observation"}:
             try:
                 query = _read_query(environ)
                 tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_posting_receipt_observations":
+                    page = observation_presentments.list_posting_receipt_observations(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
                 result = pulls.get_posting_receipt_observation(
                     tenant_reference, path_values["idempotency_key"]
                 )
                 return _send_json(start_response, 200, result.as_contract_dict())
+            except PostingReceiptObservationPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "observation_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
             except PostingReceiptObservationQueryError as error:
                 status_code = 404 if error.rejection_reason_code == "observation_not_found" else 422
                 return _send_json(
@@ -424,6 +449,8 @@ def create_http_app(
         if route_name == "posting_receipt_observations":
             try:
                 payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
                 tenant_reference = _authorized_tenant(environ, payload)
                 idempotency_key = payload.get("idempotency_key")
                 if not isinstance(idempotency_key, str) or not idempotency_key:
@@ -1053,6 +1080,8 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == POSTING_RECEIPT_COLLECTION_PATH:
         if method == "POST":
             return "posting_receipt_observations", {}
+        if method == "GET":
+            return "list_posting_receipt_observations", {}
         return "method_not_allowed", {}
     if path.startswith(POSTING_RECEIPT_ITEM_PREFIX):
         raw_key = unquote(path[len(POSTING_RECEIPT_ITEM_PREFIX) :])

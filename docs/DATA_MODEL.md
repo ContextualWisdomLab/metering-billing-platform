@@ -116,6 +116,8 @@ Rating-run presentment does not add a table.  `GET /v1/rating-runs/{rating_run_i
 
 Tax-assessment presentment does not add a table.  `GET /v1/tax-assessments/{tax_assessment_id}` stays the existing #19 item read of stored `tax_assessment` rows.  `GET /v1/tax-assessments` lists summaries from those same rows.  `tax_exclusive_amount`, `tax_amount`, and `tax_inclusive_amount` are the exact stored amounts.  Next operator action is `propose_journal`.
 
+Posting-receipt observation presentment does not add a table.  `GET /v1/posting-receipt-observations/{idempotency_key}` stays the existing #16 item read of stored `posting_receipt_observation` rows.  `GET /v1/posting-receipt-observations` lists summaries from those same rows.  `posting_status_code` is the exact stored AIS status.  Next operator action is `wait`.  `proposal_status` is not projected.
+
 Payment-receipt presentment does not add a table.  `GET /v1/payment-receipts/{payment_receipt_id}` projects stored `payment_receipt` rows and the current `collection_case`.  `received_amount` is the exact stored amount.  `remaining_outstanding_amount` is the current case outstanding.  `payment_receipt_status` stays `applied`.  Next operator action is `record_receipt` or `drain_or_wait`.
 
 ## Tax-assessment identity

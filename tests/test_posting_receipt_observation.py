@@ -764,7 +764,7 @@ class PostingReceiptObservationTests(unittest.TestCase):
 
         method_status, method_body = invoke_http(empty_app, "GET", "/v1/posting-receipt-observations")
         self.assertEqual(method_status, 422)
-        self.assertEqual(method_body["rejection_reason_code"], "request_invalid")
+        self.assertEqual(method_body["rejection_reason_code"], "tenant_not_found")
 
         post_item_status, post_item_body = invoke_http(
             empty_app,

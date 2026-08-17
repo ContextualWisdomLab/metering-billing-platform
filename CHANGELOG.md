@@ -4,6 +4,9 @@
 
 ### Added
 
+- `PostingReceiptObservationPresentmentService.present_posting_receipt_observation` projects one tenant-scoped observation statement from stored `posting_receipt_observation` rows.  `posting_status_code` stays AIS-owned.  Next operator action is `wait`.  `POST /v1/posting-receipt-observations` remains the #16 pull and refuses PAN and provider secrets.  `GET /v1/posting-receipt-observations/{idempotency_key}` stays the existing #16 item read: HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/posting-receipt-observations` lists `{posting_receipt_observations, next_cursor}` ordered by `observed_at` then `posting_receipt_observation_id`.  Drain AIS outbox, then store the receipt observation.  `proposal_status` stays `validated`.
+- `operator_console` Storybook adds a `PostingReceiptObservation` story using `StatusChip`.  Fixtures are observed-posted and observed-held.  There is no login wall, Figma-only work, or production SPA.
+- ADR 0032 for posting-receipt observation HTTP presentment.
 - `TaxAssessmentPresentmentService.present_tax_assessment` projects one tenant-scoped tax statement from stored `tax_assessment` rows.  Amounts stay exact-decimal strings.  Next operator action is `propose_journal`.  `POST /v1/tax-assessments` remains the #19 assess command and refuses PAN and provider secrets.  `GET /v1/tax-assessments/{tax_assessment_id}` stays the existing #19 item read: HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/tax-assessments` lists `{tax_assessments, next_cursor}` ordered by `assessed_at` then `tax_assessment_id`.  Publish a tax rate, assess the draft, then propose the journal and let AIS pull.
 - `operator_console` Storybook adds a `TaxAssessment` story using `AmountDue` and `StatusChip`.  Fixtures are assessed-morning and assessed-partial VAT.  There is no login wall, Figma-only work, or production SPA.
 - ADR 0031 for tax-assessment HTTP presentment.

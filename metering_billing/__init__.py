@@ -5,7 +5,7 @@ Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
 those drafts as statements, publish tax rates, assess tax on a draft, present
-those assessments, emit
+those assessments, present stored posting-receipt observations, emit
 journal proposals, open collection cases, present those cases as statements, project provider-neutral payment
 intents, present those intents as statements, apply commercial payment receipts, present those receipts as statements, record commercial credits,
 register webhook callbacks for accepted commercial facts, drain
@@ -44,6 +44,7 @@ from metering_billing.contracts import (
     USAGE_EVENT_PRESENTMENT_SCHEMA_NAME,
     RATING_RUN_PRESENTMENT_SCHEMA_NAME,
     TAX_ASSESSMENT_PRESENTMENT_SCHEMA_NAME,
+    POSTING_RECEIPT_OBSERVATION_PRESENTMENT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
     TENANT_API_CREDENTIAL_SCHEMA_NAME,
     AIS_OUTBOX_DRAIN_SCHEMA_NAME,
@@ -72,6 +73,7 @@ from metering_billing.contracts import (
     validate_usage_event_presentment,
     validate_rating_run_presentment,
     validate_tax_assessment_presentment,
+    validate_posting_receipt_observation_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_ais_outbox_drain,
@@ -132,6 +134,7 @@ from metering_billing.errors import (
     PaymentSettlementRejectionReasonCode,
     PostingReceiptObservationOutcomeCode,
     PostingReceiptObservationQueryError,
+    PostingReceiptObservationPresentmentQueryError,
     PostingReceiptObservationRejectionReasonCode,
     RatingOutcomeCode,
     RatingRejectionReasonCode,
@@ -151,6 +154,9 @@ from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.usage_event_presentment import UsageEventPresentmentService
 from metering_billing.rating_run_presentment import RatingRunPresentmentService
 from metering_billing.tax_assessment_presentment import TaxAssessmentPresentmentService
+from metering_billing.posting_receipt_observation_presentment import (
+    PostingReceiptObservationPresentmentService,
+)
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
@@ -176,6 +182,7 @@ __all__ = (
     "USAGE_EVENT_PRESENTMENT_SCHEMA_NAME",
     "RATING_RUN_PRESENTMENT_SCHEMA_NAME",
     "TAX_ASSESSMENT_PRESENTMENT_SCHEMA_NAME",
+    "POSTING_RECEIPT_OBSERVATION_PRESENTMENT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
@@ -206,6 +213,8 @@ __all__ = (
     "RatingRunPresentmentService",
     "TaxAssessmentPresentmentQueryError",
     "TaxAssessmentPresentmentService",
+    "PostingReceiptObservationPresentmentQueryError",
+    "PostingReceiptObservationPresentmentService",
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
     "CollectionCaseService",
@@ -285,6 +294,7 @@ __all__ = (
     "validate_usage_event_presentment",
     "validate_rating_run_presentment",
     "validate_tax_assessment_presentment",
+    "validate_posting_receipt_observation_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_ais_outbox_drain",
