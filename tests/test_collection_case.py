@@ -306,6 +306,14 @@ class CollectionCaseCatalogAndContractTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             ledger.insert_collection_dunning_event(duplicate_number)
+        duplicate_notice = replace(
+            stored,
+            collection_dunning_event_id=generate_record_id(),
+            dunning_event_number=2,
+            dunning_notice_code="first_notice",
+        )
+        with self.assertRaises(ValueError):
+            ledger.insert_collection_dunning_event(duplicate_notice)
         self.assertEqual(first.dunning_events[0].dunning_notice_code, "first_notice")
 
     def test_unknown_outcome_and_missing_reason_stay_fail_closed(self) -> None:
