@@ -14,6 +14,7 @@ from metering_billing import (
 )
 from metering_billing.contracts import validate_rating_run_presentment
 from metering_billing.errors import RatingRunPresentmentQueryError
+from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.rating_run_presentment import next_operator_action
 from test_http_app import invoke_http
 from test_usage_ingestion import TENANT_ONE, TENANT_TWO
@@ -94,7 +95,7 @@ class RatingRunPresentmentTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(body["rating_run_id"], str(first.rating_run_id))
-        self.assertEqual(body["rated_total_amount"], "0.003705")
+        self.assertEqual(body["rated_total_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
         self.assertEqual(body["next_operator_action"], "draft_invoice")
         self.assertNotIn("rating_outcome_code", body)
         self.assertEqual(validate_rating_run_presentment(body), ())
