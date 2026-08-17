@@ -17,9 +17,11 @@ The application is a thin WSGI adapter:
    credit against ``invoice_draft_id`` and refuses PAN and provider secrets.
    Record the credit; AIS pulls the validated journal.  The read does not
    post, call AIS, or start a web UI.
-7. Let a buyer POST a rate card and GET tenant-scoped cards and versions.
-   Rating still accepts ``rate_card_version`` and now requires that persisted
-   version.  Publish a rate card, then rate a window against that version.
+7. Let a buyer POST a rate card and GET the stored catalog as a commercial
+   statement.  The write publishes the existing #18 card and refuses PAN
+   and provider secrets.  Publish a rate card, then rate a window against
+   that version.  Version list and version-item GET stay the #18 catalog
+   reads.  The presentment read does not invent a catalog or start a web UI.
 8. Let a buyer POST a tax rate, assess a draft, and GET those records.
    Publish a tax rate, assess the draft, then propose the journal and let
    AIS pull.  AIS must map ``tax_payable``.
@@ -72,6 +74,7 @@ from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
+    RateCardPresentmentQueryError,
     PaymentIntentPresentmentQueryError,
     PaymentReceiptPresentmentQueryError,
     ExactDecimalError,
@@ -93,6 +96,7 @@ from metering_billing.collection_case_presentment import CollectionCasePresentme
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
 from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
+from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
@@ -212,6 +216,7 @@ def create_http_app(
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
     credit_presentments = CreditAdjustmentPresentmentService(shared_ledger)
+    catalog_presentments = RateCardPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -463,24 +468,46 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_rate_cards", "get_rate_card"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_rate_cards":
+                    page = catalog_presentments.list_rate_cards(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = catalog_presentments.present_rate_card(
+                    tenant_reference,
+                    _parse_uuid(path_values["rate_card_id"], "rate_card_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except RateCardPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "rate_card_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {
-            "list_rate_cards",
-            "get_rate_card",
             "list_rate_card_versions",
             "get_rate_card_version",
         }:
             try:
                 query = _read_query(environ)
                 tenant_reference = _authorized_tenant(environ, query)
-                if route_name == "list_rate_cards":
-                    page = catalogs.list_rate_cards(tenant_reference)
-                    return _send_json(start_response, 200, page.as_contract_dict())
-                if route_name == "get_rate_card":
-                    result = catalogs.get_rate_card(
-                        tenant_reference,
-                        _parse_uuid(path_values["rate_card_id"], "rate_card_id"),
-                    )
-                    return _send_json(start_response, 200, result.as_contract_dict())
                 if route_name == "list_rate_card_versions":
                     page = catalogs.list_rate_card_versions(
                         tenant_reference,
@@ -1149,6 +1176,8 @@ def _dispatch_write(
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "rate_cards":
         if catalogs is None:
+            raise HttpRequestError("request_invalid")
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
             raise HttpRequestError("request_invalid")
         rate_card_name = payload.get("rate_card_name")
         currency_code = payload.get("currency_code")

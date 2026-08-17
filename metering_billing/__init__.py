@@ -2,7 +2,7 @@
 
 This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
-canonical usage events, publish versioned rate cards, rate tenant-scoped
+canonical usage events, publish versioned rate cards, present those cards as statements, rate tenant-scoped
 windows against a persisted version, draft invoice-intent documents, present
 those drafts as statements, publish tax rates, assess tax on a draft, emit
 journal proposals, open collection cases, present those cases as statements, project provider-neutral payment
@@ -39,6 +39,7 @@ from metering_billing.contracts import (
     PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME,
+    RATE_CARD_PRESENTMENT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
     TENANT_API_CREDENTIAL_SCHEMA_NAME,
     AIS_OUTBOX_DRAIN_SCHEMA_NAME,
@@ -63,6 +64,7 @@ from metering_billing.contracts import (
     validate_payment_intent_presentment,
     validate_payment_receipt_presentment,
     validate_credit_adjustment_presentment,
+    validate_rate_card_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_ais_outbox_drain,
@@ -100,6 +102,7 @@ from metering_billing.errors import (
     InvoicePresentmentQueryError,
     PaymentIntentPresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
+    RateCardPresentmentQueryError,
     PaymentReceiptPresentmentQueryError,
     TenantApiCredentialOutcomeCode,
     TenantApiCredentialQueryError,
@@ -134,6 +137,7 @@ from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
 from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
+from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
@@ -155,6 +159,7 @@ __all__ = (
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
+    "RATE_CARD_PRESENTMENT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
@@ -177,6 +182,8 @@ __all__ = (
     "PaymentReceiptPresentmentService",
     "CreditAdjustmentPresentmentQueryError",
     "CreditAdjustmentPresentmentService",
+    "RateCardPresentmentQueryError",
+    "RateCardPresentmentService",
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
     "CollectionCaseService",
@@ -252,6 +259,7 @@ __all__ = (
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",
     "validate_credit_adjustment_presentment",
+    "validate_rate_card_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_ais_outbox_drain",

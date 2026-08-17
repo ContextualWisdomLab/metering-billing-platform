@@ -34,6 +34,7 @@ __all__ = (
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
+    "RATE_CARD_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
@@ -51,6 +52,7 @@ __all__ = (
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",
     "validate_credit_adjustment_presentment",
+    "validate_rate_card_presentment",
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
@@ -80,6 +82,7 @@ COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.js
 PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json"
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
+RATE_CARD_PRESENTMENT_SCHEMA_NAME = "rate-card-presentment.schema.json"
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
@@ -425,6 +428,34 @@ def validate_credit_adjustment_presentment(
         errors.append("$: tax_exclusive_amount plus tax_amount must equal credit_amount")
     if status == "recorded" and action != "wait":
         errors.append("$: recorded credits must wait")
+    return tuple(errors)
+
+
+def validate_rate_card_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate rate-card presentment shape plus exact unit-price invariants."""
+    schema = load_json_schema(RATE_CARD_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    lines = statement.get("lines")
+    if isinstance(lines, list):
+        for index, line in enumerate(lines):
+            if not isinstance(line, Mapping):
+                errors.append(f"$: lines[{index}] must be an object")
+                continue
+            unit_amount = line.get("unit_amount")
+            if isinstance(unit_amount, str):
+                try:
+                    parsed = Decimal(unit_amount)
+                    if parsed <= Decimal("0"):
+                        errors.append(f"$: lines[{index}].unit_amount must be greater than zero")
+                except Exception:
+                    errors.append(f"$: lines[{index}].unit_amount must be an exact decimal")
+    if action is not None and action != "rate_window":
+        errors.append("$: published cards must rate a window")
     return tuple(errors)
 
 

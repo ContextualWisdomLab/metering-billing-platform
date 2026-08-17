@@ -24,3 +24,8 @@ export {
   CREDIT_ADJUSTMENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCreditAdjustmentActionCopy,
 } from "./credit_adjustment.js";
+export {
+  renderRateCard,
+  RATE_CARD_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextRateCardActionCopy,
+} from "./rate_card.js";

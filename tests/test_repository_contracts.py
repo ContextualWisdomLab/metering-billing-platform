@@ -19,6 +19,7 @@ from metering_billing.contracts import (
     validate_payment_intent_presentment,
     validate_payment_receipt_presentment,
     validate_credit_adjustment_presentment,
+    validate_rate_card_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -827,6 +828,92 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn(
             "$: tax_amount must not be negative",
             validate_credit_adjustment_presentment(negative_tax),
+        )
+
+    def test_rate_card_presentment_accepts_lines_and_rejects_outcome(self) -> None:
+        """A rate-card statement records exact unit prices and cannot claim a write outcome."""
+        schema = self._schema("rate-card-presentment.schema.json")
+        instance = {
+            "rate_card_presentment_contract_version": 1,
+            "rate_card_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf670",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "rate_card_name": "cwl_standard",
+            "currency_code": "USD",
+            "rate_card_version": 1,
+            "rate_card_version_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf671",
+            "created_at": "2026-08-17T21:00:00Z",
+            "published_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "rate_window",
+            "lines": [
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_rate_card_presentment(instance), ())
+        posted = dict(instance)
+        posted["rate_card_outcome_code"] = "accepted"
+        self.assertIn(
+            "$: additional property is not allowed: rate_card_outcome_code",
+            validate_schema_instance(schema, posted),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: published cards must rate a window",
+            validate_rate_card_presentment(wait_action),
+        )
+        self.assertNotEqual(validate_rate_card_presentment([]), ())
+        zero = dict(instance)
+        zero["lines"] = [
+            {
+                "metric_code": "gen_ai_output_token",
+                "unit_amount": "0",
+                "currency_code": "USD",
+            }
+        ]
+        self.assertIn(
+            "$: lines[0].unit_amount must be greater than zero",
+            validate_rate_card_presentment(zero),
+        )
+        bad_unit = dict(instance)
+        bad_unit["lines"] = [
+            {
+                "metric_code": "gen_ai_output_token",
+                "unit_amount": "not-decimal",
+                "currency_code": "USD",
+            }
+        ]
+        self.assertTrue(
+            any(
+                "unit_amount must be an exact decimal" in error
+                for error in validate_rate_card_presentment(bad_unit)
+            )
+        )
+        not_object = dict(instance)
+        not_object["lines"] = ["not-a-line"]
+        self.assertIn(
+            "$: lines[0] must be an object",
+            validate_rate_card_presentment(not_object),
+        )
+        numeric = dict(instance)
+        numeric["lines"] = [
+            {
+                "metric_code": "gen_ai_output_token",
+                "unit_amount": 2,
+                "currency_code": "USD",
+            }
+        ]
+        self.assertEqual(
+            [
+                error
+                for error in validate_rate_card_presentment(numeric)
+                if "exact decimal" in error
+            ],
+            [],
         )
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:

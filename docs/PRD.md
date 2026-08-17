@@ -176,6 +176,15 @@ contextual-orchestrator usage
 - Revoked subscriptions are not POSTed. Missing tenant, insecure production callbacks, unknown event types, and secret leakage on list JSON fail closed.
 - AIS pull stays bootstrap. Operators register an https callback, then run deliveries; AIS may keep polling. This slice does not flip `proposal_status`, call AIS posting-receipt, or emit statutory IDs.
 
+## Rate-card-presentment acceptance
+
+- `POST /v1/rate-cards` remains the #18 write. Replay of the same tenant, card name, canonical lines, and contract version returns the same `rate_card_version`. PAN, CVC, and provider secrets are refused.
+- A known stored rate card presents one tenant-scoped statement with `rate_card_name`, `currency_code`, latest `rate_card_version`, flat `lines`, and `next_operator_action` (`rate_window`).
+- `GET /v1/rate-cards/{rate_card_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/rate-cards` lists summaries as `{rate_cards, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{created_at}|{rate_card_id}`.
+- Operators publish a rate card, then rate a window against that version. HTTP presentment does not invent a catalog or call AIS.
+- `operator_console` Storybook renders that card with tokenized unit price and status chip. Fixtures are published-standard and published-premium.
+
 ## Credit-adjustment-presentment acceptance
 
 - `POST /v1/credit-adjustments` remains the #17 write against `invoice_draft_id`. Amount is the exact `credit_amount`. Replay of the same tenant, draft, amount, reason, and contract version returns the same `credit_adjustment_id`. PAN, CVC, and provider secrets are refused.

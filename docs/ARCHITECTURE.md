@@ -59,7 +59,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## Rate-card catalog
 
-`metering_billing.RateCardService` publishes one tenant-scoped `rate_card` and one immutable `rate_card_version` with `rate_card_line` rows.  Header identity is `(tenant_account_id, rate_card_name)`.  Version identity is `(tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version)`.  Each line is a two-or-more-word `snake_case` `metric_code` and an exact `Decimal` `unit_amount` greater than zero in the card currency.  An identical replay returns the same `rate_card_version`.  A later distinct line set increments `version_number`.  A published version is never edited.  `POST /v1/rate-cards` publishes a version.  Tenant-scoped GET list, card, versions, and version routes fail closed across tenants.  This path does not apply tax, discounts, or tiered prices.
+`metering_billing.RateCardService` publishes one tenant-scoped `rate_card` and one immutable `rate_card_version` with `rate_card_line` rows.  Header identity is `(tenant_account_id, rate_card_name)`.  Version identity is `(tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version)`.  Each line is a two-or-more-word `snake_case` `metric_code` and an exact `Decimal` `unit_amount` greater than zero in the card currency.  An identical replay returns the same `rate_card_version`.  A later distinct line set increments `version_number`.  A published version is never edited.  `POST /v1/rate-cards` publishes a version and refuses PAN and provider secrets.  `RateCardPresentmentService` projects the stored card as a statement.  `GET /v1/rate-cards/{rate_card_id}` is HTTP 200 for the same tenant and HTTP 404 across tenants.  `GET /v1/rate-cards` lists `{rate_cards, next_cursor}` ordered by `created_at` then `rate_card_id`.  Version GET routes stay the #18 catalog reads.  This path does not apply tax, discounts, or tiered prices.
 
 ## Commercial rating
 
@@ -104,6 +104,10 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 ## Posting-receipt observation
 
 `metering_billing.PostingReceiptPullService` GETs an AIS-owned `posting_receipt` from `{ais_base_url}/posting-receipts?idempotency_key=` with required `X-CWL-Tenant-Reference`.  The response is validated against the consumed AIS contract in `schemas/consumed/`.  A successful pull persists one append-only `posting_receipt_observation` identified by `(tenant_account_id, idempotency_key)` plus `source_payload_hash` / `receipt_id`.  AIS `receipt_id` is not the internal primary key.  Replay of the same tenant, key, and receipt returns the stored observation.  `posting_status_code` stays an AIS fact (`posted`, `held`, `rejected`, `reversed`) and is never mapped onto Billing `proposal_status`.  AIS 403 writes zero rows.  AIS 404 is `not_yet_accepted` and writes zero rows.  `POST /v1/posting-receipt-observations` triggers the pull.  `GET /v1/posting-receipt-observations/{idempotency_key}` reads a stored observation and does not call AIS.
+
+## Rate-card presentment
+
+`metering_billing.RateCardPresentmentService` projects one tenant-scoped catalog statement from stored `rate_card` and latest `rate_card_version` rows.  Identity is the stored `rate_card_id`.  Line `unit_amount` values are the exact stored prices.  Next operator action is `rate_window`.  `POST /v1/rate-cards` remains the #18 write and refuses PAN and provider secrets.  `GET /v1/rate-cards/{rate_card_id}` is HTTP 200 for the same tenant and HTTP 404 across tenants.  `GET /v1/rate-cards` lists `{rate_cards, next_cursor}` ordered by `created_at` then `rate_card_id`.  Version GET routes stay the #18 catalog reads.  Publish a rate card, then rate a window against that version.  This path does not invent a catalog, call AIS, or start a production SPA.
 
 ## Credit-adjustment presentment
 

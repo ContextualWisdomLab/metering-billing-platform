@@ -89,6 +89,14 @@ class RateCardQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class RateCardPresentmentQueryError(ValueError):
+    """Raised when a stored rate card cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class TaxRateOutcomeCode(StrEnum):
     """Terminal result of publishing one tenant-scoped tax-rate version."""
 

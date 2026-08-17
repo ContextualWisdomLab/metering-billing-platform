@@ -29,6 +29,11 @@ import {
   CREDIT_ADJUSTMENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCreditAdjustmentActionCopy,
 } from "../src/credit_adjustment.js";
+import {
+  renderRateCard,
+  RATE_CARD_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextRateCardActionCopy,
+} from "../src/rate_card.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -170,6 +175,29 @@ test("taxed credit keeps exclusive and tax as strings", () => {
   assert.equal(typeof statement.tax_amount, "string");
 });
 
+test("published standard rate card shows unit price and rate a window", () => {
+  const statement = loadFixture("published_standard_rate.json");
+  const html = renderRateCard(statement);
+  assert.match(html, /0\.000002 USD/);
+  assert.match(html, /Rate a window/);
+  assert.match(html, /Publish a rate card, then rate a window against that version/);
+  assert.equal(
+    RATE_CARD_CUSTOMER_COPY,
+    "Publish a rate card, then rate a window against that version.",
+  );
+  assert.equal(nextRateCardActionCopy("rate_window"), "Rate a window");
+  assert.equal(nextRateCardActionCopy("publish"), "Publish a rate card");
+  assert.equal(typeof statement.lines[0].unit_amount, "string");
+});
+
+test("published premium rate card keeps unit amount as a string", () => {
+  const statement = loadFixture("published_premium_rate.json");
+  const html = renderRateCard(statement);
+  assert.match(html, /0\.000005 USD/);
+  assert.equal(statement.next_operator_action, "rate_window");
+  assert.equal(typeof statement.lines[0].unit_amount, "string");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -186,6 +214,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderCreditAdjustment({ credit_amount: 11.0, currency_code: "USD" }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderRateCard({ lines: [{ unit_amount: 0.000002, currency_code: "USD" }] }),
     TypeError,
   );
   assert.throws(

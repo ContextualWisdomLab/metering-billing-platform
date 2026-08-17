@@ -260,6 +260,8 @@ class RateCardCatalogTests(unittest.TestCase):
         )
         self.assertEqual(get_status, 200)
         self.assertEqual(get_body["rate_card_id"], rate_card_id)
+        self.assertEqual(get_body["next_operator_action"], "rate_window")
+        self.assertNotIn("rate_card_outcome_code", get_body)
 
         versions_status, versions_body = invoke_http(
             app,
@@ -504,7 +506,7 @@ class RateCardCatalogTests(unittest.TestCase):
             )
         self.assertEqual(missing_catalog.exception.rejection_reason_code, "request_invalid")
         with mock.patch(
-            "metering_billing.http_app.RateCardService.get_rate_card",
+            "metering_billing.http_app.RateCardPresentmentService.present_rate_card",
             side_effect=ValueError("closed"),
         ):
             value_status, value_body = invoke_http(
