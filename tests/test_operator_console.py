@@ -152,7 +152,7 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Open the collection case, then collect or credit", inventory)
         self.assertIn("Create a projected payment intent, then record the receipt", inventory)
         self.assertIn(
-            "Record the receipt, then drain or wait for AIS to pull the cash journal",
+            "Record the receipt; the cash journal is already validated for AIS to pull",
             inventory,
         )
 

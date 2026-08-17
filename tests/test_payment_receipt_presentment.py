@@ -81,7 +81,7 @@ class PaymentReceiptPresentmentTests(unittest.TestCase):
             if event.event_type_code == EVENT_TYPE_PAYMENT_RECEIPT_APPLIED
         ]
         self.assertEqual(len(receipt_events), 1)
-        self.assertEqual(len(ledger.journal_proposals), 0)
+        self.assertEqual(len(ledger.journal_proposals), 1)
 
     def test_partial_receipt_keeps_record_receipt_action(self) -> None:
         """A partial receipt leaves outstanding and offers another record_receipt."""

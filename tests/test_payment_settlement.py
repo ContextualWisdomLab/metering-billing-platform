@@ -63,7 +63,10 @@ class PaymentSettlementTests(unittest.TestCase):
         self.assertEqual(result.remaining_outstanding_amount, Decimal("0"))
         self.assertEqual(result.collection_case_status, "settled")
         self.assertEqual(result.collection_case_id, collection_case_id)
-        self.assertEqual(result.next_operator_action, "Emit a cash journal proposal to AIS.")
+        self.assertEqual(
+            result.next_operator_action,
+            "The cash journal is already validated for AIS to pull.",
+        )
         self.assertNotIsInstance(result.received_amount, float)
         self.assertEqual(validate_payment_receipt(result.as_contract_dict()), ())
         self.assertNotIn(result.payment_receipt_status, {"captured", "posted"})
@@ -71,7 +74,7 @@ class PaymentSettlementTests(unittest.TestCase):
         self.assertEqual(ledger.collection_cases[collection_case_id].collection_case_status, "settled")
         self.assertEqual(len(ledger.payment_receipts), 1)
         self.assertEqual(len(ledger.accounting_export_records), 0)
-        self.assertEqual(len(ledger.journal_proposals), 0)
+        self.assertEqual(len(ledger.journal_proposals), 1)
         replayed_case = CollectionCaseService(ledger).open_collection_case(
             TENANT_ONE, ledger.collection_cases[collection_case_id].invoice_draft_id
         )
@@ -91,7 +94,7 @@ class PaymentSettlementTests(unittest.TestCase):
         self.assertEqual(result.collection_case_status, "open")
         self.assertEqual(
             result.next_operator_action,
-            "Emit a cash journal proposal to AIS, or record another partial receipt.",
+            "The cash journal is already validated for AIS to pull, or record another partial receipt.",
         )
         self.assertEqual(ledger.collection_cases[collection_case_id].outstanding_amount, remaining)
         self.assertEqual(ledger.collection_cases[collection_case_id].collection_case_status, "open")

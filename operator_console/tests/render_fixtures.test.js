@@ -122,10 +122,10 @@ test("full payment receipt shows received amount and drain or wait", () => {
   const html = renderPaymentReceipt(statement);
   assert.match(html, /0\.003705 USD/);
   assert.match(html, /Drain or wait for AIS/);
-  assert.match(html, /Record the receipt, then drain or wait for AIS to pull the cash journal/);
+  assert.match(html, /Record the receipt; the cash journal is already validated for AIS to pull/);
   assert.equal(
     PAYMENT_RECEIPT_CUSTOMER_COPY,
-    "Record the receipt, then drain or wait for AIS to pull the cash journal.",
+    "Record the receipt; the cash journal is already validated for AIS to pull.",
   );
   assert.equal(nextPaymentReceiptActionCopy("drain_or_wait"), "Drain or wait for AIS");
   assert.equal(nextPaymentReceiptActionCopy("record_receipt"), "Record the receipt");

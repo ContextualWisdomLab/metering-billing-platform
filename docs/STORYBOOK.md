@@ -8,7 +8,7 @@ Customer copy on every collection case: outstanding and the next operator action
 
 Customer copy on every payment intent: projected amount and the next operator action. Create a projected payment intent, then record the receipt.
 
-Customer copy on every payment receipt: received amount and the next operator action. Record the receipt, then drain or wait for AIS to pull the cash journal.
+Customer copy on every payment receipt: received amount and the next operator action. Record the receipt; the cash journal is already validated for AIS to pull.
 
 ## Stories
 

@@ -6,7 +6,8 @@ The service is the buyer-facing settlement path:
 2. Load that tenant's stored ``payment_intent``.
 3. Apply an exact received amount as one append-only ``payment_receipt``.
 4. Reduce the linked collection-case outstanding by the same amount.
-5. Replay the same tenant, intent, payload hash, and contract version.
+5. Idempotently propose the existing cash journal for that receipt.
+6. Replay the same tenant, intent, payload hash, and contract version.
 
 ISO 20022 distinguishes payment initiation from settlement.  This path records
 commercial application of cash against a projected intent; it does not project
@@ -25,6 +26,7 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
+from metering_billing.accounting_export import AccountingExportService
 from metering_billing.errors import (
     ExactDecimalError,
     PaymentSettlementOutcomeCode,
@@ -51,8 +53,10 @@ SETTLEMENT_CONTRACT_VERSION = 1
 PAYMENT_RECEIPT_STATUS = "applied"
 PROJECTED_INTENT_STATUS = "projected"
 CANCELLED_INTENT_STATUS = "cancelled"
-CASH_JOURNAL_ACTION = "Emit a cash journal proposal to AIS."
-PARTIAL_RECEIPT_ACTION = "Emit a cash journal proposal to AIS, or record another partial receipt."
+CASH_JOURNAL_ACTION = "The cash journal is already validated for AIS to pull."
+PARTIAL_RECEIPT_ACTION = (
+    "The cash journal is already validated for AIS to pull, or record another partial receipt."
+)
 CANCEL_REPLACEMENT_ACTION = "Project a replacement payment_intent if collection should continue."
 
 
@@ -178,10 +182,11 @@ class PaymentSettlementService:
         """Apply one commercial receipt against a projected payment intent.
 
         A replay of the same tenant, intent, received amount, source-payload
-        hash, and contract version returns the stored ``payment_receipt_id``.
-        Another tenant cannot see or settle that intent.  The operator next
-        emits a cash journal proposal to AIS, or records another partial
-        receipt.  This service never captures via a provider or posts to AIS.
+        hash, and contract version returns the stored ``payment_receipt_id``
+        and reuses the stored cash ``proposal_id``.  Another tenant cannot
+        see or settle that intent.  The cash journal is already validated
+        for AIS to pull.  This service never captures via a provider or
+        posts to AIS.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -217,6 +222,7 @@ class PaymentSettlementService:
             current_case = self.ledger.get_collection_case(existing.collection_case_id)
             if current_case is None:
                 return _rejected(PaymentSettlementRejectionReasonCode.PAYMENT_INTENT_NOT_FOUND)
+            _compose_cash_journal(self.ledger, tenant.tenant_reference, existing.payment_receipt_id)
             return _from_receipt(
                 existing,
                 payment_intent,
@@ -267,6 +273,7 @@ class PaymentSettlementService:
             result.as_contract_dict(),
             stored.received_at,
         )
+        _compose_cash_journal(self.ledger, tenant.tenant_reference, stored.payment_receipt_id)
         return result
 
     def cancel_payment_intent(
@@ -353,8 +360,19 @@ def _rejected(reason_code: PaymentSettlementRejectionReasonCode) -> PaymentSettl
     )
 
 
+def _compose_cash_journal(
+    ledger: MemoryUsageLedger, tenant_reference: str, payment_receipt_id: UUID
+) -> None:
+    """Idempotently propose the existing #13 cash journal for one receipt.
+
+    Replay of the same tenant, receipt, hash, and contract version writes no
+    second proposal and does not flip ``proposal_status``.
+    """
+    AccountingExportService(ledger).propose_cash_journal(tenant_reference, payment_receipt_id)
+
+
 def _next_receipt_action(remaining_outstanding_amount: Decimal) -> str:
-    """Tell the operator to emit a cash proposal, or apply another partial."""
+    """Tell the operator the cash journal is validated, or apply another partial."""
     if remaining_outstanding_amount == 0:
         return CASH_JOURNAL_ACTION
     return PARTIAL_RECEIPT_ACTION

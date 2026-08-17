@@ -101,7 +101,7 @@ contextual-orchestrator usage
 - Another tenant cannot see or settle the first tenant's intent.
 - Cancel flips a projected intent to `cancelled` without writing a receipt or changing outstanding. Cancel replay is idempotent. A cancelled intent cannot later receive a receipt.
 - Missing intents, cross-tenant IDs, float money, zero or negative amounts, over-application, and non-projected intents fail closed.
-- Status stays `applied`. Operators next propose a cash journal to AIS, or record another partial receipt.
+- Status stays `applied`. Accept and duplicate replay idempotently propose the existing cash journal. Operators record the receipt; the cash journal is already validated for AIS to pull.
 
 ## Cash-journal acceptance
 
@@ -179,12 +179,12 @@ contextual-orchestrator usage
 ## Payment-receipt-presentment acceptance
 
 - `POST /v1/payment-receipts` applies one #12 receipt against a projected `payment_intent_id`. Amount is the exact `received_amount`. Currency comes from the intent. Replay of the same tenant, intent snapshot, amount, and contract version returns the same `payment_receipt_id`. PAN, CVC, and provider secrets are refused.
-- Accept persists the receipt, reduces collection outstanding, and enqueues #24 `payment_receipt.applied`. It does not emit a cash journal. #13 stays `POST /v1/cash-journal-proposals` with `{tenant}:cash_receipt:{payment_receipt_id}:{source_payload_hash}:v{version}`.
+- Accept persists the receipt, reduces collection outstanding, enqueues #24 `payment_receipt.applied`, and composes the existing #13 cash journal. `POST /v1/cash-journal-proposals` remains a manual replay with `{tenant}:cash_receipt:{payment_receipt_id}:{source_payload_hash}:v{version}`.
 - A known stored payment receipt presents one tenant-scoped statement with `received_amount`, `remaining_outstanding_amount`, `payment_receipt_status` (`applied`), and `next_operator_action` (`record_receipt` or `drain_or_wait`).
 - `GET /v1/payment-receipts/{payment_receipt_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/payment-receipts` lists summaries as `{payment_receipts, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100.
 - Missing tenant, illegal cursor, and illegal page_limit fail closed.
-- Operators record the receipt, then drain or wait for AIS to pull the cash journal. HTTP presentment does not capture cards or call AIS.
+- Operators record the receipt; the cash journal is already validated for AIS to pull. HTTP presentment does not capture cards or call AIS.
 - `operator_console` Storybook renders that receipt with tokenized amount due and status chip. Fixtures are applied-full and applied-partial.
 
 ## Payment-intent-presentment acceptance

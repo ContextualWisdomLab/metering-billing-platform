@@ -4,7 +4,7 @@ import { renderStatusChip } from "./status_chip.js";
 import { renderTenantPin } from "./tenant_pin.js";
 
 export const PAYMENT_RECEIPT_CUSTOMER_COPY =
-  "Record the receipt, then drain or wait for AIS to pull the cash journal.";
+  "Record the receipt; the cash journal is already validated for AIS to pull.";
 
 /**
  * Return the operator-facing next-action copy for one payment receipt.

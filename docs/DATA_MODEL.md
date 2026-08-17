@@ -82,7 +82,7 @@ A stored payment intent is identified by `(tenant_account_id, collection_case_id
 
 ## Payment-receipt identity
 
-A stored payment receipt is identified by `(tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)`.  The hash covers the intent amount, currency, status, and received amount.  Status is `applied` only.  Provider charge IDs and card PAN are not stored.  Receipts do not emit an `accounting_journal_proposal`.
+A stored payment receipt is identified by `(tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)`.  The hash covers the intent amount, currency, status, and received amount.  Status is `applied` only.  Provider charge IDs and card PAN are not stored.  Accept reuses the existing cash `journal_proposal` identity `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)`.
 
 ## Posting-receipt observation identity
 

@@ -55,6 +55,7 @@ REQUIRED_FILES = (
     "docs/adr/0023-collection-case-presentment.md",
     "docs/adr/0024-payment-intent-http.md",
     "docs/adr/0025-payment-receipt-http.md",
+    "docs/adr/0026-cash-journal-on-receipt-accept.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

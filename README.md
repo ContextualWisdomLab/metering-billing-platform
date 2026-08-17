@@ -78,7 +78,7 @@ After an `invoice_draft` exists, call `InvoicePresentmentService.present_invoice
 python3 -c "from metering_billing import AccountingExportService"
 ```
 
-After an `invoice_draft` exists, call `AccountingExportService.propose_journal` with the tenant and `invoice_draft_id`. After a `payment_receipt` exists, call `AccountingExportService.propose_cash_journal` with the tenant and `payment_receipt_id`. Each proposal is one balanced exact-decimal `accounting_journal_proposal` that uses semantic account roles and an intended book role. An identical replay returns the same `proposal_id`. Status stays inside the proposal lifecycle and is never `posted`. Cash lines debit `cash_receipt` and credit `accounts_receivable`.
+After an `invoice_draft` exists, call `AccountingExportService.propose_journal` with the tenant and `invoice_draft_id`. After a `payment_receipt` exists, the receipt write already proposed the cash journal; `AccountingExportService.propose_cash_journal` remains a manual replay. Each proposal is one balanced exact-decimal `accounting_journal_proposal` that uses semantic account roles and an intended book role. An identical replay returns the same `proposal_id`. Status stays inside the proposal lifecycle and is never `posted`. Cash lines debit `cash_receipt` and credit `accounts_receivable`.
 
 ## Open a collection case
 
@@ -112,7 +112,7 @@ After a `payment_intent` exists, `GET /v1/payment-intents/{payment_intent_id}` r
 python3 -c "from metering_billing import PaymentSettlementService"
 ```
 
-After a projected `payment_intent` exists, call `PaymentSettlementService.record_payment_receipt` with the tenant, `payment_intent_id`, and exact `received_amount`, or `POST /v1/payment-receipts`. The receipt status is `applied`. The linked collection-case outstanding is reduced by the same amount; remaining zero marks the case `settled`. An identical replay returns the same `payment_receipt_id`. Call `cancel_payment_intent` to flip a projected intent to `cancelled` without writing a receipt. The receipt does not capture via a provider or post a journal. The cash journal stays a later `propose_cash_journal` write.
+After a projected `payment_intent` exists, call `PaymentSettlementService.record_payment_receipt` with the tenant, `payment_intent_id`, and exact `received_amount`, or `POST /v1/payment-receipts`. The receipt status is `applied`. The linked collection-case outstanding is reduced by the same amount; remaining zero marks the case `settled`. An identical replay returns the same `payment_receipt_id`. Accept also proposes the existing cash journal. Call `cancel_payment_intent` to flip a projected intent to `cancelled` without writing a receipt. The receipt does not capture via a provider or post a journal. `POST /v1/cash-journal-proposals` remains a manual replay.
 
 ## Present a payment receipt
 
@@ -122,7 +122,7 @@ python3 -c "from metering_billing import PaymentReceiptPresentmentService"
 # GET /v1/payment-receipts?tenant_reference=urn:cwl:tenant_001
 ```
 
-After a `payment_receipt` exists, `GET /v1/payment-receipts/{payment_receipt_id}` returns the tenant-scoped statement. Record the receipt, then drain or wait for AIS to pull the cash journal.
+After a `payment_receipt` exists, `GET /v1/payment-receipts/{payment_receipt_id}` returns the tenant-scoped statement. Record the receipt; the cash journal is already validated for AIS to pull.
 
 ## Accept writes over HTTP
 
@@ -186,7 +186,7 @@ npm install
 npm run storybook
 ```
 
-`operator_console` renders the #21 invoice statement, the collection-case statement, the payment-intent statement, and the payment-receipt statement with tokenized amount due, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy on a payment receipt is: record the receipt, then drain or wait for AIS to pull the cash journal. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
+`operator_console` renders the #21 invoice statement, the collection-case statement, the payment-intent statement, and the payment-receipt statement with tokenized amount due, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy on a payment receipt is: record the receipt; the cash journal is already validated for AIS to pull. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
 
 ## Pull journal proposals
 

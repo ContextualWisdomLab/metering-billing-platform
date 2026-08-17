@@ -42,10 +42,10 @@ The application is a thin WSGI adapter:
     then record the receipt.  The write refuses PAN and provider secrets.
     The read does not capture, settle, call AIS, or start a web UI.
 15. Let an operator POST an applied payment receipt and GET the stored
-    receipt as a commercial statement.  Record the receipt, then drain or
-    wait for AIS to pull the cash journal.  The write refuses PAN and
-    provider secrets.  The read does not capture, post, call AIS, or start
-    a web UI.
+    receipt as a commercial statement.  Record the receipt; the cash
+    journal is already validated for AIS to pull.  The write refuses PAN
+    and provider secrets.  The read does not capture, post, call AIS, or
+    start a web UI.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls

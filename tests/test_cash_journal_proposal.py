@@ -54,7 +54,7 @@ class CashJournalProposalTests(unittest.TestCase):
         ledger, payment_receipt_id, collection_case_id = record_known_morning_receipt()
         outstanding_before = ledger.collection_cases[collection_case_id].outstanding_amount
         result = AccountingExportService(ledger).propose_cash_journal(TENANT_ONE, payment_receipt_id)
-        self.assertEqual(result.journal_proposal_outcome_code, JournalProposalOutcomeCode.ACCEPTED)
+        self.assertEqual(result.journal_proposal_outcome_code, JournalProposalOutcomeCode.DUPLICATE_REPLAY)
         self.assertIsInstance(result.proposal_id, UUID)
         self.assertEqual(result.proposal_status, "validated")
         self.assertEqual(result.transaction_currency, "USD")
@@ -93,7 +93,7 @@ class CashJournalProposalTests(unittest.TestCase):
         invoice_draft_id = ledger.collection_cases[collection_case_id].invoice_draft_id
         cash = AccountingExportService(ledger).propose_cash_journal(TENANT_ONE, payment_receipt_id)
         draft = AccountingExportService(ledger).propose_journal(TENANT_ONE, invoice_draft_id)
-        self.assertEqual(cash.journal_proposal_outcome_code, JournalProposalOutcomeCode.ACCEPTED)
+        self.assertEqual(cash.journal_proposal_outcome_code, JournalProposalOutcomeCode.DUPLICATE_REPLAY)
         self.assertEqual(draft.journal_proposal_outcome_code, JournalProposalOutcomeCode.ACCEPTED)
         self.assertNotEqual(cash.proposal_id, draft.proposal_id)
         self.assertEqual(draft.proposal_lines[0].account_role_code, "accounts_receivable")
@@ -108,7 +108,7 @@ class CashJournalProposalTests(unittest.TestCase):
         service = AccountingExportService(ledger)
         first = service.propose_cash_journal(TENANT_ONE, payment_receipt_id)
         second = service.propose_cash_journal(TENANT_ONE, payment_receipt_id)
-        self.assertEqual(first.journal_proposal_outcome_code, JournalProposalOutcomeCode.ACCEPTED)
+        self.assertEqual(first.journal_proposal_outcome_code, JournalProposalOutcomeCode.DUPLICATE_REPLAY)
         self.assertEqual(second.journal_proposal_outcome_code, JournalProposalOutcomeCode.DUPLICATE_REPLAY)
         self.assertEqual(second.proposal_id, first.proposal_id)
         self.assertEqual(second.source_payload_hash, first.source_payload_hash)
@@ -184,7 +184,7 @@ class CashJournalProposalTests(unittest.TestCase):
             missing_tenant.rejection_reason_code,
             JournalProposalRejectionReasonCode.TENANT_NOT_FOUND,
         )
-        self.assertEqual(len(ledger.journal_proposals), 0)
+        self.assertEqual(len(ledger.journal_proposals), 1)
 
     def test_zero_receipt_amount_and_float_money_fail_closed(self) -> None:
         """Cash proposals reject zero amounts and IEEE binary floats."""
@@ -206,7 +206,7 @@ class CashJournalProposalTests(unittest.TestCase):
             parse_proposal_amount(0.003705)
         self.assertEqual(parse_proposal_amount("0.003705"), Decimal("0.003705"))
         self.assertEqual(format_exact_decimal(parse_proposal_amount(Decimal("0.003705"))), "0.003705")
-        self.assertEqual(len(ledger.journal_proposals), 0)
+        self.assertEqual(len(ledger.journal_proposals), 1)
 
     def test_default_service_and_rejected_cash_contract_stay_sparse(self) -> None:
         """The zero-argument service constructs a ledger and rejected cash exports omit money."""
@@ -267,7 +267,7 @@ class CashJournalCatalogTests(unittest.TestCase):
             rejected.rejection_reason_code,
             JournalProposalRejectionReasonCode.PAYMENT_RECEIPT_NOT_FOUND,
         )
-        self.assertEqual(len(ledger.journal_proposals), 0)
+        self.assertEqual(len(ledger.journal_proposals), 1)
 
     def test_clock_stamps_proposed_at_from_the_receipt_date(self) -> None:
         """A supplied clock stamps proposed_at; commercial dates follow the receipt."""
@@ -278,10 +278,13 @@ class CashJournalCatalogTests(unittest.TestCase):
         receipt = PaymentSettlementService(ledger, clock=lambda: received_at).record_payment_receipt(
             TENANT_ONE, projected.payment_intent_id, KNOWN_MORNING_TOTAL
         )
+        composed = next(iter(ledger.journal_proposals.values()))
         result = AccountingExportService(ledger, clock=lambda: proposed_at).propose_cash_journal(
             TENANT_ONE, receipt.payment_receipt_id
         )
-        self.assertEqual(ledger.journal_proposals[result.proposal_id].proposed_at, proposed_at)
+        self.assertEqual(result.journal_proposal_outcome_code, JournalProposalOutcomeCode.DUPLICATE_REPLAY)
+        self.assertEqual(ledger.journal_proposals[result.proposal_id].proposed_at, composed.proposed_at)
+        self.assertNotEqual(composed.proposed_at, proposed_at)
         self.assertEqual(result.transaction_date, "2026-08-17")
         self.assertEqual(result.accounting_date, "2026-08-17")
         self.assertEqual(validate_journal_proposal(result.as_contract_dict()), ())
