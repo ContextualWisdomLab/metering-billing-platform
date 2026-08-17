@@ -9,8 +9,10 @@ The service is the buyer-facing issue path:
 
 The issued document is a commercial artifact, not a statutory invoice, tax
 invoice certificate, or AIS posting (IFRS Foundation, 2024).  It does not
-invent sequential legal numbering, capture payment, enqueue webhooks, or
-flip ``proposal_status``.
+invent sequential legal numbering, capture payment, or flip
+``proposal_status``.  First successful issue enqueues one existing #24
+``invoice.issued`` outbox event; replay of the same issued invoice does
+not grow the outbox.
 """
 
 from __future__ import annotations
@@ -38,6 +40,10 @@ from metering_billing.usage_ledger import (
     StoredIssuedInvoice,
     StoredIssuedInvoiceLine,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_INVOICE_ISSUED,
+    enqueue_accepted_fact,
 )
 
 
@@ -160,6 +166,33 @@ class IssuedInvoiceResult:
             payload["due_at"] = _format_issued_at(self.due_at)
         return payload
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``invoice.issued`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not the issued invoice body.
+        Lines, billing-account references, meter codes, PAN, secrets, and
+        statutory identifiers are omitted.
+        """
+        if self.issued_invoice_id is None or self.invoice_draft_id is None:
+            raise ValueError("rejected issued invoice has no webhook event data")
+        payload: dict[str, object] = {
+            "issued_invoice_id": str(self.issued_invoice_id),
+            "invoice_draft_id": str(self.invoice_draft_id),
+            "source_payload_hash": self.source_payload_hash,
+            "issued_invoice_contract_version": self.issued_invoice_contract_version,
+            "currency_code": self.currency_code,
+            "tax_exclusive_amount": format_exact_decimal(self.tax_exclusive_amount),
+            "tax_amount": format_exact_decimal(self.tax_amount),
+            "tax_inclusive_amount": format_exact_decimal(self.tax_inclusive_amount),
+            "issued_invoice_status": self.issued_invoice_status,
+            "issued_at": _format_issued_at(self.issued_at),
+            "rating_run_id": str(self.rating_run_id),
+            "usage_snapshot_hash": self.usage_snapshot_hash,
+        }
+        if self.due_at is not None:
+            payload["due_at"] = _format_issued_at(self.due_at)
+        return payload
+
 
 class IssuedInvoiceService:
     """Append-only issuer of commercial invoice snapshots from stored drafts."""
@@ -182,6 +215,8 @@ class IssuedInvoiceService:
 
         Replay of the same tenant and ``invoice_draft_id`` returns the stored
         ``issued_invoice_id`` and frozen totals.  A later ``due_at`` is ignored.
+        First successful issue enqueues one ``invoice.issued`` outbox event.
+        Replay of that snapshot does not enqueue a second row.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -200,9 +235,11 @@ class IssuedInvoiceService:
             tenant.tenant_account_id, invoice_draft.invoice_draft_id
         )
         if existing is not None:
-            return _from_stored(
+            result = _from_stored(
                 existing, tenant.tenant_reference, IssuedInvoiceOutcomeCode.DUPLICATE_REPLAY
             )
+            _enqueue_invoice_issued(self.ledger, tenant.tenant_reference, result)
+            return result
         try:
             exclusive, tax_amount, inclusive = _tax_amounts(self.ledger, invoice_draft)
         except ExactDecimalError:
@@ -243,9 +280,11 @@ class IssuedInvoiceService:
             ),
             stored_lines,
         )
-        return _from_stored(
+        result = _from_stored(
             stored, tenant.tenant_reference, IssuedInvoiceOutcomeCode.ACCEPTED
         )
+        _enqueue_invoice_issued(self.ledger, tenant.tenant_reference, result)
+        return result
 
 
 def _tax_amounts(
@@ -320,6 +359,29 @@ def _parse_optional_due_at(
         return parse_iso8601_datetime(due_at), None
     except (TimeWindowError, TypeError, ValueError):
         return None, IssuedInvoiceRejectionReasonCode.REQUEST_INVALID
+
+
+def _enqueue_invoice_issued(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: IssuedInvoiceResult,
+) -> None:
+    """Append one ``invoice.issued`` outbox row for a stored snapshot.
+
+    Replay of the same tenant, event type, ``issued_invoice_id``, and
+    payload hash returns the stored row.  A crash after insert and before
+    enqueue is healed by the next issue replay.
+    """
+    assert result.issued_invoice_id is not None
+    assert result.issued_at is not None
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_INVOICE_ISSUED,
+        result.issued_invoice_id,
+        result.as_webhook_event_data(),
+        result.issued_at,
+    )
 
 
 def _rejected(reason: IssuedInvoiceRejectionReasonCode) -> IssuedInvoiceResult:

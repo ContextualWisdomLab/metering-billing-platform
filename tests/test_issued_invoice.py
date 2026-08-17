@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -29,6 +30,7 @@ from metering_billing.errors import (
 from metering_billing.issued_invoice import next_operator_action
 from metering_billing.issued_invoice_presentment import next_operator_action as presentment_action
 from metering_billing.usage_ledger import generate_record_id
+from metering_billing.webhook_outbox import EVENT_TYPE_INVOICE_ISSUED
 from test_collection_case import draft_known_morning
 from test_http_app import invoke_http
 from test_tax_assessment import HUNDRED, STANDARD_TAX_RATE, insert_commercial_draft
@@ -96,7 +98,42 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertNotIn("card_pan", payload)
         self.assertEqual(draft.invoice_draft_status, "draft")
         self.assertEqual(len(ledger.issued_invoices), 1)
-        self.assertEqual(len(ledger.webhook_outbox_events), 0)
+        issued_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+        ]
+        self.assertEqual(len(issued_events), 1)
+        self.assertEqual(issued_events[0].source_id, first.issued_invoice_id)
+        envelope = json.loads(issued_events[0].payload_json)
+        self.assertEqual(envelope["event_type_code"], EVENT_TYPE_INVOICE_ISSUED)
+        self.assertEqual(envelope["tenant_reference"], TENANT_ONE)
+        self.assertEqual(envelope["data"]["issued_invoice_id"], str(first.issued_invoice_id))
+        self.assertEqual(envelope["data"]["invoice_draft_id"], str(invoice_draft_id))
+        self.assertEqual(envelope["data"]["source_payload_hash"], first.source_payload_hash)
+        self.assertEqual(envelope["data"]["issued_invoice_contract_version"], 1)
+        self.assertEqual(envelope["data"]["currency_code"], "USD")
+        self.assertEqual(
+            envelope["data"]["tax_exclusive_amount"],
+            format_exact_decimal(KNOWN_MORNING_TOTAL),
+        )
+        self.assertEqual(envelope["data"]["tax_amount"], "0")
+        self.assertEqual(
+            envelope["data"]["tax_inclusive_amount"],
+            format_exact_decimal(KNOWN_MORNING_TOTAL),
+        )
+        self.assertEqual(envelope["data"]["issued_invoice_status"], "issued")
+        self.assertEqual(envelope["data"]["issued_at"], "2026-08-17T21:00:00Z")
+        self.assertEqual(envelope["data"]["rating_run_id"], str(first.rating_run_id))
+        self.assertEqual(envelope["data"]["usage_snapshot_hash"], first.usage_snapshot_hash)
+        self.assertNotIn("issued_invoice_lines", envelope["data"])
+        self.assertNotIn("billing_account_reference", json.dumps(envelope))
+        self.assertNotIn("meter_code", json.dumps(envelope["data"]))
+        self.assertNotIn("invoice_number", envelope["data"])
+        self.assertNotIn("legal_invoice_number", envelope["data"])
+        self.assertNotIn("card_pan", json.dumps(envelope))
+        self.assertNotIn("webhook_secret", json.dumps(envelope))
+        self.assertNotIn("api_credential_secret", json.dumps(envelope))
         self.assertEqual(len(ledger.journal_proposals), 0)
 
     def test_taxed_draft_freezes_assessment_totals_and_optional_due_at(self) -> None:
@@ -121,6 +158,16 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(replay.issued_invoice_outcome_code, IssuedInvoiceOutcomeCode.DUPLICATE_REPLAY)
         self.assertEqual(replay.due_at, DUE_AT)
         self.assertEqual(replay.tax_inclusive_amount, Decimal("110.00"))
+        taxed_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+        ]
+        self.assertEqual(len(taxed_events), 1)
+        taxed_envelope = json.loads(taxed_events[0].payload_json)
+        self.assertEqual(taxed_envelope["data"]["due_at"], "2026-09-16T21:00:00Z")
+        self.assertEqual(taxed_envelope["data"]["tax_inclusive_amount"], "110.00")
+        self.assertNotIn("issued_invoice_lines", taxed_envelope["data"])
 
     def test_http_issue_get_and_paged_list_without_capture(self) -> None:
         """POST issues; GET item and list page metadata and never capture payment."""
@@ -236,7 +283,16 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(empty_status, 200)
         self.assertEqual(empty_body["issued_invoices"], [])
         self.assertIsNone(empty_body["next_cursor"])
-        self.assertEqual(len(ledger.webhook_outbox_events), 0)
+        issued_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+        ]
+        self.assertEqual(len(issued_events), 2)
+        self.assertEqual(
+            {str(event.source_id) for event in issued_events},
+            {issued_invoice_id, second_issue["issued_invoice_id"]},
+        )
         self.assertEqual(len(ledger.journal_proposals), 0)
         self.assertEqual(len(ledger.payment_intents), 0)
 
@@ -604,3 +660,5 @@ class IssuedInvoiceTests(unittest.TestCase):
             none_reason.as_contract_dict()["rejection_reason_code"],
             "invoice_draft_not_found",
         )
+        with self.assertRaises(ValueError):
+            none_reason.as_webhook_event_data()

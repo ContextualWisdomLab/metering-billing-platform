@@ -174,7 +174,7 @@ contextual-orchestrator usage
 - A known stored issued invoice presents one tenant-scoped statement with identity, draft source, frozen totals, lines, `issued_at`, optional `due_at`, and `next_operator_action` (`collect`).
 - `GET /v1/issued-invoices/{issued_invoice_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/issued-invoices` lists summaries as `{issued_invoices, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{issued_invoice_id}`.
-- Invoice-draft, tax-assessment, journal-proposal, collection, payment, webhook, and AIS contracts stay unchanged. `invoice_draft_status` stays `draft`. `proposal_status` stays `validated`. No webhook event, payment capture, or AIS call is added.
+- Invoice-draft, tax-assessment, journal-proposal, collection, payment, and AIS contracts stay unchanged. `invoice_draft_status` stays `draft`. `proposal_status` stays `validated`. First successful issue enqueues one existing #24 `invoice.issued` outbox event. No payment capture or AIS call is added. HMAC, SSRF, and delivery contracts stay unchanged.
 - Operators issue invoice, then collect or credit. `operator_console` Storybook adds one `IssuedInvoice` story. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Tenant-API-credential acceptance
@@ -200,8 +200,8 @@ contextual-orchestrator usage
 - The secret is returned once. `GET /v1/webhook-subscriptions/{webhook_subscription_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak. GET never reconstructs a secret.
 - `GET /v1/webhook-subscriptions` lists summaries as `{webhook_subscriptions, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{webhook_subscription_id}`.
 - Presentment never returns `webhook_secret`, `webhook_secret_hash`, `webhook_secret_prefix`, a signature key, `payload_json`, or a signed body. `POST /v1/webhook-subscriptions/{id}/revoke` stays the #24 revoke. PAN, CVC, and provider secrets are refused on register and revoke.
-- When a journal proposal is validated, a payment receipt is applied, or a credit is recorded, one `webhook_outbox_event` is appended. Replay of the commercial fact does not enqueue a second row.
-- Event types in this slice are `journal_proposal.validated`, `payment_receipt.applied`, and `credit_adjustment.recorded`. The payload is a thin envelope around the published contract.
+- When a journal proposal is validated, a payment receipt is applied, a credit is recorded, or an invoice is issued, one `webhook_outbox_event` is appended. Replay of the commercial fact does not enqueue a second row.
+- Event types in this slice are `journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`, and `invoice.issued`. Journal, payment, and credit payloads wrap the published contract. `invoice.issued` `data` is a thin reference plus hash and omits invoice lines, PAN, secrets, and statutory identifiers.
 - `WebhookDeliveryService.deliver_due_events` and `POST /v1/webhook-deliveries` POST JSON to active same-tenant subscriptions and sign the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`. PAN, CVC, and provider secrets are refused on the write.
 - Delivery attempts are append-only. Success marks the outbox event delivered. Later explicit runs may retry. There is no scheduler.
 - A known stored `webhook_delivery_attempt` presents one tenant-scoped statement with `delivery_attempt_id`, `webhook_subscription_id`, `event_type_code`, `source_id`, `attempt_number`, stored HTTP status or failure, timestamps, and `next_operator_action` (`wait` after stored success, otherwise `run_deliveries`).

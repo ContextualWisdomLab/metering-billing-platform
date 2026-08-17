@@ -68,6 +68,7 @@ REQUIRED_FILES = (
     "docs/adr/0036-dunning-event-presentment.md",
     "docs/adr/0037-webhook-outbox-event-presentment.md",
     "docs/adr/0038-issued-invoice-from-draft.md",
+    "docs/adr/0039-invoice-issued-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

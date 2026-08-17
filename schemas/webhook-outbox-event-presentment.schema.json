@@ -27,7 +27,8 @@
       "enum": [
         "journal_proposal.validated",
         "payment_receipt.applied",
-        "credit_adjustment.recorded"
+        "credit_adjustment.recorded",
+        "invoice.issued"
       ]
     },
     "source_id": {"type": "string", "format": "uuid"},
