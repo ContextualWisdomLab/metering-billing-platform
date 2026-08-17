@@ -10,6 +10,7 @@ from pathlib import Path
 from metering_billing.contracts import (
     validate_collection_case_presentment,
     validate_invoice_presentment,
+    validate_payment_intent_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -25,6 +26,10 @@ COLLECTION_FIXTURE_NAMES = (
     "open_collection_case.json",
     "dunning_collection_case.json",
     "settled_collection_case.json",
+)
+PAYMENT_INTENT_FIXTURE_NAMES = (
+    "projected_payment_intent.json",
+    "cancelled_payment_intent.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -75,6 +80,18 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertEqual(self._fixture("open_collection_case.json")["next_operator_action"], "collect")
         self.assertEqual(self._fixture("dunning_collection_case.json")["last_dunning_notice_code"], "first_notice")
         self.assertEqual(self._fixture("settled_collection_case.json")["next_operator_action"], "wait")
+        for fixture_name in PAYMENT_INTENT_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_payment_intent_presentment(payload), ())
+            value = payload["payment_amount"]
+            self.assertIsInstance(value, str)
+            self.assertNotIsInstance(value, float)
+            parse_exact_decimal(value)
+        self.assertEqual(
+            self._fixture("projected_payment_intent.json")["next_operator_action"],
+            "record_receipt",
+        )
+        self.assertEqual(self._fixture("cancelled_payment_intent.json")["next_operator_action"], "wait")
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -93,12 +110,20 @@ class OperatorConsoleTests(unittest.TestCase):
     def test_storybook_inventory_lists_required_stories(self) -> None:
         """The inventory must name the four tokenized modules and three fixtures."""
         inventory = (ROOT / "docs" / "STORYBOOK.md").read_text(encoding="utf-8")
-        for story_name in ("InvoiceStatement", "AmountDue", "LineTable", "StatusChip", "CollectionCase"):
+        for story_name in (
+            "InvoiceStatement",
+            "AmountDue",
+            "LineTable",
+            "StatusChip",
+            "CollectionCase",
+            "PaymentIntent",
+        ):
             self.assertIn(story_name, inventory)
-        for fixture_name in FIXTURE_NAMES + COLLECTION_FIXTURE_NAMES:
+        for fixture_name in FIXTURE_NAMES + COLLECTION_FIXTURE_NAMES + PAYMENT_INTENT_FIXTURE_NAMES:
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
         self.assertIn("Open the collection case, then collect or credit", inventory)
+        self.assertIn("Create a projected payment intent, then record the receipt", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

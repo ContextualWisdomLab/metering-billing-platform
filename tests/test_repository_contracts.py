@@ -16,6 +16,7 @@ from unittest import mock
 from metering_billing.contracts import (
     validate_ais_outbox_drain,
     validate_collection_case_presentment,
+    validate_payment_intent_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -559,6 +560,80 @@ class RepositoryContractTests(unittest.TestCase):
                 "exact decimal" in error
                 for error in validate_collection_case_presentment(scientific)
             )
+        )
+
+    def test_payment_intent_presentment_accepts_amount_and_rejects_captured(self) -> None:
+        """A payment-intent statement records exact amount and cannot claim capture."""
+        schema = self._schema("payment-intent-presentment.schema.json")
+        instance = {
+            "payment_intent_presentment_contract_version": 1,
+            "payment_intent_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf640",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "currency_code": "USD",
+            "payment_amount": "0.003705",
+            "payment_intent_status": "projected",
+            "projected_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "record_receipt",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_payment_intent_presentment(instance), ())
+        cancelled = dict(instance)
+        cancelled["payment_intent_status"] = "cancelled"
+        cancelled["next_operator_action"] = "wait"
+        self.assertEqual(validate_payment_intent_presentment(cancelled), ())
+        captured = dict(instance)
+        captured["payment_intent_status"] = "captured"
+        self.assertIn(
+            "$.payment_intent_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, captured),
+        )
+        posted = dict(instance)
+        posted["proposal_status"] = "posted"
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        negative = dict(instance)
+        negative["payment_amount"] = "-1.00"
+        self.assertIn(
+            "$: payment_amount must not be negative",
+            validate_payment_intent_presentment(negative),
+        )
+        projected_wait = dict(instance)
+        projected_wait["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: projected intents must record a receipt",
+            validate_payment_intent_presentment(projected_wait),
+        )
+        cancelled_collect = dict(cancelled)
+        cancelled_collect["next_operator_action"] = "record_receipt"
+        self.assertIn(
+            "$: cancelled or rejected intents must wait",
+            validate_payment_intent_presentment(cancelled_collect),
+        )
+        rejected_collect = dict(instance)
+        rejected_collect["payment_intent_status"] = "rejected"
+        rejected_collect["next_operator_action"] = "record_receipt"
+        self.assertIn(
+            "$: cancelled or rejected intents must wait",
+            validate_payment_intent_presentment(rejected_collect),
+        )
+        self.assertNotEqual(validate_payment_intent_presentment([]), ())
+        non_string = dict(instance)
+        non_string["payment_amount"] = 100
+        self.assertEqual(
+            [
+                error
+                for error in validate_payment_intent_presentment(non_string)
+                if "payment_amount" in error and "exact decimal" in error
+            ],
+            [],
+        )
+        scientific = dict(instance)
+        scientific["payment_amount"] = "not-decimal"
+        self.assertTrue(
+            any("exact decimal" in error for error in validate_payment_intent_presentment(scientific))
         )
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:

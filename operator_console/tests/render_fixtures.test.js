@@ -14,6 +14,11 @@ import {
   COLLECTION_CUSTOMER_COPY,
   nextOperatorActionCopy,
 } from "../src/collection_case.js";
+import {
+  renderPaymentIntent,
+  PAYMENT_INTENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextPaymentIntentActionCopy,
+} from "../src/payment_intent.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -84,10 +89,37 @@ test("settled collection case waits", () => {
   assert.equal(statement.next_operator_action, "wait");
 });
 
+test("projected payment intent shows amount and record the receipt", () => {
+  const statement = loadFixture("projected_payment_intent.json");
+  const html = renderPaymentIntent(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /Record the receipt/);
+  assert.match(html, /Create a projected payment intent, then record the receipt/);
+  assert.equal(
+    PAYMENT_INTENT_CUSTOMER_COPY,
+    "Create a projected payment intent, then record the receipt.",
+  );
+  assert.equal(nextPaymentIntentActionCopy("record_receipt"), "Record the receipt");
+  assert.equal(nextPaymentIntentActionCopy("wait"), "Wait");
+  assert.equal(typeof statement.payment_amount, "string");
+});
+
+test("cancelled payment intent waits", () => {
+  const statement = loadFixture("cancelled_payment_intent.json");
+  const html = renderPaymentIntent(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /Wait/);
+  assert.equal(statement.next_operator_action, "wait");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
     () => renderCollectionCase({ collection_outstanding: 100.0, currency_code: "USD" }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderPaymentIntent({ payment_amount: 100.0, currency_code: "USD" }),
     TypeError,
   );
   assert.throws(

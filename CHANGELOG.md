@@ -4,6 +4,9 @@
 
 ### Added
 
+- `PaymentIntentPresentmentService.present_payment_intent` projects one tenant-scoped payment-intent statement from stored `payment_intent` rows.  `payment_amount` is an exact-decimal string.  Status stays `projected`, `cancelled`, or `rejected`.  Next operator action is `record_receipt` or `wait`.  `POST /v1/payment-intents` remains the #11 write from `collection_case_id` and refuses PAN and provider secrets.  `GET /v1/payment-intents/{payment_intent_id}` is HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/payment-intents` lists `{payment_intents, next_cursor}`.  Create a projected payment intent, then record the receipt.
+- `operator_console` Storybook adds a `PaymentIntent` story using `AmountDue` and `StatusChip`.  Fixtures are projected and cancelled.  There is no login wall, Figma-only work, or production SPA.
+- ADR 0024 for payment-intent HTTP presentment.
 - `CollectionCasePresentmentService.present_collection_case` projects one tenant-scoped collection statement from stored `collection_case` and dunning rows.  `collection_outstanding` is an exact-decimal string.  Status stays `open`, `dunning`, or `settled`.  Next operator action is `collect`, `credit`, or `wait`.  `GET /v1/collection-cases/{collection_case_id}` is HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/collection-cases` lists `{collection_cases, next_cursor}`.  Open the collection case, then collect or credit.
 - `operator_console` Storybook adds a `CollectionCase` story using `AmountDue` and `StatusChip`.  Fixtures are open, dunning, and settled.  There is no login wall, Figma-only work, or production SPA.
 - ADR 0023 for collection-case presentment.

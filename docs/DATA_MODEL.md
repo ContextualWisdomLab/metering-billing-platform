@@ -100,6 +100,10 @@ Presentment does not add a table.  `GET /v1/invoice-drafts/{invoice_draft_id}` p
 
 Collection presentment does not add a table.  `GET /v1/collection-cases/{collection_case_id}` projects stored `collection_case` and `collection_dunning_event` rows plus accepted credits on the same draft.  `collection_outstanding` is the exact stored outstanding.  `collection_case_status` stays `open`, `dunning`, or `settled`.  Next operator action is `collect`, `credit`, or `wait`.
 
+## Payment-intent-presentment projection
+
+Payment-intent presentment does not add a table.  `GET /v1/payment-intents/{payment_intent_id}` projects stored `payment_intent` rows.  `payment_amount` is the exact stored amount.  `payment_intent_status` stays `projected`, `cancelled`, or `rejected`.  Next operator action is `record_receipt` or `wait`.
+
 ## Tax-assessment identity
 
 A stored tax-rate schedule is identified by `(tenant_account_id, tax_code)`.  A stored version is identified by `(tenant_account_id, tax_rate_schedule_id, source_payload_hash, tax_rate_contract_version)` and also by `(tenant_account_id, tax_rate_schedule_id, version_number)`.  A stored assessment is identified by `(tenant_account_id, invoice_draft_id, tax_rate_version_id, source_payload_hash, tax_assessment_contract_version)` and is unique per draft.  `tax_amount` is half-even rounded to the documented ISO 4217 minor-unit exponent.

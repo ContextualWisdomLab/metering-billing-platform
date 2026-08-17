@@ -37,6 +37,10 @@ The application is a thin WSGI adapter:
 13. Let an operator GET a stored collection case as a commercial statement.
     Open the collection case, then collect or credit.  The read does not
     post, call AIS, capture payment, or start a web UI.
+14. Let an operator POST a projected payment intent and GET the stored
+    intent as a commercial statement.  Create a projected payment intent,
+    then record the receipt.  The write refuses PAN and provider secrets.
+    The read does not capture, settle, call AIS, or start a web UI.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -61,6 +65,7 @@ from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
     CreditAdjustmentQueryError,
+    PaymentIntentPresentmentQueryError,
     ExactDecimalError,
     JournalProposalQueryError,
     PostingReceiptObservationQueryError,
@@ -78,6 +83,7 @@ from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
+from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.payment_intent import PaymentIntentService
@@ -95,7 +101,23 @@ COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36}
 COLLECTION_DUNNING_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/dunning-events$"
 )
+PAYMENT_INTENT_COLLECTION_PATH = "/v1/payment-intents"
+PAYMENT_INTENT_ITEM_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})$")
 PAYMENT_CANCEL_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})/cancel$")
+FORBIDDEN_PAYMENT_INTENT_KEYS = frozenset(
+    {
+        "card_pan",
+        "primary_account_number",
+        "card_number",
+        "pan",
+        "cvc",
+        "cvv",
+        "card_cvc",
+        "provider_secret",
+        "api_credential_secret",
+        "provider_charge_id",
+    }
+)
 JOURNAL_PROPOSAL_ITEM_PATH = re.compile(r"^/v1/journal-proposals/([0-9a-fA-F-]{36})$")
 POSTING_RECEIPT_COLLECTION_PATH = "/v1/posting-receipt-observations"
 POSTING_RECEIPT_ITEM_PREFIX = "/v1/posting-receipt-observations/"
@@ -132,7 +154,6 @@ KNOWN_POST_PATHS = frozenset(
         "/v1/usage-events",
         "/v1/rating-runs",
         "/v1/journal-proposals",
-        "/v1/payment-intents",
         "/v1/payment-receipts",
         "/v1/cash-journal-proposals",
     }
@@ -177,6 +198,7 @@ def create_http_app(
     assessments = TaxAssessmentService(shared_ledger)
     presentments = InvoicePresentmentService(shared_ledger)
     case_presentments = CollectionCasePresentmentService(shared_ledger)
+    intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -588,6 +610,39 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_payment_intents", "get_payment_intent"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_payment_intents":
+                    page = intent_presentments.list_payment_intents(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = intent_presentments.present_payment_intent(
+                    tenant_reference,
+                    _parse_uuid(path_values["payment_intent_id"], "payment_intent_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except PaymentIntentPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "payment_intent_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
             tenant_reference = _authorized_tenant(environ, payload)
@@ -692,10 +747,21 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "get_collection_case", {"collection_case_id": collection_match.group(1)}
         return "method_not_allowed", {}
+    if path == PAYMENT_INTENT_COLLECTION_PATH:
+        if method == "POST":
+            return "payment_intents", {}
+        if method == "GET":
+            return "list_payment_intents", {}
+        return "method_not_allowed", {}
     cancel_match = PAYMENT_CANCEL_PATH.fullmatch(path)
     if cancel_match is not None:
         if method == "POST":
             return "cancel_payment_intent", {"payment_intent_id": cancel_match.group(1)}
+        return "method_not_allowed", {}
+    payment_intent_match = PAYMENT_INTENT_ITEM_PATH.fullmatch(path)
+    if payment_intent_match is not None:
+        if method == "GET":
+            return "get_payment_intent", {"payment_intent_id": payment_intent_match.group(1)}
         return "method_not_allowed", {}
     if path == INVOICE_DRAFT_COLLECTION_PATH:
         if method == "POST":
@@ -972,6 +1038,8 @@ def _dispatch_write(
         )
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "payment_intents":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
         result = intents.project_payment_intent(
             tenant_reference,
             _parse_uuid(payload.get("collection_case_id"), "collection_case_id"),

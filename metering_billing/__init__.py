@@ -6,7 +6,7 @@ canonical usage events, publish versioned rate cards, rate tenant-scoped
 windows against a persisted version, draft invoice-intent documents, present
 those drafts as statements, publish tax rates, assess tax on a draft, emit
 journal proposals, open collection cases, present those cases as statements, project provider-neutral payment
-intents, apply commercial payment receipts, record commercial credits,
+intents, present those intents as statements, apply commercial payment receipts, record commercial credits,
 register webhook callbacks for accepted commercial facts, drain
 AIS posting-receipt outbox events into stored observations, and
 accept those writes over a stdlib HTTP adapter without taking a
@@ -36,6 +36,7 @@ from metering_billing.contracts import (
     TAX_ASSESSMENT_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
     COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME,
+    PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
     TENANT_API_CREDENTIAL_SCHEMA_NAME,
     AIS_OUTBOX_DRAIN_SCHEMA_NAME,
@@ -57,6 +58,7 @@ from metering_billing.contracts import (
     validate_tax_assessment,
     validate_invoice_draft,
     validate_collection_case_presentment,
+    validate_payment_intent_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_ais_outbox_drain,
@@ -92,6 +94,7 @@ from metering_billing.errors import (
     InvoiceDraftRejectionReasonCode,
     CollectionCasePresentmentQueryError,
     InvoicePresentmentQueryError,
+    PaymentIntentPresentmentQueryError,
     TenantApiCredentialOutcomeCode,
     TenantApiCredentialQueryError,
     TenantApiCredentialRejectionReasonCode,
@@ -123,6 +126,7 @@ from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
+from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
 from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
@@ -140,6 +144,7 @@ __all__ = (
     "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
+    "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
@@ -156,6 +161,8 @@ __all__ = (
     "AccountingExportService",
     "CollectionCasePresentmentQueryError",
     "CollectionCasePresentmentService",
+    "PaymentIntentPresentmentQueryError",
+    "PaymentIntentPresentmentService",
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
     "CollectionCaseService",
@@ -228,6 +235,7 @@ __all__ = (
     "validate_tax_assessment",
     "validate_invoice_draft",
     "validate_collection_case_presentment",
+    "validate_payment_intent_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_ais_outbox_drain",

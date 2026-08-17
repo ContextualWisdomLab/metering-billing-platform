@@ -9,3 +9,8 @@ export {
   COLLECTION_CUSTOMER_COPY,
   nextOperatorActionCopy,
 } from "./collection_case.js";
+export {
+  renderPaymentIntent,
+  PAYMENT_INTENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextPaymentIntentActionCopy,
+} from "./payment_intent.js";

@@ -20,7 +20,7 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, collection-case presentment, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, collection-case presentment, payment intents, payment-intent presentment, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
 - a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, and webhook-outbox migrations with tenant-scoped attribution constraints;
 - an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, drains AIS posting-receipt outbox events, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
 - an importable `operator_console` Storybook that renders the invoice-draft presentment contract with design tokens and exact-decimal fixtures;
@@ -94,7 +94,17 @@ After an `invoice_draft` exists, call `CollectionCaseService.open_collection_cas
 python3 -c "from metering_billing import PaymentIntentService"
 ```
 
-After a `collection_case` exists, call `PaymentIntentService.project_payment_intent` with the tenant and `collection_case_id`. The intent amount equals the exact case outstanding. An identical replay returns the same `payment_intent_id`. Status stays `projected`. The intent does not capture, settle, store a card PAN, or post a journal.
+After a `collection_case` exists, call `PaymentIntentService.project_payment_intent` with the tenant and `collection_case_id`, or `POST /v1/payment-intents`. The intent amount equals the exact case outstanding. An identical replay returns the same `payment_intent_id`. Status stays `projected`. The intent does not capture, settle, store a card PAN, or post a journal.
+
+## Present a payment intent
+
+```bash
+python3 -c "from metering_billing import PaymentIntentPresentmentService"
+# GET /v1/payment-intents/{payment_intent_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/payment-intents?tenant_reference=urn:cwl:tenant_001
+```
+
+After a `payment_intent` exists, `GET /v1/payment-intents/{payment_intent_id}` returns the tenant-scoped statement. Create a projected payment intent, then record the receipt.
 
 ## Record a payment receipt
 
@@ -111,7 +121,7 @@ python3 -c "from metering_billing.http_app import create_http_app"
 python3 -m metering_billing.http_app
 ```
 
-`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, invoice draft, or API credential. The adapter does not post journals or call a named payment provider.
+`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, invoice draft, collection case, payment intent, or API credential. The adapter does not post journals or call a named payment provider.
 
 Until a tenant has an active API credential, the existing tenant pin is enough (bootstrap window). AIS can keep pulling with `X-CWL-Tenant-Reference` until a key is issued for that tenant. After a key exists, send it on every `/v1` call.
 
@@ -166,7 +176,7 @@ npm install
 npm run storybook
 ```
 
-`operator_console` renders the #21 invoice statement and the collection-case statement with tokenized amount due, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy on a collection case is: open the collection case, then collect or credit. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
+`operator_console` renders the #21 invoice statement, the collection-case statement, and the payment-intent statement with tokenized amount due, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy on a payment intent is: create a projected payment intent, then record the receipt. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
 
 ## Pull journal proposals
 
