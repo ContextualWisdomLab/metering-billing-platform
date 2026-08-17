@@ -17,6 +17,10 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 
 The importable `metering_billing` package is the first runtime module.  It can run in-process against the in-memory third-normal-form ledger that mirrors the PostgreSQL constraints.  A later adapter can persist the same rows without changing the hash, tenant, or decimal rules.  Canonical source-payload hashing excludes envelope identifiers (`event_id`, `source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest and usage queries accept optional half-open ISO 8601 windows.
 
+## Rating plane
+
+`UsageRatingService` rates already-stored usage.  Invoice-intent money is exact decimal.  Rating-run identity is the tenant, half-open window, rate-card version, and SHA-256 usage snapshot.  Only `meter_quality_rule` dispositions of `billable` are priced.  Append-only `rating_run` and `rating_line` rows are the rating authority; invoice draft is a later increment.
+
 ## Persistence plane
 
 PostgreSQL is the authoritative store for normalized records. Raw webhook and usage payloads will be stored immutably in S3-compatible object storage in a later milestone; relational records retain hashes and references.

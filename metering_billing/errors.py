@@ -48,3 +48,22 @@ class ExactDecimalError(ValueError):
 
 class TimeWindowError(ValueError):
     """Raised when a time window or timestamp violates ISO 8601 timezone rules."""
+
+
+class RatingError(ValueError):
+    """Raised when a rating run cannot produce an invoice-intent total."""
+
+
+class RatingOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one rating run."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+
+
+class BillingDispositionCode(StrEnum):
+    """Whether a stored measurement may enter invoice-intent totals."""
+
+    BILLABLE = "billable"
+    ANALYTICS_ONLY = "analytics_only"
+    MANUAL_REVIEW = "manual_review"

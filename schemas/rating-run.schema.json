@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/rating-run/v1",
+  "title": "Rating Run",
+  "description": "Deterministic invoice-intent totals for one tenant, half-open usage window, rate-card version, and usage snapshot. Replays reuse rating_run_id. This document is not an invoice and not a posted journal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "rating_run_id",
+    "rating_contract_version",
+    "tenant_reference",
+    "window_started_at",
+    "window_ended_at",
+    "rate_card_code",
+    "rate_card_version",
+    "usage_snapshot_hash",
+    "currency_code",
+    "invoice_intent_total",
+    "rating_outcome_code",
+    "rating_lines"
+  ],
+  "properties": {
+    "rating_run_id": {"type": "string", "format": "uuid"},
+    "rating_contract_version": {"type": "integer", "minimum": 1},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "window_started_at": {"type": "string", "format": "date-time"},
+    "window_ended_at": {"type": "string", "format": "date-time"},
+    "rate_card_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "rate_card_version": {"type": "integer", "minimum": 1},
+    "usage_snapshot_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "invoice_intent_total": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "rating_outcome_code": {"type": "string", "enum": ["accepted", "duplicate_replay"]},
+    "rating_lines": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/rating_line"}
+    }
+  },
+  "$defs": {
+    "rating_line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["meter_code", "billed_quantity", "unit_price", "line_amount"],
+      "properties": {
+        "meter_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,95}$"},
+        "billed_quantity": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "unit_price": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "line_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        }
+      }
+    }
+  }
+}

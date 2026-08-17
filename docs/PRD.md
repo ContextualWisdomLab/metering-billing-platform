@@ -44,6 +44,14 @@ contextual-orchestrator usage
 - Time-window queries return only the tenant's events whose `occurred_at` lies in `[window_started_at, window_ended_at)`.
 - Ingestion does not create a posted accounting journal.
 
+## Rating acceptance
+
+- Known stored usage in a half-open ISO 8601 window produces a known exact invoice-intent total.
+- A second rate of the same tenant, window, rate-card version, and usage snapshot returns the same `rating_run_id` and totals.
+- Another tenant's usage is invisible to the rated total.
+- Analytics-only and manual-review measurements do not enter invoice-intent totals.
+- Rating does not create an invoice draft or a posted accounting journal.
+
 ## Initial milestone acceptance
 
 - All published schemas declare Draft 2020-12 and pass the repository's offline conformance fixtures.

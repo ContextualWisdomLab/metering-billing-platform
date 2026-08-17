@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from metering_billing.errors import ExactDecimalError
+from metering_billing.exact_decimal import parse_exact_decimal
 from scripts.validate_repository import (
     validate_accounting_journal_proposal,
     validate_schema_instance,
@@ -20,12 +22,14 @@ from scripts.validate_repository import (
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
     "USAGE_INGESTION_RECEIPT_SCHEMA_NAME",
     "default_schemas_directory",
     "load_json_schema",
     "validate_accounting_journal_proposal",
     "validate_journal_proposal",
+    "validate_rating_run",
     "validate_schema_instance",
     "validate_usage_event",
     "validate_usage_ingestion_receipt",
@@ -33,6 +37,7 @@ __all__ = (
 
 USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
 USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
+RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 
@@ -119,6 +124,34 @@ def _missing_success_receipt_fields(
         if field_name not in event_receipt:
             missing.append(f"$: {outcome} receipts must include {field_name}")
     return tuple(missing)
+
+
+def validate_rating_run(
+    rating_run: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate rating-run shape plus invoice-intent total invariants."""
+    schema = load_json_schema(RATING_RUN_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, rating_run))
+    if not isinstance(rating_run, Mapping):
+        return tuple(errors)
+    rating_lines = rating_run.get("rating_lines")
+    if not isinstance(rating_lines, list):
+        return tuple(errors)
+    try:
+        invoice_intent_total = parse_exact_decimal(str(rating_run.get("invoice_intent_total")))
+        line_total = sum(
+            (
+                parse_exact_decimal(str(line["line_amount"]))
+                for line in rating_lines
+                if isinstance(line, Mapping) and "line_amount" in line
+            ),
+            parse_exact_decimal("0"),
+        )
+    except ExactDecimalError:
+        return tuple(errors)
+    if invoice_intent_total != line_total:
+        errors.append("$: invoice_intent_total must equal the sum of rating_lines")
+    return tuple(errors)
 
 
 def validate_journal_proposal(

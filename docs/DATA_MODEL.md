@@ -12,6 +12,10 @@
 - `usage_event`: idempotent source fact identified by tenant-scoped `source_event_key` and by `(tenant_account_id, event_payload_hash, event_contract_version)`. The producer `event_id` is stored as `producer_event_id`, not as the internal primary key.
 - `usage_measurement`: normalized meter quantity and quality, constrained to an explicit meter-specific quality rule.
 - `usage_ingestion_receipt`: append-only accepted, replay, or rejected outcome for every ingest attempt, including rejected cross-tenant and schema failures.
+- `rate_card`: versioned commercial price book and currency.
+- `rate_card_price`: exact unit price for one meter on one rate-card version.
+- `rating_run`: append-only invoice-intent identity for one tenant, half-open window, rate-card version, and usage snapshot.
+- `rating_line`: exact billed quantity, unit price, and line amount for one meter inside a rating run.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -28,8 +32,12 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add price books, contracts, ratings, credits, spend reservations, invoice lines, provider webhooks, refunds, disputes, settlements, and reconciliation exceptions without changing the initial identity and usage keys.
+Subsequent migrations add contracts, credits, spend reservations, invoice drafts, provider webhooks, refunds, disputes, settlements, and reconciliation exceptions without changing the usage or rating-run keys.
 
 ## Usage identity
 
 A stored usage row is identified twice: by `(tenant_account_id, source_event_key)` and by `(tenant_account_id, event_payload_hash, event_contract_version)`.  Measurements remain in their own table and reference the event and meter definition.  Time-window reads filter `occurred_at` and never leak another tenant's rows.
+
+## Rating identity
+
+A rating run is identified by `(tenant_account_id, window_started_at, window_ended_at, rate_card_id, usage_snapshot_hash)`.  `rate_card_id` names one `(rate_card_code, rate_card_version)` row.  Lines reference the run through a tenant-scoped composite foreign key.  Invoice-intent totals are exact `numeric` values.

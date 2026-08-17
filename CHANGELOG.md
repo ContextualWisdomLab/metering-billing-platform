@@ -11,6 +11,8 @@
 - Usage-ingestion receipt contract and PostgreSQL migration for contract version, payload-hash uniqueness, and ingestion receipts.
 - Receipt contract invariants: accepted and `duplicate_replay` events require `usage_event_id`, `event_contract_version`, and `source_payload_hash`; rejected events require `rejection_reason_code`; batch counts must match `event_receipts` outcomes.
 - Repository SQL diagnostics now name the migration path, scan every migration for provider identifiers, and reject single-word `ALTER TABLE ... ADD COLUMN` names.
+- Deterministic time-windowed rating: `UsageRatingService` produces exact invoice-intent totals from stored usage, persists append-only `rating_run` and `rating_line` rows, and replays the same `rating_run_id` for the same tenant, window, rate-card version, and usage snapshot.
+- ADR 0004 for rating authority.  Rating does not draft invoices or post journals.
 - ADR 0003 for immutable usage ingestion.
 - Initial product, architecture, data-model, and accounting-boundary baseline.
 - Canonical usage-event, provider-capability, and accounting-journal-proposal schemas.

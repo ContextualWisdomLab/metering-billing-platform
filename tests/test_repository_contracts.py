@@ -99,6 +99,32 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
 
+    def test_rating_run_accepts_exact_invoice_intent_total(self) -> None:
+        """A rating run records exact line money without claiming an invoice or journal."""
+        schema = self._schema("rating-run.schema.json")
+        instance = {
+            "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf910",
+            "rating_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T12:00:00Z",
+            "rate_card_code": "orchestrator_standard",
+            "rate_card_version": 1,
+            "usage_snapshot_hash": "sha256:" + "a" * 64,
+            "currency_code": "USD",
+            "invoice_intent_total": "1853.500000000001",
+            "rating_outcome_code": "accepted",
+            "rating_lines": [
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "billed_quantity": "1853.500000000001",
+                    "unit_price": "1",
+                    "line_amount": "1853.500000000001",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+
     def test_usage_ingestion_receipt_schema_requires_outcome_evidence(self) -> None:
         """Accepted and replay receipts need identity fields; rejected receipts need a reason."""
         schema = self._schema("usage-ingestion-receipt.schema.json")
@@ -305,6 +331,24 @@ class RepositoryContractTests(unittest.TestCase):
             "CREATE TABLE billing_core.usage_ingestion_receipt",
             "FOREIGN KEY (tenant_account_id, usage_event_id)",
             "ingestion_outcome_code",
+        ):
+            self.assertIn(expected_fragment, sql)
+
+    def test_rating_migration_binds_window_card_and_snapshot(self) -> None:
+        """The rating migration must keep run identity tenant-scoped and append-only."""
+        sql = (ROOT / "database/migrations/0003_deterministic_windowed_rating.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.rate_card",
+            "CREATE TABLE billing_core.rate_card_price",
+            "CREATE TABLE billing_core.rating_run",
+            "CREATE TABLE billing_core.rating_line",
+            "UNIQUE (rate_card_code, rate_card_version)",
+            "UNIQUE (tenant_account_id, rating_run_id)",
+            "usage_snapshot_hash",
+            "invoice_intent_total",
+            "FOREIGN KEY (tenant_account_id, rating_run_id)",
         ):
             self.assertIn(expected_fragment, sql)
 
