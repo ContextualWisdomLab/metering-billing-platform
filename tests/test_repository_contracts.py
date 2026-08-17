@@ -351,6 +351,71 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(schema, instance),
         )
 
+    def test_invoice_draft_accepts_exact_draft_totals(self) -> None:
+        """An invoice-draft contract records exact decimal draft-only lines."""
+        schema = self._schema("invoice-draft.schema.json")
+        instance = {
+            "invoice_draft_contract_version": 1,
+            "invoice_draft_outcome_code": "accepted",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf621",
+            "usage_snapshot_hash": "sha256:" + "d" * 64,
+            "currency_code": "USD",
+            "invoice_draft_status": "draft",
+            "drafted_total_amount": "0.003705",
+            "invoice_draft_lines": [
+                {
+                    "line_number": 1,
+                    "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                    "meter_code": "gen_ai_output_token",
+                    "unit_code": "token",
+                    "rated_quantity": "1852.5",
+                    "unit_price_amount": "0.000002",
+                    "line_total_amount": "0.003705",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+
+    def test_invoice_draft_schema_rejects_posted_and_issued_status(self) -> None:
+        """An invoice draft cannot claim issued, collected, or posted status."""
+        schema = self._schema("invoice-draft.schema.json")
+        instance = {
+            "invoice_draft_contract_version": 1,
+            "invoice_draft_outcome_code": "rejected",
+            "rejection_reason_code": "rating_run_not_found",
+            "proposal_status": "posted",
+        }
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, instance),
+        )
+        issued = {
+            "invoice_draft_contract_version": 1,
+            "invoice_draft_outcome_code": "accepted",
+            "invoice_draft_status": "issued",
+        }
+        self.assertIn(
+            "$.invoice_draft_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, issued),
+        )
+
+    def test_invoice_draft_migration_persists_append_only_drafts(self) -> None:
+        """The invoice-draft migration must keep identity tenant-scoped and draft-only."""
+        sql = (ROOT / "database/migrations/0004_invoice_draft.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.invoice_draft",
+            "CREATE TABLE billing_core.invoice_draft_line",
+            "UNIQUE (tenant_account_id, rating_run_id)",
+            "UNIQUE (tenant_account_id, invoice_draft_id)",
+            "FOREIGN KEY (tenant_account_id, rating_run_id)",
+            "FOREIGN KEY (tenant_account_id, invoice_draft_id)",
+            "invoice_draft_status text NOT NULL CHECK (invoice_draft_status IN ('draft'))",
+            "drafted_total_amount numeric(38, 12)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_rating_migration_persists_append_only_runs_and_lines(self) -> None:
         """The rating migration must keep run identity tenant-scoped and append-only."""
         sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(encoding="utf-8")

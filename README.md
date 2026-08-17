@@ -53,6 +53,14 @@ python3 -c "from metering_billing import TimeWindow, UsageRatingService"
 
 Register a versioned rate card and exact unit prices on the same ledger, then call `UsageRatingService.rate_usage_window` with a tenant, a half-open ISO 8601 window, and a rate-card version. Only `meter_quality_rule` billable quality enters the invoice-intent total. An identical replay returns the same `rating_run_id` and exact totals. Rating does not draft an invoice, call a payment provider, or post a journal.
 
+## Draft an invoice
+
+```bash
+python3 -c "from metering_billing import InvoiceDraftService"
+```
+
+After a `rating_run` exists, call `InvoiceDraftService.draft_invoice` with the tenant and `rating_run_id`. The draft total equals the rating-run billable total. An identical replay returns the same `invoice_draft_id`. Status stays `draft`. The draft does not issue, collect, call a payment provider, or post a journal.
+
 ## Next action
 
-After windowed rating merges, implement invoice draft from persisted rating runs before adding a payment-provider adapter. Do not post accounting journals from billing.
+After invoice-draft review, emit an `accounting_journal_proposal` from the persisted draft. Do not mark the proposal posted, and do not add a payment-provider adapter until the draft is the commercial source of the proposal.

@@ -212,6 +212,39 @@ class StoredRatingRun:
 
 
 @dataclass(frozen=True)
+class StoredInvoiceDraftLine:
+    """Append-only invoice-intent draft line copied from one rating line."""
+
+    invoice_draft_line_id: UUID
+    invoice_draft_id: UUID
+    tenant_account_id: UUID
+    billing_account_id: UUID
+    billing_account_reference: str
+    meter_definition_id: UUID
+    meter_code: str
+    unit_code: str
+    rated_quantity: Decimal
+    unit_price_amount: Decimal
+    line_total_amount: Decimal
+    line_number: int
+
+
+@dataclass(frozen=True)
+class StoredInvoiceDraft:
+    """Append-only draft invoice intent for one tenant and rating run."""
+
+    invoice_draft_id: UUID
+    tenant_account_id: UUID
+    rating_run_id: UUID
+    usage_snapshot_hash: str
+    currency_code: str
+    invoice_draft_status: str
+    drafted_total_amount: Decimal
+    recorded_at: datetime
+    invoice_draft_lines: tuple[StoredInvoiceDraftLine, ...]
+
+
+@dataclass(frozen=True)
 class StoredIngestionReceipt:
     """Append-only audit row for one ingest attempt."""
 
@@ -250,6 +283,9 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     rating_lines: list[StoredRatingLine] = field(default_factory=list)
+    invoice_drafts: dict[UUID, StoredInvoiceDraft] = field(default_factory=dict)
+    invoice_draft_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    invoice_draft_lines: list[StoredInvoiceDraftLine] = field(default_factory=list)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -544,6 +580,54 @@ class MemoryUsageLedger:
         self.rating_run_index[identity_key] = persisted.rating_run_id
         self.rating_lines.extend(rating_lines)
         return persisted
+
+    def get_rating_run(self, rating_run_id: UUID) -> StoredRatingRun | None:
+        """Return a stored rating run by internal identifier."""
+        return self.rating_runs.get(rating_run_id)
+
+    def find_invoice_draft(
+        self, tenant_account_id: UUID, rating_run_id: UUID
+    ) -> StoredInvoiceDraft | None:
+        """Return the draft for one tenant-scoped rating run, if it exists."""
+        invoice_draft_id = self.invoice_draft_index.get((tenant_account_id, rating_run_id))
+        if invoice_draft_id is None:
+            return None
+        return self.invoice_drafts[invoice_draft_id]
+
+    def insert_invoice_draft(
+        self,
+        invoice_draft: StoredInvoiceDraft,
+        invoice_draft_lines: tuple[StoredInvoiceDraftLine, ...],
+    ) -> StoredInvoiceDraft:
+        """Append an immutable invoice draft.  Existing identity rows are never updated."""
+        identity_key = (invoice_draft.tenant_account_id, invoice_draft.rating_run_id)
+        if invoice_draft.invoice_draft_id in self.invoice_drafts:
+            raise ValueError("invoice drafts are immutable and cannot be replaced")
+        if identity_key in self.invoice_draft_index:
+            raise ValueError("invoice drafts are immutable and cannot be replaced")
+        persisted = StoredInvoiceDraft(
+            invoice_draft_id=invoice_draft.invoice_draft_id,
+            tenant_account_id=invoice_draft.tenant_account_id,
+            rating_run_id=invoice_draft.rating_run_id,
+            usage_snapshot_hash=invoice_draft.usage_snapshot_hash,
+            currency_code=invoice_draft.currency_code,
+            invoice_draft_status=invoice_draft.invoice_draft_status,
+            drafted_total_amount=invoice_draft.drafted_total_amount,
+            recorded_at=invoice_draft.recorded_at,
+            invoice_draft_lines=invoice_draft_lines,
+        )
+        self.invoice_drafts[persisted.invoice_draft_id] = persisted
+        self.invoice_draft_index[identity_key] = persisted.invoice_draft_id
+        self.invoice_draft_lines.extend(invoice_draft_lines)
+        return persisted
+
+    def list_invoice_drafts(self, tenant_account_id: UUID) -> tuple[StoredInvoiceDraft, ...]:
+        """Return invoice drafts limited to one tenant."""
+        return tuple(
+            invoice_draft
+            for invoice_draft in self.invoice_drafts.values()
+            if invoice_draft.tenant_account_id == tenant_account_id
+        )
 
     def list_rating_runs(self, tenant_account_id: UUID) -> tuple[StoredRatingRun, ...]:
         """Return rating runs limited to one tenant."""

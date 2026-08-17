@@ -9,7 +9,7 @@
 | IEEE 754-2019 | Decimal interchange stays in the decimal domain; binary inexact types are rejected. |
 | ISO 8601-1:2019 | `occurred_at` and usage windows are timezone-aware instants; naive timestamps fail closed. |
 | FOCUS 1.4 | Cost, invoice, billing-period, and commitment data are export projections, not the internal operational schema. |
-| IFRS 15 | Billing and revenue recognition remain separate; performance-obligation and principal-versus-agent judgments belong to versioned accounting policy. |
+| IFRS 15 | Billing and revenue recognition remain separate; an invoice-intent draft is a commercial document, not evidence that revenue has been earned. Performance-obligation and principal-versus-agent judgments belong to versioned accounting policy. |
 | IFRS 18 | The Accounting Information Platform owns presentation categories, required subtotals, management-defined performance measure disclosures, and the 2027 transition; Billing does not encode statement presentation. |
 | IFRS Accounting Taxonomy 2025 | Financial-report output remains taxonomy-versioned, with the 2025 taxonomy retained for 2026 reporting. |
 | IAS 7 | Bank and settlement facts are classified and presented by Accounting rather than inferred from a payment-provider status alone. |

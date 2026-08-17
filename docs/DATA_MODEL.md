@@ -16,6 +16,8 @@
 - `rate_card_price`: exact unit price for one meter on one rate-card version.
 - `rating_run`: append-only invoice-intent total for one tenant, half-open window, rate card, and usage snapshot.
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
+- `invoice_draft`: append-only draft-only commercial document for one tenant and rating run.
+- `invoice_draft_line`: append-only draft line copied from a rating line.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -40,4 +42,8 @@ A stored usage row is identified twice: by `(tenant_account_id, source_event_key
 
 ## Rating identity
 
-A stored rating run is identified by `(tenant_account_id, window_started_at, window_ended_at, rate_card_id, usage_snapshot_hash)`.  Lines reference the run, tenant, billing account, and meter definition.  Money columns use exact `numeric` types.  Invoice drafts are a later table and do not replace these rows.
+A stored rating run is identified by `(tenant_account_id, window_started_at, window_ended_at, rate_card_id, usage_snapshot_hash)`.  Lines reference the run, tenant, billing account, and meter definition.  Money columns use exact `numeric` types.
+
+## Invoice-draft identity
+
+A stored invoice draft is identified by `(tenant_account_id, rating_run_id)` and carries the rating run's `usage_snapshot_hash`.  Status is `draft` only.  Lines reference the draft, tenant, billing account, and meter definition.  Journal proposals are a later export and do not replace these rows.

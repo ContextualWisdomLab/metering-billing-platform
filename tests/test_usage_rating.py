@@ -108,7 +108,7 @@ class UsageRatingTests(unittest.TestCase):
         self.assertEqual(len(ingest.ledger.rating_runs), 1)
         self.assertEqual(len(ingest.ledger.rating_lines), 1)
         self.assertEqual(len(ingest.ledger.accounting_export_records), 0)
-        self.assertFalse(hasattr(ingest.ledger, "invoice_drafts"))
+        self.assertEqual(len(ingest.ledger.invoice_drafts), 0)
 
     def test_equivalent_decimal_and_utc_spellings_rate_as_one_fact(self) -> None:
         """Ingested ``1``/``1.0`` and ``Z``/``+00:00`` remain one fact and one money total."""

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/invoice-draft/v1",
+  "title": "Invoice Draft",
+  "description": "Exact invoice-intent draft for one tenant and one stored rating run. Replays acknowledge the stored invoice_draft_id. Status is draft only; the document is not issued, collected, or posted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invoice_draft_contract_version",
+    "invoice_draft_outcome_code"
+  ],
+  "properties": {
+    "invoice_draft_contract_version": {"type": "integer", "minimum": 1},
+    "invoice_draft_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "rating_run_id": {"type": "string", "format": "uuid"},
+    "usage_snapshot_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "invoice_draft_status": {"type": "string", "enum": ["draft"]},
+    "drafted_total_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": ["tenant_not_found", "rating_run_not_found"]
+    },
+    "invoice_draft_lines": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/invoice_draft_line"}
+    }
+  },
+  "$defs": {
+    "invoice_draft_line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "line_number",
+        "billing_account_reference",
+        "meter_code",
+        "unit_code",
+        "rated_quantity",
+        "unit_price_amount",
+        "line_total_amount"
+      ],
+      "properties": {
+        "line_number": {"type": "integer", "minimum": 1},
+        "billing_account_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "meter_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,95}$"},
+        "unit_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,31}$"},
+        "rated_quantity": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "unit_price_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "line_total_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        }
+      }
+    }
+  }
+}

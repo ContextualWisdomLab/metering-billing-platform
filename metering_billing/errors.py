@@ -1,4 +1,4 @@
-"""Typed outcomes and rejection reasons for usage ingestion and rating.
+"""Typed outcomes and rejection reasons for usage ingestion, rating, and drafts.
 
 Reason codes are stable operational vocabulary.  They are safe to persist in
 audit receipts and do not require masking: they describe control failures, not
@@ -58,6 +58,21 @@ class RatingRejectionReasonCode(StrEnum):
     RATE_CARD_NOT_EFFECTIVE = "rate_card_not_effective"
     METER_PRICE_MISSING = "meter_price_missing"
     BILLING_DISPOSITION_UNKNOWN = "billing_disposition_unknown"
+
+
+class InvoiceDraftOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one invoice-intent draft."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class InvoiceDraftRejectionReasonCode(StrEnum):
+    """Why a draft request was refused without writing invoice-intent money."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    RATING_RUN_NOT_FOUND = "rating_run_not_found"
 
 
 class ExactDecimalError(ValueError):

@@ -4,6 +4,10 @@
 
 ### Added
 
+- Importable `metering_billing` invoice-draft service that copies a stored rating run into an exact, tenant-scoped, draft-only invoice-intent document.
+- Idempotent invoice-draft identity on `(tenant, rating_run_id)` so a replay returns the same `invoice_draft_id` and totals.
+- Append-only `invoice_draft` and `invoice_draft_line` persistence and a closed invoice-draft contract.
+- ADR 0005 for invoice drafts as commercial documents, not statutory invoices.
 - Importable `metering_billing` rating service that turns a tenant plus half-open ISO 8601 window into exact invoice-intent line totals from already-stored usage.
 - Idempotent rating-run identity on `(tenant, window, rate_card_version, usage snapshot)` so a replay returns the same `rating_run_id` and totals.
 - Append-only `rating_run` and `rating_line` persistence, versioned `rate_card` prices, and a closed rating-run contract.

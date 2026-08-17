@@ -11,3 +11,4 @@ Before changing behavior:
 5. Export accounting proposals without claiming legal posting.
 6. Ingest usage through `metering_billing.UsageIngestionService` so retries are idempotent and tenants cannot attribute usage to each other.
 7. Rate stored usage through `metering_billing.UsageRatingService` so a tenant window produces exact invoice-intent totals from billable quality only.
+8. Draft invoice intent through `metering_billing.InvoiceDraftService` from a stored rating run.  Do not issue, collect, or post from that path.

@@ -21,12 +21,14 @@ from scripts.validate_repository import (
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "INVOICE_DRAFT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
     "USAGE_INGESTION_RECEIPT_SCHEMA_NAME",
     "default_schemas_directory",
     "load_json_schema",
     "validate_accounting_journal_proposal",
+    "validate_invoice_draft",
     "validate_journal_proposal",
     "validate_rating_run",
     "validate_schema_instance",
@@ -37,6 +39,7 @@ __all__ = (
 USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
 USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
+INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 
@@ -176,6 +179,61 @@ def _rating_total_errors(rating_run: Mapping[str, Any]) -> tuple[str, ...]:
         line_total += Decimal(line_amount)
     if line_total != Decimal(rated_total_amount):
         return ("$: rating line totals must equal rated_total_amount",)
+    return ()
+
+
+def validate_invoice_draft(
+    invoice_draft: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate invoice-draft shape plus identity, reason, and exact total invariants."""
+    schema = load_json_schema(INVOICE_DRAFT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, invoice_draft))
+    if not isinstance(invoice_draft, Mapping):
+        return tuple(errors)
+    outcome = invoice_draft.get("invoice_draft_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_invoice_draft_fields(invoice_draft, str(outcome)))
+        errors.extend(_invoice_draft_total_errors(invoice_draft))
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in invoice_draft:
+            errors.append("$: rejected invoice drafts must include rejection_reason_code")
+    return tuple(errors)
+
+
+def _missing_success_invoice_draft_fields(
+    invoice_draft: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay draft lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "invoice_draft_id",
+        "rating_run_id",
+        "drafted_total_amount",
+        "currency_code",
+        "invoice_draft_status",
+        "invoice_draft_lines",
+    ):
+        if field_name not in invoice_draft:
+            missing.append(f"$: {outcome} invoice drafts must include {field_name}")
+    return tuple(missing)
+
+
+def _invoice_draft_total_errors(invoice_draft: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return a diagnostic when draft lines do not sum to the drafted total."""
+    drafted_total_amount = invoice_draft.get("drafted_total_amount")
+    invoice_draft_lines = invoice_draft.get("invoice_draft_lines")
+    if not isinstance(drafted_total_amount, str) or not isinstance(invoice_draft_lines, list):
+        return ()
+    line_total = Decimal("0")
+    for invoice_draft_line in invoice_draft_lines:
+        if not isinstance(invoice_draft_line, Mapping):
+            return ()
+        line_amount = invoice_draft_line.get("line_total_amount")
+        if not isinstance(line_amount, str):
+            return ()
+        line_total += Decimal(line_amount)
+    if line_total != Decimal(drafted_total_amount):
+        return ("$: invoice draft line totals must equal drafted_total_amount",)
     return ()
 
 
