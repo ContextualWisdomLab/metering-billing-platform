@@ -394,3 +394,15 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
         with self.assertRaises(TenantApiCredentialPresentmentQueryError):
             service.present_tenant_api_credential("", stored.tenant_api_credential_id)
         self.assertEqual(listed.tenant_api_credentials[0].issued_at, ISSUED_MORNING)
+        with mock.patch(
+            "metering_billing.http_app.TenantApiCredentialService.issue_credential",
+            side_effect=ValueError("closed"),
+        ):
+            issue_value_status, issue_value_body = invoke_http(
+                create_http_app(seed_rated_ledger()),
+                "POST",
+                "/v1/tenant-api-credentials",
+                {"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(issue_value_status, 422)
+        self.assertEqual(issue_value_body["rejection_reason_code"], "request_invalid")
