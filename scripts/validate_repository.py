@@ -32,12 +32,18 @@ REQUIRED_FILES = (
     "docs/ACCOUNTING_BOUNDARY.md",
     "docs/adr/0001-commercial-authority.md",
     "docs/adr/0002-accounting-boundary.md",
+    "docs/adr/0003-usage-ingestion-idempotency.md",
     "docs/doctoring/REFERENCES.md",
     "docs/doctoring/STANDARD_TRACEABILITY.md",
     "schemas/usage-event.schema.json",
     "schemas/provider-capability.schema.json",
     "schemas/accounting-journal-proposal.schema.json",
+    "schemas/usage-ingestion-receipt.schema.json",
     "database/migrations/0001_initial_billing_core.sql",
+    "database/migrations/0002_usage_event_idempotency.sql",
+    "metering_billing/__init__.py",
+    "metering_billing/usage_ingestion.py",
+    "metering_billing/contracts.py",
     "requirements-quality.txt",
     ".github/workflows/ci.yml",
 )
@@ -141,12 +147,14 @@ def validate_repository(root: Path) -> tuple[str, ...]:
         for schema_path in sorted(schemas_directory.glob("*.schema.json")):
             errors.extend(_validate_schema_file(schema_path, schema_identifiers))
 
-    migration_path = root / "database/migrations/0001_initial_billing_core.sql"
-    if migration_path.is_file():
-        sql_text = migration_path.read_text(encoding="utf-8")
-        errors.extend(validate_sql_object_names(sql_text))
-        if "provider_customer_id" in sql_text or "stripe_customer_id" in sql_text:
-            errors.append("provider-specific identifiers must remain in mapping tables")
+    migrations_directory = root / "database/migrations"
+    if migrations_directory.is_dir():
+        for migration_path in sorted(migrations_directory.glob("*.sql")):
+            sql_text = migration_path.read_text(encoding="utf-8")
+            errors.extend(validate_sql_object_names(sql_text))
+            if "provider_customer_id" in sql_text or "stripe_customer_id" in sql_text:
+                errors.append("provider-specific identifiers must remain in mapping tables")
+                break
 
     requirements_path = root / "requirements-quality.txt"
     if requirements_path.is_file():

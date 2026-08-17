@@ -9,3 +9,4 @@ Before changing behavior:
 3. Preserve immutable history through correction or reversal records.
 4. Keep provider integration behind capability-specific ports.
 5. Export accounting proposals without claiming legal posting.
+6. Ingest usage through `metering_billing.UsageIngestionService` so retries are idempotent and tenants cannot attribute usage to each other.

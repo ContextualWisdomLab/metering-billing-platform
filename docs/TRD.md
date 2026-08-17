@@ -10,7 +10,12 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 - Exact decimal values represented as strings at API boundaries.
 - UUIDv7 identifiers for new records where PostgreSQL 18 generates IDs.
 - Idempotency keys on all state-changing external commands.
+- Usage ingestion deduplicates on tenant-scoped `source_event_key` and on `source_payload_hash` plus `event_contract_version`.
 - CloudEvents-compatible envelopes in the event milestone.
+
+## Usage-ingestion plane
+
+The importable `metering_billing` package is the first runtime module.  It can run in-process against the in-memory third-normal-form ledger that mirrors the PostgreSQL constraints.  A later adapter can persist the same rows without changing the hash, tenant, or decimal rules.  Canonical source-payload hashing excludes envelope identifiers (`event_id`, `source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest and usage queries accept optional half-open ISO 8601 windows.
 
 ## Persistence plane
 

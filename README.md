@@ -20,8 +20,9 @@ CWL products
 
 The first milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, and semantically validated accounting journal proposals;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, and semantically validated accounting journal proposals;
 - a normalized PostgreSQL 18 core migration with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage and deduplicates by source-event key plus source-payload hash and contract version;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -36,6 +37,14 @@ python3 -m coverage report --fail-under=100 --show-missing
 python3 scripts/validate_repository.py
 ```
 
+## Ingest usage
+
+```bash
+python3 -c "from metering_billing import UsageIngestionService, MemoryUsageLedger"
+```
+
+Register the tenant, billing account, principal, meter, and quality rules on a `MemoryUsageLedger`, then call `UsageIngestionService.ingest_usage_batch`. Identical retries return `duplicate_replay` and leave the stored usage set unchanged. A changed hash or contract version for the same source key is rejected.
+
 ## Next action
 
-After this foundation merges, implement immutable usage ingestion and idempotent deduplication before adding a payment-provider adapter.
+After usage ingestion merges, implement deterministic meter aggregation and commercial rating before adding a payment-provider adapter. Do not post accounting journals from billing.

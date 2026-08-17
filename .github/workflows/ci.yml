@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches:
+      - develop
       - main
 
 permissions:
@@ -37,10 +38,10 @@ jobs:
           --require-hashes
           -r requirements-quality.txt
       - name: Run tests with complete branch coverage
-        run: python -m coverage run --branch --source=scripts -m unittest discover -s tests -v
+        run: python -m coverage run --branch --source=scripts,metering_billing -m unittest discover -s tests -v
       - name: Enforce complete statement and branch coverage
         run: python -m coverage report --fail-under=100 --show-missing
       - name: Validate repository contracts
         run: python scripts/validate_repository.py .
       - name: Compile quality tooling
-        run: python -m compileall -q scripts tests
+        run: python -m compileall -q scripts tests metering_billing

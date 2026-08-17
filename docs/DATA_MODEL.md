@@ -9,8 +9,9 @@
 - `credential_assignment`: effective-dated link among credential, principal, and billing account.
 - `meter_definition`: versioned unit and aggregation rule.
 - `meter_quality_rule`: billable, analytics-only, or manual-review disposition by quality.
-- `usage_event`: idempotent source fact.
+- `usage_event`: idempotent source fact, including `event_contract_version` and a tenant-unique source-payload hash.
 - `usage_measurement`: normalized meter quantity and quality, constrained to an explicit meter-specific quality rule.
+- `usage_ingestion_receipt`: append-only accepted, replay, or rejected outcome for one ingest attempt.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -28,3 +29,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 ## Future extensions
 
 Subsequent migrations add price books, contracts, ratings, credits, spend reservations, invoice lines, provider webhooks, refunds, disputes, settlements, and reconciliation exceptions without changing the initial identity and usage keys.
+
+## Usage identity
+
+A stored usage row is identified twice: by `(tenant_account_id, source_event_key)` and by `(tenant_account_id, event_payload_hash, event_contract_version)`.  Measurements remain in their own table and reference the event and meter definition.  Time-window reads filter `occurred_at` and never leak another tenant's rows.

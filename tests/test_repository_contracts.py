@@ -65,6 +65,38 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
 
+    def test_usage_ingestion_receipt_accepts_replay_counts(self) -> None:
+        """A batch receipt records accepted, replayed, and rejected events."""
+        schema = self._schema("usage-ingestion-receipt.schema.json")
+        instance = {
+            "batch_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "receipt_contract_version": 1,
+            "accepted_event_count": 1,
+            "duplicate_replay_count": 1,
+            "rejected_event_count": 1,
+            "event_receipts": [
+                {
+                    "source_event_key": "workflow_381:step_04:attempt_01",
+                    "ingestion_outcome_code": "accepted",
+                    "event_contract_version": 1,
+                    "source_payload_hash": "sha256:" + "d" * 64,
+                    "tenant_reference": "urn:cwl:tenant_001",
+                    "usage_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+                },
+                {
+                    "source_event_key": "workflow_381:step_04:attempt_01",
+                    "ingestion_outcome_code": "duplicate_replay",
+                    "usage_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+                },
+                {
+                    "source_event_key": "unavailable_source_event_key",
+                    "ingestion_outcome_code": "rejected",
+                    "rejection_reason_code": "schema_invalid",
+                },
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+
     def test_usage_event_rejects_prompt_content(self) -> None:
         """Billing events must reject undeclared prompt or response content."""
         schema = self._schema("usage-event.schema.json")
@@ -220,6 +252,19 @@ class RepositoryContractTests(unittest.TestCase):
             "FOREIGN KEY (tenant_account_id, billing_principal_id)",
             "FOREIGN KEY (tenant_account_id, billing_account_id)",
             "FOREIGN KEY (meter_definition_id, quality_code)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
+    def test_usage_idempotency_migration_binds_hash_and_contract_version(self) -> None:
+        """The follow-up migration must keep hash-version identity tenant-scoped."""
+        sql = (ROOT / "database/migrations/0002_usage_event_idempotency.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "event_contract_version",
+            "UNIQUE (tenant_account_id, event_payload_hash, event_contract_version)",
+            "CREATE TABLE billing_core.usage_ingestion_receipt",
+            "ingestion_outcome_code",
         ):
             self.assertIn(expected_fragment, sql)
 

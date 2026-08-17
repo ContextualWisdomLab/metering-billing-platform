@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/usage-ingestion-receipt/v1",
+  "title": "Usage Ingestion Receipt",
+  "description": "Per-batch and per-event results of immutable usage ingestion. Duplicate replays acknowledge the stored fact; conflicts never overwrite it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "batch_receipt_id",
+    "receipt_contract_version",
+    "accepted_event_count",
+    "duplicate_replay_count",
+    "rejected_event_count",
+    "event_receipts"
+  ],
+  "properties": {
+    "batch_receipt_id": {"type": "string", "format": "uuid"},
+    "receipt_contract_version": {"type": "integer", "minimum": 1},
+    "accepted_event_count": {"type": "integer", "minimum": 0},
+    "duplicate_replay_count": {"type": "integer", "minimum": 0},
+    "rejected_event_count": {"type": "integer", "minimum": 0},
+    "event_receipts": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/event_receipt"}
+    }
+  },
+  "$defs": {
+    "event_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_event_key", "ingestion_outcome_code"],
+      "properties": {
+        "source_event_key": {"type": "string", "minLength": 1, "maxLength": 256},
+        "ingestion_outcome_code": {
+          "type": "string",
+          "enum": ["accepted", "duplicate_replay", "rejected"]
+        },
+        "event_contract_version": {"type": "integer", "minimum": 1},
+        "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "usage_event_id": {"type": "string", "format": "uuid"},
+        "rejection_reason_code": {
+          "type": "string",
+          "enum": [
+            "schema_invalid",
+            "payload_hash_mismatch",
+            "tenant_not_found",
+            "attribution_tenant_mismatch",
+            "billing_account_not_found",
+            "billing_account_not_active",
+            "billing_principal_not_found",
+            "principal_not_effective",
+            "credential_not_found",
+            "credential_not_assigned",
+            "meter_not_found",
+            "meter_unit_mismatch",
+            "meter_quality_not_allowed",
+            "measurement_quantity_invalid",
+            "measurement_meter_duplicate",
+            "event_outside_time_window",
+            "source_event_conflict",
+            "payload_hash_conflict"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,8 @@
 [run]
 branch = True
-source = scripts
+source =
+    scripts
+    metering_billing
 
 [report]
 fail_under = 100

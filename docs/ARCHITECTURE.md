@@ -53,9 +53,15 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 | posted journal and trial balance | Accounting Information Platform |
 | bank transaction | bank or treasury provider; accounting projection in Accounting Information Platform |
 
+## Usage ingestion
+
+`metering_billing.UsageIngestionService` is the write path for canonical usage events.  It validates the published schema, verifies the source-payload hash for the declared contract version, resolves tenant-scoped attribution, stores exact decimal measurements, and returns a receipt.  Optional batch bounds and usage queries use half-open ISO 8601 windows.  Ingestion never writes a posted journal and never calls a payment provider.
+
 ## Failure policy
 
 - Duplicate input returns the existing receipt.
+- A source-event key replay with a different payload hash or contract version is a conflict.
+- Attribution URNs that leave the event tenant are rejected.
 - Invalid quality or meter configuration fails closed.
 - Provider timeouts retain internal facts and retry idempotently.
 - Existing provider objects never fail over automatically to a different provider.

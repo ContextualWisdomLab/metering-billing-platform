@@ -35,13 +35,22 @@ contextual-orchestrator usage
 -> accounting journal proposal
 ```
 
+## Usage-ingestion acceptance
+
+- A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.
+- A replay with the same source-event key and a different source-payload hash or contract version is rejected.
+- A usage event cannot attribute a billing account, principal, or credential from another tenant.
+- Measurement quantities persist as exact decimals, never as binary floating-point values.
+- Time-window queries return only the tenant's events whose `occurred_at` lies in `[window_started_at, window_ended_at)`.
+- Ingestion does not create a posted accounting journal.
+
 ## Initial milestone acceptance
 
-- All three schemas declare Draft 2020-12 and pass the repository's offline conformance fixtures.
+- All published schemas declare Draft 2020-12 and pass the repository's offline conformance fixtures.
 - Prompt and response text are rejected from usage events.
 - `posted` is rejected from accounting proposal status.
 - Accounting proposals fail semantic validation when line numbers repeat or debit and credit totals differ.
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling reaches 100% statement and branch coverage.
+- Repository tooling and the usage-ingestion package reach 100% statement and branch coverage.
