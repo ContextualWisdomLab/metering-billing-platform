@@ -1,4 +1,4 @@
-"""Typed outcomes and rejection reasons for usage, rating, drafts, exports, collections, intents, and settlement.
+"""Typed outcomes and rejection reasons for usage, rating, drafts, exports, collections, intents, settlement, and observations.
 
 Reason codes are stable operational vocabulary.  They are safe to persist in
 audit receipts and do not require masking: they describe control failures, not
@@ -95,6 +95,36 @@ class JournalProposalRejectionReasonCode(StrEnum):
 
 class JournalProposalQueryError(ValueError):
     """Raised when a proposal query cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
+class PostingReceiptObservationOutcomeCode(StrEnum):
+    """Terminal result of pulling one AIS posting receipt as an observation."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class PostingReceiptObservationRejectionReasonCode(StrEnum):
+    """Why a posting-receipt pull was refused without writing an observation."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    IDEMPOTENCY_KEY_MISSING = "idempotency_key_missing"
+    CROSS_TENANT = "cross_tenant"
+    NOT_YET_ACCEPTED = "not_yet_accepted"
+    RECEIPT_INVALID = "receipt_invalid"
+    TENANT_MISMATCH = "tenant_mismatch"
+    TRANSPORT_FAILURE = "transport_failure"
+    OBSERVATION_CONFLICT = "observation_conflict"
+    AIS_ENDPOINT_UNCONFIGURED = "ais_endpoint_unconfigured"
+
+
+class PostingReceiptObservationQueryError(ValueError):
+    """Raised when a stored observation cannot be authorized or decoded."""
 
     def __init__(self, rejection_reason_code: str) -> None:
         super().__init__(rejection_reason_code)

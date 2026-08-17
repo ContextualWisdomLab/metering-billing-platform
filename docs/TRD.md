@@ -39,6 +39,8 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `GET /v1/journal-proposals` is a safe collection read (Fielding et al., 2022; Google, 2024). AIS pulls validated proposals and may pin `X-CWL-Tenant-Reference`. Body or query `tenant_reference` still works when the header is absent; a mismatch is HTTP 422. Cash and AR rows share `journal_proposal`. Query does not flip `proposal_status`; AIS later returns `posting_receipt`. Billing emits semantic account roles only.
 
+`metering_billing.PostingReceiptPullService` GETs that AIS receipt with stdlib `urllib` and stores a commercial observation. The consumed schema stays AIS-owned. `POST /v1/posting-receipt-observations` is the operator trigger; `GET /v1/posting-receipt-observations/{idempotency_key}` is a safe stored read and does not call AIS (Fielding et al., 2022). `posting_status_code` is not mapped onto `proposal_status`. If AIS returns 404, the operator accepts the proposal on AIS and retries.
+
 ## Security
 
 - No card number, CVC, provider secret, PAT plaintext, prompt, or response is accepted in billing contracts.

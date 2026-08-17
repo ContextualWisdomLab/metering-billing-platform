@@ -24,6 +24,7 @@
 - `collection_dunning_event`: append-only commercial reminder that does not capture money.
 - `payment_intent`: provider-neutral payment initiation projection for one collection case; cancellation updates current status.
 - `payment_receipt`: append-only commercial receipt applied against one projected payment intent.
+- `posting_receipt_observation`: append-only commercial observation of one AIS posting receipt. AIS `receipt_id` is an external reference, not the internal primary key.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -40,7 +41,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, credits, spend reservations, issued invoices, provider webhooks, refunds, disputes, cash journal proposals from receipts, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, or payment-receipt keys.
+Subsequent migrations add contracts, credits, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, or posting-receipt-observation keys.
 
 ## Usage identity
 
@@ -69,3 +70,7 @@ A stored payment intent is identified by `(tenant_account_id, collection_case_id
 ## Payment-receipt identity
 
 A stored payment receipt is identified by `(tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)`.  The hash covers the intent amount, currency, status, and received amount.  Status is `applied` only.  Provider charge IDs and card PAN are not stored.  Receipts do not emit an `accounting_journal_proposal`.
+
+## Posting-receipt observation identity
+
+A stored posting-receipt observation is identified by `(tenant_account_id, idempotency_key)` plus `source_payload_hash` and AIS `receipt_id`.  Internal primary key is `posting_receipt_observation_id`.  `posting_status_code` is AIS-owned (`posted`, `held`, `rejected`, `reversed`) and is not mapped onto journal `proposal_status`.

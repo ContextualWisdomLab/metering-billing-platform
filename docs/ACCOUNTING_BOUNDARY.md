@@ -38,7 +38,7 @@ Combining these questions would couple product pricing to accounting policy, mak
 
 ## Integration contract
 
-Usage ingestion writes commercial usage facts only.  Windowed rating writes invoice-intent `rating_run` and `rating_line` facts only.  Invoice draft writes commercial `invoice_draft` facts only.  Accounting export writes an `accounting_journal_proposal` from a persisted draft or payment receipt.  Collection writes commercial `collection_case` and `collection_dunning_event` facts only.  Payment intent writes a provider-neutral `payment_intent` only.  Payment settlement writes a commercial `payment_receipt` only and updates collection outstanding.  Journal-proposal query is a tenant-scoped read of those persisted proposals.  None of those paths mark a journal as posted or capture payment via a named provider.  AIS pulls validated proposals and returns `posting_receipt`; Billing does not flip `proposal_status` after that pull.
+Usage ingestion writes commercial usage facts only.  Windowed rating writes invoice-intent `rating_run` and `rating_line` facts only.  Invoice draft writes commercial `invoice_draft` facts only.  Accounting export writes an `accounting_journal_proposal` from a persisted draft or payment receipt.  Collection writes commercial `collection_case` and `collection_dunning_event` facts only.  Payment intent writes a provider-neutral `payment_intent` only.  Payment settlement writes a commercial `payment_receipt` only and updates collection outstanding.  Journal-proposal query is a tenant-scoped read of those persisted proposals.  Posting-receipt pull stores an AIS `posting_receipt` as a commercial `posting_receipt_observation` only.  None of those paths mark a journal as posted or capture payment via a named provider.  AIS pulls validated proposals and returns `posting_receipt`; Billing does not flip `proposal_status` after that pull or after storing the observation.
 
 The billing platform emits `accounting_journal_proposal` with:
 
@@ -60,7 +60,7 @@ The accounting platform returns `accounting_posting_receipt` with:
 - posting, rejection, hold, or reversal evidence;
 - the exact source proposal ID and payload hash.
 
-The receipt is a reconciliation reference in Billing. It never grants Billing authority to edit a posted journal.
+The receipt is a reconciliation reference in Billing. It never grants Billing authority to edit a posted journal. Operators pull it after AIS accept; a 404 means the proposal is not yet accepted and must be retried later. Stored `posting_status_code` values remain AIS outcomes and do not change Billing `proposal_status`.
 
 ## Accounting data model principles
 

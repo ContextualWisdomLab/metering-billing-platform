@@ -344,6 +344,40 @@ class StoredPaymentReceipt:
 
 
 @dataclass(frozen=True)
+class StoredPostingReceiptObservation:
+    """Append-only commercial observation of one AIS posting receipt.
+
+    AIS ``receipt_id`` is stored as an external reference.  It is never the
+    internal primary key.  ``posting_status_code`` is AIS-owned and is not
+    mapped onto journal ``proposal_status``.
+    """
+
+    posting_receipt_observation_id: UUID
+    tenant_account_id: UUID
+    receipt_id: UUID
+    receipt_contract_version: int
+    idempotency_key: str
+    source_proposal_id: UUID
+    source_payload_hash: str
+    legal_entity_reference: str
+    accounting_book_reference: str
+    accounting_policy_version: str
+    posting_rule_version: str
+    posting_status_code: str
+    recorded_at: str
+    fiscal_period_reference: str | None
+    journal_reference: str | None
+    reversal_of_journal_reference: str | None
+    hold_reason_code: str | None
+    rejection_reason_code: str | None
+    posted_at: str | None
+    line_count: int | None
+    transaction_currency: str | None
+    functional_currency: str | None
+    observed_at: str
+
+
+@dataclass(frozen=True)
 class StoredIngestionReceipt:
     """Append-only audit row for one ingest attempt."""
 
@@ -400,6 +434,13 @@ class MemoryUsageLedger:
     payment_intent_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
     payment_receipts: dict[UUID, StoredPaymentReceipt] = field(default_factory=dict)
     payment_receipt_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
+    posting_receipt_observations: dict[UUID, StoredPostingReceiptObservation] = field(
+        default_factory=dict
+    )
+    posting_receipt_observation_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
+    posting_receipt_observation_receipt_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -1144,6 +1185,71 @@ class MemoryUsageLedger:
         self.payment_receipts[persisted.payment_receipt_id] = persisted
         self.payment_receipt_index[identity_key] = persisted.payment_receipt_id
         return persisted
+
+    def find_posting_receipt_observation(
+        self, tenant_account_id: UUID, idempotency_key: str
+    ) -> StoredPostingReceiptObservation | None:
+        """Return the observation for one tenant-scoped AIS idempotency key."""
+        observation_id = self.posting_receipt_observation_index.get(
+            (tenant_account_id, idempotency_key)
+        )
+        if observation_id is None:
+            return None
+        return self.posting_receipt_observations[observation_id]
+
+    def find_posting_receipt_observation_by_receipt(
+        self, tenant_account_id: UUID, receipt_id: UUID
+    ) -> StoredPostingReceiptObservation | None:
+        """Return the observation for one tenant-scoped AIS receipt identifier."""
+        observation_id = self.posting_receipt_observation_receipt_index.get(
+            (tenant_account_id, receipt_id)
+        )
+        if observation_id is None:
+            return None
+        return self.posting_receipt_observations[observation_id]
+
+    def insert_posting_receipt_observation(
+        self, observation: StoredPostingReceiptObservation
+    ) -> StoredPostingReceiptObservation:
+        """Append an immutable observation.  Same receipt identity is a replay."""
+        if observation.posting_status_code not in {"posted", "held", "rejected", "reversed"}:
+            raise ValueError("posting_status_code must remain an AIS-owned receipt status")
+        identity_key = (observation.tenant_account_id, observation.idempotency_key)
+        receipt_key = (observation.tenant_account_id, observation.receipt_id)
+        existing_id = self.posting_receipt_observation_index.get(identity_key)
+        if existing_id is not None:
+            existing = self.posting_receipt_observations[existing_id]
+            if (
+                existing.receipt_id == observation.receipt_id
+                and existing.source_payload_hash == observation.source_payload_hash
+            ):
+                return existing
+            raise ValueError("posting receipt observations are immutable and cannot be replaced")
+        existing_receipt_id = self.posting_receipt_observation_receipt_index.get(receipt_key)
+        if existing_receipt_id is not None:
+            raise ValueError("posting receipt observations are immutable and cannot be replaced")
+        if observation.posting_receipt_observation_id in self.posting_receipt_observations:
+            raise ValueError("posting receipt observations are immutable and cannot be replaced")
+        self.posting_receipt_observations[observation.posting_receipt_observation_id] = observation
+        self.posting_receipt_observation_index[identity_key] = (
+            observation.posting_receipt_observation_id
+        )
+        self.posting_receipt_observation_receipt_index[receipt_key] = (
+            observation.posting_receipt_observation_id
+        )
+        return observation
+
+    def list_posting_receipt_observations(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredPostingReceiptObservation, ...]:
+        """Return observations, optionally limited to one tenant."""
+        if tenant_account_id is None:
+            return tuple(self.posting_receipt_observations.values())
+        return tuple(
+            observation
+            for observation in self.posting_receipt_observations.values()
+            if observation.tenant_account_id == tenant_account_id
+        )
 
     def list_payment_receipts(self, tenant_account_id: UUID) -> tuple[StoredPaymentReceipt, ...]:
         """Return payment receipts limited to one tenant."""

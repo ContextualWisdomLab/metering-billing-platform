@@ -40,6 +40,9 @@ __all__ = (
     "validate_schema_instance",
     "validate_usage_event",
     "validate_usage_ingestion_receipt",
+    "ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME",
+    "default_consumed_schemas_directory",
+    "validate_consumed_posting_receipt",
 )
 
 USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
@@ -51,11 +54,34 @@ PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
 PAYMENT_RECEIPT_SCHEMA_NAME = "payment-receipt.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
+ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
 
 
 def default_schemas_directory() -> Path:
     """Return the repository ``schemas/`` directory next to this package."""
     return Path(__file__).resolve().parents[1] / "schemas"
+
+
+def default_consumed_schemas_directory() -> Path:
+    """Return the consumer-copy directory for contracts Billing does not own."""
+    return default_schemas_directory() / "consumed"
+
+
+def validate_consumed_posting_receipt(
+    receipt: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate an AIS posting receipt against the consumed AIS contract.
+
+    Billing does not own this schema.  The helper only checks that a pulled
+    response matches the published AIS shape before it is stored.
+    """
+    directory = (
+        default_consumed_schemas_directory()
+        if schemas_directory is None
+        else schemas_directory
+    )
+    schema = load_json_schema(ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME, directory)
+    return validate_schema_instance(schema, receipt)
 
 
 def load_json_schema(

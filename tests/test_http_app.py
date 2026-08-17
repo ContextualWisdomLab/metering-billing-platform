@@ -603,9 +603,16 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
 
         fake_server_two = mock.Mock()
         with mock.patch("metering_billing.http_app.make_server", return_value=fake_server_two) as maker_two:
-            with mock.patch.dict(os.environ, {"PORT": "9000"}, clear=False):
-                self.assertEqual(main(None), 0)
+            with mock.patch("metering_billing.http_app.create_http_app") as creator:
+                creator.return_value = lambda environ, start_response: []
+                with mock.patch.dict(
+                    os.environ,
+                    {"PORT": "9000", "AIS_BASE_URL": "http://ais.example"},
+                    clear=False,
+                ):
+                    self.assertEqual(main(None), 0)
         self.assertEqual(maker_two.call_args.args[1], 9000)
+        creator.assert_called_once_with(ais_base_url="http://ais.example")
 
         fake_server_three = mock.Mock()
         with mock.patch("wsgiref.simple_server.make_server", return_value=fake_server_three):

@@ -87,6 +87,10 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 `GET /v1/journal-proposals` and `GET /v1/journal-proposals/{proposal_id}` are the AIS pull.  Tenant is required via optional `X-CWL-Tenant-Reference` or `tenant_reference` in the query or JSON body.  If both are present they must match.  Optional filters are `proposal_status`, inclusive `proposed_after`, and a bounded `cursor` / `page_limit`.  List items are the published journal-proposal contract with semantic account roles only.  Cash and AR proposals share `journal_proposal` and appear in the same list.  Query does not mutate `proposal_status`.  AIS pulls validated proposals and later returns `posting_receipt`.
 
+## Posting-receipt observation
+
+`metering_billing.PostingReceiptPullService` GETs an AIS-owned `posting_receipt` from `{ais_base_url}/posting-receipts?idempotency_key=` with required `X-CWL-Tenant-Reference`.  The response is validated against the consumed AIS contract in `schemas/consumed/`.  A successful pull persists one append-only `posting_receipt_observation` identified by `(tenant_account_id, idempotency_key)` plus `source_payload_hash` / `receipt_id`.  AIS `receipt_id` is not the internal primary key.  Replay of the same tenant, key, and receipt returns the stored observation.  `posting_status_code` stays an AIS fact (`posted`, `held`, `rejected`, `reversed`) and is never mapped onto Billing `proposal_status`.  AIS 403 writes zero rows.  AIS 404 is `not_yet_accepted` and writes zero rows.  `POST /v1/posting-receipt-observations` triggers the pull.  `GET /v1/posting-receipt-observations/{idempotency_key}` reads a stored observation and does not call AIS.
+
 ## Failure policy
 
 - Duplicate input returns the existing receipt.

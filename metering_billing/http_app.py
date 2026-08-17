@@ -9,6 +9,9 @@ The application is a thin WSGI adapter:
 3. Return each service ``as_contract_dict`` result as JSON.
 4. Let AIS pull persisted journal proposals with GET.  Query never mutates
    ``proposal_status``.
+5. Let an operator POST a posting-receipt pull and GET a stored observation.
+   The pull stores AIS ``posting_status_code`` without flipping Billing
+   ``proposal_status``.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -21,17 +24,23 @@ import json
 import os
 import re
 from typing import Any, Callable, Iterable, Mapping
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 from uuid import UUID
 from wsgiref.simple_server import make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
-from metering_billing.errors import ExactDecimalError, JournalProposalQueryError, TimeWindowError
+from metering_billing.errors import (
+    ExactDecimalError,
+    JournalProposalQueryError,
+    PostingReceiptObservationQueryError,
+    TimeWindowError,
+)
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
+from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_ingestion import UsageIngestionService
 from metering_billing.usage_ledger import MemoryUsageLedger
@@ -44,6 +53,8 @@ COLLECTION_DUNNING_PATH = re.compile(
 )
 PAYMENT_CANCEL_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})/cancel$")
 JOURNAL_PROPOSAL_ITEM_PATH = re.compile(r"^/v1/journal-proposals/([0-9a-fA-F-]{36})$")
+POSTING_RECEIPT_COLLECTION_PATH = "/v1/posting-receipt-observations"
+POSTING_RECEIPT_ITEM_PREFIX = "/v1/posting-receipt-observations/"
 KNOWN_POST_PATHS = frozenset(
     {
         "/v1/usage-events",
@@ -68,7 +79,12 @@ class HttpRequestError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
-def create_http_app(ledger: MemoryUsageLedger | None = None) -> WSGIApp:
+def create_http_app(
+    ledger: MemoryUsageLedger | None = None,
+    *,
+    ais_base_url: str | None = None,
+    ais_client: AisPostingReceiptClient | None = None,
+) -> WSGIApp:
     """Return a stdlib WSGI app bound to one shared commercial ledger."""
     shared_ledger = MemoryUsageLedger() if ledger is None else ledger
     ingestion = UsageIngestionService(shared_ledger)
@@ -78,6 +94,13 @@ def create_http_app(ledger: MemoryUsageLedger | None = None) -> WSGIApp:
     collections = CollectionCaseService(shared_ledger)
     intents = PaymentIntentService(shared_ledger)
     settlements = PaymentSettlementService(shared_ledger)
+    if ais_client is not None:
+        resolved_ais_client = ais_client
+    elif ais_base_url:
+        resolved_ais_client = AisPostingReceiptClient(ais_base_url)
+    else:
+        resolved_ais_client = None
+    pulls = PostingReceiptPullService(shared_ledger, ais_client=resolved_ais_client)
 
     def application(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         """Dispatch one HTTP request onto the existing commercial services."""
@@ -114,6 +137,48 @@ def create_http_app(ledger: MemoryUsageLedger | None = None) -> WSGIApp:
                     start_response,
                     status_code,
                     {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "get_posting_receipt_observation":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _resolve_tenant_pin(environ, query)
+                result = pulls.get_posting_receipt_observation(
+                    tenant_reference, path_values["idempotency_key"]
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except PostingReceiptObservationQueryError as error:
+                status_code = 404 if error.rejection_reason_code == "observation_not_found" else 422
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "posting_receipt_observations":
+            try:
+                payload = _read_json_object(environ)
+                tenant_reference = _resolve_tenant_pin(environ, payload)
+                idempotency_key = payload.get("idempotency_key")
+                if not isinstance(idempotency_key, str) or not idempotency_key:
+                    raise HttpRequestError("idempotency_key_missing")
+                result = pulls.pull_posting_receipt(tenant_reference, idempotency_key)
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
                 )
             except HttpRequestError as error:
                 return _send_json(
@@ -161,7 +226,8 @@ def main(arguments: tuple[str, ...] | None = None) -> int:
     """
     del arguments
     port = int(os.environ.get("PORT", "8000"))
-    httpd = make_server("0.0.0.0", port, create_http_app())
+    ais_base_url = os.environ.get("AIS_BASE_URL") or None
+    httpd = make_server("0.0.0.0", port, create_http_app(ais_base_url=ais_base_url))
     httpd.serve_forever()
     return 0
 
@@ -187,6 +253,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "journal_proposals", {}
         if method == "GET":
             return "list_journal_proposals", {}
+        return "method_not_allowed", {}
+    if path == POSTING_RECEIPT_COLLECTION_PATH:
+        if method == "POST":
+            return "posting_receipt_observations", {}
+        return "method_not_allowed", {}
+    if path.startswith(POSTING_RECEIPT_ITEM_PREFIX):
+        raw_key = unquote(path[len(POSTING_RECEIPT_ITEM_PREFIX) :])
+        if not raw_key:
+            return None, {}
+        if method == "GET":
+            return "get_posting_receipt_observation", {"idempotency_key": raw_key}
         return "method_not_allowed", {}
     proposal_match = JOURNAL_PROPOSAL_ITEM_PATH.fullmatch(path)
     if proposal_match is not None:

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/accounting/posting-receipt/v1",
+  "title": "Accounting Posting Receipt",
+  "description": "Authoritative accounting outcome for one source proposal, hold, rejection, reversal, or posted journal.",
+  "x-cwl-authority": "accounting-information-platform",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "receipt_id",
+    "receipt_contract_version",
+    "idempotency_key",
+    "source_proposal_id",
+    "source_payload_hash",
+    "tenant_reference",
+    "legal_entity_reference",
+    "accounting_book_reference",
+    "accounting_policy_version",
+    "posting_rule_version",
+    "posting_status_code",
+    "recorded_at"
+  ],
+  "properties": {
+    "receipt_id": {"type": "string", "format": "uuid"},
+    "receipt_contract_version": {"type": "integer", "minimum": 1},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "source_proposal_id": {"type": "string", "format": "uuid"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "legal_entity_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "accounting_book_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "fiscal_period_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "journal_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "reversal_of_journal_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "accounting_policy_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "posting_rule_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "posting_status_code": {
+      "type": "string",
+      "enum": ["posted", "held", "rejected", "reversed"]
+    },
+    "hold_reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "rejection_reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "posted_at": {"type": "string", "format": "date-time"},
+    "line_count": {"type": "integer", "minimum": 0},
+    "transaction_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "functional_currency": {"type": "string", "pattern": "^[A-Z]{3}$"}
+  }
+}

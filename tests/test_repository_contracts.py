@@ -568,6 +568,24 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_posting_receipt_observation_migration_is_tenant_scoped_and_append_only(self) -> None:
+        """The observation table must not use AIS receipt_id as the primary key."""
+        sql = (ROOT / "database/migrations/0010_posting_receipt_observation.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.posting_receipt_observation",
+            "posting_receipt_observation_id uuid PRIMARY KEY",
+            "UNIQUE (tenant_account_id, idempotency_key)",
+            "UNIQUE (tenant_account_id, receipt_id)",
+            "UNIQUE (tenant_account_id, posting_receipt_observation_id)",
+            "CHECK (posting_status_code IN ('posted', 'held', 'rejected', 'reversed'))",
+            "CHECK (source_payload_hash ~ '^sha256:[0-9a-f]{64}$')",
+            "FOREIGN KEY (tenant_account_id)",
+        ):
+            self.assertIn(expected_fragment, sql)
+        self.assertNotIn("receipt_id uuid PRIMARY KEY", sql)
+
     def test_rating_migration_persists_append_only_runs_and_lines(self) -> None:
         """The rating migration must keep run identity tenant-scoped and append-only."""
         sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(encoding="utf-8")

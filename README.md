@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, and semantically validated accounting journal proposals;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, and payment-receipt migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, and accepts those writes over a stdlib HTTP adapter;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, and posting-receipt-observation migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -111,6 +111,16 @@ python3 -m metering_billing.http_app
 
 AIS pulls validated proposals from the same stdlib app. Pin the tenant with optional `X-CWL-Tenant-Reference` or with `tenant_reference` in the query or JSON body. If both are present they must match. Cash and AR proposals share `journal_proposal` and appear in the same list. Query never marks a proposal exported, posted, or consumed. Billing emits semantic account roles only; AIS maps `cash_receipt` to its own chart.
 
+## Pull a posting receipt
+
+```bash
+python3 -c "from metering_billing import PostingReceiptPullService"
+# POST /v1/posting-receipt-observations
+# GET /v1/posting-receipt-observations/{idempotency_key}
+```
+
+After AIS accepts a validated proposal, an operator pulls the AIS `posting_receipt` and Billing stores it as a commercial observation. If AIS returns 404, accept the proposal on AIS and retry. `posting_status_code` stays an AIS fact. Billing `proposal_status` stays `validated`. GET reads a previously stored observation and does not call AIS.
+
 ## Next action
 
-AIS pulls validated proposals. Do not mark the proposal posted, do not open a fiscal period, and do not resolve statutory account IDs in this repository.
+Operators pull the AIS posting receipt after accept. Do not flip `proposal_status`, do not open a fiscal period, and do not start credit or adjustment in this slice.

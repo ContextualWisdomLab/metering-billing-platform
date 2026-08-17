@@ -12,12 +12,14 @@ The package never posts statutory journals.  Accounting exports remain
 ``accounting_journal_proposal`` documents with proposal-only statuses.
 Collection cases stay in commercial ``open``, ``dunning``, or ``settled``
 status.  Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
-Payment receipts stay ``applied`` and do not post to AIS.
+Payment receipts stay ``applied`` and do not post to AIS.  AIS posting
+receipts are stored as observations and never flip ``proposal_status``.
 """
 
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
 from metering_billing.contracts import (
+    ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME,
     ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME,
     COLLECTION_CASE_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
@@ -26,8 +28,10 @@ from metering_billing.contracts import (
     RATING_RUN_SCHEMA_NAME,
     USAGE_EVENT_SCHEMA_NAME,
     USAGE_INGESTION_RECEIPT_SCHEMA_NAME,
+    default_consumed_schemas_directory,
     default_schemas_directory,
     load_json_schema,
+    validate_consumed_posting_receipt,
     validate_collection_case,
     validate_invoice_draft,
     validate_journal_proposal,
@@ -48,6 +52,9 @@ from metering_billing.errors import (
     PaymentIntentRejectionReasonCode,
     PaymentSettlementOutcomeCode,
     PaymentSettlementRejectionReasonCode,
+    PostingReceiptObservationOutcomeCode,
+    PostingReceiptObservationQueryError,
+    PostingReceiptObservationRejectionReasonCode,
     RatingOutcomeCode,
     RatingRejectionReasonCode,
     RejectionReasonCode,
@@ -58,12 +65,14 @@ from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
+from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
 from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
 from metering_billing.usage_ingestion import UsageIngestionService
 from metering_billing.usage_ledger import MemoryUsageLedger
 from metering_billing.usage_rating import UsageRatingService
 
 __all__ = (
+    "ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME",
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
@@ -89,6 +98,11 @@ __all__ = (
     "PaymentSettlementOutcomeCode",
     "PaymentSettlementRejectionReasonCode",
     "PaymentSettlementService",
+    "AisPostingReceiptClient",
+    "PostingReceiptObservationOutcomeCode",
+    "PostingReceiptObservationQueryError",
+    "PostingReceiptObservationRejectionReasonCode",
+    "PostingReceiptPullService",
     "RatingOutcomeCode",
     "RatingRejectionReasonCode",
     "RejectionReasonCode",
@@ -97,11 +111,13 @@ __all__ = (
     "UsageRatingService",
     "compute_source_payload_hash",
     "create_http_app",
+    "default_consumed_schemas_directory",
     "default_schemas_directory",
     "format_exact_decimal",
     "load_json_schema",
     "parse_exact_decimal",
     "parse_iso8601_datetime",
+    "validate_consumed_posting_receipt",
     "validate_collection_case",
     "validate_invoice_draft",
     "validate_journal_proposal",

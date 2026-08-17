@@ -104,6 +104,16 @@ contextual-orchestrator usage
 - HTTP 200 is a successful read. HTTP 422 is a missing tenant or illegal filter. HTTP 404 is an unknown route or unknown/cross-tenant proposal.
 - Query never mutates `proposal_status` and never emits `posted`. AIS pulls validated proposals and owns `posting_receipt`.
 
+## Posting-receipt observation acceptance
+
+- An operator can pull an AIS posting receipt for the published invoice and cash idempotency keys and store one `posting_receipt_observation`.
+- A replay of the same tenant, key, and receipt returns the same observation as `duplicate_replay`.
+- AIS 403 is cross-tenant, writes zero rows, and is not retried as another tenant.
+- AIS 404 is `not_yet_accepted`: accept the proposal on AIS, then retry. Billing does not invent a receipt.
+- `posting_status_code` values `posted`, `held`, `rejected`, and `reversed` store as observations. Billing `proposal_status` stays `validated`.
+- GET of a stored observation is tenant-scoped, returns 404 across tenants, and does not call AIS.
+- Missing tenant, missing key, illegal `posting_status_code`, tenant mismatch, float JSON, and transport failure fail closed.
+
 ## Usage-ingestion acceptance
 
 - A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.
@@ -122,4 +132,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, and journal-proposal query reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, and posting-receipt observation reach 100% statement and branch coverage.
