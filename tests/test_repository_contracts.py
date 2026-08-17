@@ -20,6 +20,7 @@ from metering_billing.contracts import (
     validate_payment_receipt_presentment,
     validate_credit_adjustment_presentment,
     validate_rate_card_presentment,
+    validate_usage_event_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -914,6 +915,97 @@ class RepositoryContractTests(unittest.TestCase):
             [
                 error
                 for error in validate_rate_card_presentment(numeric)
+                if "exact decimal" in error
+            ],
+            [],
+        )
+
+    def test_usage_event_presentment_accepts_quantity_and_rejects_outcome(self) -> None:
+        """A usage-event statement records exact quantity and cannot claim a write outcome."""
+        schema = self._schema("usage-event-presentment.schema.json")
+        instance = {
+            "usage_event_presentment_contract_version": 1,
+            "usage_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "source_event_key": "workflow_381:step_04:attempt_01",
+            "event_payload_hash": "sha256:" + ("a" * 64),
+            "occurred_at": "2026-08-16T10:27:42.482Z",
+            "recorded_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "rate_window",
+            "measurements": [
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "1810",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_usage_event_presentment(instance), ())
+        posted = dict(instance)
+        posted["ingestion_outcome_code"] = "accepted"
+        self.assertIn(
+            "$: additional property is not allowed: ingestion_outcome_code",
+            validate_schema_instance(schema, posted),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: stored usage must rate a window",
+            validate_usage_event_presentment(wait_action),
+        )
+        self.assertNotEqual(validate_usage_event_presentment([]), ())
+        missing_measurements = dict(instance)
+        missing_measurements.pop("measurements")
+        self.assertNotEqual(validate_usage_event_presentment(missing_measurements), ())
+        negative = dict(instance)
+        negative["measurements"] = [
+            {
+                "meter_code": "gen_ai_output_token",
+                "quantity": "-1",
+                "unit_code": "token",
+                "quality_code": "provider_reported",
+            }
+        ]
+        self.assertIn(
+            "$: measurements[0].quantity must not be negative",
+            validate_usage_event_presentment(negative),
+        )
+        bad_quantity = dict(instance)
+        bad_quantity["measurements"] = [
+            {
+                "meter_code": "gen_ai_output_token",
+                "quantity": "not-decimal",
+                "unit_code": "token",
+                "quality_code": "provider_reported",
+            }
+        ]
+        self.assertTrue(
+            any(
+                "quantity must be an exact decimal" in error
+                for error in validate_usage_event_presentment(bad_quantity)
+            )
+        )
+        not_object = dict(instance)
+        not_object["measurements"] = ["not-a-measurement"]
+        self.assertIn(
+            "$: measurements[0] must be an object",
+            validate_usage_event_presentment(not_object),
+        )
+        numeric = dict(instance)
+        numeric["measurements"] = [
+            {
+                "meter_code": "gen_ai_output_token",
+                "quantity": 1810,
+                "unit_code": "token",
+                "quality_code": "provider_reported",
+            }
+        ]
+        self.assertEqual(
+            [
+                error
+                for error in validate_usage_event_presentment(numeric)
                 if "exact decimal" in error
             ],
             [],

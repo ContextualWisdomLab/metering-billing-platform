@@ -55,7 +55,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## Usage ingestion
 
-`metering_billing.UsageIngestionService` is the write path for canonical usage events.  It validates the published schema, verifies the source-payload hash for the declared contract version, resolves tenant-scoped attribution, stores exact decimal measurements, and returns a receipt.  Optional batch bounds and usage queries use half-open ISO 8601 windows.  Ingestion never writes a posted journal and never calls a payment provider.
+`metering_billing.UsageIngestionService` is the write path for canonical usage events.  It validates the published schema, verifies the source-payload hash for the declared contract version, resolves tenant-scoped attribution, stores exact decimal measurements, and returns a receipt.  Optional batch bounds and usage queries use half-open ISO 8601 windows.  `POST /v1/usage-events` stays that ingest and refuses PAN and provider secrets.  `UsageEventPresentmentService` projects a stored event as a statement.  `GET /v1/usage-events/{usage_event_id}` is HTTP 200 for the same tenant and HTTP 404 across tenants.  `GET /v1/usage-events` lists `{usage_events, next_cursor}` ordered by `recorded_at` then `usage_event_id`.  Ingestion never writes a posted journal and never calls a payment provider.
 
 ## Rate-card catalog
 
@@ -104,6 +104,10 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 ## Posting-receipt observation
 
 `metering_billing.PostingReceiptPullService` GETs an AIS-owned `posting_receipt` from `{ais_base_url}/posting-receipts?idempotency_key=` with required `X-CWL-Tenant-Reference`.  The response is validated against the consumed AIS contract in `schemas/consumed/`.  A successful pull persists one append-only `posting_receipt_observation` identified by `(tenant_account_id, idempotency_key)` plus `source_payload_hash` / `receipt_id`.  AIS `receipt_id` is not the internal primary key.  Replay of the same tenant, key, and receipt returns the stored observation.  `posting_status_code` stays an AIS fact (`posted`, `held`, `rejected`, `reversed`) and is never mapped onto Billing `proposal_status`.  AIS 403 writes zero rows.  AIS 404 is `not_yet_accepted` and writes zero rows.  `POST /v1/posting-receipt-observations` triggers the pull.  `GET /v1/posting-receipt-observations/{idempotency_key}` reads a stored observation and does not call AIS.
+
+## Usage-event presentment
+
+`metering_billing.UsageEventPresentmentService` projects one tenant-scoped usage statement from stored `usage_event` rows.  Identity is the stored `usage_event_id`.  Measurement quantities are the exact stored decimals.  Next operator action is `rate_window`.  `POST /v1/usage-events` remains the #5 ingest and refuses PAN and provider secrets.  `GET /v1/usage-events/{usage_event_id}` is HTTP 200 for the same tenant and HTTP 404 across tenants.  `GET /v1/usage-events` lists `{usage_events, next_cursor}` ordered by `recorded_at` then `usage_event_id`.  Ingest usage, then rate a window against a published card.  This path does not invent an ingest shape, call AIS, or start a production SPA.
 
 ## Rate-card presentment
 

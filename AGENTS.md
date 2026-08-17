@@ -19,7 +19,7 @@
 - Require production statement and branch coverage of 100%.
 - Document every public API and every accounting or monetary invariant.
 - Update architecture, ADRs, and CHANGELOG when authority or behavior changes.
-- Keep usage ingestion append-only.  Deduplicate by tenant-scoped source-event key and by source-payload hash plus contract version.
+- Keep usage ingestion append-only.  Deduplicate by tenant-scoped source-event key and by source-payload hash plus contract version.  Present a stored event through `metering_billing.UsageEventPresentmentService.present_usage_event`.  `POST /v1/usage-events` stays the #5 ingest.  `GET /v1/usage-events/{usage_event_id}` is the HTTP read.  `GET /v1/usage-events` lists `{usage_events, next_cursor}`.  Ingest usage, then rate a window against a published card.
 - Rate stored usage through `metering_billing.UsageRatingService` so a tenant window, rate-card version, and usage snapshot replay the same `rating_run_id` and exact totals.
 - Draft invoice intent through `metering_billing.InvoiceDraftService` so a tenant and `rating_run_id` replay the same `invoice_draft_id` and exact totals.  Drafts are not issued, collected, or posted.
 - Present a stored draft through `metering_billing.InvoicePresentmentService.present_invoice_draft` so a tenant and `invoice_draft_id` return one statement with tax, credits, amount due, optional collection, and rating lines.  `GET /v1/invoice-drafts/{invoice_draft_id}` is the HTTP read.  Cross-tenant or unknown is 404.  Open the draft statement, then collect or credit.

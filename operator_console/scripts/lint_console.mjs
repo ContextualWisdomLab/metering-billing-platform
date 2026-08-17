@@ -65,6 +65,16 @@ for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.ends
       fail(`${fileName}: lines[${index}].unit_amount must be an exact-decimal string`);
     }
   }
+  const measurements = Array.isArray(payload.measurements) ? payload.measurements : [];
+  for (const [index, measurement] of measurements.entries()) {
+    const value = measurement.quantity;
+    if (value === undefined) {
+      continue;
+    }
+    if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+      fail(`${fileName}: measurements[${index}].quantity must be an exact-decimal string`);
+    }
+  }
 }
 
 const sourceDirectory = join(root, "src");

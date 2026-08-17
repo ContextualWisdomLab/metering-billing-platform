@@ -176,6 +176,15 @@ contextual-orchestrator usage
 - Revoked subscriptions are not POSTed. Missing tenant, insecure production callbacks, unknown event types, and secret leakage on list JSON fail closed.
 - AIS pull stays bootstrap. Operators register an https callback, then run deliveries; AIS may keep polling. This slice does not flip `proposal_status`, call AIS posting-receipt, or emit statutory IDs.
 
+## Usage-event-presentment acceptance
+
+- `POST /v1/usage-events` remains the #5 ingest. Replay of the same tenant, source-event key, payload hash, and contract version returns the same `usage_event_id`. PAN, CVC, and provider secrets are refused.
+- A known stored usage event presents one tenant-scoped statement with `source_event_key`, `event_payload_hash`, `occurred_at`, `recorded_at`, measurement quantities, and `next_operator_action` (`rate_window`).
+- `GET /v1/usage-events/{usage_event_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/usage-events` lists summaries as `{usage_events, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{recorded_at}|{usage_event_id}`.
+- Operators ingest usage, then rate a window against a published card. HTTP presentment does not invent an ingest shape or call AIS.
+- `operator_console` Storybook renders that event with tokenized quantity and status chip. Fixtures are stored-morning and stored-partial-token.
+
 ## Rate-card-presentment acceptance
 
 - `POST /v1/rate-cards` remains the #18 write. Replay of the same tenant, card name, canonical lines, and contract version returns the same `rate_card_version`. PAN, CVC, and provider secrets are refused.

@@ -1,9 +1,9 @@
 {
   "name": "@cwl/operator-console",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "private": true,
   "type": "module",
-  "description": "Operator presentment Storybook for invoice-draft, collection-case, payment-intent, payment-receipt, credit-adjustment, and rate-card statement contracts.",
+  "description": "Operator presentment Storybook for invoice-draft, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, and usage-event statement contracts.",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",

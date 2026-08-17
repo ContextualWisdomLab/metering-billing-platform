@@ -14,6 +14,7 @@ from metering_billing.contracts import (
     validate_payment_receipt_presentment,
     validate_credit_adjustment_presentment,
     validate_rate_card_presentment,
+    validate_usage_event_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -45,6 +46,10 @@ CREDIT_ADJUSTMENT_FIXTURE_NAMES = (
 RATE_CARD_FIXTURE_NAMES = (
     "published_standard_rate.json",
     "published_premium_rate.json",
+)
+USAGE_EVENT_FIXTURE_NAMES = (
+    "stored_morning_usage.json",
+    "stored_partial_token_usage.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -149,6 +154,22 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("published_premium_rate.json")["lines"][0]["unit_amount"],
             "0.000005",
         )
+        for fixture_name in USAGE_EVENT_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_usage_event_presentment(payload), ())
+            for measurement in payload["measurements"]:
+                value = measurement["quantity"]
+                self.assertIsInstance(value, str)
+                self.assertNotIsInstance(value, float)
+                parse_exact_decimal(value)
+        self.assertEqual(
+            self._fixture("stored_morning_usage.json")["next_operator_action"],
+            "rate_window",
+        )
+        self.assertEqual(
+            self._fixture("stored_partial_token_usage.json")["measurements"][0]["quantity"],
+            "42.5",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -177,6 +198,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "PaymentReceipt",
             "CreditAdjustment",
             "RateCard",
+            "UsageEvent",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -186,6 +208,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + PAYMENT_RECEIPT_FIXTURE_NAMES
             + CREDIT_ADJUSTMENT_FIXTURE_NAMES
             + RATE_CARD_FIXTURE_NAMES
+            + USAGE_EVENT_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -197,6 +220,7 @@ class OperatorConsoleTests(unittest.TestCase):
         )
         self.assertIn("Record the credit; AIS pulls the validated journal", inventory)
         self.assertIn("Publish a rate card, then rate a window against that version", inventory)
+        self.assertIn("Ingest usage, then rate a window against a published card", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

@@ -34,6 +34,11 @@ import {
   RATE_CARD_CUSTOMER_COPY,
   nextOperatorActionCopy as nextRateCardActionCopy,
 } from "../src/rate_card.js";
+import {
+  renderUsageEvent,
+  USAGE_EVENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextUsageEventActionCopy,
+} from "../src/usage_event.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -198,6 +203,29 @@ test("published premium rate card keeps unit amount as a string", () => {
   assert.equal(typeof statement.lines[0].unit_amount, "string");
 });
 
+test("stored morning usage shows quantity and rate a window", () => {
+  const statement = loadFixture("stored_morning_usage.json");
+  const html = renderUsageEvent(statement);
+  assert.match(html, /1810 token/);
+  assert.match(html, /Rate a window/);
+  assert.match(html, /Ingest usage, then rate a window against a published card/);
+  assert.equal(
+    USAGE_EVENT_CUSTOMER_COPY,
+    "Ingest usage, then rate a window against a published card.",
+  );
+  assert.equal(nextUsageEventActionCopy("rate_window"), "Rate a window");
+  assert.equal(nextUsageEventActionCopy("ingest"), "Ingest usage");
+  assert.equal(typeof statement.measurements[0].quantity, "string");
+});
+
+test("stored partial token usage keeps quantity as a string", () => {
+  const statement = loadFixture("stored_partial_token_usage.json");
+  const html = renderUsageEvent(statement);
+  assert.match(html, /42\.5 token/);
+  assert.equal(statement.next_operator_action, "rate_window");
+  assert.equal(typeof statement.measurements[0].quantity, "string");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -218,6 +246,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderRateCard({ lines: [{ unit_amount: 0.000002, currency_code: "USD" }] }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderUsageEvent({ measurements: [{ quantity: 1810, unit_code: "token" }] }),
     TypeError,
   );
   assert.throws(

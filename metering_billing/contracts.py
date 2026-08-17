@@ -35,6 +35,7 @@ __all__ = (
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_PRESENTMENT_SCHEMA_NAME",
+    "USAGE_EVENT_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
@@ -53,6 +54,7 @@ __all__ = (
     "validate_payment_receipt_presentment",
     "validate_credit_adjustment_presentment",
     "validate_rate_card_presentment",
+    "validate_usage_event_presentment",
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
@@ -83,6 +85,7 @@ PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
 RATE_CARD_PRESENTMENT_SCHEMA_NAME = "rate-card-presentment.schema.json"
+USAGE_EVENT_PRESENTMENT_SCHEMA_NAME = "usage-event-presentment.schema.json"
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
@@ -456,6 +459,34 @@ def validate_rate_card_presentment(
                     errors.append(f"$: lines[{index}].unit_amount must be an exact decimal")
     if action is not None and action != "rate_window":
         errors.append("$: published cards must rate a window")
+    return tuple(errors)
+
+
+def validate_usage_event_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate usage-event presentment shape plus exact quantity invariants."""
+    schema = load_json_schema(USAGE_EVENT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    measurements = statement.get("measurements")
+    if isinstance(measurements, list):
+        for index, measurement in enumerate(measurements):
+            if not isinstance(measurement, Mapping):
+                errors.append(f"$: measurements[{index}] must be an object")
+                continue
+            quantity = measurement.get("quantity")
+            if isinstance(quantity, str):
+                try:
+                    parsed = Decimal(quantity)
+                    if parsed < Decimal("0"):
+                        errors.append(f"$: measurements[{index}].quantity must not be negative")
+                except Exception:
+                    errors.append(f"$: measurements[{index}].quantity must be an exact decimal")
+    if action is not None and action != "rate_window":
+        errors.append("$: stored usage must rate a window")
     return tuple(errors)
 
 

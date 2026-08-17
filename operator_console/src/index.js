@@ -29,3 +29,8 @@ export {
   RATE_CARD_CUSTOMER_COPY,
   nextOperatorActionCopy as nextRateCardActionCopy,
 } from "./rate_card.js";
+export {
+  renderUsageEvent,
+  USAGE_EVENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextUsageEventActionCopy,
+} from "./usage_event.js";

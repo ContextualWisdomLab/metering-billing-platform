@@ -2439,6 +2439,21 @@ class MemoryUsageLedger:
             if receipt.tenant_account_id == tenant_account_id
         )
 
+    def get_usage_event(self, usage_event_id: UUID) -> StoredUsageEvent | None:
+        """Return one stored usage event by internal identifier, if present."""
+        return self.usage_events.get(usage_event_id)
+
+    def list_usage_events(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredUsageEvent, ...]:
+        """Return stored usage events, optionally filtered by tenant."""
+        events = tuple(self.usage_events.values())
+        if tenant_account_id is None:
+            return events
+        return tuple(
+            event for event in events if event.tenant_account_id == tenant_account_id
+        )
+
     def list_usage_events_in_window(
         self, tenant_account_id: UUID, window_started_at: datetime, window_ended_at: datetime
     ) -> tuple[StoredUsageEvent, ...]:

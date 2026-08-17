@@ -110,6 +110,8 @@ Credit-adjustment presentment does not add a table.  `GET /v1/credit-adjustments
 
 Rate-card presentment does not add a table.  `GET /v1/rate-cards/{rate_card_id}` projects stored `rate_card` and latest `rate_card_version` rows.  `unit_amount` values are the exact stored prices.  Next operator action is `rate_window`.
 
+Usage-event presentment does not add a table.  `GET /v1/usage-events/{usage_event_id}` projects stored `usage_event` rows.  Measurement quantities are the exact stored amounts.  Next operator action is `rate_window`.
+
 Payment-receipt presentment does not add a table.  `GET /v1/payment-receipts/{payment_receipt_id}` projects stored `payment_receipt` rows and the current `collection_case`.  `received_amount` is the exact stored amount.  `remaining_outstanding_amount` is the current case outstanding.  `payment_receipt_status` stays `applied`.  Next operator action is `record_receipt` or `drain_or_wait`.
 
 ## Tax-assessment identity
