@@ -4,7 +4,8 @@
 | --- | --- |
 | CloudEvents 1.0.2 | Future event envelopes preserve source and event identity for deduplication. |
 | Cowlishaw decimal arithmetic 1.70 | Billable quantities are exact decimals, never binary floating-point values. |
-| RFC 9110 | At-least-once delivery is made safe by idempotent ingest of the same source key and payload. The HTTP accept surface maps `accepted` and `duplicate_replay` to 200, `rejected` to 422, and unknown routes to 404. |
+| RFC 9110 | At-least-once delivery is made safe by idempotent ingest of the same source key and payload. The HTTP accept surface maps `accepted` and `duplicate_replay` to 200, `rejected` to 422, and unknown routes to 404. GET journal-proposal query is a safe, idempotent pull and does not mutate `proposal_status`. |
+| Google AIP-158 | Journal-proposal list pages use a deterministic keyset cursor (`proposed_at`, `proposal_id`) and a bounded `page_limit` instead of a mutable offset. |
 | Helland (2012) | Replays acknowledge the stored fact; a mutated payload is a conflict, not an update. |
 | IEEE 754-2019 | Decimal interchange stays in the decimal domain; binary inexact types are rejected. |
 | ISO 8601-1:2019 | `occurred_at` and usage windows are timezone-aware instants; naive timestamps fail closed. |
@@ -14,6 +15,6 @@
 | IFRS Accounting Taxonomy 2025 | Financial-report output remains taxonomy-versioned, with the 2025 taxonomy retained for 2026 reporting. |
 | IAS 7 | Bank and settlement facts are classified and presented by Accounting rather than inferred from a payment-provider status alone. Billing proposes semantic `cash_receipt` versus `accounts_receivable` roles; AIS owns the cash-flow classification. |
 | IAS 21 | Transaction, functional, and presentation currencies are separate accounting concepts; Billing preserves source currency and amounts. |
-| ISO 20022-1:2026 | Bank and treasury adapters use versioned financial-message mappings rather than proprietary fields in the accounting core. Payment initiation stays a provider-neutral `payment_intent` until a later adapter projects an ISO 20022 initiation message. Commercial settlement is a `payment_receipt` applied against that intent; the cash journal proposal is billing evidence for AIS, not an ISO 20022 settlement or clearing message. |
+| ISO 20022-1:2026 | Bank and treasury adapters use versioned financial-message mappings rather than proprietary fields in the accounting core. Payment initiation stays a provider-neutral `payment_intent` until a later adapter projects an ISO 20022 initiation message (`pain.001`). Commercial settlement is a `payment_receipt` applied against that intent; the cash journal proposal is billing evidence for AIS, not an ISO 20022 `camt` settlement or clearing message. AIS pulls that evidence; Billing does not post it. |
 | PCI DSS 4.0.1 | Payment intents and payment receipts never store card PAN, CVC, or provider charge identifiers, reducing cardholder-data scope in this repository. |
 | PostgreSQL 18 | UUIDv7 and exact numeric persistence support ordered identifiers and monetary precision. |

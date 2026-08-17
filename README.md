@@ -102,6 +102,15 @@ python3 -m metering_billing.http_app
 
 `create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay`. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is only an unknown route. The adapter does not post journals or call a named payment provider.
 
+## Pull journal proposals
+
+```bash
+# GET /v1/journal-proposals?tenant_reference=urn:cwl:tenant_001
+# GET /v1/journal-proposals/{proposal_id}?tenant_reference=urn:cwl:tenant_001
+```
+
+AIS pulls validated proposals from the same stdlib app. Cash and AR proposals share `journal_proposal` and appear in the same list. Query never marks a proposal exported, posted, or consumed.
+
 ## Next action
 
-Hand the persisted cash proposal to AIS. Do not mark the proposal posted, do not open a fiscal period, and do not resolve statutory account IDs in this repository.
+AIS pulls validated proposals. Do not mark the proposal posted, do not open a fiscal period, and do not resolve statutory account IDs in this repository.

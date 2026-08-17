@@ -37,6 +37,8 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.http_app.create_http_app` exposes those services as stdlib JSON HTTP. The adapter requires a tenant on every write, returns published `as_contract_dict` contracts, and never posts a journal.
 
+`GET /v1/journal-proposals` is a safe collection read (Fielding et al., 2022; Google, 2024). AIS pulls validated proposals. Cash and AR rows share `journal_proposal`. Query does not flip `proposal_status`; AIS later returns `posting_receipt`.
+
 ## Security
 
 - No card number, CVC, provider secret, PAT plaintext, prompt, or response is accepted in billing contracts.

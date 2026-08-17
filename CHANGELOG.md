@@ -4,6 +4,8 @@
 
 ### Added
 
+- `GET /v1/journal-proposals` and `GET /v1/journal-proposals/{proposal_id}` let AIS pull persisted proposals without mutating `proposal_status`.  Cash and AR proposals share the same list.  Tenant is required.  HTTP 200 is a successful read; HTTP 422 is a missing tenant or illegal filter; HTTP 404 is an unknown or cross-tenant proposal.
+- ADR 0012 for query-without-mutation and AIS pull.
 - Stdlib HTTP accept surface (`python -m metering_billing.http_app` or `create_http_app(ledger=...)`) exposes the existing commercial services as JSON.  Money stays exact-decimal strings.  Tenant is required on every write.  HTTP 200 means `accepted` or `duplicate_replay`; HTTP 422 means `rejected`; HTTP 404 is only an unknown route.
 - ADR 0011 for HTTP as a thin adapter that does not post journals or add a named payment provider.
 - `AccountingExportService.propose_cash_journal` emits one balanced cash/AR `accounting_journal_proposal` from a stored payment receipt.

@@ -86,7 +86,7 @@ contextual-orchestrator usage
 - A second propose of the same tenant, `payment_receipt_id`, source-payload hash, and contract version returns the same `proposal_id`.
 - Another tenant cannot see or propose from the first tenant's receipt.
 - Missing receipts, cross-tenant IDs, float money, and zero or negative amounts fail closed.
-- Collection outstanding is not changed. Status stays inside the proposal lifecycle and is never `posted`. Operators hand the persisted cash proposal to AIS.
+- Collection outstanding is not changed. Status stays inside the proposal lifecycle and is never `posted`. AIS pulls validated proposals.
 
 ## HTTP accept-surface acceptance
 
@@ -94,6 +94,15 @@ contextual-orchestrator usage
 - Every write requires `tenant_reference`. Money stays exact-decimal strings.
 - HTTP 200 means `accepted` or `duplicate_replay`. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is only an unknown route.
 - HTTP does not post journals, store a card PAN, or add Stripe, Adyen, or Toss.
+
+## Journal-proposal query acceptance
+
+- AIS can GET persisted proposals as the published `accounting_journal_proposal` contract.
+- Every read requires `tenant_reference`. Another tenant cannot list or fetch the first tenant's proposals.
+- Optional filters are `proposal_status` (`draft|validated|exported|rejected` only), inclusive `proposed_after`, and a bounded `cursor` / `page_limit`.
+- Cash and AR proposals share `journal_proposal` and appear in the same list. There is no cash-specific GET route.
+- HTTP 200 is a successful read. HTTP 422 is a missing tenant or illegal filter. HTTP 404 is an unknown route or unknown/cross-tenant proposal.
+- Query never mutates `proposal_status` and never emits `posted`. AIS pulls validated proposals and owns `posting_receipt`.
 
 ## Usage-ingestion acceptance
 
@@ -113,4 +122,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, and the HTTP accept surface reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, and journal-proposal query reach 100% statement and branch coverage.

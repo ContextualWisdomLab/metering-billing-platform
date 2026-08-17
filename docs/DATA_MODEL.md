@@ -18,7 +18,7 @@
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
 - `invoice_draft`: append-only draft-only commercial document for one tenant and rating run.
 - `invoice_draft_line`: append-only draft line copied from a rating line.
-- `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft or payment receipt.
+- `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft or payment receipt. AIS pulls these rows; query does not add a second table.
 - `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
 - `collection_case`: commercial collection case for one tenant invoice draft; receipts update outstanding and may mark the case settled.
 - `collection_dunning_event`: append-only commercial reminder that does not capture money.

@@ -27,9 +27,11 @@ from uuid import UUID
 from metering_billing.errors import (
     ExactDecimalError,
     JournalProposalOutcomeCode,
+    JournalProposalQueryError,
     JournalProposalRejectionReasonCode,
 )
 from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
+from metering_billing.time_window import parse_iso8601_datetime
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredInvoiceDraft,
@@ -47,6 +49,9 @@ INTENDED_BOOK_ROLE_CODE = "primary_statutory"
 RECEIVABLE_ACCOUNT_ROLE_CODE = "accounts_receivable"
 REVENUE_ACCOUNT_ROLE_CODE = "usage_revenue"
 CASH_RECEIPT_ACCOUNT_ROLE_CODE = "cash_receipt"
+ALLOWED_PROPOSAL_STATUSES = frozenset({"draft", "validated", "exported", "rejected"})
+DEFAULT_PAGE_LIMIT = 50
+MAXIMUM_PAGE_LIMIT = 100
 
 
 def parse_proposal_amount(value: Any) -> Decimal:
@@ -155,6 +160,21 @@ class JournalProposalResult:
         }
 
 
+@dataclass(frozen=True)
+class JournalProposalPage:
+    """One tenant-scoped page of published journal-proposal contracts."""
+
+    journal_proposals: tuple[JournalProposalResult, ...]
+    next_cursor: str | None
+
+    def as_contract_dict(self) -> dict[str, object]:
+        """Return the collection envelope.  Items stay the published contract."""
+        return {
+            "journal_proposals": [item.as_contract_dict() for item in self.journal_proposals],
+            "next_cursor": self.next_cursor,
+        }
+
+
 class AccountingExportService:
     """Append-only journal-proposal exporter backed by a normalized ledger."""
 
@@ -173,8 +193,8 @@ class AccountingExportService:
 
         A replay of the same tenant, invoice draft, source-payload hash, and
         contract version returns the stored ``proposal_id``.  Another tenant
-        cannot see or propose from that draft.  The operator next hands the
-        proposal to AIS; this service never posts.
+        cannot see or propose from that draft.  AIS next pulls validated
+        proposals; this service never posts.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -251,8 +271,8 @@ class AccountingExportService:
         A replay of the same tenant, payment receipt, source-payload hash, and
         contract version returns the stored ``proposal_id``.  Another tenant
         cannot see or propose from that receipt.  Collection outstanding is
-        not changed.  The operator next hands the proposal to AIS; this
-        service never posts.
+        not changed.  AIS next pulls validated proposals; this service
+        never posts.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -332,6 +352,71 @@ class AccountingExportService:
             ),
             stored_lines,
         )
+        return _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+
+    def list_journal_proposals(
+        self,
+        tenant_reference: str,
+        proposal_status: str | None = None,
+        proposed_after: str | None = None,
+        cursor: str | None = None,
+        page_limit: object | None = None,
+    ) -> JournalProposalPage:
+        """Return one tenant page of persisted proposals without mutating status.
+
+        Order is ``proposed_at`` then ``proposal_id``.  Cash and AR proposals
+        share ``journal_proposal`` and therefore appear in the same list.
+        AIS owns ``posting_receipt``; this query never marks exported or posted.
+        """
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
+        if tenant_error is not None:
+            raise JournalProposalQueryError("tenant_not_found")
+        assert tenant is not None
+        status_filter = _parse_proposal_status(proposal_status)
+        after_instant = _parse_proposed_after(proposed_after)
+        cursor_key = _parse_page_cursor(cursor)
+        limit = _parse_page_limit(page_limit)
+        stored_rows = sorted(
+            self.ledger.list_journal_proposals(tenant.tenant_account_id),
+            key=lambda proposal: (proposal.proposed_at, proposal.journal_proposal_id),
+        )
+        matched: list[StoredJournalProposal] = []
+        for stored in stored_rows:
+            if status_filter is not None and stored.proposal_status != status_filter:
+                continue
+            if after_instant is not None and stored.proposed_at < after_instant:
+                continue
+            if cursor_key is not None and (stored.proposed_at, stored.journal_proposal_id) <= cursor_key:
+                continue
+            matched.append(stored)
+        page_rows = matched[:limit]
+        next_cursor = None
+        if len(matched) > limit:
+            last = page_rows[-1]
+            next_cursor = _encode_page_cursor(last.proposed_at, last.journal_proposal_id)
+        return JournalProposalPage(
+            journal_proposals=tuple(
+                _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+                for stored in page_rows
+            ),
+            next_cursor=next_cursor,
+        )
+
+    def get_journal_proposal(
+        self, tenant_reference: str, proposal_id: UUID
+    ) -> JournalProposalResult:
+        """Return one same-tenant published proposal, or fail closed.
+
+        A missing or cross-tenant identifier is indistinguishable.  The read
+        does not change ``proposal_status``.
+        """
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
+        if tenant_error is not None:
+            raise JournalProposalQueryError("tenant_not_found")
+        assert tenant is not None
+        stored = self.ledger.get_journal_proposal(proposal_id)
+        if stored is None or stored.tenant_account_id != tenant.tenant_account_id:
+            raise JournalProposalQueryError("proposal_not_found")
         return _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
 
 
@@ -531,3 +616,55 @@ def _from_stored(
 def _format_proposed_at(proposed_at: datetime) -> str:
     """Render ``proposed_at`` as a timezone-aware ISO 8601 instant."""
     return proposed_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _parse_proposal_status(proposal_status: str | None) -> str | None:
+    """Accept a proposal-lifecycle status or reject an illegal filter."""
+    if proposal_status is None or proposal_status == "":
+        return None
+    if proposal_status not in ALLOWED_PROPOSAL_STATUSES:
+        raise JournalProposalQueryError("request_invalid")
+    return proposal_status
+
+
+def _parse_proposed_after(proposed_after: str | None) -> datetime | None:
+    """Parse an inclusive ISO 8601 lower bound, or reject an unreadable instant."""
+    if proposed_after is None or proposed_after == "":
+        return None
+    try:
+        return parse_iso8601_datetime(proposed_after)
+    except Exception as error:
+        raise JournalProposalQueryError("request_invalid") from error
+
+
+def _parse_page_limit(page_limit: object | None) -> int:
+    """Bound page size to a positive integer no greater than the maximum."""
+    if page_limit is None or page_limit == "":
+        return DEFAULT_PAGE_LIMIT
+    if isinstance(page_limit, bool) or not isinstance(page_limit, (int, str)):
+        raise JournalProposalQueryError("request_invalid")
+    if isinstance(page_limit, str):
+        if not page_limit.isdigit():
+            raise JournalProposalQueryError("request_invalid")
+        parsed = int(page_limit)
+    else:
+        parsed = page_limit
+    if parsed < 1 or parsed > MAXIMUM_PAGE_LIMIT:
+        raise JournalProposalQueryError("request_invalid")
+    return parsed
+
+
+def _encode_page_cursor(proposed_at: datetime, proposal_id: UUID) -> str:
+    """Encode the keyset cursor as proposed_at then proposal_id."""
+    return f"{_format_proposed_at(proposed_at)}|{proposal_id}"
+
+
+def _parse_page_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
+    """Decode a keyset cursor or reject an unreadable token."""
+    if cursor is None or cursor == "":
+        return None
+    try:
+        proposed_text, proposal_text = cursor.split("|", 1)
+        return parse_iso8601_datetime(proposed_text), UUID(proposal_text)
+    except (TypeError, ValueError) as error:
+        raise JournalProposalQueryError("request_invalid") from error

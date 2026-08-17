@@ -5,10 +5,12 @@ The application is a thin WSGI adapter:
 1. Parse JSON and require a tenant on every write.
 2. Call the existing in-process services.
 3. Return each service ``as_contract_dict`` result as JSON.
+4. Let AIS pull persisted journal proposals with GET.  Query never mutates
+   ``proposal_status``.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
-stores a card PAN, and never calls a named payment provider.  AIS remains the
-consumer of journal proposals.
+stores a card PAN, and never calls a named payment provider.  AIS pulls
+validated proposals and later returns ``posting_receipt``.
 """
 
 from __future__ import annotations
@@ -17,13 +19,14 @@ import json
 import os
 import re
 from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import parse_qs
 from uuid import UUID
 from wsgiref.simple_server import make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
-from metering_billing.errors import ExactDecimalError, TimeWindowError
+from metering_billing.errors import ExactDecimalError, JournalProposalQueryError, TimeWindowError
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -38,6 +41,7 @@ COLLECTION_DUNNING_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/dunning-events$"
 )
 PAYMENT_CANCEL_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})/cancel$")
+JOURNAL_PROPOSAL_ITEM_PATH = re.compile(r"^/v1/journal-proposals/([0-9a-fA-F-]{36})$")
 KNOWN_POST_PATHS = frozenset(
     {
         "/v1/usage-events",
@@ -83,6 +87,39 @@ def create_http_app(ledger: MemoryUsageLedger | None = None) -> WSGIApp:
             return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "healthz":
             return _send_json(start_response, 200, {"status": "ok"})
+        if route_name in {"list_journal_proposals", "get_journal_proposal"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _require_tenant(query)
+                if route_name == "list_journal_proposals":
+                    page = exports.list_journal_proposals(
+                        tenant_reference,
+                        proposal_status=query.get("proposal_status"),
+                        proposed_after=query.get("proposed_after"),
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = exports.get_journal_proposal(
+                    tenant_reference,
+                    _parse_uuid(path_values["proposal_id"], "proposal_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except JournalProposalQueryError as error:
+                status_code = 404 if error.rejection_reason_code == "proposal_not_found" else 422
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
             tenant_reference = _require_tenant(payload)
@@ -142,11 +179,29 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "POST":
             return "cancel_payment_intent", {"payment_intent_id": cancel_match.group(1)}
         return "method_not_allowed", {}
+    if path == "/v1/journal-proposals":
+        if method == "POST":
+            return "journal_proposals", {}
+        if method == "GET":
+            return "list_journal_proposals", {}
+        return "method_not_allowed", {}
+    proposal_match = JOURNAL_PROPOSAL_ITEM_PATH.fullmatch(path)
+    if proposal_match is not None:
+        if method == "GET":
+            return "get_journal_proposal", {"proposal_id": proposal_match.group(1)}
+        return "method_not_allowed", {}
     if path in KNOWN_POST_PATHS:
         if method == "POST":
             return path.removeprefix("/v1/").replace("-", "_"), {}
         return "method_not_allowed", {}
     return None, {}
+
+
+def _read_query(environ: WSGIEnvironment) -> dict[str, str]:
+    """Return the first value for each query-string field."""
+    raw_query = str(environ.get("QUERY_STRING") or "")
+    parsed = parse_qs(raw_query, keep_blank_values=True)
+    return {key: values[0] for key, values in parsed.items()}
 
 
 def _read_json_object(environ: WSGIEnvironment) -> dict[str, Any]:

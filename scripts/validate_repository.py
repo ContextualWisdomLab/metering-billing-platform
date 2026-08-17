@@ -41,6 +41,7 @@ REQUIRED_FILES = (
     "docs/adr/0009-payment-receipt-from-payment-intent.md",
     "docs/adr/0010-cash-journal-from-payment-receipt.md",
     "docs/adr/0011-http-accept-surface.md",
+    "docs/adr/0012-journal-proposal-query.md",
     "docs/doctoring/REFERENCES.md",
     "docs/doctoring/STANDARD_TRACEABILITY.md",
     "schemas/usage-event.schema.json",

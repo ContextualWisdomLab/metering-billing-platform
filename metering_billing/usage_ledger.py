@@ -872,6 +872,10 @@ class MemoryUsageLedger:
             if proposal.tenant_account_id == tenant_account_id
         )
 
+    def get_journal_proposal(self, journal_proposal_id: UUID) -> StoredJournalProposal | None:
+        """Return a stored journal proposal by internal identifier."""
+        return self.journal_proposals.get(journal_proposal_id)
+
     def get_collection_case(self, collection_case_id: UUID) -> StoredCollectionCase | None:
         """Return a stored collection case by internal identifier."""
         return self.collection_cases.get(collection_case_id)

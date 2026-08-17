@@ -10,6 +10,7 @@ import unittest
 from decimal import Decimal
 from typing import Any, Mapping
 from unittest import mock
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from metering_billing import MemoryUsageLedger, format_exact_decimal
@@ -53,6 +54,7 @@ def invoke_http(
     path: str,
     payload: Mapping[str, object] | bytes | None = None,
     extra_environ: Mapping[str, object] | None = None,
+    query: Mapping[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Call the WSGI app in-process and return status plus JSON body."""
     if payload is None:
@@ -64,6 +66,7 @@ def invoke_http(
     environ: dict[str, Any] = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
+        "QUERY_STRING": urlencode(query) if query else "",
         "CONTENT_LENGTH": str(len(raw_body)),
         "wsgi.input": io.BytesIO(raw_body),
         "wsgi.errors": io.StringIO(),

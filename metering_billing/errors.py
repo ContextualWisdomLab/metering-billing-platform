@@ -93,6 +93,14 @@ class JournalProposalRejectionReasonCode(StrEnum):
     RECEIPT_AMOUNT_INVALID = "receipt_amount_invalid"
 
 
+class JournalProposalQueryError(ValueError):
+    """Raised when a proposal query cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class CollectionCaseOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one collection case or notice."""
 

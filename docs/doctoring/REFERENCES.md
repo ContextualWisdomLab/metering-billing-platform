@@ -6,6 +6,8 @@ Cowlishaw, M. (2009). *General decimal arithmetic specification* (Version 1.70).
 
 Fielding, R., Nottingham, M., & Reschke, J. (Eds.). (2022). *HTTP semantics* (RFC 9110). Internet Engineering Task Force. https://doi.org/10.17487/RFC9110
 
+Google. (2024). *AIP-158: Pagination*. https://google.aip.dev/158
+
 Helland, P. (2012). Idempotence is not a medical condition. *Communications of the ACM, 55*(5), 56–65. https://doi.org/10.1145/2160718.2160734
 
 IEEE. (2019). *IEEE standard for floating-point arithmetic* (IEEE Std 754-2019). https://doi.org/10.1109/IEEESTD.2019.8766229

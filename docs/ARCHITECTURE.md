@@ -67,7 +67,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## Accounting export
 
-`metering_billing.AccountingExportService` copies one stored invoice draft or one stored payment receipt into an append-only `accounting_journal_proposal`.  Draft identity is `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)`.  Cash identity is `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)`.  An identical replay returns the same `proposal_id`.  Draft lines debit `accounts_receivable` and credit `usage_revenue`.  Cash lines debit `cash_receipt` and credit `accounts_receivable`.  Status stays inside the proposal lifecycle and is never `posted`.  The operator next hands the proposal to the Accounting Information Platform.  This path does not open fiscal periods, resolve statutory account IDs, change collection outstanding, or call a payment provider.
+`metering_billing.AccountingExportService` copies one stored invoice draft or one stored payment receipt into an append-only `accounting_journal_proposal`.  Draft identity is `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)`.  Cash identity is `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)`.  An identical replay returns the same `proposal_id`.  Draft lines debit `accounts_receivable` and credit `usage_revenue`.  Cash lines debit `cash_receipt` and credit `accounts_receivable`.  Status stays inside the proposal lifecycle and is never `posted`.  AIS next pulls validated proposals.  This path does not open fiscal periods, resolve statutory account IDs, change collection outstanding, call a payment provider, or flip `proposal_status` after a pull.
 
 ## Collection case
 
@@ -83,7 +83,9 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## HTTP accept surface
 
-`metering_billing.http_app.create_http_app` is a stdlib WSGI adapter.  It parses JSON, requires `tenant_reference` on every write, calls the existing in-process services, and returns each `as_contract_dict` result.  Standalone serving is `python -m metering_billing.http_app` on `0.0.0.0:$PORT`.  HTTP 200 means `accepted` or `duplicate_replay`.  HTTP 422 means `rejected` or an unreadable request.  HTTP 404 is only an unknown route.  Money stays exact-decimal strings.  The adapter never posts a journal, never stores a card PAN, and never calls Stripe, Adyen, or Toss.  AIS remains the consumer of journal proposals and later posting receipts.
+`metering_billing.http_app.create_http_app` is a stdlib WSGI adapter.  It parses JSON, requires `tenant_reference` on every write, calls the existing in-process services, and returns each `as_contract_dict` result.  Standalone serving is `python -m metering_billing.http_app` on `0.0.0.0:$PORT`.  HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read.  HTTP 422 means `rejected` or an unreadable request.  HTTP 404 is an unknown route or an unknown/cross-tenant proposal.  Money stays exact-decimal strings.  The adapter never posts a journal, never stores a card PAN, and never calls Stripe, Adyen, or Toss.
+
+`GET /v1/journal-proposals` and `GET /v1/journal-proposals/{proposal_id}` are the AIS pull.  Tenant is required.  Optional filters are `proposal_status`, inclusive `proposed_after`, and a bounded `cursor` / `page_limit`.  List items are the published journal-proposal contract.  Cash and AR proposals share `journal_proposal` and appear in the same list.  Query does not mutate `proposal_status`.  AIS pulls validated proposals and later returns `posting_receipt`.
 
 ## Failure policy
 
