@@ -4,6 +4,10 @@
 
 ### Added
 
+- `AccountingExportService.propose_cash_journal` emits one balanced cash/AR `accounting_journal_proposal` from a stored payment receipt.
+- Idempotent cash-proposal identity on `(tenant, payment_receipt_id, source_payload_hash, proposal_contract_version)` so a replay returns the same `proposal_id`.
+- AIS-compatible cash idempotency key `{tenant}:cash_receipt:{payment_receipt_id}:{source_payload_hash}:v{version}`.
+- ADR 0010 for cash journal export without posting, fiscal-period control, or statutory account IDs.
 - Importable `metering_billing` payment-settlement service that applies an exact commercial receipt against a projected payment intent and reduces collection outstanding.
 - Idempotent payment-receipt identity on `(tenant, payment_intent_id, source_payload_hash, settlement_contract_version)` so a replay returns the same `payment_receipt_id`.
 - Append-only `payment_receipt` persistence.  Status stays `applied`.  A full receipt settles the collection case; a partial receipt leaves residual outstanding.

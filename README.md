@@ -67,7 +67,7 @@ After a `rating_run` exists, call `InvoiceDraftService.draft_invoice` with the t
 python3 -c "from metering_billing import AccountingExportService"
 ```
 
-After an `invoice_draft` exists, call `AccountingExportService.propose_journal` with the tenant and `invoice_draft_id`. The proposal is one balanced exact-decimal `accounting_journal_proposal` that uses semantic account roles and an intended book role. An identical replay returns the same `proposal_id`. Status stays inside the proposal lifecycle and is never `posted`.
+After an `invoice_draft` exists, call `AccountingExportService.propose_journal` with the tenant and `invoice_draft_id`. After a `payment_receipt` exists, call `AccountingExportService.propose_cash_journal` with the tenant and `payment_receipt_id`. Each proposal is one balanced exact-decimal `accounting_journal_proposal` that uses semantic account roles and an intended book role. An identical replay returns the same `proposal_id`. Status stays inside the proposal lifecycle and is never `posted`. Cash lines debit `cash_receipt` and credit `accounts_receivable`.
 
 ## Open a collection case
 
@@ -95,4 +95,4 @@ After a projected `payment_intent` exists, call `PaymentSettlementService.record
 
 ## Next action
 
-Emit a cash journal proposal to AIS, or record another partial receipt. Do not mark the receipt captured or posted, and do not add a named provider adapter until a later increment.
+Hand the persisted cash proposal to AIS. Do not mark the proposal posted, do not open a fiscal period, and do not resolve statutory account IDs in this repository.

@@ -1,17 +1,17 @@
-"""Accounting journal proposals produced from already-stored invoice drafts.
+"""Accounting journal proposals produced from stored drafts and payment receipts.
 
 The service is the buyer-facing export path:
 
 1. Resolve the tenant.
-2. Load that tenant's stored ``invoice_draft``.
-3. Copy the exact draft total into one balanced debit and credit pair.
-4. Replay the same tenant, draft, payload hash, and contract version.
+2. Load that tenant's stored ``invoice_draft`` or ``payment_receipt``.
+3. Copy the exact commercial amount into one balanced debit and credit pair.
+4. Replay the same tenant, source identity, payload hash, and contract version.
 
 The result is an ``accounting_journal_proposal`` for the Accounting
 Information Platform (AIS).  It uses semantic account roles and an intended
 book role.  Status stays inside the proposal lifecycle and is never posted.
 This repository does not open fiscal periods or resolve statutory account IDs
-(IFRS Foundation, 2024).
+(IFRS Foundation, 2024; International Organization for Standardization, 2026).
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping
 from uuid import UUID
 
 from metering_billing.errors import (
+    ExactDecimalError,
     JournalProposalOutcomeCode,
     JournalProposalRejectionReasonCode,
 )
@@ -34,6 +35,7 @@ from metering_billing.usage_ledger import (
     StoredInvoiceDraft,
     StoredJournalProposal,
     StoredJournalProposalLine,
+    StoredPaymentReceipt,
     generate_record_id,
 )
 
@@ -44,6 +46,7 @@ PROPOSAL_STATUS = "validated"
 INTENDED_BOOK_ROLE_CODE = "primary_statutory"
 RECEIVABLE_ACCOUNT_ROLE_CODE = "accounts_receivable"
 REVENUE_ACCOUNT_ROLE_CODE = "usage_revenue"
+CASH_RECEIPT_ACCOUNT_ROLE_CODE = "cash_receipt"
 
 
 def parse_proposal_amount(value: Any) -> Decimal:
@@ -109,6 +112,7 @@ class JournalProposalResult:
     idempotency_key: str | None
     rejection_reason_code: JournalProposalRejectionReasonCode | None
     proposal_lines: tuple[JournalProposalLineResult, ...]
+    payment_receipt_id: UUID | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the published proposal, or a sparse rejected operational result."""
@@ -239,6 +243,97 @@ class AccountingExportService:
         )
         return _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
 
+    def propose_cash_journal(
+        self, tenant_reference: str, payment_receipt_id: UUID
+    ) -> JournalProposalResult:
+        """Propose one balanced cash/AR journal from a persisted payment receipt.
+
+        A replay of the same tenant, payment receipt, source-payload hash, and
+        contract version returns the stored ``proposal_id``.  Another tenant
+        cannot see or propose from that receipt.  Collection outstanding is
+        not changed.  The operator next hands the proposal to AIS; this
+        service never posts.
+        """
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
+        if tenant_error is not None:
+            return _rejected(JournalProposalRejectionReasonCode.TENANT_NOT_FOUND)
+        assert tenant is not None
+
+        payment_receipt = self.ledger.get_payment_receipt(payment_receipt_id)
+        if (
+            payment_receipt is None
+            or payment_receipt.tenant_account_id != tenant.tenant_account_id
+        ):
+            return _rejected(JournalProposalRejectionReasonCode.PAYMENT_RECEIPT_NOT_FOUND)
+
+        try:
+            received_amount = parse_proposal_amount(payment_receipt.received_amount)
+        except ExactDecimalError:
+            return _rejected(JournalProposalRejectionReasonCode.RECEIPT_AMOUNT_INVALID)
+        if received_amount <= 0:
+            return _rejected(JournalProposalRejectionReasonCode.RECEIPT_AMOUNT_INVALID)
+
+        collection_case = self.ledger.get_collection_case(payment_receipt.collection_case_id)
+        if collection_case is None:
+            return _rejected(JournalProposalRejectionReasonCode.PAYMENT_RECEIPT_NOT_FOUND)
+
+        commercial_date = payment_receipt.received_at.astimezone(UTC).date().isoformat()
+        legal_entity_reference = f"{tenant.tenant_reference}:legal_entity:commercial"
+        source_event_reference = (
+            f"{tenant.tenant_reference}:cash_receipt:{payment_receipt.payment_receipt_id}"
+        )
+        canonical_payload = _canonical_cash_proposal_payload(
+            tenant_reference=tenant.tenant_reference,
+            payment_receipt=payment_receipt,
+            received_amount=received_amount,
+            commercial_date=commercial_date,
+            legal_entity_reference=legal_entity_reference,
+            source_event_reference=source_event_reference,
+        )
+        source_payload_hash = compute_proposal_payload_hash(canonical_payload)
+        existing = self.ledger.find_journal_proposal_for_receipt(
+            tenant.tenant_account_id,
+            payment_receipt.payment_receipt_id,
+            source_payload_hash,
+            PROPOSAL_CONTRACT_VERSION,
+        )
+        if existing is not None:
+            return _from_stored(
+                existing, tenant.tenant_reference, JournalProposalOutcomeCode.DUPLICATE_REPLAY
+            )
+
+        journal_proposal_id = generate_record_id()
+        stored_lines = _build_cash_proposal_lines(
+            journal_proposal_id,
+            tenant.tenant_account_id,
+            received_amount,
+        )
+        stored = self.ledger.insert_journal_proposal(
+            StoredJournalProposal(
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant.tenant_account_id,
+                invoice_draft_id=collection_case.invoice_draft_id,
+                proposal_contract_version=PROPOSAL_CONTRACT_VERSION,
+                idempotency_key=(
+                    f"{tenant.tenant_reference}:cash_receipt:{payment_receipt.payment_receipt_id}"
+                    f":{source_payload_hash}:v{PROPOSAL_CONTRACT_VERSION}"
+                ),
+                legal_entity_reference=legal_entity_reference,
+                intended_book_role_code=INTENDED_BOOK_ROLE_CODE,
+                transaction_currency=payment_receipt.currency_code,
+                transaction_date=commercial_date,
+                accounting_date=commercial_date,
+                source_payload_hash=source_payload_hash,
+                proposed_at=self._clock(),
+                proposal_status=PROPOSAL_STATUS,
+                source_event_reference=source_event_reference,
+                proposal_lines=stored_lines,
+                payment_receipt_id=payment_receipt.payment_receipt_id,
+            ),
+            stored_lines,
+        )
+        return _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+
 
 def _canonical_proposal_payload(
     tenant_reference: str,
@@ -276,6 +371,73 @@ def _canonical_proposal_payload(
             },
         ],
     }
+
+
+def _canonical_cash_proposal_payload(
+    tenant_reference: str,
+    payment_receipt: StoredPaymentReceipt,
+    received_amount: Decimal,
+    commercial_date: str,
+    legal_entity_reference: str,
+    source_event_reference: str,
+) -> dict[str, object]:
+    """Return cash-proposal facts excluding identifiers and timestamps."""
+    amount_text = format_exact_decimal(received_amount)
+    return {
+        "proposal_contract_version": PROPOSAL_CONTRACT_VERSION,
+        "tenant_reference": tenant_reference,
+        "payment_receipt_id": str(payment_receipt.payment_receipt_id),
+        "legal_entity_reference": legal_entity_reference,
+        "intended_book_role_code": INTENDED_BOOK_ROLE_CODE,
+        "transaction_currency": payment_receipt.currency_code,
+        "transaction_date": commercial_date,
+        "accounting_date": commercial_date,
+        "proposal_status": PROPOSAL_STATUS,
+        "source_event_references": [source_event_reference],
+        "lines": [
+            {
+                "line_number": 1,
+                "account_role_code": CASH_RECEIPT_ACCOUNT_ROLE_CODE,
+                "debit_amount": amount_text,
+                "credit_amount": "0",
+            },
+            {
+                "line_number": 2,
+                "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
+                "debit_amount": "0",
+                "credit_amount": amount_text,
+            },
+        ],
+    }
+
+
+def _build_cash_proposal_lines(
+    journal_proposal_id: UUID,
+    tenant_account_id: UUID,
+    received_amount: Decimal,
+) -> tuple[StoredJournalProposalLine, ...]:
+    """Build the cash-receipt debit and receivable credit for one receipt."""
+    amount = parse_proposal_amount(received_amount)
+    return (
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=1,
+            account_role_code=CASH_RECEIPT_ACCOUNT_ROLE_CODE,
+            debit_amount=amount,
+            credit_amount=Decimal("0"),
+        ),
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=2,
+            account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
+            debit_amount=Decimal("0"),
+            credit_amount=amount,
+        ),
+    )
 
 
 def _build_proposal_lines(
@@ -362,6 +524,7 @@ def _from_stored(
             )
             for line in stored.proposal_lines
         ),
+        payment_receipt_id=stored.payment_receipt_id,
     )
 
 

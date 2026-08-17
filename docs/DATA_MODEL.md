@@ -18,7 +18,7 @@
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
 - `invoice_draft`: append-only draft-only commercial document for one tenant and rating run.
 - `invoice_draft_line`: append-only draft line copied from a rating line.
-- `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft.
+- `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft or payment receipt.
 - `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
 - `collection_case`: commercial collection case for one tenant invoice draft; receipts update outstanding and may mark the case settled.
 - `collection_dunning_event`: append-only commercial reminder that does not capture money.
@@ -56,7 +56,7 @@ A stored invoice draft is identified by `(tenant_account_id, rating_run_id)` and
 
 ## Journal-proposal identity
 
-A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)`.  Lines reference the proposal and tenant, carry unique `line_number` values, and must balance in the transaction currency.  Status is proposal-only.  Statutory account IDs and posted journals are not stored here.
+A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)` for invoice-draft exports, and by `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)` for cash exports.  Lines reference the proposal and tenant, carry unique `line_number` values, and must balance in the transaction currency.  Cash lines use semantic `cash_receipt` and `accounts_receivable` roles.  Status is proposal-only.  Statutory account IDs and posted journals are not stored here.
 
 ## Collection-case identity
 

@@ -259,7 +259,7 @@ class StoredJournalProposalLine:
 
 @dataclass(frozen=True)
 class StoredJournalProposal:
-    """Append-only balanced journal proposal for one tenant invoice draft."""
+    """Append-only balanced journal proposal for one tenant draft or receipt."""
 
     journal_proposal_id: UUID
     tenant_account_id: UUID
@@ -276,6 +276,7 @@ class StoredJournalProposal:
     proposal_status: str
     source_event_reference: str
     proposal_lines: tuple[StoredJournalProposalLine, ...]
+    payment_receipt_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -386,6 +387,9 @@ class MemoryUsageLedger:
     invoice_draft_lines: list[StoredInvoiceDraftLine] = field(default_factory=list)
     journal_proposals: dict[UUID, StoredJournalProposal] = field(default_factory=dict)
     journal_proposal_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
+    cash_journal_proposal_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
+        default_factory=dict
+    )
     journal_proposal_lines: list[StoredJournalProposalLine] = field(default_factory=list)
     collection_cases: dict[UUID, StoredCollectionCase] = field(default_factory=dict)
     collection_case_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
@@ -763,6 +767,26 @@ class MemoryUsageLedger:
             return None
         return self.journal_proposals[journal_proposal_id]
 
+    def find_journal_proposal_for_receipt(
+        self,
+        tenant_account_id: UUID,
+        payment_receipt_id: UUID,
+        source_payload_hash: str,
+        proposal_contract_version: int,
+    ) -> StoredJournalProposal | None:
+        """Return the cash proposal for one tenant-scoped receipt, if it exists."""
+        journal_proposal_id = self.cash_journal_proposal_index.get(
+            (
+                tenant_account_id,
+                payment_receipt_id,
+                source_payload_hash,
+                proposal_contract_version,
+            )
+        )
+        if journal_proposal_id is None:
+            return None
+        return self.journal_proposals[journal_proposal_id]
+
     def insert_journal_proposal(
         self,
         journal_proposal: StoredJournalProposal,
@@ -801,9 +825,19 @@ class MemoryUsageLedger:
             journal_proposal.source_payload_hash,
             journal_proposal.proposal_contract_version,
         )
+        cash_identity_key = None
+        if journal_proposal.payment_receipt_id is not None:
+            cash_identity_key = (
+                journal_proposal.tenant_account_id,
+                journal_proposal.payment_receipt_id,
+                journal_proposal.source_payload_hash,
+                journal_proposal.proposal_contract_version,
+            )
         if journal_proposal.journal_proposal_id in self.journal_proposals:
             raise ValueError("journal proposals are immutable and cannot be replaced")
         if identity_key in self.journal_proposal_index:
+            raise ValueError("journal proposals are immutable and cannot be replaced")
+        if cash_identity_key is not None and cash_identity_key in self.cash_journal_proposal_index:
             raise ValueError("journal proposals are immutable and cannot be replaced")
         persisted = StoredJournalProposal(
             journal_proposal_id=journal_proposal.journal_proposal_id,
@@ -821,9 +855,12 @@ class MemoryUsageLedger:
             proposal_status=journal_proposal.proposal_status,
             source_event_reference=journal_proposal.source_event_reference,
             proposal_lines=parsed_lines,
+            payment_receipt_id=journal_proposal.payment_receipt_id,
         )
         self.journal_proposals[persisted.journal_proposal_id] = persisted
         self.journal_proposal_index[identity_key] = persisted.journal_proposal_id
+        if cash_identity_key is not None:
+            self.cash_journal_proposal_index[cash_identity_key] = persisted.journal_proposal_id
         self.journal_proposal_lines.extend(parsed_lines)
         return persisted
 

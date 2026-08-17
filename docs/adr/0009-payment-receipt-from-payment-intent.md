@@ -18,11 +18,11 @@ This path must not capture via a named provider, store a provider charge identif
 - Expose `PaymentSettlementService.cancel_payment_intent` to flip a projected intent to `cancelled` without writing a receipt or changing outstanding.  Cancel replay is idempotent.  A cancelled intent cannot later receive a receipt.
 - Reject a missing or cross-tenant intent without leaking the other tenant's document.
 - Reject zero or negative amounts, amounts greater than remaining outstanding, binary floating-point values, and intents that are not `projected`.
-- Do not emit a cash journal proposal, call Stripe/Adyen/Toss, or post journals.
+- Do not call Stripe/Adyen/Toss or post journals.  Cash journal export is ADR 0010.
 
 ## Consequences
 
 - A known projected intent amount can be fully applied; outstanding becomes zero and the case settles.
 - A partial receipt leaves residual outstanding for another receipt.
 - Tenants cannot see or settle each other's intents.
-- Operators next emit a cash journal proposal to AIS, or record another partial receipt.
+- Operators next propose a cash journal to AIS, or record another partial receipt.

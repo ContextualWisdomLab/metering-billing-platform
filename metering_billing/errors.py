@@ -89,6 +89,8 @@ class JournalProposalRejectionReasonCode(StrEnum):
     TENANT_NOT_FOUND = "tenant_not_found"
     INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
     DRAFT_TOTAL_INVALID = "draft_total_invalid"
+    PAYMENT_RECEIPT_NOT_FOUND = "payment_receipt_not_found"
+    RECEIPT_AMOUNT_INVALID = "receipt_amount_invalid"
 
 
 class CollectionCaseOutcomeCode(StrEnum):

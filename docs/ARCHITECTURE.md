@@ -67,7 +67,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## Accounting export
 
-`metering_billing.AccountingExportService` copies one stored invoice draft into an append-only `accounting_journal_proposal`.  Identity is `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)`.  An identical replay returns the same `proposal_id`.  Lines use semantic account roles and an intended book role.  Status stays inside the proposal lifecycle and is never `posted`.  The operator next hands the proposal to the Accounting Information Platform.  This path does not open fiscal periods, resolve statutory account IDs, issue an invoice, or call a payment provider.
+`metering_billing.AccountingExportService` copies one stored invoice draft or one stored payment receipt into an append-only `accounting_journal_proposal`.  Draft identity is `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)`.  Cash identity is `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)`.  An identical replay returns the same `proposal_id`.  Draft lines debit `accounts_receivable` and credit `usage_revenue`.  Cash lines debit `cash_receipt` and credit `accounts_receivable`.  Status stays inside the proposal lifecycle and is never `posted`.  The operator next hands the proposal to the Accounting Information Platform.  This path does not open fiscal periods, resolve statutory account IDs, change collection outstanding, or call a payment provider.
 
 ## Collection case
 
@@ -79,7 +79,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## Payment settlement
 
-`metering_billing.PaymentSettlementService` applies one commercial `payment_receipt` against a stored projected payment intent.  Identity is `(tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)`.  The hash covers the intent amount, currency, status, and received amount.  Receipt status is `applied` only.  The linked collection-case outstanding is reduced by the same exact amount; remaining zero marks the case `settled`.  An identical replay returns the same `payment_receipt_id`.  `cancel_payment_intent` flips a projected intent to `cancelled` without writing a receipt or changing outstanding.  This path does not store a card PAN, call a named provider, emit an `accounting_journal_proposal`, or post a journal.  The operator next emits a cash journal proposal to AIS, or records another partial receipt.
+`metering_billing.PaymentSettlementService` applies one commercial `payment_receipt` against a stored projected payment intent.  Identity is `(tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)`.  The hash covers the intent amount, currency, status, and received amount.  Receipt status is `applied` only.  The linked collection-case outstanding is reduced by the same exact amount; remaining zero marks the case `settled`.  An identical replay returns the same `payment_receipt_id`.  `cancel_payment_intent` flips a projected intent to `cancelled` without writing a receipt or changing outstanding.  This path does not store a card PAN, call a named provider, emit an `accounting_journal_proposal`, or post a journal.  The operator next proposes a cash journal to AIS, or records another partial receipt.
 
 ## Failure policy
 

@@ -78,7 +78,15 @@ contextual-orchestrator usage
 - Another tenant cannot see or settle the first tenant's intent.
 - Cancel flips a projected intent to `cancelled` without writing a receipt or changing outstanding. Cancel replay is idempotent. A cancelled intent cannot later receive a receipt.
 - Missing intents, cross-tenant IDs, float money, zero or negative amounts, over-application, and non-projected intents fail closed.
-- Status stays `applied`. Operators next emit a cash journal proposal to AIS, or record another partial receipt. This slice does not emit an `accounting_journal_proposal`.
+- Status stays `applied`. Operators next propose a cash journal to AIS, or record another partial receipt.
+
+## Cash-journal acceptance
+
+- A known payment receipt produces one balanced exact-decimal `accounting_journal_proposal` that debits `cash_receipt` and credits `accounts_receivable`.
+- A second propose of the same tenant, `payment_receipt_id`, source-payload hash, and contract version returns the same `proposal_id`.
+- Another tenant cannot see or propose from the first tenant's receipt.
+- Missing receipts, cross-tenant IDs, float money, and zero or negative amounts fail closed.
+- Collection outstanding is not changed. Status stays inside the proposal lifecycle and is never `posted`. Operators hand the persisted cash proposal to AIS.
 
 ## Usage-ingestion acceptance
 
@@ -98,4 +106,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, and payment-settlement reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, and cash-journal export reach 100% statement and branch coverage.

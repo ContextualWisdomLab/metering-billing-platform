@@ -554,6 +554,20 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_cash_journal_migration_reuses_journal_proposal_for_receipts(self) -> None:
+        """Cash proposals reuse journal_proposal and add a receipt-scoped identity."""
+        sql = (ROOT / "database/migrations/0009_cash_journal_proposal.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ADD COLUMN payment_receipt_id uuid",
+            "FOREIGN KEY (tenant_account_id, payment_receipt_id)",
+            "REFERENCES billing_core.payment_receipt (tenant_account_id, payment_receipt_id)",
+            "CREATE UNIQUE INDEX journal_proposal_receipt_identity",
+            "payment_receipt_id IS NOT NULL",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_rating_migration_persists_append_only_runs_and_lines(self) -> None:
         """The rating migration must keep run identity tenant-scoped and append-only."""
         sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(encoding="utf-8")
