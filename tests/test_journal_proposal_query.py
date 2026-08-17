@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import UTC, datetime, timedelta
 from unittest import mock
@@ -411,6 +412,107 @@ class JournalProposalQueryTests(unittest.TestCase):
         self.assertEqual(boom_status, 422)
         self.assertEqual(boom_body["rejection_reason_code"], "request_invalid")
 
+    def test_tenant_header_pins_reads_and_writes_without_statutory_ids(self) -> None:
+        """AIS may pin X-CWL-Tenant-Reference; mismatch is 422; roles stay semantic."""
+        app, ar_proposal_id, cash_proposal_id, _, _ = persist_known_proposals_over_http()
+        header = {"X-CWL-Tenant-Reference": TENANT_ONE}
 
-if __name__ == "__main__":
-    unittest.main()
+        header_list_status, header_list_body = invoke_http(
+            app, "GET", "/v1/journal-proposals", headers=header
+        )
+        self.assertEqual(header_list_status, 200)
+        self.assertEqual(len(header_list_body["journal_proposals"]), 2)
+        for item in header_list_body["journal_proposals"]:
+            roles = {line["account_role_code"] for line in item["lines"]}
+            self.assertTrue(roles <= {"accounts_receivable", "usage_revenue", "cash_receipt"})
+            self.assertNotIn("110200", json.dumps(item))
+            self.assertNotIn("110100", json.dumps(item))
+            self.assertNotIn("410100", json.dumps(item))
+
+        matching_status, matching_body = invoke_http(
+            app,
+            "GET",
+            f"/v1/journal-proposals/{ar_proposal_id}",
+            query={"tenant_reference": TENANT_ONE},
+            headers=header,
+        )
+        self.assertEqual(matching_status, 200)
+        self.assertEqual(matching_body["proposal_id"], ar_proposal_id)
+        self.assertEqual(matching_body["proposal_status"], "validated")
+
+        mismatch_status, mismatch_body = invoke_http(
+            app,
+            "GET",
+            "/v1/journal-proposals",
+            query={"tenant_reference": TENANT_TWO},
+            headers=header,
+        )
+        self.assertEqual(mismatch_status, 422)
+        self.assertEqual(mismatch_body["rejection_reason_code"], "request_invalid")
+
+        empty_header_status, empty_header_body = invoke_http(
+            app,
+            "GET",
+            "/v1/journal-proposals",
+            query={"tenant_reference": TENANT_ONE},
+            headers={"X-CWL-Tenant-Reference": ""},
+        )
+        self.assertEqual(empty_header_status, 200)
+        self.assertEqual(len(empty_header_body["journal_proposals"]), 2)
+
+        write_status, write_body = invoke_http(
+            app,
+            "POST",
+            "/v1/journal-proposals",
+            {"invoice_draft_id": "not-a-uuid"},
+            headers=header,
+        )
+        self.assertEqual(write_status, 422)
+        self.assertEqual(write_body["rejection_reason_code"], "request_invalid")
+
+        rating_app = create_http_app(seed_rated_ledger())
+        invoke_http(
+            rating_app,
+            "POST",
+            "/v1/usage-events",
+            {"tenant_reference": TENANT_ONE, "events": list(known_event_batch())},
+        )
+        header_write_status, header_write_body = invoke_http(
+            rating_app,
+            "POST",
+            "/v1/rating-runs",
+            {
+                "window_started_at": "2026-08-16T10:00:00Z",
+                "window_ended_at": "2026-08-16T11:00:00Z",
+                "rate_card_version": 1,
+            },
+            headers=header,
+        )
+        self.assertEqual(header_write_status, 200)
+        self.assertEqual(header_write_body["rating_outcome_code"], "accepted")
+
+        mismatch_write_status, mismatch_write_body = invoke_http(
+            rating_app,
+            "POST",
+            "/v1/rating-runs",
+            {
+                "tenant_reference": TENANT_TWO,
+                "window_started_at": "2026-08-16T10:00:00Z",
+                "window_ended_at": "2026-08-16T11:00:00Z",
+                "rate_card_version": 1,
+            },
+            headers=header,
+        )
+        self.assertEqual(mismatch_write_status, 422)
+        self.assertEqual(mismatch_write_body["rejection_reason_code"], "request_invalid")
+        self.assertNotIn(cash_proposal_id, mismatch_write_body)
+
+        non_string_header_status, non_string_header_body = invoke_http(
+            app,
+            "GET",
+            "/v1/journal-proposals",
+            query={"tenant_reference": TENANT_ONE},
+            extra_environ={"HTTP_X_CWL_TENANT_REFERENCE": 1},
+        )
+        self.assertEqual(non_string_header_status, 200)
+        self.assertEqual(len(non_string_header_body["journal_proposals"]), 2)

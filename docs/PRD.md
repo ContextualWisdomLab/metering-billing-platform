@@ -98,7 +98,7 @@ contextual-orchestrator usage
 ## Journal-proposal query acceptance
 
 - AIS can GET persisted proposals as the published `accounting_journal_proposal` contract.
-- Every read requires `tenant_reference`. Another tenant cannot list or fetch the first tenant's proposals.
+- Every read requires a tenant via optional `X-CWL-Tenant-Reference` or `tenant_reference`. If both are present they must match. Another tenant cannot list or fetch the first tenant's proposals.
 - Optional filters are `proposal_status` (`draft|validated|exported|rejected` only), inclusive `proposed_after`, and a bounded `cursor` / `page_limit`.
 - Cash and AR proposals share `journal_proposal` and appear in the same list. There is no cash-specific GET route.
 - HTTP 200 is a successful read. HTTP 422 is a missing tenant or illegal filter. HTTP 404 is an unknown route or unknown/cross-tenant proposal.

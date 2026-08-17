@@ -55,6 +55,7 @@ def invoke_http(
     payload: Mapping[str, object] | bytes | None = None,
     extra_environ: Mapping[str, object] | None = None,
     query: Mapping[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Call the WSGI app in-process and return status plus JSON body."""
     if payload is None:
@@ -72,6 +73,9 @@ def invoke_http(
         "wsgi.errors": io.StringIO(),
         "wsgi.url_scheme": "http",
     }
+    if headers is not None:
+        for header_name, header_value in headers.items():
+            environ["HTTP_" + header_name.upper().replace("-", "_")] = header_value
     if extra_environ is not None:
         environ.update(extra_environ)
     recorded: dict[str, Any] = {}

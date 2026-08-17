@@ -37,7 +37,7 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.http_app.create_http_app` exposes those services as stdlib JSON HTTP. The adapter requires a tenant on every write, returns published `as_contract_dict` contracts, and never posts a journal.
 
-`GET /v1/journal-proposals` is a safe collection read (Fielding et al., 2022; Google, 2024). AIS pulls validated proposals. Cash and AR rows share `journal_proposal`. Query does not flip `proposal_status`; AIS later returns `posting_receipt`.
+`GET /v1/journal-proposals` is a safe collection read (Fielding et al., 2022; Google, 2024). AIS pulls validated proposals and may pin `X-CWL-Tenant-Reference`. Body or query `tenant_reference` still works when the header is absent; a mismatch is HTTP 422. Cash and AR rows share `journal_proposal`. Query does not flip `proposal_status`; AIS later returns `posting_receipt`. Billing emits semantic account roles only.
 
 ## Security
 

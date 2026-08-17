@@ -2,7 +2,9 @@
 
 The application is a thin WSGI adapter:
 
-1. Parse JSON and require a tenant on every write.
+1. Parse JSON and require a tenant on every write.  Accept optional
+   ``X-CWL-Tenant-Reference``; body or query ``tenant_reference`` still works
+   when the header is absent.
 2. Call the existing in-process services.
 3. Return each service ``as_contract_dict`` result as JSON.
 4. Let AIS pull persisted journal proposals with GET.  Query never mutates
@@ -55,6 +57,7 @@ KNOWN_POST_PATHS = frozenset(
     }
 )
 SUCCESS_OUTCOMES = frozenset({"accepted", "duplicate_replay"})
+TENANT_HEADER_ENVIRON = "HTTP_X_CWL_TENANT_REFERENCE"
 
 
 class HttpRequestError(ValueError):
@@ -90,7 +93,7 @@ def create_http_app(ledger: MemoryUsageLedger | None = None) -> WSGIApp:
         if route_name in {"list_journal_proposals", "get_journal_proposal"}:
             try:
                 query = _read_query(environ)
-                tenant_reference = _require_tenant(query)
+                tenant_reference = _resolve_tenant_pin(environ, query)
                 if route_name == "list_journal_proposals":
                     page = exports.list_journal_proposals(
                         tenant_reference,
@@ -122,7 +125,7 @@ def create_http_app(ledger: MemoryUsageLedger | None = None) -> WSGIApp:
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
-            tenant_reference = _require_tenant(payload)
+            tenant_reference = _resolve_tenant_pin(environ, payload)
             body, status_code = _dispatch_write(
                 route_name,
                 path_values,
@@ -226,12 +229,46 @@ def _read_json_object(environ: WSGIEnvironment) -> dict[str, Any]:
     return loaded
 
 
-def _require_tenant(payload: Mapping[str, Any]) -> str:
-    """Return the write tenant or reject a request that omitted it."""
+def _header_tenant(environ: WSGIEnvironment) -> str | None:
+    """Return the optional X-CWL-Tenant-Reference pin, if present."""
+    raw_value = environ.get(TENANT_HEADER_ENVIRON)
+    if not isinstance(raw_value, str) or not raw_value:
+        return None
+    return raw_value
+
+
+def _payload_tenant(payload: Mapping[str, Any]) -> str | None:
+    """Return tenant_reference from a JSON body or query string, if present."""
     tenant_reference = payload.get("tenant_reference")
     if not isinstance(tenant_reference, str) or not tenant_reference:
+        return None
+    return tenant_reference
+
+
+def _require_tenant(payload: Mapping[str, Any]) -> str:
+    """Return the write tenant or reject a request that omitted it."""
+    tenant_reference = _payload_tenant(payload)
+    if tenant_reference is None:
         raise HttpRequestError("tenant_not_found")
     return tenant_reference
+
+
+def _resolve_tenant_pin(environ: WSGIEnvironment, payload: Mapping[str, Any]) -> str:
+    """Resolve the tenant from header, body/query, or both when they agree.
+
+    ``X-CWL-Tenant-Reference`` is optional.  Body or query ``tenant_reference``
+    still works when the header is absent.  If both are present they must be
+    identical; a mismatch is ``request_invalid``.
+    """
+    header_tenant = _header_tenant(environ)
+    payload_tenant = _payload_tenant(payload)
+    if header_tenant is not None and payload_tenant is not None:
+        if header_tenant != payload_tenant:
+            raise HttpRequestError("request_invalid")
+        return header_tenant
+    if header_tenant is not None:
+        return header_tenant
+    return _require_tenant(payload)
 
 
 def _parse_uuid(value: object, field_name: str) -> UUID:

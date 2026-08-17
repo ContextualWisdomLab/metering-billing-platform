@@ -109,7 +109,7 @@ python3 -m metering_billing.http_app
 # GET /v1/journal-proposals/{proposal_id}?tenant_reference=urn:cwl:tenant_001
 ```
 
-AIS pulls validated proposals from the same stdlib app. Cash and AR proposals share `journal_proposal` and appear in the same list. Query never marks a proposal exported, posted, or consumed.
+AIS pulls validated proposals from the same stdlib app. Pin the tenant with optional `X-CWL-Tenant-Reference` or with `tenant_reference` in the query or JSON body. If both are present they must match. Cash and AR proposals share `journal_proposal` and appear in the same list. Query never marks a proposal exported, posted, or consumed. Billing emits semantic account roles only; AIS maps `cash_receipt` to its own chart.
 
 ## Next action
 
