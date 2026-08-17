@@ -11,11 +11,18 @@ from uuid import UUID, uuid4
 
 from metering_billing import (
     AccountingExportService,
+    CollectionCaseService,
     CreditAdjustmentService,
+    InvoiceDraftService,
     MemoryUsageLedger,
+    PaymentIntentService,
+    PaymentSettlementService,
+    UsageIngestionService,
+    UsageRatingService,
     create_http_app,
     format_exact_decimal,
 )
+from metering_billing.http_app import HttpRequestError, _dispatch_write
 from metering_billing.contracts import validate_credit_adjustment, validate_journal_proposal
 from metering_billing.errors import (
     CreditAdjustmentOutcomeCode,
@@ -261,6 +268,8 @@ class CreditAdjustmentTests(unittest.TestCase):
         )
         self.assertEqual(result.proposal_status, "validated")
         self.assertEqual(len(ledger.journal_proposals), 1)
+        self.assertNotIn("collection_case_id", result.as_contract_dict())
+        self.assertEqual(validate_credit_adjustment(result.as_contract_dict()), ())
 
     def test_http_post_and_get_include_credit_proposal_on_journal_list(self) -> None:
         """Operators POST a credit; AIS GET list includes the validated proposal."""
@@ -614,6 +623,50 @@ class CreditAdjustmentTests(unittest.TestCase):
         self.assertTrue(
             any("credit_adjustment_id" in error for error in accepted_missing_id)
         )
+        self.assertTrue(
+            validate_credit_adjustment({"credit_adjustment_contract_version": 1})
+        )
+        self.assertEqual(
+            validate_credit_adjustment(
+                {
+                    "credit_adjustment_contract_version": 1,
+                    "credit_adjustment_outcome_code": "rejected",
+                    "rejection_reason_code": "tenant_not_found",
+                }
+            ),
+            (),
+        )
+        with self.assertRaises(HttpRequestError) as missing_credits:
+            _dispatch_write(
+                "credit_adjustments",
+                {},
+                TENANT_ONE,
+                {
+                    "invoice_draft_id": str(invoice_draft_id),
+                    "credit_amount": format_exact_decimal(PARTIAL_CREDIT_AMOUNT),
+                    "credit_reason_code": "goodwill",
+                },
+                UsageIngestionService(ledger),
+                UsageRatingService(ledger),
+                InvoiceDraftService(ledger),
+                AccountingExportService(ledger),
+                CollectionCaseService(ledger),
+                PaymentIntentService(ledger),
+                PaymentSettlementService(ledger),
+            )
+        self.assertEqual(missing_credits.exception.rejection_reason_code, "request_invalid")
+        missing_reason_status, missing_reason_body = invoke_http(
+            create_http_app(ledger),
+            "POST",
+            "/v1/credit-adjustments",
+            {
+                "tenant_reference": TENANT_ONE,
+                "invoice_draft_id": str(invoice_draft_id),
+                "credit_amount": format_exact_decimal(PARTIAL_CREDIT_AMOUNT),
+            },
+        )
+        self.assertEqual(missing_reason_status, 422)
+        self.assertEqual(missing_reason_body["rejection_reason_code"], "request_invalid")
 
 
 if __name__ == "__main__":
