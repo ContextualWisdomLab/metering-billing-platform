@@ -268,6 +268,33 @@ class TaxAssessmentTests(unittest.TestCase):
             assessor.assess_tax(TENANT_ONE, xxx_draft, 1).rejection_reason_code,
             TaxAssessmentRejectionReasonCode.CURRENCY_EXPONENT_UNKNOWN,
         )
+        other_rate = rates.publish_tax_rate(TENANT_TWO, "vat", STANDARD_TAX_RATE)
+        self.assertEqual(
+            assessor.assess_tax(
+                TENANT_ONE, own_draft, other_rate.tax_rate_version_id
+            ).rejection_reason_code,
+            TaxAssessmentRejectionReasonCode.TAX_RATE_NOT_FOUND,
+        )
+        scientific_id = generate_record_id()
+        tenant = ledger.require_tenant(TENANT_ONE)
+        ledger.insert_invoice_draft(
+            StoredInvoiceDraft(
+                invoice_draft_id=scientific_id,
+                tenant_account_id=tenant.tenant_account_id,
+                rating_run_id=generate_record_id(),
+                usage_snapshot_hash="sha256:" + ("b" * 64),
+                currency_code="USD",
+                invoice_draft_status="draft",
+                drafted_total_amount="1e2",  # type: ignore[arg-type]
+                recorded_at=datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+                invoice_draft_lines=(),
+            ),
+            (),
+        )
+        self.assertEqual(
+            assessor.assess_tax(TENANT_ONE, scientific_id, 1).rejection_reason_code,
+            TaxAssessmentRejectionReasonCode.DRAFT_TOTAL_INVALID,
+        )
         first = rates.publish_tax_rate(TENANT_ONE, "vat", STANDARD_TAX_RATE)
         with self.assertRaises(TaxRateQueryError) as other_rate:
             TaxRateService(ledger).get_tax_rate_version(TENANT_TWO, first.tax_rate_version_id)
@@ -504,6 +531,11 @@ class TaxAssessmentTests(unittest.TestCase):
             ).as_contract_dict()
         self.assertTrue(validate_tax_rate(["not a mapping"]))
         self.assertTrue(validate_tax_rate({"tax_rate_contract_version": 1}))
+        self.assertTrue(
+            validate_tax_rate(
+                {"tax_rate_contract_version": 1, "tax_rate_outcome_code": "accepted"}
+            )
+        )
         self.assertEqual(
             validate_tax_rate(
                 {
@@ -520,6 +552,33 @@ class TaxAssessmentTests(unittest.TestCase):
             )
         )
         self.assertTrue(validate_tax_assessment(["not a mapping"]))
+        self.assertTrue(validate_tax_assessment({"tax_assessment_contract_version": 1}))
+        self.assertTrue(
+            validate_tax_assessment(
+                {"tax_assessment_contract_version": 1, "tax_assessment_outcome_code": "accepted"}
+            )
+        )
+        self.assertTrue(
+            validate_tax_assessment(
+                {
+                    "tax_assessment_contract_version": 1,
+                    "tax_assessment_outcome_code": "accepted",
+                    "tax_exclusive_amount": "abc",
+                    "tax_amount": "10.00",
+                    "tax_inclusive_amount": "110.00",
+                }
+            )
+        )
+        self.assertEqual(
+            validate_tax_assessment(
+                {
+                    "tax_assessment_contract_version": 1,
+                    "tax_assessment_outcome_code": "rejected",
+                    "rejection_reason_code": "tenant_not_found",
+                }
+            ),
+            (),
+        )
         self.assertTrue(
             validate_tax_assessment(
                 {"tax_assessment_contract_version": 1, "tax_assessment_outcome_code": "rejected"}
@@ -752,6 +811,17 @@ class TaxAssessmentTests(unittest.TestCase):
             app, "PUT", f"/v1/tax-assessments/{assessed.tax_assessment_id}"
         )
         self.assertEqual(method_assessment_status, 422)
+        collection_get_status, collection_get_body = invoke_http(app, "GET", "/v1/tax-assessments")
+        self.assertEqual(collection_get_status, 422)
+        self.assertEqual(collection_get_body["rejection_reason_code"], "request_invalid")
+        bad_uuid_status, bad_uuid_body = invoke_http(
+            app,
+            "GET",
+            "/v1/tax-assessments/" + ("-" * 36),
+            query={"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(bad_uuid_status, 422)
+        self.assertEqual(bad_uuid_body["rejection_reason_code"], "request_invalid")
         with mock.patch(
             "metering_billing.http_app.TaxRateService.get_tax_rate_version",
             side_effect=ValueError("closed"),
