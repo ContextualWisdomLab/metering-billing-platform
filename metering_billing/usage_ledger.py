@@ -135,6 +135,7 @@ class StoredUsageEvent:
     """Immutable persisted usage fact."""
 
     usage_event_id: UUID
+    producer_event_id: UUID
     tenant_account_id: UUID
     billing_account_id: UUID
     billing_principal_id: UUID
@@ -165,6 +166,7 @@ class MemoryUsageLedger:
     usage_events: dict[UUID, StoredUsageEvent] = field(default_factory=dict)
     source_event_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
     payload_hash_index: dict[tuple[UUID, str, int], UUID] = field(default_factory=dict)
+    producer_event_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     accounting_export_records: list[dict[str, str]] = field(default_factory=list)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
@@ -447,19 +449,40 @@ class MemoryUsageLedger:
             return None
         return self.usage_events[usage_event_id]
 
+    def find_by_producer_event_id(
+        self, tenant_account_id: UUID, producer_event_id: UUID
+    ) -> StoredUsageEvent | None:
+        """Return the event stored for a tenant-scoped producer event identifier."""
+        usage_event_id = self.producer_event_index.get((tenant_account_id, producer_event_id))
+        if usage_event_id is None:
+            return None
+        return self.usage_events[usage_event_id]
+
     def insert_usage_event(self, event: StoredUsageEvent) -> StoredUsageEvent:
-        """Append an immutable usage event.  Existing rows are never updated."""
+        """Append an immutable usage event.  Existing rows are never updated.
+
+        This in-memory ledger is not thread-safe.  Duplicate checks and insert
+        are a single-threaded sequence.  A later PostgreSQL adapter should turn
+        unique-constraint violations into replay or conflict receipts.
+        """
         source_key = (event.tenant_account_id, event.source_event_key)
         hash_key = (
             event.tenant_account_id,
             event.event_payload_hash,
             event.event_contract_version,
         )
-        if source_key in self.source_event_index or hash_key in self.payload_hash_index:
+        producer_key = (event.tenant_account_id, event.producer_event_id)
+        if (
+            event.usage_event_id in self.usage_events
+            or source_key in self.source_event_index
+            or hash_key in self.payload_hash_index
+            or producer_key in self.producer_event_index
+        ):
             raise ValueError("usage events are immutable and cannot be replaced")
         self.usage_events[event.usage_event_id] = event
         self.source_event_index[source_key] = event.usage_event_id
         self.payload_hash_index[hash_key] = event.usage_event_id
+        self.producer_event_index[producer_key] = event.usage_event_id
         return event
 
     def list_usage_events_in_window(

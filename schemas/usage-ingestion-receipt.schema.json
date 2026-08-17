@@ -61,7 +61,8 @@
             "measurement_meter_duplicate",
             "event_outside_time_window",
             "source_event_conflict",
-            "payload_hash_conflict"
+            "payload_hash_conflict",
+            "producer_event_conflict"
           ]
         }
       }

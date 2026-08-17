@@ -60,7 +60,7 @@ SCHEMA_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 COLUMN_NAME_PATTERN = re.compile(
-    r"^\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+"
+    r"^\s+(?:ADD\s+COLUMN\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+"
     r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean)\b",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -154,7 +154,6 @@ def validate_repository(root: Path) -> tuple[str, ...]:
             errors.extend(validate_sql_object_names(sql_text))
             if "provider_customer_id" in sql_text or "stripe_customer_id" in sql_text:
                 errors.append("provider-specific identifiers must remain in mapping tables")
-                break
 
     requirements_path = root / "requirements-quality.txt"
     if requirements_path.is_file():

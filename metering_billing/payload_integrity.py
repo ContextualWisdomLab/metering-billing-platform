@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC
 from typing import Any, Mapping
+
+from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
+from metering_billing.time_window import parse_iso8601_datetime
 
 SOURCE_PAYLOAD_FIELDS = (
     "event_contract_version",
@@ -33,8 +37,34 @@ SOURCE_PAYLOAD_FIELDS = (
 
 
 def canonical_source_payload(event: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the producer-controlled fields that participate in the digest."""
-    return {field_name: event[field_name] for field_name in SOURCE_PAYLOAD_FIELDS if field_name in event}
+    """Return producer-controlled fields with normalized decimals and instants."""
+    payload: dict[str, Any] = {}
+    for field_name in SOURCE_PAYLOAD_FIELDS:
+        if field_name not in event:
+            continue
+        value = event[field_name]
+        if field_name == "occurred_at":
+            payload[field_name] = (
+                parse_iso8601_datetime(value).astimezone(UTC).isoformat().replace("+00:00", "Z")
+            )
+        elif field_name == "measurements" and isinstance(value, list):
+            payload[field_name] = [
+                dict(measurement, quantity=_canonical_quantity_text(measurement["quantity"]))
+                if isinstance(measurement, Mapping) and "quantity" in measurement
+                else measurement
+                for measurement in value
+            ]
+        else:
+            payload[field_name] = value
+    return payload
+
+
+def _canonical_quantity_text(quantity_text: Any) -> str:
+    """Render a quantity so ``1`` and ``1.0`` produce the same digest."""
+    formatted = format_exact_decimal(parse_exact_decimal(str(quantity_text)))
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted
 
 
 def compute_source_payload_hash(event: Mapping[str, Any]) -> str:

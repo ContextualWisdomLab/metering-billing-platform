@@ -9,7 +9,8 @@ Buyers emit usage at least once.  A replay must not create a second stored fact,
 ## Decision
 
 - Persist usage events as append-only rows keyed by `(tenant_account_id, source_event_key)`.
-- Treat `(tenant_account_id, source_payload_hash, event_contract_version)` as a second identity.  An identical replay is acknowledged; a different hash or contract version is a conflict.
+- Generate the internal `usage_event_id`.  The producer `event_id` is stored as `producer_event_id` and is unique per tenant.
+- Treat `(tenant_account_id, source_payload_hash, event_contract_version)` as a second identity.  An identical replay is acknowledged; a different hash or contract version is a conflict.  Equivalent decimal and UTC instant spellings hash to the same digest.
 - Keep attribution tenant-scoped.  A billing account, principal, or credential URN from another tenant is rejected.
 - Store quantities as exact decimals.  Binary floating-point values are not accepted.
 - Query and optional batch bounds use half-open ISO 8601 windows `[window_started_at, window_ended_at)`.

@@ -17,6 +17,20 @@ from scripts.validate_repository import (
     validate_schema_instance,
 )
 
+__all__ = (
+    "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
+    "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "USAGE_EVENT_SCHEMA_NAME",
+    "USAGE_INGESTION_RECEIPT_SCHEMA_NAME",
+    "default_schemas_directory",
+    "load_json_schema",
+    "validate_accounting_journal_proposal",
+    "validate_journal_proposal",
+    "validate_schema_instance",
+    "validate_usage_event",
+    "validate_usage_ingestion_receipt",
+)
+
 USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
 USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
@@ -53,9 +67,37 @@ def validate_usage_event(
 def validate_usage_ingestion_receipt(
     receipt: Mapping[str, Any], schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
-    """Validate an ingestion receipt against the published receipt contract."""
+    """Validate receipt shape plus outcome evidence and count invariants."""
     schema = load_json_schema(USAGE_INGESTION_RECEIPT_SCHEMA_NAME, schemas_directory)
-    return validate_schema_instance(schema, receipt)
+    errors = list(validate_schema_instance(schema, receipt))
+    if errors:
+        return tuple(errors)
+
+    event_receipts = receipt["event_receipts"]
+    accepted = 0
+    duplicate_replays = 0
+    rejected = 0
+    for event_receipt in event_receipts:
+        outcome = event_receipt["ingestion_outcome_code"]
+        if outcome == "accepted":
+            accepted += 1
+            if "usage_event_id" not in event_receipt:
+                errors.append("$: accepted receipts must include usage_event_id")
+        elif outcome == "duplicate_replay":
+            duplicate_replays += 1
+            if "usage_event_id" not in event_receipt:
+                errors.append("$: duplicate_replay receipts must include usage_event_id")
+        else:
+            rejected += 1
+            if "rejection_reason_code" not in event_receipt:
+                errors.append("$: rejected receipts must include rejection_reason_code")
+    if accepted != receipt["accepted_event_count"]:
+        errors.append("$: accepted_event_count must match event_receipts")
+    if duplicate_replays != receipt["duplicate_replay_count"]:
+        errors.append("$: duplicate_replay_count must match event_receipts")
+    if rejected != receipt["rejected_event_count"]:
+        errors.append("$: rejected_event_count must match event_receipts")
+    return tuple(errors)
 
 
 def validate_journal_proposal(

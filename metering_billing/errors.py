@@ -39,6 +39,7 @@ class RejectionReasonCode(StrEnum):
     EVENT_OUTSIDE_TIME_WINDOW = "event_outside_time_window"
     SOURCE_EVENT_CONFLICT = "source_event_conflict"
     PAYLOAD_HASH_CONFLICT = "payload_hash_conflict"
+    PRODUCER_EVENT_CONFLICT = "producer_event_conflict"
 
 
 class ExactDecimalError(ValueError):

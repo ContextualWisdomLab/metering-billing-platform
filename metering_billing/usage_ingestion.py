@@ -22,6 +22,7 @@ from uuid import UUID
 from metering_billing.contracts import (
     USAGE_EVENT_SCHEMA_NAME,
     load_json_schema,
+    validate_schema_instance,
     validate_usage_event,
 )
 from metering_billing.errors import (
@@ -39,8 +40,6 @@ from metering_billing.usage_ledger import (
     StoredUsageMeasurement,
     generate_record_id,
 )
-from scripts.validate_repository import validate_schema_instance
-
 Clock = Callable[[], datetime]
 
 
@@ -149,11 +148,6 @@ class UsageIngestionService:
 
         try:
             occurred_at = parse_iso8601_datetime(event["occurred_at"])
-            recorded_at = (
-                parse_iso8601_datetime(event["recorded_at"])
-                if "recorded_at" in event
-                else self._clock()
-            )
         except TimeWindowError:
             return _rejected(
                 source_event_key,
@@ -162,6 +156,7 @@ class UsageIngestionService:
                 tenant_reference,
                 RejectionReasonCode.SCHEMA_INVALID,
             )
+        recorded_at = self._clock()
 
         if time_window is not None and not time_window.contains(occurred_at):
             return _rejected(
@@ -214,6 +209,19 @@ class UsageIngestionService:
                 RejectionReasonCode.PAYLOAD_HASH_CONFLICT,
             )
 
+        producer_event_id = UUID(event["event_id"])
+        producer_existing = self.ledger.find_by_producer_event_id(
+            tenant.tenant_account_id, producer_event_id
+        )
+        if producer_existing is not None:
+            return _rejected(
+                source_event_key,
+                event_contract_version,
+                source_payload_hash,
+                tenant_reference,
+                RejectionReasonCode.PRODUCER_EVENT_CONFLICT,
+            )
+
         account, account_error = self.ledger.resolve_billing_account(
             tenant, event["billing_account_reference"]
         )
@@ -260,8 +268,9 @@ class UsageIngestionService:
             assert credential is not None
             credential_record_id = credential.credential_record_id
 
+        usage_event_id = generate_record_id()
         try:
-            measurements = self._build_measurements(event["event_id"], event["measurements"], occurred_at)
+            measurements = self._build_measurements(usage_event_id, event["measurements"], occurred_at)
         except _MeasurementRejected as error:
             return _rejected(
                 source_event_key,
@@ -273,7 +282,8 @@ class UsageIngestionService:
 
         stored = self.ledger.insert_usage_event(
             StoredUsageEvent(
-                usage_event_id=UUID(event["event_id"]),
+                usage_event_id=usage_event_id,
+                producer_event_id=producer_event_id,
                 tenant_account_id=tenant.tenant_account_id,
                 billing_account_id=account.billing_account_id,
                 billing_principal_id=principal.billing_principal_id,
@@ -339,7 +349,7 @@ class UsageIngestionService:
 
     def _build_measurements(
         self,
-        usage_event_id: str,
+        usage_event_id: UUID,
         measurements: Sequence[Mapping[str, Any]],
         occurred_at: datetime,
     ) -> tuple[StoredUsageMeasurement, ...]:
@@ -366,7 +376,7 @@ class UsageIngestionService:
             built.append(
                 StoredUsageMeasurement(
                     usage_measurement_id=generate_record_id(),
-                    usage_event_id=UUID(usage_event_id),
+                    usage_event_id=usage_event_id,
                     meter_definition_id=definition.meter_definition_id,
                     meter_code=definition.meter_code,
                     unit_code=definition.unit_code,

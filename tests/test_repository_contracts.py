@@ -262,8 +262,13 @@ class RepositoryContractTests(unittest.TestCase):
         )
         for expected_fragment in (
             "event_contract_version",
+            "producer_event_id",
+            "SET event_contract_version = 1",
             "UNIQUE (tenant_account_id, event_payload_hash, event_contract_version)",
+            "UNIQUE (tenant_account_id, usage_event_id)",
+            "UNIQUE (tenant_account_id, producer_event_id)",
             "CREATE TABLE billing_core.usage_ingestion_receipt",
+            "FOREIGN KEY (tenant_account_id, usage_event_id)",
             "ingestion_outcome_code",
         ):
             self.assertIn(expected_fragment, sql)

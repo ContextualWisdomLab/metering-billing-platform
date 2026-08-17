@@ -31,6 +31,7 @@ from metering_billing import (
 )
 from metering_billing.contracts import (
     validate_journal_proposal,
+    validate_schema_instance,
     validate_usage_ingestion_receipt,
 )
 from metering_billing.errors import ExactDecimalError, TimeWindowError
@@ -263,6 +264,68 @@ class UsageIngestionTests(unittest.TestCase):
         stored = next(iter(service.ledger.usage_events.values()))
         self.assertEqual(stored.measurements[0].measured_quantity, Decimal("1810"))
 
+    def test_reused_producer_event_id_does_not_overwrite_usage(self) -> None:
+        """A new source key cannot reuse a producer event_id to replace history."""
+        service = UsageIngestionService(seed_ledger())
+        original = make_event()
+        first = service.ingest_usage_event(original)
+        self.assertEqual(first.ingestion_outcome_code, IngestionOutcomeCode.ACCEPTED)
+        colliding = make_event(
+            source_event_key="workflow_381:step_04:attempt_02",
+            occurred_at="2026-08-16T10:29:00Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "9",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        receipt = service.ingest_usage_event(colliding)
+        self.assertEqual(receipt.rejection_reason_code, RejectionReasonCode.PRODUCER_EVENT_CONFLICT)
+        stored = service.ledger.usage_events[first.usage_event_id]
+        self.assertEqual(stored.measurements[0].measured_quantity, Decimal("1810"))
+        self.assertEqual(stored.producer_event_id, UUID(original["event_id"]))
+        self.assertNotEqual(stored.usage_event_id, stored.producer_event_id)
+
+    def test_equivalent_decimal_and_timestamp_text_share_one_hash(self) -> None:
+        """Canonical hashing treats 1 and 1.0, and Z and +00:00, as one fact."""
+        first = make_event(
+            occurred_at="2026-08-16T10:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "1.0",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        second = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf888",
+            source_event_key="workflow_381:step_04:attempt_alt",
+            occurred_at="2026-08-16T10:27:42.482+00:00",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "1",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        self.assertEqual(first["source_payload_hash"], second["source_payload_hash"])
+        service = UsageIngestionService(seed_ledger())
+        self.assertEqual(
+            service.ingest_usage_event(first).ingestion_outcome_code,
+            IngestionOutcomeCode.ACCEPTED,
+        )
+        self.assertEqual(
+            service.ingest_usage_event(second).rejection_reason_code,
+            RejectionReasonCode.PAYLOAD_HASH_CONFLICT,
+        )
+
     def test_same_payload_with_new_source_key_is_a_hash_conflict(self) -> None:
         """Hash-version identity rejects a replay that only changes the envelope key."""
         service = UsageIngestionService(seed_ledger())
@@ -480,10 +543,16 @@ class UsageIngestionTests(unittest.TestCase):
 
     def test_default_service_clock_and_receipt_optional_fields(self) -> None:
         """The zero-argument service constructs a ledger and a timezone-aware clock."""
-        service = UsageIngestionService()
-        self.assertIsInstance(service.ledger, MemoryUsageLedger)
-        self.assertIsNotNone(service._clock().tzinfo)
-        rejected = service.ingest_usage_event({"source_event_key": "", "event_contract_version": "x"})
+        fixed = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+        service = UsageIngestionService(seed_ledger(), clock=lambda: fixed)
+        accepted = service.ingest_usage_event(make_event(recorded_at="2020-01-01T00:00:00Z"))
+        self.assertEqual(
+            service.ledger.usage_events[accepted.usage_event_id].recorded_at,
+            fixed,
+        )
+        empty = UsageIngestionService()
+        self.assertIsInstance(empty.ledger, MemoryUsageLedger)
+        rejected = empty.ingest_usage_event({"source_event_key": "", "event_contract_version": "x"})
         payload = rejected.as_contract_dict()
         self.assertEqual(payload["source_event_key"], "unavailable_source_event_key")
         self.assertNotIn("event_contract_version", payload)
@@ -639,6 +708,11 @@ class LedgerAndContractUnitTests(unittest.TestCase):
         self.assertIsNone(
             ledger.find_by_payload_hash(tenant.tenant_account_id, "sha256:" + "b" * 64, 1)
         )
+        self.assertIsNone(
+            ledger.find_by_producer_event_id(
+                tenant.tenant_account_id, UUID("019d7b92-1aa0-7a7f-b61c-962c0f4bf61c")
+            )
+        )
 
     def test_insert_is_immutable_and_meter_versions_select_highest(self) -> None:
         """A second insert of the same identity fails, and the newest meter wins."""
@@ -648,6 +722,30 @@ class LedgerAndContractUnitTests(unittest.TestCase):
         stored = service.ledger.usage_events[receipt.usage_event_id]
         with self.assertRaises(ValueError):
             service.ledger.insert_usage_event(stored)
+        colliding_identity = replace(
+            stored,
+            usage_event_id=generate_record_id(),
+            source_event_key="other_source_event",
+            producer_event_id=UUID("019d7b92-1aa0-7a7f-b61c-962c0f4bf999"),
+        )
+        with self.assertRaises(ValueError):
+            service.ledger.insert_usage_event(colliding_identity)
+        colliding_producer = replace(
+            stored,
+            usage_event_id=generate_record_id(),
+            source_event_key="third_source_event",
+            event_payload_hash="sha256:" + "e" * 64,
+        )
+        with self.assertRaises(ValueError):
+            service.ledger.insert_usage_event(colliding_producer)
+        colliding_source = replace(
+            stored,
+            usage_event_id=generate_record_id(),
+            event_payload_hash="sha256:" + "f" * 64,
+            producer_event_id=UUID("019d7b92-1aa0-7a7f-b61c-962c0f4bfbbb"),
+        )
+        with self.assertRaises(ValueError):
+            service.ledger.insert_usage_event(colliding_source)
         newer = service.ledger.register_meter_definition(
             "gen_ai_output_token",
             2,
@@ -748,6 +846,74 @@ class LedgerAndContractUnitTests(unittest.TestCase):
         self.assertEqual(compute_source_payload_hash(event), expected)
         self.assertEqual(source_payload_hash_errors(event), ())
         self.assertTrue(source_payload_hash_errors(make_event(source_payload_hash="sha256:" + "c" * 64)))
+        raw_payload = canonical_source_payload({"occurred_at": "2026-08-16T10:27:42.482Z", "measurements": ["skip"]})
+        self.assertEqual(raw_payload["measurements"], ["skip"])
+
+    def test_receipt_semantics_require_ids_reasons_and_matching_counts(self) -> None:
+        """A receipt contract is invalid when evidence or counts drift."""
+        valid = {
+            "batch_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "receipt_contract_version": 1,
+            "accepted_event_count": 1,
+            "duplicate_replay_count": 0,
+            "rejected_event_count": 0,
+            "event_receipts": [
+                {
+                    "source_event_key": "workflow_381:step_04:attempt_01",
+                    "ingestion_outcome_code": "accepted",
+                    "usage_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+                }
+            ],
+        }
+        self.assertEqual(validate_usage_ingestion_receipt(valid), ())
+        missing_id = json.loads(json.dumps(valid))
+        del missing_id["event_receipts"][0]["usage_event_id"]
+        self.assertIn(
+            "$: accepted receipts must include usage_event_id",
+            validate_usage_ingestion_receipt(missing_id),
+        )
+        replay = json.loads(json.dumps(valid))
+        replay["accepted_event_count"] = 0
+        replay["duplicate_replay_count"] = 1
+        replay["event_receipts"][0]["ingestion_outcome_code"] = "duplicate_replay"
+        del replay["event_receipts"][0]["usage_event_id"]
+        self.assertIn(
+            "$: duplicate_replay receipts must include usage_event_id",
+            validate_usage_ingestion_receipt(replay),
+        )
+        rejected = json.loads(json.dumps(valid))
+        rejected["accepted_event_count"] = 0
+        rejected["rejected_event_count"] = 1
+        rejected["event_receipts"][0]["ingestion_outcome_code"] = "rejected"
+        del rejected["event_receipts"][0]["usage_event_id"]
+        self.assertIn(
+            "$: rejected receipts must include rejection_reason_code",
+            validate_usage_ingestion_receipt(rejected),
+        )
+        mismatched = json.loads(json.dumps(valid))
+        mismatched["accepted_event_count"] = 4
+        self.assertIn(
+            "$: accepted_event_count must match event_receipts",
+            validate_usage_ingestion_receipt(mismatched),
+        )
+        mismatched_replay = json.loads(json.dumps(valid))
+        mismatched_replay["event_receipts"][0]["ingestion_outcome_code"] = "duplicate_replay"
+        self.assertIn(
+            "$: duplicate_replay_count must match event_receipts",
+            validate_usage_ingestion_receipt(mismatched_replay),
+        )
+        mismatched_rejected = json.loads(json.dumps(valid))
+        mismatched_rejected["event_receipts"][0]["ingestion_outcome_code"] = "rejected"
+        mismatched_rejected["event_receipts"][0]["rejection_reason_code"] = "schema_invalid"
+        del mismatched_rejected["event_receipts"][0]["usage_event_id"]
+        self.assertIn(
+            "$: rejected_event_count must match event_receipts",
+            validate_usage_ingestion_receipt(mismatched_rejected),
+        )
+        self.assertTrue(
+            validate_usage_ingestion_receipt({"batch_receipt_id": 1})
+        )
+        self.assertEqual(validate_schema_instance({"type": "object"}, {}), ())
 
     def test_schema_loader_rejects_missing_and_non_object_contracts(self) -> None:
         """Importers get an actionable error when a contract file is unusable."""
