@@ -106,6 +106,8 @@ Payment-intent presentment does not add a table.  `GET /v1/payment-intents/{paym
 
 ## Payment-receipt-presentment projection
 
+Credit-adjustment presentment does not add a table.  `GET /v1/credit-adjustments/{credit_adjustment_id}` projects stored `credit_adjustment` rows.  `credit_amount`, `tax_exclusive_amount`, and `tax_amount` are the exact stored amounts.  `credit_adjustment_status` stays `recorded`.  Next operator action is `wait`.
+
 Payment-receipt presentment does not add a table.  `GET /v1/payment-receipts/{payment_receipt_id}` projects stored `payment_receipt` rows and the current `collection_case`.  `received_amount` is the exact stored amount.  `remaining_outstanding_amount` is the current case outstanding.  `payment_receipt_status` stays `applied`.  Next operator action is `record_receipt` or `drain_or_wait`.
 
 ## Tax-assessment identity

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/credit-adjustment-presentment/v1",
+  "title": "Credit Adjustment Presentment",
+  "description": "Tenant-scoped commercial credit-adjustment statement projected from a stored credit_adjustment. Amounts are exact-decimal strings. Status stays recorded. Next operator action is wait. The document is not a posting, capture, or statutory credit note.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "credit_adjustment_presentment_contract_version",
+    "credit_adjustment_id",
+    "tenant_reference",
+    "invoice_draft_id",
+    "currency_code",
+    "credit_amount",
+    "tax_exclusive_amount",
+    "tax_amount",
+    "credit_adjustment_status",
+    "recorded_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "credit_adjustment_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "credit_adjustment_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "credit_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_exclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "credit_adjustment_status": {
+      "type": "string",
+      "enum": ["recorded"]
+    },
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}

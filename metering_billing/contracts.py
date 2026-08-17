@@ -33,6 +33,7 @@ __all__ = (
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
+    "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
@@ -49,6 +50,7 @@ __all__ = (
     "validate_collection_case_presentment",
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",
+    "validate_credit_adjustment_presentment",
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
@@ -77,6 +79,7 @@ INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
 COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
 PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json"
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
+CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
@@ -387,6 +390,41 @@ def validate_payment_receipt_presentment(
                 errors.append("$: residual receipts must record another receipt")
         except Exception:
             errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    return tuple(errors)
+
+
+def validate_credit_adjustment_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate credit-adjustment presentment shape plus amount invariants."""
+    schema = load_json_schema(CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    credit_amount = statement.get("credit_amount")
+    exclusive = statement.get("tax_exclusive_amount")
+    tax_amount = statement.get("tax_amount")
+    action = statement.get("next_operator_action")
+    status = statement.get("credit_adjustment_status")
+    parsed_amounts: list[Decimal] = []
+    for field_name, value in (
+        ("credit_amount", credit_amount),
+        ("tax_exclusive_amount", exclusive),
+        ("tax_amount", tax_amount),
+    ):
+        if isinstance(value, str):
+            try:
+                parsed = Decimal(value)
+                if parsed < Decimal("0"):
+                    errors.append(f"$: {field_name} must not be negative")
+                else:
+                    parsed_amounts.append(parsed)
+            except Exception:
+                errors.append(f"$: {field_name} must be an exact decimal")
+    if len(parsed_amounts) == 3 and parsed_amounts[0] != parsed_amounts[1] + parsed_amounts[2]:
+        errors.append("$: tax_exclusive_amount plus tax_amount must equal credit_amount")
+    if status == "recorded" and action != "wait":
+        errors.append("$: recorded credits must wait")
     return tuple(errors)
 
 

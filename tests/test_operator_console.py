@@ -12,6 +12,7 @@ from metering_billing.contracts import (
     validate_invoice_presentment,
     validate_payment_intent_presentment,
     validate_payment_receipt_presentment,
+    validate_credit_adjustment_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -35,6 +36,10 @@ PAYMENT_INTENT_FIXTURE_NAMES = (
 PAYMENT_RECEIPT_FIXTURE_NAMES = (
     "applied_full_payment_receipt.json",
     "applied_partial_payment_receipt.json",
+)
+CREDIT_ADJUSTMENT_FIXTURE_NAMES = (
+    "recorded_morning_credit.json",
+    "recorded_taxed_credit.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -113,6 +118,16 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("applied_partial_payment_receipt.json")["next_operator_action"],
             "record_receipt",
         )
+        for fixture_name in CREDIT_ADJUSTMENT_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_credit_adjustment_presentment(payload), ())
+            for field_name in ("credit_amount", "tax_exclusive_amount", "tax_amount"):
+                value = payload[field_name]
+                self.assertIsInstance(value, str)
+                self.assertNotIsInstance(value, float)
+                parse_exact_decimal(value)
+        self.assertEqual(self._fixture("recorded_morning_credit.json")["next_operator_action"], "wait")
+        self.assertEqual(self._fixture("recorded_taxed_credit.json")["credit_amount"], "11.00")
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -139,6 +154,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "CollectionCase",
             "PaymentIntent",
             "PaymentReceipt",
+            "CreditAdjustment",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -146,6 +162,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + COLLECTION_FIXTURE_NAMES
             + PAYMENT_INTENT_FIXTURE_NAMES
             + PAYMENT_RECEIPT_FIXTURE_NAMES
+            + CREDIT_ADJUSTMENT_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -155,6 +172,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "Record the receipt; the cash journal is already validated for AIS to pull",
             inventory,
         )
+        self.assertIn("Record the credit; AIS pulls the validated journal", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

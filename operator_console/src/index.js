@@ -19,3 +19,8 @@ export {
   PAYMENT_RECEIPT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextPaymentReceiptActionCopy,
 } from "./payment_receipt.js";
+export {
+  renderCreditAdjustment,
+  CREDIT_ADJUSTMENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCreditAdjustmentActionCopy,
+} from "./credit_adjustment.js";

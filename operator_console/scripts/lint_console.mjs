@@ -18,6 +18,7 @@ const moneyFields = [
   "payment_amount",
   "received_amount",
   "remaining_outstanding_amount",
+  "credit_amount",
 ];
 const lineMoneyFields = ["quantity", "unit_amount", "line_amount"];
 

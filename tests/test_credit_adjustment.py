@@ -335,7 +335,9 @@ class CreditAdjustmentTests(unittest.TestCase):
         )
         self.assertEqual(get_status, 200)
         self.assertEqual(get_body["credit_adjustment_id"], credit_adjustment_id)
-        self.assertEqual(get_body["proposal_id"], proposal_id)
+        self.assertEqual(get_body["invoice_draft_id"], str(invoice_draft_id))
+        self.assertEqual(get_body["next_operator_action"], "wait")
+        self.assertNotIn("proposal_id", get_body)
 
         ledger.register_tenant(TENANT_TWO)
         other_status, other_body = invoke_http(
@@ -382,7 +384,7 @@ class CreditAdjustmentTests(unittest.TestCase):
         self.assertEqual(get_missing_tenant, 422)
         self.assertEqual(get_missing_body["rejection_reason_code"], "tenant_not_found")
 
-        method_status, method_body = invoke_http(app, "GET", "/v1/credit-adjustments")
+        method_status, method_body = invoke_http(app, "PUT", "/v1/credit-adjustments")
         self.assertEqual(method_status, 422)
         self.assertEqual(method_body["rejection_reason_code"], "request_invalid")
 
@@ -593,7 +595,7 @@ class CreditAdjustmentTests(unittest.TestCase):
         self.assertEqual(unknown_get_status, 422)
         self.assertEqual(unknown_get_body["rejection_reason_code"], "tenant_not_found")
         with mock.patch(
-            "metering_billing.http_app.CreditAdjustmentService.get_credit_adjustment",
+            "metering_billing.http_app.CreditAdjustmentPresentmentService.present_credit_adjustment",
             side_effect=ValueError("closed"),
         ):
             value_status, value_body = invoke_http(

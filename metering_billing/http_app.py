@@ -12,9 +12,11 @@ The application is a thin WSGI adapter:
 5. Let an operator POST a posting-receipt pull and GET a stored observation.
    The pull stores AIS ``posting_status_code`` without flipping Billing
    ``proposal_status``.
-6. Let a buyer POST a commercial credit adjustment.  The adapter records the
-   credit and returns the paired validated proposal.  AIS later pulls that
-   proposal.  This path never posts and never calls AIS.
+6. Let a buyer POST a commercial credit adjustment and GET the stored
+   credit as a commercial statement.  The write records the existing #17
+   credit against ``invoice_draft_id`` and refuses PAN and provider secrets.
+   Record the credit; AIS pulls the validated journal.  The read does not
+   post, call AIS, or start a web UI.
 7. Let a buyer POST a rate card and GET tenant-scoped cards and versions.
    Rating still accepts ``rate_card_version`` and now requires that persisted
    version.  Publish a rate card, then rate a window against that version.
@@ -69,7 +71,7 @@ from metering_billing.collection_case import CollectionCaseService
 from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
-    CreditAdjustmentQueryError,
+    CreditAdjustmentPresentmentQueryError,
     PaymentIntentPresentmentQueryError,
     PaymentReceiptPresentmentQueryError,
     ExactDecimalError,
@@ -90,6 +92,7 @@ from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
+from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
@@ -208,6 +211,7 @@ def create_http_app(
     case_presentments = CollectionCasePresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
+    credit_presentments = CreditAdjustmentPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -426,16 +430,23 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
-        if route_name == "get_credit_adjustment":
+        if route_name in {"list_credit_adjustments", "get_credit_adjustment"}:
             try:
                 query = _read_query(environ)
                 tenant_reference = _authorized_tenant(environ, query)
-                result = credits.get_credit_adjustment(
+                if route_name == "list_credit_adjustments":
+                    page = credit_presentments.list_credit_adjustments(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = credit_presentments.present_credit_adjustment(
                     tenant_reference,
                     _parse_uuid(path_values["credit_adjustment_id"], "credit_adjustment_id"),
                 )
                 return _send_json(start_response, 200, result.as_contract_dict())
-            except CreditAdjustmentQueryError as error:
+            except CreditAdjustmentPresentmentQueryError as error:
                 status_code = (
                     404 if error.rejection_reason_code == "credit_adjustment_not_found" else 422
                 )
@@ -877,6 +888,8 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == CREDIT_ADJUSTMENT_COLLECTION_PATH:
         if method == "POST":
             return "credit_adjustments", {}
+        if method == "GET":
+            return "list_credit_adjustments", {}
         return "method_not_allowed", {}
     credit_match = CREDIT_ADJUSTMENT_ITEM_PATH.fullmatch(path)
     if credit_match is not None:
@@ -1121,6 +1134,8 @@ def _dispatch_write(
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "credit_adjustments":
         if credits is None:
+            raise HttpRequestError("request_invalid")
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
             raise HttpRequestError("request_invalid")
         reason = payload.get("credit_reason_code")
         if not isinstance(reason, str):

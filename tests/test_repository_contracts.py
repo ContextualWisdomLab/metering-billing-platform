@@ -18,6 +18,7 @@ from metering_billing.contracts import (
     validate_collection_case_presentment,
     validate_payment_intent_presentment,
     validate_payment_receipt_presentment,
+    validate_credit_adjustment_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -725,6 +726,107 @@ class RepositoryContractTests(unittest.TestCase):
                 "remaining_outstanding_amount must be an exact decimal" in error
                 for error in validate_payment_receipt_presentment(bad_remaining)
             )
+        )
+
+    def test_credit_adjustment_presentment_accepts_split_and_rejects_posted(self) -> None:
+        """A credit statement records exact amounts and cannot claim posting."""
+        schema = self._schema("credit-adjustment-presentment.schema.json")
+        instance = {
+            "credit_adjustment_presentment_contract_version": 1,
+            "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf660",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "currency_code": "USD",
+            "credit_amount": "0.003705",
+            "tax_exclusive_amount": "0.003705",
+            "tax_amount": "0",
+            "credit_adjustment_status": "recorded",
+            "recorded_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_credit_adjustment_presentment(instance), ())
+        taxed = dict(instance)
+        taxed["credit_amount"] = "11.00"
+        taxed["tax_exclusive_amount"] = "10.00"
+        taxed["tax_amount"] = "1.00"
+        self.assertEqual(validate_credit_adjustment_presentment(taxed), ())
+        posted = dict(instance)
+        posted["proposal_status"] = "posted"
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        captured = dict(instance)
+        captured["credit_adjustment_status"] = "posted"
+        self.assertIn(
+            "$.credit_adjustment_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, captured),
+        )
+        negative = dict(instance)
+        negative["credit_amount"] = "-1.00"
+        self.assertIn(
+            "$: credit_amount must not be negative",
+            validate_credit_adjustment_presentment(negative),
+        )
+        unbalanced = dict(taxed)
+        unbalanced["tax_amount"] = "2.00"
+        self.assertIn(
+            "$: tax_exclusive_amount plus tax_amount must equal credit_amount",
+            validate_credit_adjustment_presentment(unbalanced),
+        )
+        recorded_collect = dict(instance)
+        recorded_collect["next_operator_action"] = "credit"
+        self.assertIn(
+            "$: recorded credits must wait",
+            validate_credit_adjustment_presentment(recorded_collect),
+        )
+        self.assertNotEqual(validate_credit_adjustment_presentment([]), ())
+        non_string = dict(instance)
+        non_string["credit_amount"] = 11
+        self.assertEqual(
+            [
+                error
+                for error in validate_credit_adjustment_presentment(non_string)
+                if "exact decimal" in error
+            ],
+            [],
+        )
+        bad_credit = dict(instance)
+        bad_credit["credit_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "credit_amount must be an exact decimal" in error
+                for error in validate_credit_adjustment_presentment(bad_credit)
+            )
+        )
+        bad_exclusive = dict(instance)
+        bad_exclusive["tax_exclusive_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "tax_exclusive_amount must be an exact decimal" in error
+                for error in validate_credit_adjustment_presentment(bad_exclusive)
+            )
+        )
+        bad_tax = dict(instance)
+        bad_tax["tax_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "tax_amount must be an exact decimal" in error
+                for error in validate_credit_adjustment_presentment(bad_tax)
+            )
+        )
+        negative_exclusive = dict(instance)
+        negative_exclusive["tax_exclusive_amount"] = "-1.00"
+        self.assertIn(
+            "$: tax_exclusive_amount must not be negative",
+            validate_credit_adjustment_presentment(negative_exclusive),
+        )
+        negative_tax = dict(instance)
+        negative_tax["tax_amount"] = "-1.00"
+        self.assertIn(
+            "$: tax_amount must not be negative",
+            validate_credit_adjustment_presentment(negative_tax),
         )
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:

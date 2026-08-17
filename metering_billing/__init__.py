@@ -38,6 +38,7 @@ from metering_billing.contracts import (
     COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME,
+    CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
     TENANT_API_CREDENTIAL_SCHEMA_NAME,
     AIS_OUTBOX_DRAIN_SCHEMA_NAME,
@@ -61,6 +62,7 @@ from metering_billing.contracts import (
     validate_collection_case_presentment,
     validate_payment_intent_presentment,
     validate_payment_receipt_presentment,
+    validate_credit_adjustment_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_ais_outbox_drain,
@@ -97,6 +99,7 @@ from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
     InvoicePresentmentQueryError,
     PaymentIntentPresentmentQueryError,
+    CreditAdjustmentPresentmentQueryError,
     PaymentReceiptPresentmentQueryError,
     TenantApiCredentialOutcomeCode,
     TenantApiCredentialQueryError,
@@ -130,6 +133,7 @@ from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubsc
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
+from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
@@ -150,6 +154,7 @@ __all__ = (
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
+    "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
@@ -170,6 +175,8 @@ __all__ = (
     "PaymentIntentPresentmentService",
     "PaymentReceiptPresentmentQueryError",
     "PaymentReceiptPresentmentService",
+    "CreditAdjustmentPresentmentQueryError",
+    "CreditAdjustmentPresentmentService",
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
     "CollectionCaseService",
@@ -244,6 +251,7 @@ __all__ = (
     "validate_collection_case_presentment",
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",
+    "validate_credit_adjustment_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_ais_outbox_drain",

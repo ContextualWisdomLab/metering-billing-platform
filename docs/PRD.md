@@ -176,6 +176,15 @@ contextual-orchestrator usage
 - Revoked subscriptions are not POSTed. Missing tenant, insecure production callbacks, unknown event types, and secret leakage on list JSON fail closed.
 - AIS pull stays bootstrap. Operators register an https callback, then run deliveries; AIS may keep polling. This slice does not flip `proposal_status`, call AIS posting-receipt, or emit statutory IDs.
 
+## Credit-adjustment-presentment acceptance
+
+- `POST /v1/credit-adjustments` remains the #17 write against `invoice_draft_id`. Amount is the exact `credit_amount`. Replay of the same tenant, draft, amount, reason, and contract version returns the same `credit_adjustment_id`. PAN, CVC, and provider secrets are refused.
+- A known stored credit presents one tenant-scoped statement with `credit_amount`, stored `tax_exclusive_amount` and `tax_amount`, `credit_adjustment_status` (`recorded`), and `next_operator_action` (`wait`).
+- `GET /v1/credit-adjustments/{credit_adjustment_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/credit-adjustments` lists summaries as `{credit_adjustments, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{recorded_at}|{credit_adjustment_id}`.
+- Operators record the credit; AIS pulls the validated journal. HTTP presentment does not invent a journal or call AIS.
+- `operator_console` Storybook renders that credit with tokenized amount due and status chip. Fixtures are recorded-morning and recorded-taxed.
+
 ## Payment-receipt-presentment acceptance
 
 - `POST /v1/payment-receipts` applies one #12 receipt against a projected `payment_intent_id`. Amount is the exact `received_amount`. Currency comes from the intent. Replay of the same tenant, intent snapshot, amount, and contract version returns the same `payment_receipt_id`. PAN, CVC, and provider secrets are refused.

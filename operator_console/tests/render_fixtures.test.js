@@ -24,6 +24,11 @@ import {
   PAYMENT_RECEIPT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextPaymentReceiptActionCopy,
 } from "../src/payment_receipt.js";
+import {
+  renderCreditAdjustment,
+  CREDIT_ADJUSTMENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCreditAdjustmentActionCopy,
+} from "../src/credit_adjustment.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -141,6 +146,30 @@ test("partial payment receipt keeps remaining outstanding as a string", () => {
   assert.equal(typeof statement.remaining_outstanding_amount, "string");
 });
 
+test("recorded morning credit shows amount and wait", () => {
+  const statement = loadFixture("recorded_morning_credit.json");
+  const html = renderCreditAdjustment(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /Wait for AIS/);
+  assert.match(html, /Record the credit; AIS pulls the validated journal/);
+  assert.equal(
+    CREDIT_ADJUSTMENT_CUSTOMER_COPY,
+    "Record the credit; AIS pulls the validated journal.",
+  );
+  assert.equal(nextCreditAdjustmentActionCopy("wait"), "Wait for AIS");
+  assert.equal(nextCreditAdjustmentActionCopy("credit"), "Record the credit");
+  assert.equal(typeof statement.credit_amount, "string");
+});
+
+test("taxed credit keeps exclusive and tax as strings", () => {
+  const statement = loadFixture("recorded_taxed_credit.json");
+  const html = renderCreditAdjustment(statement);
+  assert.match(html, /11\.00 USD/);
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(typeof statement.tax_exclusive_amount, "string");
+  assert.equal(typeof statement.tax_amount, "string");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -153,6 +182,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderPaymentReceipt({ received_amount: 100.0, remaining_outstanding_amount: "0.00" }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderCreditAdjustment({ credit_amount: 11.0, currency_code: "USD" }),
     TypeError,
   );
   assert.throws(
