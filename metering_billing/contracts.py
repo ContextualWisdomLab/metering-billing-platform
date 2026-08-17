@@ -21,6 +21,7 @@ from scripts.validate_repository import (
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "COLLECTION_CASE_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
@@ -28,6 +29,7 @@ __all__ = (
     "default_schemas_directory",
     "load_json_schema",
     "validate_accounting_journal_proposal",
+    "validate_collection_case",
     "validate_invoice_draft",
     "validate_journal_proposal",
     "validate_rating_run",
@@ -40,6 +42,7 @@ USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
 USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
+COLLECTION_CASE_SCHEMA_NAME = "collection-case.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 
@@ -235,6 +238,41 @@ def _invoice_draft_total_errors(invoice_draft: Mapping[str, Any]) -> tuple[str, 
     if line_total != Decimal(drafted_total_amount):
         return ("$: invoice draft line totals must equal drafted_total_amount",)
     return ()
+
+
+def validate_collection_case(
+    collection_case: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate collection-case shape plus identity, reason, and commercial status."""
+    schema = load_json_schema(COLLECTION_CASE_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, collection_case))
+    if not isinstance(collection_case, Mapping):
+        return tuple(errors)
+    outcome = collection_case.get("collection_case_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_collection_case_fields(collection_case, str(outcome)))
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in collection_case:
+            errors.append("$: rejected collection cases must include rejection_reason_code")
+    return tuple(errors)
+
+
+def _missing_success_collection_case_fields(
+    collection_case: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay case lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "collection_case_id",
+        "invoice_draft_id",
+        "outstanding_amount",
+        "currency_code",
+        "collection_case_status",
+        "dunning_events",
+    ):
+        if field_name not in collection_case:
+            missing.append(f"$: {outcome} collection cases must include {field_name}")
+    return tuple(missing)
 
 
 def validate_journal_proposal(

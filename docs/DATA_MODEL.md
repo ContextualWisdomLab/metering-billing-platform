@@ -20,6 +20,8 @@
 - `invoice_draft_line`: append-only draft line copied from a rating line.
 - `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft.
 - `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
+- `collection_case`: append-only commercial collection case for one tenant invoice draft.
+- `collection_dunning_event`: append-only commercial reminder that does not capture money.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -36,7 +38,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, credits, spend reservations, issued invoices, provider webhooks, refunds, disputes, settlements, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, or journal-proposal keys.
+Subsequent migrations add contracts, credits, spend reservations, issued invoices, payment intents, provider webhooks, refunds, disputes, settlements, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, or collection-case keys.
 
 ## Usage identity
 
@@ -53,3 +55,7 @@ A stored invoice draft is identified by `(tenant_account_id, rating_run_id)` and
 ## Journal-proposal identity
 
 A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)`.  Lines reference the proposal and tenant, carry unique `line_number` values, and must balance in the transaction currency.  Status is proposal-only.  Statutory account IDs and posted journals are not stored here.
+
+## Collection-case identity
+
+A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding is the exact invoice-draft total.  Status is `open` or `dunning` only.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.

@@ -431,6 +431,50 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_collection_case_accepts_open_and_dunning_status(self) -> None:
+        """A collection-case contract records exact outstanding and commercial status only."""
+        schema = self._schema("collection-case.schema.json")
+        instance = {
+            "collection_case_contract_version": 1,
+            "collection_case_outcome_code": "accepted",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "currency_code": "USD",
+            "collection_case_status": "dunning",
+            "outstanding_amount": "0.003705",
+            "dunning_events": [
+                {
+                    "dunning_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf631",
+                    "dunning_event_number": 1,
+                    "dunning_notice_code": "first_notice",
+                    "occurred_at": "2026-08-18T09:00:00Z",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        paid = dict(instance, collection_case_status="paid")
+        self.assertIn(
+            "$.collection_case_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, paid),
+        )
+
+    def test_collection_case_migration_persists_append_only_cases_and_notices(self) -> None:
+        """The collection-case migration must stay tenant-scoped and commercial-only."""
+        sql = (ROOT / "database/migrations/0006_collection_case.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.collection_case",
+            "CREATE TABLE billing_core.collection_dunning_event",
+            "UNIQUE (tenant_account_id, invoice_draft_id)",
+            "UNIQUE (tenant_account_id, collection_case_id)",
+            "FOREIGN KEY (tenant_account_id, invoice_draft_id)",
+            "FOREIGN KEY (tenant_account_id, collection_case_id)",
+            "collection_case_status text NOT NULL CHECK (collection_case_status IN ('open', 'dunning'))",
+            "UNIQUE (collection_case_id, dunning_notice_code)",
+            "UNIQUE (collection_case_id, dunning_event_number)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_rating_migration_persists_append_only_runs_and_lines(self) -> None:
         """The rating migration must keep run identity tenant-scoped and append-only."""
         sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(encoding="utf-8")

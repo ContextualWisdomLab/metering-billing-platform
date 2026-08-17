@@ -52,6 +52,15 @@ contextual-orchestrator usage
 - Missing drafts, zero draft totals, float money, and unbalanced lines fail closed.
 - Status stays inside the proposal lifecycle and is never `posted`. Operators hand the proposal to AIS.
 
+## Collection-case acceptance
+
+- A known invoice draft opens one collection case whose outstanding equals the exact draft total.
+- A second open of the same tenant and `invoice_draft_id` returns the same `collection_case_id`.
+- Another tenant cannot see or collect the first tenant's case.
+- Dunning events append commercial reminders (`first_notice`, `overdue_notice`) without capturing money.
+- Missing drafts, cross-tenant IDs, float money, and zero outstanding fail closed.
+- Status stays `open` or `dunning`. Operators open the case, then send a dunning notice.
+
 ## Usage-ingestion acceptance
 
 - A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.
@@ -70,4 +79,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, and accounting-export reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, and collection-case reach 100% statement and branch coverage.

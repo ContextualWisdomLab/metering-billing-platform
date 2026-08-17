@@ -4,6 +4,10 @@
 
 ### Added
 
+- Importable `metering_billing` collection-case service that opens a tenant-scoped commercial case from a stored invoice draft and appends dunning reminders.
+- Idempotent collection-case identity on `(tenant, invoice_draft_id)` so a replay returns the same `collection_case_id` and exact outstanding.
+- Append-only `collection_case` and `collection_dunning_event` persistence.  Status stays `open` or `dunning`.
+- ADR 0007 for commercial collection without payment capture or journal posting.
 - Importable `metering_billing` accounting-export service that copies a stored invoice draft into one balanced, exact-decimal `accounting_journal_proposal`.
 - Idempotent journal-proposal identity on `(tenant, invoice_draft_id, source_payload_hash, proposal_contract_version)` so a replay returns the same `proposal_id`.
 - Append-only `journal_proposal` and `journal_proposal_line` persistence that keeps debit totals equal to credit totals.

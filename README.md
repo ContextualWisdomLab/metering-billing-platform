@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, and semantically validated accounting journal proposals;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, and journal-proposal migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, and emits proposal-only journals;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, and semantically validated accounting journal proposals;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, and collection-case migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, and opens commercial collection cases;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -69,6 +69,14 @@ python3 -c "from metering_billing import AccountingExportService"
 
 After an `invoice_draft` exists, call `AccountingExportService.propose_journal` with the tenant and `invoice_draft_id`. The proposal is one balanced exact-decimal `accounting_journal_proposal` that uses semantic account roles and an intended book role. An identical replay returns the same `proposal_id`. Status stays inside the proposal lifecycle and is never `posted`.
 
+## Open a collection case
+
+```bash
+python3 -c "from metering_billing import CollectionCaseService"
+```
+
+After an `invoice_draft` exists, call `CollectionCaseService.open_collection_case` with the tenant and `invoice_draft_id`. Outstanding equals the exact draft total. An identical replay returns the same `collection_case_id`. Status stays `open` or `dunning`. Then call `record_dunning_event` with `first_notice` or `overdue_notice`. Reminders do not capture money or post journals.
+
 ## Next action
 
-Hand the persisted `accounting_journal_proposal` to the Accounting Information Platform (AIS). AIS owns posting, fiscal-period control, and statutory account mapping. Do not mark the proposal posted here, and do not add a payment-provider adapter until issued invoices exist.
+Open the collection case from the persisted invoice draft, then send a dunning notice. Do not add a payment-provider adapter or payment intent until the case is the commercial source of collection. Do not mark the case paid, written off, or posted.

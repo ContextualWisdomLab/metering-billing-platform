@@ -25,4 +25,4 @@ This repository is not the statutory accounting authority.  It must not post a j
 - Known invoice-draft totals reproduce one exact balanced proposal.
 - Tenants cannot see or propose from each other's drafts.
 - Operators hand the proposal to AIS.  Posting, fiscal-period control, and statutory mapping remain AIS responsibilities.
-- Issued invoices, collections, and payment-provider adapters remain subsequent increments.
+- Issued invoices, payment-provider adapters, and payment capture remain subsequent increments.  Commercial collection cases are a later increment that still must not post journals.

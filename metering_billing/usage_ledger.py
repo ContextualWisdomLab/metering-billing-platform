@@ -279,6 +279,31 @@ class StoredJournalProposal:
 
 
 @dataclass(frozen=True)
+class StoredCollectionDunningEvent:
+    """Append-only commercial reminder; it does not capture money or post books."""
+
+    collection_dunning_event_id: UUID
+    collection_case_id: UUID
+    tenant_account_id: UUID
+    dunning_event_number: int
+    dunning_notice_code: str
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredCollectionCase:
+    """Append-only commercial collection case for one tenant invoice draft."""
+
+    collection_case_id: UUID
+    tenant_account_id: UUID
+    invoice_draft_id: UUID
+    currency_code: str
+    collection_case_status: str
+    outstanding_amount: Decimal
+    opened_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredIngestionReceipt:
     """Append-only audit row for one ingest attempt."""
 
@@ -323,6 +348,11 @@ class MemoryUsageLedger:
     journal_proposals: dict[UUID, StoredJournalProposal] = field(default_factory=dict)
     journal_proposal_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
     journal_proposal_lines: list[StoredJournalProposalLine] = field(default_factory=list)
+    collection_cases: dict[UUID, StoredCollectionCase] = field(default_factory=dict)
+    collection_case_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    collection_dunning_events: list[StoredCollectionDunningEvent] = field(default_factory=list)
+    collection_dunning_notice_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
+    collection_dunning_number_index: dict[tuple[UUID, int], UUID] = field(default_factory=dict)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -761,6 +791,100 @@ class MemoryUsageLedger:
             for proposal in self.journal_proposals.values()
             if proposal.tenant_account_id == tenant_account_id
         )
+
+    def get_collection_case(self, collection_case_id: UUID) -> StoredCollectionCase | None:
+        """Return a stored collection case by internal identifier."""
+        return self.collection_cases.get(collection_case_id)
+
+    def find_collection_case(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> StoredCollectionCase | None:
+        """Return the case for one tenant-scoped invoice draft, if it exists."""
+        collection_case_id = self.collection_case_index.get((tenant_account_id, invoice_draft_id))
+        if collection_case_id is None:
+            return None
+        return self.collection_cases[collection_case_id]
+
+    def insert_collection_case(self, collection_case: StoredCollectionCase) -> StoredCollectionCase:
+        """Append an immutable collection case.  Existing identity rows are never updated."""
+        if collection_case.collection_case_status not in {"open", "dunning"}:
+            raise ValueError("collection cases cannot be paid, written off, or posted")
+        outstanding_amount = parse_exact_decimal(
+            format_exact_decimal(collection_case.outstanding_amount)
+        )
+        if outstanding_amount <= 0:
+            raise ValueError("collection case outstanding must be a positive exact decimal")
+        identity_key = (collection_case.tenant_account_id, collection_case.invoice_draft_id)
+        if collection_case.collection_case_id in self.collection_cases:
+            raise ValueError("collection cases are immutable and cannot be replaced")
+        if identity_key in self.collection_case_index:
+            raise ValueError("collection cases are immutable and cannot be replaced")
+        persisted = StoredCollectionCase(
+            collection_case_id=collection_case.collection_case_id,
+            tenant_account_id=collection_case.tenant_account_id,
+            invoice_draft_id=collection_case.invoice_draft_id,
+            currency_code=collection_case.currency_code,
+            collection_case_status=collection_case.collection_case_status,
+            outstanding_amount=outstanding_amount,
+            opened_at=collection_case.opened_at,
+        )
+        self.collection_cases[persisted.collection_case_id] = persisted
+        self.collection_case_index[identity_key] = persisted.collection_case_id
+        return persisted
+
+    def list_collection_cases(self, tenant_account_id: UUID) -> tuple[StoredCollectionCase, ...]:
+        """Return collection cases limited to one tenant."""
+        return tuple(
+            collection_case
+            for collection_case in self.collection_cases.values()
+            if collection_case.tenant_account_id == tenant_account_id
+        )
+
+    def list_collection_dunning_events(
+        self, collection_case_id: UUID
+    ) -> tuple[StoredCollectionDunningEvent, ...]:
+        """Return dunning events for one collection case in event-number order."""
+        matched = [
+            event
+            for event in self.collection_dunning_events
+            if event.collection_case_id == collection_case_id
+        ]
+        return tuple(sorted(matched, key=lambda event: event.dunning_event_number))
+
+    def find_collection_dunning_event(
+        self, collection_case_id: UUID, dunning_notice_code: str
+    ) -> StoredCollectionDunningEvent | None:
+        """Return the stored reminder for one case and notice code, if it exists."""
+        for event in self.collection_dunning_events:
+            if (
+                event.collection_case_id == collection_case_id
+                and event.dunning_notice_code == dunning_notice_code
+            ):
+                return event
+        return None
+
+    def insert_collection_dunning_event(
+        self, dunning_event: StoredCollectionDunningEvent
+    ) -> StoredCollectionDunningEvent:
+        """Append an immutable commercial reminder.  Existing notice rows are never updated."""
+        if dunning_event.dunning_notice_code not in {"first_notice", "overdue_notice"}:
+            raise ValueError("collection dunning notices must be commercial reminder codes")
+        if dunning_event.collection_case_id not in self.collection_cases:
+            raise ValueError("collection dunning events require a stored collection case")
+        notice_key = (dunning_event.collection_case_id, dunning_event.dunning_notice_code)
+        number_key = (dunning_event.collection_case_id, dunning_event.dunning_event_number)
+        if dunning_event.collection_dunning_event_id in {
+            event.collection_dunning_event_id for event in self.collection_dunning_events
+        }:
+            raise ValueError("collection dunning events are immutable and cannot be replaced")
+        if notice_key in self.collection_dunning_notice_index:
+            raise ValueError("collection dunning events are immutable and cannot be replaced")
+        if number_key in self.collection_dunning_number_index:
+            raise ValueError("collection dunning events are immutable and cannot be replaced")
+        self.collection_dunning_events.append(dunning_event)
+        self.collection_dunning_notice_index[notice_key] = dunning_event.collection_dunning_event_id
+        self.collection_dunning_number_index[number_key] = dunning_event.collection_dunning_event_id
+        return dunning_event
 
     def list_rating_runs(self, tenant_account_id: UUID) -> tuple[StoredRatingRun, ...]:
         """Return rating runs limited to one tenant."""

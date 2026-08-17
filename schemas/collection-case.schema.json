@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-case/v1",
+  "title": "Collection Case",
+  "description": "Exact commercial collection case for one tenant and one stored invoice draft. Replays acknowledge the stored collection_case_id. Status is open or dunning only; the case is not paid, written off, or posted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "collection_case_contract_version",
+    "collection_case_outcome_code"
+  ],
+  "properties": {
+    "collection_case_contract_version": {"type": "integer", "minimum": 1},
+    "collection_case_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "collection_case_status": {"type": "string", "enum": ["open", "dunning"]},
+    "outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "invoice_draft_not_found",
+        "collection_case_not_found",
+        "outstanding_amount_invalid",
+        "dunning_notice_invalid"
+      ]
+    },
+    "dunning_events": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/collection_dunning_event"}
+    }
+  },
+  "$defs": {
+    "collection_dunning_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dunning_event_id",
+        "dunning_event_number",
+        "dunning_notice_code",
+        "occurred_at"
+      ],
+      "properties": {
+        "dunning_event_id": {"type": "string", "format": "uuid"},
+        "dunning_event_number": {"type": "integer", "minimum": 1},
+        "dunning_notice_code": {
+          "type": "string",
+          "enum": ["first_notice", "overdue_notice"]
+        },
+        "occurred_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

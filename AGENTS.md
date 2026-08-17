@@ -23,4 +23,5 @@
 - Rate stored usage through `metering_billing.UsageRatingService` so a tenant window, rate-card version, and usage snapshot replay the same `rating_run_id` and exact totals.
 - Draft invoice intent through `metering_billing.InvoiceDraftService` so a tenant and `rating_run_id` replay the same `invoice_draft_id` and exact totals.  Drafts are not issued, collected, or posted.
 - Export a journal proposal through `metering_billing.AccountingExportService` so a tenant and `invoice_draft_id` replay the same `proposal_id`.  Proposals stay proposal-only; this repository does not post journals.
+- Open a collection case through `metering_billing.CollectionCaseService` so a tenant and `invoice_draft_id` replay the same `collection_case_id`.  Dunning events are commercial reminders; they do not capture payment or post journals.
 - Leave principal, account, and project identifiers usable for invoicing.  Purpose-limit access; do not mask operational billing identifiers.

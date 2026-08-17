@@ -35,7 +35,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 - `meter_registry`: versions, units, dimensions, aggregation, and billability.
 - `commercial_rating`: price books, contracts, tiers, and rating outcomes.
 - `entitlement_control`: grants, quotas, credits, and spend authorization.
-- `invoice_management`: invoice intent and explainable lines.
+- `invoice_management`: invoice intent, explainable lines, and commercial collection cases.
 - `provider_gateway`: capability discovery, mapping, commands, and webhooks.
 - `settlement_reconciliation`: expected versus provider versus cash evidence.
 - `accounting_export`: journal proposals and posting receipts.
@@ -68,6 +68,10 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 ## Accounting export
 
 `metering_billing.AccountingExportService` copies one stored invoice draft into an append-only `accounting_journal_proposal`.  Identity is `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)`.  An identical replay returns the same `proposal_id`.  Lines use semantic account roles and an intended book role.  Status stays inside the proposal lifecycle and is never `posted`.  The operator next hands the proposal to the Accounting Information Platform.  This path does not open fiscal periods, resolve statutory account IDs, issue an invoice, or call a payment provider.
+
+## Collection case
+
+`metering_billing.CollectionCaseService` opens an append-only commercial collection case from one stored invoice draft.  Identity is `(tenant_account_id, invoice_draft_id)`.  Outstanding equals the exact draft total.  An identical replay returns the same `collection_case_id`.  Status stays `open` or `dunning`.  Dunning events are commercial reminders (`first_notice`, `overdue_notice`) and do not capture money or change AIS books.  The operator next opens the case, then sends a dunning notice.  Payment intents and provider adapters remain a later increment.
 
 ## Failure policy
 

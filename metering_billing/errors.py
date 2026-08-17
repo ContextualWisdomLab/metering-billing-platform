@@ -1,4 +1,4 @@
-"""Typed outcomes and rejection reasons for usage ingestion, rating, drafts, and exports.
+"""Typed outcomes and rejection reasons for usage ingestion, rating, drafts, exports, and collections.
 
 Reason codes are stable operational vocabulary.  They are safe to persist in
 audit receipts and do not require masking: they describe control failures, not
@@ -89,6 +89,24 @@ class JournalProposalRejectionReasonCode(StrEnum):
     TENANT_NOT_FOUND = "tenant_not_found"
     INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
     DRAFT_TOTAL_INVALID = "draft_total_invalid"
+
+
+class CollectionCaseOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one collection case or notice."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class CollectionCaseRejectionReasonCode(StrEnum):
+    """Why a collection request was refused without capturing payment."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
+    OUTSTANDING_AMOUNT_INVALID = "outstanding_amount_invalid"
+    DUNNING_NOTICE_INVALID = "dunning_notice_invalid"
 
 
 class ExactDecimalError(ValueError):
