@@ -331,6 +331,13 @@ class DunningEventPresentmentTests(unittest.TestCase):
         )
         self.assertEqual(method_status, 422)
         self.assertEqual(method_body["rejection_reason_code"], "request_invalid")
+        collection_method_status, collection_method_body = invoke_http(
+            app,
+            "PUT",
+            "/v1/dunning-events",
+        )
+        self.assertEqual(collection_method_status, 422)
+        self.assertEqual(collection_method_body["rejection_reason_code"], "request_invalid")
         with mock.patch(
             "metering_billing.http_app.DunningEventPresentmentService.list_dunning_events",
             side_effect=DunningEventPresentmentQueryError("dunning_event_not_found"),
