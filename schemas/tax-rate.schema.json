@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/tax-rate/v1",
+  "title": "Tax Rate",
+  "description": "Tenant-scoped published tax-rate version. tax_rate is an exact decimal in [0, 1], never a float or a percent integer. Replays acknowledge the stored tax_rate_version. A published version is never edited.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tax_rate_contract_version",
+    "tax_rate_outcome_code"
+  ],
+  "properties": {
+    "tax_rate_contract_version": {"type": "integer", "minimum": 1},
+    "tax_rate_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "tax_rate_schedule_id": {"type": "string", "format": "uuid"},
+    "tax_rate_version_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "tax_code": {"type": "string", "enum": ["vat", "gst", "sales_tax"]},
+    "tax_rate_version": {"type": "integer", "minimum": 1},
+    "tax_rate": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "published_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "tax_rate_not_found",
+        "tax_code_invalid",
+        "tax_rate_invalid"
+      ]
+    }
+  }
+}

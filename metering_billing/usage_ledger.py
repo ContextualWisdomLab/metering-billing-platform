@@ -23,6 +23,7 @@ from metering_billing.errors import RejectionReasonCode
 from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
+TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
 
 
 def generate_record_id(uuid_module: ModuleType = uuid) -> UUID:
@@ -236,6 +237,62 @@ class StoredRatingRun:
     rated_total_amount: Decimal
     recorded_at: datetime
     rating_lines: tuple[StoredRatingLine, ...]
+
+
+@dataclass(frozen=True)
+class StoredTaxRateSchedule:
+    """Tenant-scoped tax-rate header identified by ``(tenant, tax_code)``."""
+
+    tax_rate_schedule_id: UUID
+    tenant_account_id: UUID
+    tax_code: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredTaxRateVersion:
+    """Append-only published tax rate for one tenant schedule.
+
+    Identity is tenant-scoped
+    ``(tax_rate_schedule_id, source_payload_hash, tax_rate_contract_version)``.
+    ``version_number`` increments on each distinct publish of the same code.
+    """
+
+    tax_rate_version_id: UUID
+    tenant_account_id: UUID
+    tax_rate_schedule_id: UUID
+    version_number: int
+    tax_rate_contract_version: int
+    tax_code: str
+    tax_rate: Decimal
+    source_payload_hash: str
+    published_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredTaxAssessment:
+    """Append-only commercial tax on one tenant invoice draft.
+
+    Identity is
+    ``(tenant_account_id, invoice_draft_id, tax_rate_version_id,
+    source_payload_hash, tax_assessment_contract_version)``.
+    One draft holds at most one assessment.
+    """
+
+    tax_assessment_id: UUID
+    tenant_account_id: UUID
+    invoice_draft_id: UUID
+    tax_rate_version_id: UUID
+    tax_assessment_contract_version: int
+    tax_code: str
+    tax_rate: Decimal
+    currency_code: str
+    tax_exclusive_amount: Decimal
+    tax_amount: Decimal
+    tax_inclusive_amount: Decimal
+    source_payload_hash: str
+    assessed_at: datetime
+    tax_rate_version_number: int
 
 
 @dataclass(frozen=True)
@@ -505,6 +562,20 @@ class MemoryUsageLedger:
     posting_receipt_observation_receipt_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
+    tax_rate_schedules: dict[UUID, StoredTaxRateSchedule] = field(default_factory=dict)
+    tax_rate_schedule_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
+    tax_rate_versions: dict[UUID, StoredTaxRateVersion] = field(default_factory=dict)
+    tax_rate_version_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
+        default_factory=dict
+    )
+    tax_rate_version_number_index: dict[tuple[UUID, UUID, int], UUID] = field(
+        default_factory=dict
+    )
+    tax_assessments: dict[UUID, StoredTaxAssessment] = field(default_factory=dict)
+    tax_assessment_index: dict[tuple[UUID, UUID, UUID, str, int], UUID] = field(
+        default_factory=dict
+    )
+    tax_assessment_draft_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -856,6 +927,264 @@ class MemoryUsageLedger:
             if line.metric_code == metric_code:
                 return line
         return None
+
+    def find_tax_rate_schedule(
+        self, tenant_account_id: UUID, tax_code: str
+    ) -> StoredTaxRateSchedule | None:
+        """Return the tenant-scoped tax-rate schedule for one code, if present."""
+        schedule_id = self.tax_rate_schedule_index.get((tenant_account_id, tax_code))
+        if schedule_id is None:
+            return None
+        return self.tax_rate_schedules[schedule_id]
+
+    def get_tax_rate_schedule(
+        self, tax_rate_schedule_id: UUID
+    ) -> StoredTaxRateSchedule | None:
+        """Return one tax-rate schedule by internal identifier, if present."""
+        return self.tax_rate_schedules.get(tax_rate_schedule_id)
+
+    def insert_tax_rate_schedule(
+        self, schedule: StoredTaxRateSchedule
+    ) -> StoredTaxRateSchedule:
+        """Persist one tenant-scoped tax-rate schedule or return the existing code."""
+        if schedule.tax_code not in TAX_CODES:
+            raise ValueError("tax_code is not in the closed set")
+        existing_id = self.tax_rate_schedule_index.get(
+            (schedule.tenant_account_id, schedule.tax_code)
+        )
+        if existing_id is not None:
+            return self.tax_rate_schedules[existing_id]
+        if schedule.tax_rate_schedule_id in self.tax_rate_schedules:
+            raise ValueError("tax_rate_schedule_id already stored for a different code")
+        self.tax_rate_schedules[schedule.tax_rate_schedule_id] = schedule
+        self.tax_rate_schedule_index[(schedule.tenant_account_id, schedule.tax_code)] = (
+            schedule.tax_rate_schedule_id
+        )
+        return schedule
+
+    def list_tax_rate_schedules(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredTaxRateSchedule, ...]:
+        """Return tax-rate schedules limited to one tenant."""
+        return tuple(
+            schedule
+            for schedule in self.tax_rate_schedules.values()
+            if schedule.tenant_account_id == tenant_account_id
+        )
+
+    def find_tax_rate_version_by_identity(
+        self,
+        tenant_account_id: UUID,
+        tax_rate_schedule_id: UUID,
+        source_payload_hash: str,
+        tax_rate_contract_version: int,
+    ) -> StoredTaxRateVersion | None:
+        """Return the published version for one tenant-scoped rate hash, if any."""
+        version_id = self.tax_rate_version_index.get(
+            (
+                tenant_account_id,
+                tax_rate_schedule_id,
+                source_payload_hash,
+                tax_rate_contract_version,
+            )
+        )
+        if version_id is None:
+            return None
+        return self.tax_rate_versions[version_id]
+
+    def get_tax_rate_version(
+        self, tax_rate_version_id: UUID
+    ) -> StoredTaxRateVersion | None:
+        """Return one published tax-rate version by internal identifier, if present."""
+        return self.tax_rate_versions.get(tax_rate_version_id)
+
+    def find_tax_rate_version(
+        self,
+        tenant_account_id: UUID,
+        version_number: int,
+        tax_code: str | None = None,
+    ) -> StoredTaxRateVersion | None:
+        """Return one tenant-scoped published version number, if uniquely present."""
+        if tax_code is not None:
+            schedule = self.find_tax_rate_schedule(tenant_account_id, tax_code)
+            if schedule is None:
+                return None
+            version_id = self.tax_rate_version_number_index.get(
+                (tenant_account_id, schedule.tax_rate_schedule_id, version_number)
+            )
+            if version_id is None:
+                return None
+            return self.tax_rate_versions[version_id]
+        matches = tuple(
+            version
+            for version in self.tax_rate_versions.values()
+            if version.tenant_account_id == tenant_account_id
+            and version.version_number == version_number
+        )
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    def next_tax_rate_version_number(
+        self, tenant_account_id: UUID, tax_rate_schedule_id: UUID
+    ) -> int:
+        """Return the next append-only version number for one tenant schedule."""
+        current = [
+            version.version_number
+            for version in self.tax_rate_versions.values()
+            if version.tenant_account_id == tenant_account_id
+            and version.tax_rate_schedule_id == tax_rate_schedule_id
+        ]
+        if not current:
+            return 1
+        return max(current) + 1
+
+    def insert_tax_rate_version(
+        self, version: StoredTaxRateVersion
+    ) -> StoredTaxRateVersion:
+        """Persist one immutable published tax rate or return the existing identity."""
+        if version.version_number < 1:
+            raise ValueError("version_number must be greater than zero")
+        if version.tax_code not in TAX_CODES:
+            raise ValueError("tax_code is not in the closed set")
+        parsed_rate = parse_exact_decimal(format_exact_decimal(version.tax_rate))
+        if parsed_rate > 1:
+            raise ValueError("tax_rate must be an exact decimal in [0, 1]")
+        identity = (
+            version.tenant_account_id,
+            version.tax_rate_schedule_id,
+            version.source_payload_hash,
+            version.tax_rate_contract_version,
+        )
+        existing_id = self.tax_rate_version_index.get(identity)
+        if existing_id is not None:
+            return self.tax_rate_versions[existing_id]
+        if version.tax_rate_version_id in self.tax_rate_versions:
+            raise ValueError("tax_rate_version_id already stored for a different identity")
+        persisted = StoredTaxRateVersion(
+            tax_rate_version_id=version.tax_rate_version_id,
+            tenant_account_id=version.tenant_account_id,
+            tax_rate_schedule_id=version.tax_rate_schedule_id,
+            version_number=version.version_number,
+            tax_rate_contract_version=version.tax_rate_contract_version,
+            tax_code=version.tax_code,
+            tax_rate=parsed_rate,
+            source_payload_hash=version.source_payload_hash,
+            published_at=version.published_at,
+        )
+        self.tax_rate_versions[persisted.tax_rate_version_id] = persisted
+        self.tax_rate_version_index[identity] = persisted.tax_rate_version_id
+        self.tax_rate_version_number_index[
+            (persisted.tenant_account_id, persisted.tax_rate_schedule_id, persisted.version_number)
+        ] = persisted.tax_rate_version_id
+        return persisted
+
+    def list_tax_rate_versions(
+        self, tenant_account_id: UUID, tax_rate_schedule_id: UUID | None = None
+    ) -> tuple[StoredTaxRateVersion, ...]:
+        """Return published tax-rate versions, optionally limited to one schedule."""
+        versions = tuple(
+            version
+            for version in self.tax_rate_versions.values()
+            if version.tenant_account_id == tenant_account_id
+        )
+        if tax_rate_schedule_id is None:
+            return versions
+        return tuple(
+            version for version in versions if version.tax_rate_schedule_id == tax_rate_schedule_id
+        )
+
+    def find_tax_assessment(
+        self,
+        tenant_account_id: UUID,
+        invoice_draft_id: UUID,
+        tax_rate_version_id: UUID,
+        source_payload_hash: str,
+        tax_assessment_contract_version: int,
+    ) -> StoredTaxAssessment | None:
+        """Return the assessment for one tenant-scoped identity, if any."""
+        assessment_id = self.tax_assessment_index.get(
+            (
+                tenant_account_id,
+                invoice_draft_id,
+                tax_rate_version_id,
+                source_payload_hash,
+                tax_assessment_contract_version,
+            )
+        )
+        if assessment_id is None:
+            return None
+        return self.tax_assessments[assessment_id]
+
+    def find_tax_assessment_for_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> StoredTaxAssessment | None:
+        """Return the single assessment stored for one tenant draft, if any."""
+        assessment_id = self.tax_assessment_draft_index.get(
+            (tenant_account_id, invoice_draft_id)
+        )
+        if assessment_id is None:
+            return None
+        return self.tax_assessments[assessment_id]
+
+    def get_tax_assessment(
+        self, tax_assessment_id: UUID
+    ) -> StoredTaxAssessment | None:
+        """Return one tax assessment by internal identifier, if present."""
+        return self.tax_assessments.get(tax_assessment_id)
+
+    def insert_tax_assessment(
+        self, assessment: StoredTaxAssessment
+    ) -> StoredTaxAssessment:
+        """Persist one tax assessment or return the existing identity row."""
+        if assessment.tax_code not in TAX_CODES:
+            raise ValueError("tax_code is not in the closed set")
+        exclusive = parse_exact_decimal(format_exact_decimal(assessment.tax_exclusive_amount))
+        tax_amount = parse_exact_decimal(format_exact_decimal(assessment.tax_amount))
+        inclusive = parse_exact_decimal(format_exact_decimal(assessment.tax_inclusive_amount))
+        if exclusive <= 0:
+            raise ValueError("tax_exclusive_amount must be greater than zero")
+        if inclusive != exclusive + tax_amount:
+            raise ValueError("tax_inclusive_amount must equal exclusive plus tax")
+        parsed_rate = parse_exact_decimal(format_exact_decimal(assessment.tax_rate))
+        if parsed_rate > 1:
+            raise ValueError("tax_rate must be an exact decimal in [0, 1]")
+        identity = (
+            assessment.tenant_account_id,
+            assessment.invoice_draft_id,
+            assessment.tax_rate_version_id,
+            assessment.source_payload_hash,
+            assessment.tax_assessment_contract_version,
+        )
+        existing_id = self.tax_assessment_index.get(identity)
+        if existing_id is not None:
+            return self.tax_assessments[existing_id]
+        draft_key = (assessment.tenant_account_id, assessment.invoice_draft_id)
+        existing_draft_id = self.tax_assessment_draft_index.get(draft_key)
+        if existing_draft_id is not None:
+            raise ValueError("invoice draft already has a tax assessment")
+        if assessment.tax_assessment_id in self.tax_assessments:
+            raise ValueError("tax_assessment_id already stored for a different identity")
+        persisted = StoredTaxAssessment(
+            tax_assessment_id=assessment.tax_assessment_id,
+            tenant_account_id=assessment.tenant_account_id,
+            invoice_draft_id=assessment.invoice_draft_id,
+            tax_rate_version_id=assessment.tax_rate_version_id,
+            tax_assessment_contract_version=assessment.tax_assessment_contract_version,
+            tax_code=assessment.tax_code,
+            tax_rate=parsed_rate,
+            currency_code=assessment.currency_code,
+            tax_exclusive_amount=exclusive,
+            tax_amount=tax_amount,
+            tax_inclusive_amount=inclusive,
+            source_payload_hash=assessment.source_payload_hash,
+            assessed_at=assessment.assessed_at,
+            tax_rate_version_number=assessment.tax_rate_version_number,
+        )
+        self.tax_assessments[persisted.tax_assessment_id] = persisted
+        self.tax_assessment_index[identity] = persisted.tax_assessment_id
+        self.tax_assessment_draft_index[draft_key] = persisted.tax_assessment_id
+        return persisted
 
     def billing_account_reference_for(self, billing_account_id: UUID) -> str:
         """Return the catalog URN for a stored billing account identifier."""

@@ -35,6 +35,18 @@ contextual-orchestrator usage
 -> accounting journal proposal
 ```
 
+## Tax-assessment acceptance
+
+- A known tenant publishes one `tax_rate_schedule` and one immutable `tax_rate_version` whose `tax_rate` is an exact decimal in `[0, 1]`.
+- A second publish of the same tenant, `tax_code`, rate, and contract version returns the same `tax_rate_version` as `duplicate_replay`.
+- A later distinct rate increments the version. A published version is never edited.
+- Assessing a stored draft stores `tax_exclusive_amount` as the drafted subtotal, half-even `tax_amount` in the currency minor units, and `tax_inclusive_amount` as exclusive plus tax.
+- A taxed journal proposal debits `accounts_receivable` inclusive, credits `usage_revenue` exclusive, and credits `tax_payable` tax. An untaxed draft keeps the two-line AR/revenue proposal.
+- Collection outstanding uses the inclusive amount when an assessment exists. Assess after a case is open fails closed.
+- Another tenant cannot list, fetch, or assess the first tenant's rate or assessment.
+- Missing tenant, float rates, rates outside `[0, 1]`, unknown `tax_code`, unknown currency exponents, and zero drafts fail closed.
+- Operators publish a tax rate, assess the draft, then propose the journal and let AIS pull. AIS must map `tax_payable`. This slice does not add an OSS engine, exemptions, or UI.
+
 ## Rate-card catalog acceptance
 
 - A known tenant publishes one `rate_card` and one immutable `rate_card_version` whose lines carry exact `unit_amount` values greater than zero.
@@ -155,4 +167,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, and the versioned rate-card catalog reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, and tax assessment reach 100% statement and branch coverage.

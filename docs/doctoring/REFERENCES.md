@@ -12,9 +12,15 @@ Helland, P. (2012). Idempotence is not a medical condition. *Communications of t
 
 IEEE. (2019). *IEEE standard for floating-point arithmetic* (IEEE Std 754-2019). https://doi.org/10.1109/IEEESTD.2019.8766229
 
+International Organization for Standardization. (2015). *Codes for the representation of currencies* (ISO Standard No. 4217). https://www.iso.org/standard/64758.html
+
 International Organization for Standardization. (2019). *Date and time—Representations for information interchange—Part 1: Basic rules* (ISO Standard No. 8601-1:2019). https://www.iso.org/standard/70907.html
 
+Organisation for Economic Co-operation and Development. (2017). *International VAT/GST guidelines.* OECD Publishing. https://doi.org/10.1787/9789264271401-en
+
 FinOps Foundation. (2026). *FinOps Open Cost and Usage Specification (FOCUS), Version 1.4.* https://focus.finops.org/focus-specification/
+
+IFRS Foundation. (n.d.). *IAS 12 income taxes.* https://www.ifrs.org/issued-standards/list-of-standards/ias-12-income-taxes/
 
 IFRS Foundation. (2024). *IFRS 15: Revenue from contracts with customers—Supporting material.* https://www.ifrs.org/supporting-implementation/supporting-materials-by-ifrs-standards/ifrs-15/
 

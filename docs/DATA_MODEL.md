@@ -27,6 +27,9 @@
 - `payment_receipt`: append-only commercial receipt applied against one projected payment intent.
 - `posting_receipt_observation`: append-only commercial observation of one AIS posting receipt. AIS `receipt_id` is an external reference, not the internal primary key.
 - `credit_adjustment`: append-only commercial credit against one tenant invoice draft. The paired journal proposal reuses `journal_proposal`.
+- `tax_rate_schedule`: tenant-scoped tax-rate header identified by `(tenant_account_id, tax_code)`.
+- `tax_rate_version`: append-only published tax rate. Identity is `(tenant_account_id, tax_rate_schedule_id, source_payload_hash, tax_rate_contract_version)`.
+- `tax_assessment`: append-only commercial tax on one tenant invoice draft. `tax_inclusive_amount` drives collection outstanding and the AR journal debit when present.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -43,7 +46,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, or rate-card-catalog keys.
+Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, or tax-assessment keys.
 
 ## Usage identity
 
@@ -63,11 +66,11 @@ A stored invoice draft is identified by `(tenant_account_id, rating_run_id)` and
 
 ## Journal-proposal identity
 
-A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)` for invoice-draft exports, by `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)` for cash exports, and by `(tenant_account_id, credit_adjustment_id, source_payload_hash, proposal_contract_version)` for credit exports.  Lines reference the proposal and tenant, carry unique `line_number` values, and must balance in the transaction currency.  Cash lines use semantic `cash_receipt` and `accounts_receivable` roles.  Credit lines use semantic `usage_revenue` and `accounts_receivable` roles.  Status is proposal-only.  Statutory account IDs and posted journals are not stored here.
+A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)` for invoice-draft exports, by `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)` for cash exports, and by `(tenant_account_id, credit_adjustment_id, source_payload_hash, proposal_contract_version)` for credit exports.  Lines reference the proposal and tenant, carry unique `line_number` values, and must balance in the transaction currency.  Untaxed draft lines use semantic `accounts_receivable` and `usage_revenue` roles.  Taxed draft lines add semantic `tax_payable`.  Cash lines use semantic `cash_receipt` and `accounts_receivable` roles.  Credit lines use semantic `usage_revenue` and `accounts_receivable` roles.  Status is proposal-only.  Statutory account IDs and posted journals are not stored here.
 
 ## Collection-case identity
 
-A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts or commercial credits reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
+A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as `tax_inclusive_amount` when a tax assessment exists, otherwise the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts or commercial credits reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
 
 ## Payment-intent identity
 
@@ -83,4 +86,8 @@ A stored posting-receipt observation is identified by `(tenant_account_id, idemp
 
 ## Credit-adjustment identity
 
-A stored credit adjustment is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)`.  Internal primary key is `credit_adjustment_id`.  The hash covers the draft, exact credit amount, closed reason, and currency.  Status is `recorded` only.  Remaining adjustable is the draft total minus prior accepted credits.  If a collection case exists, outstanding is reduced by the same amount and cannot go negative.
+A stored credit adjustment is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)`.  Internal primary key is `credit_adjustment_id`.  The hash covers the draft, exact credit amount, closed reason, and currency.  Status is `recorded` only.  Remaining adjustable is the tax-inclusive amount when an assessment exists, otherwise the draft total, minus prior accepted credits.  If a collection case exists, outstanding is reduced by the same amount and cannot go negative.  The paired journal stays two-line revenue/AR; tax-payable unwind is a later slice.
+
+## Tax-assessment identity
+
+A stored tax-rate schedule is identified by `(tenant_account_id, tax_code)`.  A stored version is identified by `(tenant_account_id, tax_rate_schedule_id, source_payload_hash, tax_rate_contract_version)` and also by `(tenant_account_id, tax_rate_schedule_id, version_number)`.  A stored assessment is identified by `(tenant_account_id, invoice_draft_id, tax_rate_version_id, source_payload_hash, tax_assessment_contract_version)` and is unique per draft.  `tax_amount` is half-even rounded to the documented ISO 4217 minor-unit exponent.

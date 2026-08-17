@@ -26,6 +26,8 @@ __all__ = (
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
+    "TAX_RATE_SCHEMA_NAME",
+    "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
@@ -39,6 +41,8 @@ __all__ = (
     "validate_payment_receipt",
     "validate_credit_adjustment",
     "validate_rate_card",
+    "validate_tax_rate",
+    "validate_tax_assessment",
     "validate_journal_proposal",
     "validate_rating_run",
     "validate_schema_instance",
@@ -58,6 +62,8 @@ PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
 PAYMENT_RECEIPT_SCHEMA_NAME = "payment-receipt.schema.json"
 CREDIT_ADJUSTMENT_SCHEMA_NAME = "credit-adjustment.schema.json"
 RATE_CARD_SCHEMA_NAME = "rate-card.schema.json"
+TAX_RATE_SCHEMA_NAME = "tax-rate.schema.json"
+TAX_ASSESSMENT_SCHEMA_NAME = "tax-assessment.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
@@ -466,6 +472,90 @@ def _missing_success_rate_card_fields(
     ):
         if field_name not in rate_card:
             missing.append(f"$: {outcome} rate cards must include {field_name}")
+    return tuple(missing)
+
+
+def validate_tax_rate(
+    tax_rate: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate tax-rate shape plus identity and published rate."""
+    schema = load_json_schema(TAX_RATE_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, tax_rate))
+    if not isinstance(tax_rate, Mapping):
+        return tuple(errors)
+    outcome = tax_rate.get("tax_rate_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_tax_rate_fields(tax_rate, str(outcome)))
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in tax_rate:
+            errors.append("$: rejected tax rates must include rejection_reason_code")
+    return tuple(errors)
+
+
+def _missing_success_tax_rate_fields(
+    tax_rate: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay rate lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "tax_rate_schedule_id",
+        "tax_rate_version_id",
+        "tax_code",
+        "tax_rate_version",
+        "tax_rate",
+        "source_payload_hash",
+    ):
+        if field_name not in tax_rate:
+            missing.append(f"$: {outcome} tax rates must include {field_name}")
+    return tuple(missing)
+
+
+def validate_tax_assessment(
+    tax_assessment: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate tax-assessment shape plus identity and exact amounts."""
+    schema = load_json_schema(TAX_ASSESSMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, tax_assessment))
+    if not isinstance(tax_assessment, Mapping):
+        return tuple(errors)
+    outcome = tax_assessment.get("tax_assessment_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_tax_assessment_fields(tax_assessment, str(outcome)))
+        exclusive = tax_assessment.get("tax_exclusive_amount")
+        tax_amount = tax_assessment.get("tax_amount")
+        inclusive = tax_assessment.get("tax_inclusive_amount")
+        if (
+            isinstance(exclusive, str)
+            and isinstance(tax_amount, str)
+            and isinstance(inclusive, str)
+        ):
+            try:
+                if Decimal(exclusive) + Decimal(tax_amount) != Decimal(inclusive):
+                    errors.append("$: tax_inclusive_amount must equal exclusive plus tax")
+            except Exception:
+                errors.append("$: tax amounts must be exact decimals")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in tax_assessment:
+            errors.append("$: rejected tax assessments must include rejection_reason_code")
+    return tuple(errors)
+
+
+def _missing_success_tax_assessment_fields(
+    tax_assessment: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay assessment lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "tax_assessment_id",
+        "invoice_draft_id",
+        "tax_rate_version_id",
+        "tax_exclusive_amount",
+        "tax_amount",
+        "tax_inclusive_amount",
+        "source_payload_hash",
+    ):
+        if field_name not in tax_assessment:
+            missing.append(f"$: {outcome} tax assessments must include {field_name}")
     return tuple(missing)
 
 

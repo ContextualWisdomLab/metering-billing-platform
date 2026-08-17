@@ -340,8 +340,20 @@ def _canonical_credit_snapshot(
 def _remaining_adjustable(
     ledger: MemoryUsageLedger, tenant_account_id: UUID, invoice_draft: StoredInvoiceDraft
 ) -> Decimal:
-    """Return draft total minus already-recorded credits for that draft."""
-    drafted_total = parse_invoice_amount(invoice_draft.drafted_total_amount)
+    """Return inclusive (or draft) total minus already-recorded credits.
+
+    When a tax assessment exists the adjustable base is
+    ``tax_inclusive_amount``.  The paired credit journal stays a two-line
+    revenue debit / AR credit; tax-payable unwind is a later slice.
+    """
+    assessment = ledger.find_tax_assessment_for_draft(
+        tenant_account_id, invoice_draft.invoice_draft_id
+    )
+    drafted_total = parse_invoice_amount(
+        assessment.tax_inclusive_amount
+        if assessment is not None
+        else invoice_draft.drafted_total_amount
+    )
     prior_total = sum(
         (
             credit.credit_amount

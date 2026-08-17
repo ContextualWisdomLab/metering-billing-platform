@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, and rate-card-catalog migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, and tax-assessment migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -139,6 +139,14 @@ python3 -c "from metering_billing import CreditAdjustmentService"
 
 After an `invoice_draft` exists, call `CreditAdjustmentService.record_credit_adjustment` with the tenant, `invoice_draft_id`, exact `credit_amount`, and a closed `credit_reason_code` (`rating_correction`, `goodwill`, or `billing_error`). The credit cannot exceed remaining adjustable consideration. If a collection case exists, outstanding is reduced by the same amount; remaining zero marks the case `settled`. The path emits one validated journal proposal that debits `usage_revenue` and credits `accounts_receivable`. An identical replay returns the same `credit_adjustment_id` and `proposal_id`. Record the credit, then let AIS pull the validated proposal. This path does not post, call AIS, tax, refund-to-card, or chargeback.
 
+## Publish a tax rate and assess a draft
+
+```bash
+python3 -c "from metering_billing import TaxRateService, TaxAssessmentService"
+```
+
+Call `TaxRateService.publish_tax_rate` with a tenant, a closed `tax_code` (`vat`, `gst`, or `sales_tax`), and an exact `tax_rate` in `[0, 1]`. Then call `TaxAssessmentService.assess_tax` with the tenant, `invoice_draft_id`, and that persisted version. Tax is half-even rounded to the documented ISO 4217 minor units. Assess before opening a collection case. A taxed `propose_journal` credits semantic `tax_payable`; AIS must map that role.
+
 ## Next action
 
-Publish a rate card, then rate a window against that version. Do not invent a hidden default price, do not edit a published version, and do not start tax in this slice.
+Publish a tax rate, assess the draft, then propose the journal and let AIS pull. Do not call an OSS tax engine, do not store exemption certificates, and do not start operator UI in this slice.

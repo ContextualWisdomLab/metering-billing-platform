@@ -18,6 +18,9 @@ The application is a thin WSGI adapter:
 7. Let a buyer POST a rate card and GET tenant-scoped cards and versions.
    Rating still accepts ``rate_card_version`` and now requires that persisted
    version.  Publish a rate card, then rate a window against that version.
+8. Let a buyer POST a tax rate, assess a draft, and GET those records.
+   Publish a tax rate, assess the draft, then propose the journal and let
+   AIS pull.  AIS must map ``tax_payable``.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -44,9 +47,13 @@ from metering_billing.errors import (
     JournalProposalQueryError,
     PostingReceiptObservationQueryError,
     RateCardQueryError,
+    TaxAssessmentQueryError,
+    TaxRateQueryError,
     TimeWindowError,
 )
 from metering_billing.rate_card import RateCardService
+from metering_billing.tax_assessment import TaxAssessmentService
+from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -73,6 +80,12 @@ RATE_CARD_VERSIONS_PATH = re.compile(r"^/v1/rate-cards/([0-9a-fA-F-]{36})/versio
 RATE_CARD_VERSION_ITEM_PATH = re.compile(
     r"^/v1/rate-card-versions/([0-9a-fA-F-]{36}|[0-9]+)$"
 )
+TAX_RATE_COLLECTION_PATH = "/v1/tax-rates"
+TAX_RATE_VERSION_ITEM_PATH = re.compile(
+    r"^/v1/tax-rate-versions/([0-9a-fA-F-]{36}|[0-9]+)$"
+)
+TAX_ASSESSMENT_COLLECTION_PATH = "/v1/tax-assessments"
+TAX_ASSESSMENT_ITEM_PATH = re.compile(r"^/v1/tax-assessments/([0-9a-fA-F-]{36})$")
 KNOWN_POST_PATHS = frozenset(
     {
         "/v1/usage-events",
@@ -121,6 +134,8 @@ def create_http_app(
     pulls = PostingReceiptPullService(shared_ledger, ais_client=resolved_ais_client)
     credits = CreditAdjustmentService(shared_ledger)
     catalogs = RateCardService(shared_ledger)
+    tax_rates = TaxRateService(shared_ledger)
+    assessments = TaxAssessmentService(shared_ledger)
 
     def application(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         """Dispatch one HTTP request onto the existing commercial services."""
@@ -280,6 +295,61 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_tax_rates", "get_tax_rate_version"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _resolve_tenant_pin(environ, query)
+                if route_name == "list_tax_rates":
+                    page = tax_rates.list_tax_rates(tenant_reference)
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = tax_rates.get_tax_rate_version(
+                    tenant_reference,
+                    _parse_rate_card_version(path_values["tax_rate_version"]),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except TaxRateQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "tax_rate_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "get_tax_assessment":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _resolve_tenant_pin(environ, query)
+                result = assessments.get_tax_assessment(
+                    tenant_reference,
+                    _parse_uuid(path_values["tax_assessment_id"], "tax_assessment_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except TaxAssessmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "tax_assessment_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
             tenant_reference = _resolve_tenant_pin(environ, payload)
@@ -297,6 +367,8 @@ def create_http_app(
                 settlements,
                 credits,
                 catalogs,
+                tax_rates,
+                assessments,
             )
         except HttpRequestError as error:
             return _send_json(
@@ -353,6 +425,26 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "rate_cards", {}
         if method == "GET":
             return "list_rate_cards", {}
+        return "method_not_allowed", {}
+    if path == TAX_RATE_COLLECTION_PATH:
+        if method == "POST":
+            return "tax_rates", {}
+        if method == "GET":
+            return "list_tax_rates", {}
+        return "method_not_allowed", {}
+    tax_version_match = TAX_RATE_VERSION_ITEM_PATH.fullmatch(path)
+    if tax_version_match is not None:
+        if method == "GET":
+            return "get_tax_rate_version", {"tax_rate_version": tax_version_match.group(1)}
+        return "method_not_allowed", {}
+    if path == TAX_ASSESSMENT_COLLECTION_PATH:
+        if method == "POST":
+            return "tax_assessments", {}
+        return "method_not_allowed", {}
+    tax_assessment_match = TAX_ASSESSMENT_ITEM_PATH.fullmatch(path)
+    if tax_assessment_match is not None:
+        if method == "GET":
+            return "get_tax_assessment", {"tax_assessment_id": tax_assessment_match.group(1)}
         return "method_not_allowed", {}
     versions_match = RATE_CARD_VERSIONS_PATH.fullmatch(path)
     if versions_match is not None:
@@ -509,6 +601,8 @@ def _dispatch_write(
     settlements: PaymentSettlementService,
     credits: CreditAdjustmentService | None = None,
     catalogs: RateCardService | None = None,
+    tax_rates: TaxRateService | None = None,
+    assessments: TaxAssessmentService | None = None,
 ) -> tuple[dict[str, object], int]:
     """Call one commercial service and map its contract to an HTTP status."""
     if route_name == "usage_events":
@@ -610,6 +704,29 @@ def _dispatch_write(
             raise HttpRequestError("request_invalid")
         result = catalogs.publish_rate_card(
             tenant_reference, rate_card_name, currency_code, lines
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "tax_rates":
+        if tax_rates is None:
+            raise HttpRequestError("request_invalid")
+        result = tax_rates.publish_tax_rate(
+            tenant_reference, payload.get("tax_code"), payload.get("tax_rate")
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "tax_assessments":
+        if assessments is None:
+            raise HttpRequestError("request_invalid")
+        version_value = payload.get("tax_rate_version")
+        if isinstance(version_value, str):
+            parsed_version = _parse_rate_card_version(version_value)
+        elif isinstance(version_value, int) and not isinstance(version_value, bool):
+            parsed_version = version_value
+        else:
+            raise HttpRequestError("request_invalid")
+        result = assessments.assess_tax(
+            tenant_reference,
+            _parse_uuid(payload.get("invoice_draft_id"), "invoice_draft_id"),
+            parsed_version,
         )
         return result.as_contract_dict(), _status_for_result(result)
     raise HttpRequestError("request_invalid")

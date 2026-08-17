@@ -38,6 +38,7 @@ from metering_billing.usage_ledger import (
     StoredJournalProposal,
     StoredJournalProposalLine,
     StoredPaymentReceipt,
+    StoredTaxAssessment,
     generate_record_id,
 )
 
@@ -49,6 +50,7 @@ INTENDED_BOOK_ROLE_CODE = "primary_statutory"
 RECEIVABLE_ACCOUNT_ROLE_CODE = "accounts_receivable"
 REVENUE_ACCOUNT_ROLE_CODE = "usage_revenue"
 CASH_RECEIPT_ACCOUNT_ROLE_CODE = "cash_receipt"
+TAX_PAYABLE_ACCOUNT_ROLE_CODE = "tax_payable"
 ALLOWED_PROPOSAL_STATUSES = frozenset({"draft", "validated", "exported", "rejected"})
 DEFAULT_PAGE_LIMIT = 50
 MAXIMUM_PAGE_LIMIT = 100
@@ -208,6 +210,9 @@ class AccountingExportService:
         drafted_total_amount = parse_proposal_amount(invoice_draft.drafted_total_amount)
         if drafted_total_amount <= 0:
             return _rejected(JournalProposalRejectionReasonCode.DRAFT_TOTAL_INVALID)
+        assessment = self.ledger.find_tax_assessment_for_draft(
+            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        )
 
         commercial_date = invoice_draft.recorded_at.astimezone(UTC).date().isoformat()
         legal_entity_reference = f"{tenant.tenant_reference}:legal_entity:commercial"
@@ -219,6 +224,7 @@ class AccountingExportService:
             commercial_date=commercial_date,
             legal_entity_reference=legal_entity_reference,
             source_event_reference=source_event_reference,
+            assessment=assessment,
         )
         source_payload_hash = compute_proposal_payload_hash(canonical_payload)
         existing = self.ledger.find_journal_proposal(
@@ -237,6 +243,7 @@ class AccountingExportService:
             journal_proposal_id,
             tenant.tenant_account_id,
             drafted_total_amount,
+            assessment,
         )
         stored = self.ledger.insert_journal_proposal(
             StoredJournalProposal(
@@ -427,21 +434,17 @@ def _canonical_proposal_payload(
     commercial_date: str,
     legal_entity_reference: str,
     source_event_reference: str,
+    assessment: StoredTaxAssessment | None = None,
 ) -> dict[str, object]:
-    """Return commercial proposal facts excluding identifiers and timestamps."""
-    amount_text = format_exact_decimal(drafted_total_amount)
-    return {
-        "proposal_contract_version": PROPOSAL_CONTRACT_VERSION,
-        "tenant_reference": tenant_reference,
-        "invoice_draft_id": str(invoice_draft.invoice_draft_id),
-        "legal_entity_reference": legal_entity_reference,
-        "intended_book_role_code": INTENDED_BOOK_ROLE_CODE,
-        "transaction_currency": invoice_draft.currency_code,
-        "transaction_date": commercial_date,
-        "accounting_date": commercial_date,
-        "proposal_status": PROPOSAL_STATUS,
-        "source_event_references": [source_event_reference],
-        "lines": [
+    """Return commercial proposal facts excluding identifiers and timestamps.
+
+    When a tax assessment exists the hash includes the three-line AR, revenue,
+    and ``tax_payable`` amounts so a taxed draft cannot collide with an
+    untaxed replay of the same invoice draft.
+    """
+    if assessment is None:
+        amount_text = format_exact_decimal(drafted_total_amount)
+        lines: list[dict[str, object]] = [
             {
                 "line_number": 1,
                 "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
@@ -454,7 +457,40 @@ def _canonical_proposal_payload(
                 "debit_amount": "0",
                 "credit_amount": amount_text,
             },
-        ],
+        ]
+    else:
+        lines = [
+            {
+                "line_number": 1,
+                "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
+                "debit_amount": format_exact_decimal(assessment.tax_inclusive_amount),
+                "credit_amount": "0",
+            },
+            {
+                "line_number": 2,
+                "account_role_code": REVENUE_ACCOUNT_ROLE_CODE,
+                "debit_amount": "0",
+                "credit_amount": format_exact_decimal(assessment.tax_exclusive_amount),
+            },
+            {
+                "line_number": 3,
+                "account_role_code": TAX_PAYABLE_ACCOUNT_ROLE_CODE,
+                "debit_amount": "0",
+                "credit_amount": format_exact_decimal(assessment.tax_amount),
+            },
+        ]
+    return {
+        "proposal_contract_version": PROPOSAL_CONTRACT_VERSION,
+        "tenant_reference": tenant_reference,
+        "invoice_draft_id": str(invoice_draft.invoice_draft_id),
+        "legal_entity_reference": legal_entity_reference,
+        "intended_book_role_code": INTENDED_BOOK_ROLE_CODE,
+        "transaction_currency": invoice_draft.currency_code,
+        "transaction_date": commercial_date,
+        "accounting_date": commercial_date,
+        "proposal_status": PROPOSAL_STATUS,
+        "source_event_references": [source_event_reference],
+        "lines": lines,
     }
 
 
@@ -529,17 +565,48 @@ def _build_proposal_lines(
     journal_proposal_id: UUID,
     tenant_account_id: UUID,
     drafted_total_amount: Decimal,
+    assessment: StoredTaxAssessment | None = None,
 ) -> tuple[StoredJournalProposalLine, ...]:
-    """Build the receivable debit and usage-revenue credit for one draft total."""
-    amount = parse_proposal_amount(drafted_total_amount)
-    return (
+    """Build AR/revenue lines, plus ``tax_payable`` when assessed tax is positive.
+
+    A half-even product that rounds to zero keeps the two-line AR/revenue
+    shape so every persisted line stays debit XOR credit.  The canonical
+    payload still includes the tax facts so a zero-tax assessment cannot
+    collide with an untaxed draft.
+    """
+    if assessment is None:
+        amount = parse_proposal_amount(drafted_total_amount)
+        return (
+            StoredJournalProposalLine(
+                journal_proposal_line_id=generate_record_id(),
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant_account_id,
+                line_number=1,
+                account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
+                debit_amount=amount,
+                credit_amount=Decimal("0"),
+            ),
+            StoredJournalProposalLine(
+                journal_proposal_line_id=generate_record_id(),
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant_account_id,
+                line_number=2,
+                account_role_code=REVENUE_ACCOUNT_ROLE_CODE,
+                debit_amount=Decimal("0"),
+                credit_amount=amount,
+            ),
+        )
+    inclusive = parse_proposal_amount(assessment.tax_inclusive_amount)
+    exclusive = parse_proposal_amount(assessment.tax_exclusive_amount)
+    tax_amount = parse_proposal_amount(assessment.tax_amount)
+    lines = [
         StoredJournalProposalLine(
             journal_proposal_line_id=generate_record_id(),
             journal_proposal_id=journal_proposal_id,
             tenant_account_id=tenant_account_id,
             line_number=1,
             account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
-            debit_amount=amount,
+            debit_amount=inclusive,
             credit_amount=Decimal("0"),
         ),
         StoredJournalProposalLine(
@@ -549,9 +616,22 @@ def _build_proposal_lines(
             line_number=2,
             account_role_code=REVENUE_ACCOUNT_ROLE_CODE,
             debit_amount=Decimal("0"),
-            credit_amount=amount,
+            credit_amount=exclusive,
         ),
-    )
+    ]
+    if tax_amount > 0:
+        lines.append(
+            StoredJournalProposalLine(
+                journal_proposal_line_id=generate_record_id(),
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant_account_id,
+                line_number=3,
+                account_role_code=TAX_PAYABLE_ACCOUNT_ROLE_CODE,
+                debit_amount=Decimal("0"),
+                credit_amount=tax_amount,
+            )
+        )
+    return tuple(lines)
 
 
 def _rejected(reason_code: JournalProposalRejectionReasonCode) -> JournalProposalResult:

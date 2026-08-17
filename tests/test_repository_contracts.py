@@ -624,6 +624,88 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_tax_rate_accepts_published_version_and_closed_codes(self) -> None:
+        """A tax-rate contract records an exact rate in [0, 1] and closed codes."""
+        schema = self._schema("tax-rate.schema.json")
+        instance = {
+            "tax_rate_contract_version": 1,
+            "tax_rate_outcome_code": "accepted",
+            "tax_rate_schedule_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf690",
+            "tax_rate_version_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf691",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "tax_code": "vat",
+            "tax_rate_version": 1,
+            "tax_rate": "0.10",
+            "source_payload_hash": "sha256:" + "4" * 64,
+            "published_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": (
+                "Publish a tax rate, assess the draft, then propose the journal and let AIS pull."
+            ),
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        floated = dict(instance, tax_rate=0.10)
+        self.assertTrue(validate_schema_instance(schema, floated))
+        unknown_code = dict(instance, tax_code="excise")
+        self.assertIn(
+            "$.tax_code: value is not in the allowed enumeration",
+            validate_schema_instance(schema, unknown_code),
+        )
+
+    def test_tax_assessment_accepts_inclusive_identity_and_closed_reasons(self) -> None:
+        """A tax-assessment contract records exclusive, tax, and inclusive amounts."""
+        schema = self._schema("tax-assessment.schema.json")
+        instance = {
+            "tax_assessment_contract_version": 1,
+            "tax_assessment_outcome_code": "accepted",
+            "tax_assessment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf692",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "tax_rate_version_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf691",
+            "tax_rate_version": 1,
+            "tax_code": "vat",
+            "tax_rate": "0.10",
+            "currency_code": "USD",
+            "tax_exclusive_amount": "100.00",
+            "tax_amount": "10.00",
+            "tax_inclusive_amount": "110.00",
+            "source_payload_hash": "sha256:" + "5" * 64,
+            "assessed_at": "2026-08-17T21:05:00Z",
+            "next_operator_action": (
+                "Publish a tax rate, assess the draft, then propose the journal and let AIS pull."
+            ),
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        unknown_reason = {
+            "tax_assessment_contract_version": 1,
+            "tax_assessment_outcome_code": "rejected",
+            "rejection_reason_code": "tax_exempt",
+        }
+        self.assertIn(
+            "$.rejection_reason_code: value is not in the allowed enumeration",
+            validate_schema_instance(schema, unknown_reason),
+        )
+
+    def test_tax_assessment_migration_is_tenant_scoped_and_append_only(self) -> None:
+        """Tax schedules, versions, and assessments stay tenant-scoped."""
+        sql = (ROOT / "database/migrations/0013_tax_assessment.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.tax_rate_schedule",
+            "CREATE TABLE billing_core.tax_rate_version",
+            "CREATE TABLE billing_core.tax_assessment",
+            "UNIQUE (tenant_account_id, tax_code)",
+            "UNIQUE (tenant_account_id, tax_rate_schedule_id, version_number)",
+            "UNIQUE (tenant_account_id, tax_rate_schedule_id, source_payload_hash, tax_rate_contract_version)",
+            "UNIQUE (tenant_account_id, invoice_draft_id)",
+            "UNIQUE (tenant_account_id, invoice_draft_id, tax_rate_version_id, source_payload_hash, tax_assessment_contract_version)",
+            "tax_rate numeric(38, 12) NOT NULL CHECK (tax_rate >= 0 AND tax_rate <= 1)",
+            "CHECK (tax_inclusive_amount = tax_exclusive_amount + tax_amount)",
+            "FOREIGN KEY (tenant_account_id, invoice_draft_id)",
+            "FOREIGN KEY (tenant_account_id, tax_rate_version_id)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_rate_card_accepts_published_version_and_closed_reasons(self) -> None:
         """A rate-card contract records exact unit amounts and closed outcomes."""
         schema = self._schema("rate-card.schema.json")

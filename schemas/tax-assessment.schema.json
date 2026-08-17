@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/tax-assessment/v1",
+  "title": "Tax Assessment",
+  "description": "Append-only commercial tax assessment on one tenant invoice draft. tax_exclusive_amount is the drafted subtotal. tax_amount is half-even rounded to the currency minor units. tax_inclusive_amount is exclusive plus tax. Replays acknowledge the stored tax_assessment_id. Tax-payable unwind on credit is a later slice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tax_assessment_contract_version",
+    "tax_assessment_outcome_code"
+  ],
+  "properties": {
+    "tax_assessment_contract_version": {"type": "integer", "minimum": 1},
+    "tax_assessment_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "tax_assessment_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "tax_rate_version_id": {"type": "string", "format": "uuid"},
+    "tax_rate_version": {"type": "integer", "minimum": 1},
+    "tax_code": {"type": "string", "enum": ["vat", "gst", "sales_tax"]},
+    "tax_rate": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "tax_exclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_inclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "assessed_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "invoice_draft_not_found",
+        "tax_rate_not_found",
+        "tax_after_collection_opened",
+        "draft_total_invalid",
+        "currency_exponent_unknown",
+        "tax_assessment_not_found"
+      ]
+    }
+  }
+}

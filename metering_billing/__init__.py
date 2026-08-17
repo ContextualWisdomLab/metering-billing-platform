@@ -3,11 +3,11 @@
 This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, rate tenant-scoped
-windows against a persisted version, draft invoice-intent documents, emit
-journal proposals, open collection cases, project provider-neutral payment
-intents, apply commercial payment receipts, record commercial credits, and
-accept those writes over a stdlib HTTP adapter without taking a
-payment-provider dependency.
+windows against a persisted version, draft invoice-intent documents, publish
+tax rates, assess tax on a draft, emit journal proposals, open collection
+cases, project provider-neutral payment intents, apply commercial payment
+receipts, record commercial credits, and accept those writes over a stdlib
+HTTP adapter without taking a payment-provider dependency.
 
 The package never posts statutory journals.  Accounting exports remain
 ``accounting_journal_proposal`` documents with proposal-only statuses.
@@ -27,6 +27,8 @@ from metering_billing.contracts import (
     COLLECTION_CASE_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_SCHEMA_NAME,
     RATE_CARD_SCHEMA_NAME,
+    TAX_RATE_SCHEMA_NAME,
+    TAX_ASSESSMENT_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
@@ -40,6 +42,8 @@ from metering_billing.contracts import (
     validate_collection_case,
     validate_credit_adjustment,
     validate_rate_card,
+    validate_tax_rate,
+    validate_tax_assessment,
     validate_invoice_draft,
     validate_journal_proposal,
     validate_payment_intent,
@@ -49,6 +53,8 @@ from metering_billing.contracts import (
 )
 from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.rate_card import RateCardService
+from metering_billing.tax_assessment import TaxAssessmentService
+from metering_billing.tax_rate import TaxRateService
 from metering_billing.errors import (
     CollectionCaseOutcomeCode,
     CollectionCaseRejectionReasonCode,
@@ -58,6 +64,12 @@ from metering_billing.errors import (
     RateCardOutcomeCode,
     RateCardQueryError,
     RateCardRejectionReasonCode,
+    TaxAssessmentOutcomeCode,
+    TaxAssessmentQueryError,
+    TaxAssessmentRejectionReasonCode,
+    TaxRateOutcomeCode,
+    TaxRateQueryError,
+    TaxRateRejectionReasonCode,
     IngestionOutcomeCode,
     InvoiceDraftOutcomeCode,
     InvoiceDraftRejectionReasonCode,
@@ -92,6 +104,8 @@ __all__ = (
     "COLLECTION_CASE_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
+    "TAX_RATE_SCHEMA_NAME",
+    "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
@@ -110,6 +124,14 @@ __all__ = (
     "RateCardQueryError",
     "RateCardRejectionReasonCode",
     "RateCardService",
+    "TaxAssessmentOutcomeCode",
+    "TaxAssessmentQueryError",
+    "TaxAssessmentRejectionReasonCode",
+    "TaxAssessmentService",
+    "TaxRateOutcomeCode",
+    "TaxRateQueryError",
+    "TaxRateRejectionReasonCode",
+    "TaxRateService",
     "IngestionOutcomeCode",
     "InvoiceDraftOutcomeCode",
     "InvoiceDraftRejectionReasonCode",
@@ -146,6 +168,8 @@ __all__ = (
     "validate_collection_case",
     "validate_credit_adjustment",
     "validate_rate_card",
+    "validate_tax_rate",
+    "validate_tax_assessment",
     "validate_invoice_draft",
     "validate_journal_proposal",
     "validate_payment_intent",

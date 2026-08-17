@@ -4,7 +4,8 @@ The service is the buyer-facing collections path:
 
 1. Resolve the tenant.
 2. Load that tenant's stored ``invoice_draft``.
-3. Open an append-only case whose outstanding equals the exact draft total.
+3. Open an append-only case whose outstanding equals the tax-inclusive
+   amount when a tax assessment exists, otherwise the exact draft total.
 4. Append commercial dunning reminders without capturing payment.
 
 The case is a commercial collection record, not a statutory invoice and not a
@@ -149,7 +150,15 @@ class CollectionCaseService:
         if invoice_draft is None or invoice_draft.tenant_account_id != tenant.tenant_account_id:
             return _rejected(CollectionCaseRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
 
-        outstanding_amount = parse_collection_amount(invoice_draft.drafted_total_amount)
+        assessment = self.ledger.find_tax_assessment_for_draft(
+            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        )
+        collectible = (
+            assessment.tax_inclusive_amount
+            if assessment is not None
+            else invoice_draft.drafted_total_amount
+        )
+        outstanding_amount = parse_collection_amount(collectible)
         if outstanding_amount <= 0:
             return _rejected(CollectionCaseRejectionReasonCode.OUTSTANDING_AMOUNT_INVALID)
 

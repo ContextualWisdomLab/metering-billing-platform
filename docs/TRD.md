@@ -45,6 +45,8 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.RateCardService` publishes a tenant-scoped catalog version with flat unit prices (TM Forum, 2024). Replay of the same tenant, card name, canonical line hash, and contract version returns the stored `rate_card_version` (Helland, 2012). `UsageRatingService` must resolve that persisted version; a missing metric fails closed and does not invent a price. `POST /v1/rate-cards` publishes a version. `GET /v1/rate-cards`, `GET /v1/rate-cards/{rate_card_id}`, `GET /v1/rate-cards/{rate_card_id}/versions`, and `GET /v1/rate-card-versions/{rate_card_version}` are safe tenant-scoped reads (Fielding et al., 2022). Publish a rate card, then rate a window against that version.
 
+`metering_billing.TaxRateService` publishes a tenant-scoped tax-rate version. `metering_billing.TaxAssessmentService` applies that version to a stored invoice draft and half-even rounds to ISO 4217 minor units (International Organization for Standardization, 2015; OECD, 2017). IFRS 15 keeps amounts collected for a tax authority out of revenue (IFRS Foundation, 2024). A taxed journal proposal credits semantic `tax_payable`; AIS must map that role and owns IAS 12 presentation (IFRS Foundation, n.d.). `POST /v1/tax-rates` and `POST /v1/tax-assessments` write; GET list, version, and assessment routes are safe tenant-scoped reads (Fielding et al., 2022). Publish a tax rate, assess the draft, then propose the journal and let AIS pull.
+
 ## Security
 
 - No card number, CVC, provider secret, PAT plaintext, prompt, or response is accepted in billing contracts.

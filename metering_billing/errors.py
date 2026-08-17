@@ -89,6 +89,59 @@ class RateCardQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class TaxRateOutcomeCode(StrEnum):
+    """Terminal result of publishing one tenant-scoped tax-rate version."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class TaxRateRejectionReasonCode(StrEnum):
+    """Why a tax-rate publish or read was refused without writing a rate."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    TAX_RATE_NOT_FOUND = "tax_rate_not_found"
+    TAX_CODE_INVALID = "tax_code_invalid"
+    TAX_RATE_INVALID = "tax_rate_invalid"
+
+
+class TaxRateQueryError(ValueError):
+    """Raised when a stored tax-rate version cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
+class TaxAssessmentOutcomeCode(StrEnum):
+    """Terminal result of assessing tax on one invoice draft."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class TaxAssessmentRejectionReasonCode(StrEnum):
+    """Why a tax assessment was refused without writing tax amounts."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    TAX_RATE_NOT_FOUND = "tax_rate_not_found"
+    TAX_AFTER_COLLECTION_OPENED = "tax_after_collection_opened"
+    DRAFT_TOTAL_INVALID = "draft_total_invalid"
+    CURRENCY_EXPONENT_UNKNOWN = "currency_exponent_unknown"
+    TAX_ASSESSMENT_NOT_FOUND = "tax_assessment_not_found"
+
+
+class TaxAssessmentQueryError(ValueError):
+    """Raised when a stored tax assessment cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class InvoiceDraftOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one invoice-intent draft."""
 
