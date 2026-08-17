@@ -474,3 +474,22 @@ class TenantApiCredentialTests(unittest.TestCase):
         )
         self.assertEqual(empty_issue_status, 422)
         self.assertEqual(empty_issue_body["rejection_reason_code"], "request_invalid")
+        unknown_tenant_key_status, unknown_tenant_key_body = invoke_http(
+            create_http_app(),
+            "GET",
+            "/v1/journal-proposals",
+            query={"tenant_reference": TENANT_ONE},
+            headers={"Authorization": "Bearer not-a-stored-secret"},
+        )
+        self.assertEqual(unknown_tenant_key_status, 422)
+        self.assertEqual(unknown_tenant_key_body["rejection_reason_code"], "api_credential_invalid")
+        gone_ledger = seed_rated_ledger()
+        gone_service = TenantApiCredentialService(gone_ledger)
+        gone_issued = gone_service.issue_credential(TENANT_ONE)
+        del gone_ledger.tenant_accounts[TENANT_ONE]
+        with self.assertRaises(TenantApiCredentialQueryError) as gone:
+            gone_service.authorize_request(TENANT_ONE, gone_issued.api_credential_secret)
+        self.assertEqual(gone.exception.rejection_reason_code, "request_invalid")
+        with self.assertRaises(TenantApiCredentialQueryError) as empty_secret:
+            service.authorize_request(TENANT_ONE, "")
+        self.assertEqual(empty_secret.exception.rejection_reason_code, "api_credential_invalid")

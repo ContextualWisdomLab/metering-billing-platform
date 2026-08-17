@@ -232,9 +232,11 @@ class TenantApiCredentialService:
 
         A presented secret is always verified.  Unknown and revoked keys are
         indistinguishable.  A key whose tenant does not match the pin is
-        ``request_invalid``.
+        ``request_invalid``.  An unknown tenant with no secret stays in the
+        bootstrap window so downstream services can reject with their own
+        contracts.
         """
-        tenant = self._require_tenant(tenant_reference)
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if presented_secret is not None:
             try:
                 secret_hash = hash_api_credential_secret(presented_secret, self._pepper)
@@ -243,8 +245,12 @@ class TenantApiCredentialService:
             stored = self.ledger.find_tenant_api_credential_by_hash(secret_hash)
             if stored is None or stored.credential_status != "active":
                 raise TenantApiCredentialQueryError("api_credential_invalid")
+            if tenant_error is not None or tenant is None:
+                raise TenantApiCredentialQueryError("request_invalid")
             if stored.tenant_account_id != tenant.tenant_account_id:
                 raise TenantApiCredentialQueryError("request_invalid")
+            return
+        if tenant_error is not None or tenant is None:
             return
         if self.ledger.list_active_tenant_api_credentials(tenant.tenant_account_id):
             raise TenantApiCredentialQueryError("api_credential_missing")

@@ -530,6 +530,15 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertTrue(
             any("must include" in error for error in validate_tenant_api_credential(accepted_missing))
         )
+        unknown_outcome = {
+            "tenant_api_credential_contract_version": 1,
+            "tenant_api_credential_outcome_code": "posted",
+        }
+        self.assertTrue(validate_tenant_api_credential(unknown_outcome))
+        replay = dict(instance)
+        replay["tenant_api_credential_outcome_code"] = "duplicate_replay"
+        del replay["api_credential_secret"]
+        self.assertEqual(validate_tenant_api_credential(replay), ())
 
     def test_tenant_api_credential_migration_stores_keyed_hash(self) -> None:
         """API credentials persist a keyed HMAC and never a recoverable secret."""
