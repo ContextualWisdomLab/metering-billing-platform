@@ -20,7 +20,12 @@
     "observed_receipt_count": {"type": "integer", "minimum": 0},
     "published_event_count": {"type": "integer", "minimum": 0},
     "skipped_event_count": {"type": "integer", "minimum": 0},
-    "next_cursor": {"type": ["string", "null"]},
+    "next_cursor": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {"const": null}
+      ]
+    },
     "rejection_reason_code": {
       "type": "string",
       "enum": [
