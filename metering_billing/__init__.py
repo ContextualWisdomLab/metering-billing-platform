@@ -5,7 +5,7 @@ Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, rate tenant-scoped
 windows against a persisted version, draft invoice-intent documents, present
 those drafts as statements, publish tax rates, assess tax on a draft, emit
-journal proposals, open collection cases, project provider-neutral payment
+journal proposals, open collection cases, present those cases as statements, project provider-neutral payment
 intents, apply commercial payment receipts, record commercial credits,
 register webhook callbacks for accepted commercial facts, drain
 AIS posting-receipt outbox events into stored observations, and
@@ -25,6 +25,7 @@ that AIS later pulls.
 from metering_billing.ais_outbox_drain import AisOutboxDrainService
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
+from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.contracts import (
     ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME,
     ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME,
@@ -34,6 +35,7 @@ from metering_billing.contracts import (
     TAX_RATE_SCHEMA_NAME,
     TAX_ASSESSMENT_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
+    COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
     TENANT_API_CREDENTIAL_SCHEMA_NAME,
     AIS_OUTBOX_DRAIN_SCHEMA_NAME,
@@ -54,6 +56,7 @@ from metering_billing.contracts import (
     validate_tax_rate,
     validate_tax_assessment,
     validate_invoice_draft,
+    validate_collection_case_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_ais_outbox_drain,
@@ -87,6 +90,7 @@ from metering_billing.errors import (
     IngestionOutcomeCode,
     InvoiceDraftOutcomeCode,
     InvoiceDraftRejectionReasonCode,
+    CollectionCasePresentmentQueryError,
     InvoicePresentmentQueryError,
     TenantApiCredentialOutcomeCode,
     TenantApiCredentialQueryError,
@@ -135,6 +139,7 @@ __all__ = (
     "TAX_RATE_SCHEMA_NAME",
     "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
+    "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
@@ -149,6 +154,8 @@ __all__ = (
     "AisOutboxDrainRejectionReasonCode",
     "AisOutboxDrainService",
     "AccountingExportService",
+    "CollectionCasePresentmentQueryError",
+    "CollectionCasePresentmentService",
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
     "CollectionCaseService",
@@ -220,6 +227,7 @@ __all__ = (
     "validate_tax_rate",
     "validate_tax_assessment",
     "validate_invoice_draft",
+    "validate_collection_case_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_ais_outbox_drain",

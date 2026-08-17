@@ -4,6 +4,9 @@
 
 ### Added
 
+- `CollectionCasePresentmentService.present_collection_case` projects one tenant-scoped collection statement from stored `collection_case` and dunning rows.  `collection_outstanding` is an exact-decimal string.  Status stays `open`, `dunning`, or `settled`.  Next operator action is `collect`, `credit`, or `wait`.  `GET /v1/collection-cases/{collection_case_id}` is HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/collection-cases` lists `{collection_cases, next_cursor}`.  Open the collection case, then collect or credit.
+- `operator_console` Storybook adds a `CollectionCase` story using `AmountDue` and `StatusChip`.  Fixtures are open, dunning, and settled.  There is no login wall, Figma-only work, or production SPA.
+- ADR 0023 for collection-case presentment.
 - `AisOutboxDrainService.drain_ais_outbox` GETs AIS `GET /outbox-events?event_type_code=posting_receipt`, matches `payload_reference` / `aggregate_reference` by equality to URNs constructed from our stored `proposal_id`, then GETs `/posting-receipts?idempotency_key=` with the stored Billing key.  Empty unpublished pages skip receipt GETs.  After a stored observation, POST `/outbox-events/{outbox_event_id}/publish`.  `proposal_status` stays `validated`.  Do not drain `journal_reversal` or `period_close`.  Do not parse the payload URN.
 - `POST /v1/ais-outbox-drains` on the existing WSGI app uses the tenant pin plus the #22 key rule.  `AIS_BASE_URL` is operator-configured https; http is allowed only for localhost tests.  There is no scheduler.
 - ADR 0022 for the AIS outbox drain.  Customer copy: drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.

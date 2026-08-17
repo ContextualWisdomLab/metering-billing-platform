@@ -15,6 +15,7 @@ from unittest import mock
 
 from metering_billing.contracts import (
     validate_ais_outbox_drain,
+    validate_collection_case_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -490,6 +491,74 @@ class RepositoryContractTests(unittest.TestCase):
         due_scientific["amount_due"] = "not-decimal"
         self.assertTrue(
             any("presentment amounts" in error for error in validate_invoice_presentment(due_scientific))
+        )
+
+    def test_collection_case_presentment_accepts_outstanding_and_rejects_posted(self) -> None:
+        """A collection statement records exact outstanding and cannot claim posting."""
+        schema = self._schema("collection-case-presentment.schema.json")
+        instance = {
+            "collection_case_presentment_contract_version": 1,
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "currency_code": "USD",
+            "collection_outstanding": "100.00",
+            "collection_case_status": "open",
+            "opened_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "collect",
+            "next_dunning_notice_code": "first_notice",
+            "dunning_events": [],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_collection_case_presentment(instance), ())
+        settled = dict(instance)
+        settled["collection_outstanding"] = "0.00"
+        settled["collection_case_status"] = "settled"
+        settled["next_operator_action"] = "wait"
+        settled.pop("next_dunning_notice_code")
+        self.assertEqual(validate_collection_case_presentment(settled), ())
+        posted = dict(instance)
+        posted["proposal_status"] = "posted"
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        negative = dict(instance)
+        negative["collection_outstanding"] = "-1.00"
+        self.assertIn(
+            "$: collection_outstanding must not be negative",
+            validate_collection_case_presentment(negative),
+        )
+        settled_due = dict(settled)
+        settled_due["collection_outstanding"] = "1.00"
+        self.assertIn(
+            "$: settled cases must present zero outstanding",
+            validate_collection_case_presentment(settled_due),
+        )
+        settled_collect = dict(settled)
+        settled_collect["next_operator_action"] = "collect"
+        self.assertIn(
+            "$: settled cases must wait",
+            validate_collection_case_presentment(settled_collect),
+        )
+        self.assertNotEqual(validate_collection_case_presentment([]), ())
+        non_string = dict(instance)
+        non_string["collection_outstanding"] = 100
+        self.assertEqual(
+            [
+                error
+                for error in validate_collection_case_presentment(non_string)
+                if "collection_outstanding" in error and "exact decimal" in error
+            ],
+            [],
+        )
+        scientific = dict(instance)
+        scientific["collection_outstanding"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "exact decimal" in error
+                for error in validate_collection_case_presentment(scientific)
+            )
         )
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:

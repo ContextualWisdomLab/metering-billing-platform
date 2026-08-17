@@ -3,7 +3,7 @@
   "version": "0.20.0",
   "private": true,
   "type": "module",
-  "description": "Operator presentment Storybook for the invoice-draft statement contract.",
+  "description": "Operator presentment Storybook for invoice-draft and collection-case statement contracts.",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",

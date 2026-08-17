@@ -34,6 +34,9 @@ The application is a thin WSGI adapter:
     unpublished pages skip receipt GETs.  Matched rows use the stored
     Billing idempotency key, never the payload URN.  Observations stay
     observations; ``proposal_status`` stays ``validated``.
+13. Let an operator GET a stored collection case as a commercial statement.
+    Open the collection case, then collect or credit.  The read does not
+    post, call AIS, capture payment, or start a web UI.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -56,6 +59,7 @@ from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
 from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
+    CollectionCasePresentmentQueryError,
     CreditAdjustmentQueryError,
     ExactDecimalError,
     JournalProposalQueryError,
@@ -72,6 +76,7 @@ from metering_billing.rate_card import RateCardService
 from metering_billing.tax_assessment import TaxAssessmentService
 from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
+from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
@@ -85,6 +90,8 @@ from metering_billing.usage_rating import UsageRatingService
 
 
 WSGIApp = Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]
+COLLECTION_CASE_COLLECTION_PATH = "/v1/collection-cases"
+COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36})$")
 COLLECTION_DUNNING_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/dunning-events$"
 )
@@ -125,7 +132,6 @@ KNOWN_POST_PATHS = frozenset(
         "/v1/usage-events",
         "/v1/rating-runs",
         "/v1/journal-proposals",
-        "/v1/collection-cases",
         "/v1/payment-intents",
         "/v1/payment-receipts",
         "/v1/cash-journal-proposals",
@@ -170,6 +176,7 @@ def create_http_app(
     tax_rates = TaxRateService(shared_ledger)
     assessments = TaxAssessmentService(shared_ledger)
     presentments = InvoicePresentmentService(shared_ledger)
+    case_presentments = CollectionCasePresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -548,6 +555,39 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_collection_cases", "get_collection_case"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_collection_cases":
+                    page = case_presentments.list_collection_cases(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = case_presentments.present_collection_case(
+                    tenant_reference,
+                    _parse_uuid(path_values["collection_case_id"], "collection_case_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except CollectionCasePresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "collection_case_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
             tenant_reference = _authorized_tenant(environ, payload)
@@ -640,6 +680,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if dunning_match is not None:
         if method == "POST":
             return "dunning_events", {"collection_case_id": dunning_match.group(1)}
+        return "method_not_allowed", {}
+    if path == COLLECTION_CASE_COLLECTION_PATH:
+        if method == "POST":
+            return "collection_cases", {}
+        if method == "GET":
+            return "list_collection_cases", {}
+        return "method_not_allowed", {}
+    collection_match = COLLECTION_CASE_ITEM_PATH.fullmatch(path)
+    if collection_match is not None:
+        if method == "GET":
+            return "get_collection_case", {"collection_case_id": collection_match.group(1)}
         return "method_not_allowed", {}
     cancel_match = PAYMENT_CANCEL_PATH.fullmatch(path)
     if cancel_match is not None:

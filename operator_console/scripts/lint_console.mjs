@@ -42,7 +42,8 @@ for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.ends
       fail(`${fileName}: ${fieldName} must be an exact-decimal string`);
     }
   }
-  for (const [index, line] of payload.invoice_lines.entries()) {
+  const invoiceLines = Array.isArray(payload.invoice_lines) ? payload.invoice_lines : [];
+  for (const [index, line] of invoiceLines.entries()) {
     for (const fieldName of lineMoneyFields) {
       const value = line[fieldName];
       if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {

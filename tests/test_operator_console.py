@@ -7,7 +7,10 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from metering_billing.contracts import validate_invoice_presentment
+from metering_billing.contracts import (
+    validate_collection_case_presentment,
+    validate_invoice_presentment,
+)
 from metering_billing.exact_decimal import parse_exact_decimal
 
 
@@ -17,6 +20,11 @@ FIXTURE_NAMES = (
     "taxed_partial_credit.json",
     "untaxed_morning.json",
     "settled_statement.json",
+)
+COLLECTION_FIXTURE_NAMES = (
+    "open_collection_case.json",
+    "dunning_collection_case.json",
+    "settled_collection_case.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -57,6 +65,16 @@ class OperatorConsoleTests(unittest.TestCase):
         settled = self._fixture("settled_statement.json")
         self.assertEqual(settled["amount_due"], "0.00")
         self.assertEqual(settled["credited_amount"], settled["tax_inclusive_amount"])
+        for fixture_name in COLLECTION_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_collection_case_presentment(payload), ())
+            value = payload["collection_outstanding"]
+            self.assertIsInstance(value, str)
+            self.assertNotIsInstance(value, float)
+            parse_exact_decimal(value)
+        self.assertEqual(self._fixture("open_collection_case.json")["next_operator_action"], "collect")
+        self.assertEqual(self._fixture("dunning_collection_case.json")["last_dunning_notice_code"], "first_notice")
+        self.assertEqual(self._fixture("settled_collection_case.json")["next_operator_action"], "wait")
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -75,11 +93,12 @@ class OperatorConsoleTests(unittest.TestCase):
     def test_storybook_inventory_lists_required_stories(self) -> None:
         """The inventory must name the four tokenized modules and three fixtures."""
         inventory = (ROOT / "docs" / "STORYBOOK.md").read_text(encoding="utf-8")
-        for story_name in ("InvoiceStatement", "AmountDue", "LineTable", "StatusChip"):
+        for story_name in ("InvoiceStatement", "AmountDue", "LineTable", "StatusChip", "CollectionCase"):
             self.assertIn(story_name, inventory)
-        for fixture_name in FIXTURE_NAMES:
+        for fixture_name in FIXTURE_NAMES + COLLECTION_FIXTURE_NAMES:
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
+        self.assertIn("Open the collection case, then collect or credit", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

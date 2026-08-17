@@ -30,6 +30,7 @@ __all__ = (
     "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
@@ -43,6 +44,7 @@ __all__ = (
     "validate_collection_case",
     "validate_invoice_draft",
     "validate_invoice_presentment",
+    "validate_collection_case_presentment",
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
@@ -68,6 +70,7 @@ USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
+COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
@@ -297,6 +300,31 @@ def _invoice_draft_total_errors(invoice_draft: Mapping[str, Any]) -> tuple[str, 
     if line_total != Decimal(drafted_total_amount):
         return ("$: invoice draft line totals must equal drafted_total_amount",)
     return ()
+
+
+def validate_collection_case_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate collection presentment shape plus outstanding and action invariants."""
+    schema = load_json_schema(COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    outstanding = statement.get("collection_outstanding")
+    status = statement.get("collection_case_status")
+    action = statement.get("next_operator_action")
+    if isinstance(outstanding, str):
+        try:
+            parsed = Decimal(outstanding)
+            if parsed < Decimal("0"):
+                errors.append("$: collection_outstanding must not be negative")
+            if status == "settled" and parsed != Decimal("0"):
+                errors.append("$: settled cases must present zero outstanding")
+            if status == "settled" and action != "wait":
+                errors.append("$: settled cases must wait")
+        except Exception:
+            errors.append("$: collection_outstanding must be an exact decimal")
+    return tuple(errors)
 
 
 def validate_invoice_presentment(

@@ -9,6 +9,11 @@ import { renderInvoiceStatement, NEXT_OPERATOR_ACTION } from "../src/invoice_sta
 import { renderLineTable } from "../src/line_table.js";
 import { renderStatusChip, resolveStatementStatus } from "../src/status_chip.js";
 import { renderTenantPin } from "../src/tenant_pin.js";
+import {
+  renderCollectionCase,
+  COLLECTION_CUSTOMER_COPY,
+  nextOperatorActionCopy,
+} from "../src/collection_case.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -49,8 +54,42 @@ test("settled fixture shows zero due as a string", () => {
   assert.match(renderStatusChip(statement), /settled/);
 });
 
+test("open collection case shows outstanding and collect or credit", () => {
+  const statement = loadFixture("open_collection_case.json");
+  const html = renderCollectionCase(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /Collect or credit/);
+  assert.match(html, /Open the collection case, then collect or credit/);
+  assert.equal(COLLECTION_CUSTOMER_COPY, "Open the collection case, then collect or credit.");
+  assert.equal(nextOperatorActionCopy("collect"), "Collect or credit");
+  assert.equal(nextOperatorActionCopy("credit"), "Credit");
+  assert.equal(nextOperatorActionCopy("wait"), "Wait");
+  assert.equal(typeof statement.collection_outstanding, "string");
+});
+
+test("dunning collection case keeps first_notice and outstanding as a string", () => {
+  const statement = loadFixture("dunning_collection_case.json");
+  const html = renderCollectionCase(statement);
+  assert.match(html, /100\.00 USD/);
+  assert.match(html, /dunning/);
+  assert.equal(statement.last_dunning_notice_code, "first_notice");
+  assert.equal(typeof statement.collection_outstanding, "string");
+});
+
+test("settled collection case waits", () => {
+  const statement = loadFixture("settled_collection_case.json");
+  const html = renderCollectionCase(statement);
+  assert.match(html, /0\.00 USD/);
+  assert.match(html, /Wait/);
+  assert.equal(statement.next_operator_action, "wait");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
+  assert.throws(
+    () => renderCollectionCase({ collection_outstanding: 100.0, currency_code: "USD" }),
+    TypeError,
+  );
   assert.throws(
     () => renderLineTable({ invoice_lines: [{ line_number: 1, metric_code: "x", quantity: 1, unit_amount: "1.00", line_amount: "1.00" }] }),
     TypeError,

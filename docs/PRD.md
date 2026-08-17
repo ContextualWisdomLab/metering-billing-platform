@@ -176,6 +176,15 @@ contextual-orchestrator usage
 - Revoked subscriptions are not POSTed. Missing tenant, insecure production callbacks, unknown event types, and secret leakage on list JSON fail closed.
 - AIS pull stays bootstrap. Operators register an https callback, then run deliveries; AIS may keep polling. This slice does not flip `proposal_status`, call AIS posting-receipt, or emit statutory IDs.
 
+## Collection-case-presentment acceptance
+
+- A known stored collection case presents one tenant-scoped statement with `collection_outstanding`, `collection_case_status` (`open` / `dunning` / `settled`), last/next dunning notice codes when those rows exist, and `next_operator_action` (`collect`, `credit`, or `wait`).
+- `GET /v1/collection-cases/{collection_case_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/collection-cases` lists summaries as `{collection_cases, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100.
+- Missing tenant, illegal cursor, and illegal page_limit fail closed.
+- Operators open the collection case, then collect or credit. HTTP presentment does not capture cards or call AIS.
+- `operator_console` Storybook renders that case with tokenized amount due and status chip. Fixtures are open, dunning, and settled.
+
 ## AIS-outbox-drain acceptance
 
 - An operator can drain AIS `posting_receipt` outbox events for a known tenant through `AisOutboxDrainService.drain_ais_outbox` or `POST /v1/ais-outbox-drains`.
@@ -218,4 +227,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, tenant API credentials, operator-console fixture checks, webhook outbox, and AIS outbox drain reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, tenant API credentials, operator-console fixture checks, webhook outbox, and AIS outbox drain reach 100% statement and branch coverage.
