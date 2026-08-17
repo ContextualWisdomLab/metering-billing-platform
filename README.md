@@ -23,6 +23,7 @@ The current milestone contains:
 - closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, tenant API credentials, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
 - a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, and tenant-api-credential migrations with tenant-scoped attribution constraints;
 - an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, issues tenant API credentials, and accepts those writes over a stdlib HTTP adapter;
+- an importable `operator_console` Storybook that renders the invoice-draft presentment contract with design tokens and exact-decimal fixtures;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -69,7 +70,7 @@ python3 -c "from metering_billing import InvoiceDraftService"
 
 After a `rating_run` exists, call `InvoiceDraftService.draft_invoice` with the tenant and `rating_run_id`. The draft total equals the rating-run billable total. An identical replay returns the same `invoice_draft_id`. Status stays `draft`. The draft does not issue, collect, call a payment provider, or post a journal.
 
-After an `invoice_draft` exists, call `InvoicePresentmentService.present_invoice_draft` or `GET /v1/invoice-drafts/{invoice_draft_id}` with the tenant. The statement shows exclusive, tax, inclusive, credited, and amount due as exact-decimal strings. Tax is zero when no assessment exists. Amount due is inclusive minus accepted credits and never below zero. `GET /v1/invoice-drafts` lists summaries. Open the draft statement, then collect or credit. The read does not post, call AIS, or start a web UI.
+After an `invoice_draft` exists, call `InvoicePresentmentService.present_invoice_draft` or `GET /v1/invoice-drafts/{invoice_draft_id}` with the tenant. The statement shows exclusive, tax, inclusive, credited, and amount due as exact-decimal strings. Tax is zero when no assessment exists. Amount due is inclusive minus accepted credits and never below zero. `GET /v1/invoice-drafts` lists summaries. Open the draft statement, then collect or credit. The read does not post or call AIS.
 
 ## Propose a journal
 
@@ -135,6 +136,16 @@ python3 -c "from metering_billing import InvoicePresentmentService"
 
 After an `invoice_draft` exists, `GET /v1/invoice-drafts/{invoice_draft_id}` returns the tenant-scoped statement. Open the draft statement, then collect or credit.
 
+## Present a statement in Storybook
+
+```bash
+cd operator_console
+npm install
+npm run storybook
+```
+
+`operator_console` renders the #21 statement JSON with tokenized amount due, line table, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy is amount due and the next operator action: collect or credit. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
+
 ## Pull journal proposals
 
 ```bash
@@ -174,4 +185,4 @@ Call `TaxRateService.publish_tax_rate` with a tenant, a closed `tax_code` (`vat`
 
 ## Next action
 
-Issue a key, then send it on every `/v1` call; revoke when leaked. Do not start a web UI, PDF, or email in this slice.
+Open the draft statement in Storybook, then collect or credit. Amounts stay exact-decimal strings. Do not add a production SPA, PDF, or email in this slice.

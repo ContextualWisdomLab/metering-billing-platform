@@ -41,6 +41,17 @@ class RepositoryContractTests(unittest.TestCase):
             errors = validate_repository(Path(temporary_directory))
         self.assertIn("missing required file: README.md", errors)
 
+    def test_node_modules_placeholders_are_ignored(self) -> None:
+        """Storybook install trees must not fail repository contract scans."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            nested = root / "operator_console" / "node_modules" / "semver"
+            nested.mkdir(parents=True)
+            (nested / "README.md").write_text("TODO leftover note\n", encoding="utf-8")
+            errors = validate_repository(root)
+        self.assertFalse(any("node_modules" in error for error in errors))
+        self.assertFalse(any("unresolved placeholder" in error for error in errors))
+
     def test_usage_event_accepts_reported_usage(self) -> None:
         """Provider-reported usage with an idempotency key is contract-valid."""
         schema = self._schema("usage-event.schema.json")

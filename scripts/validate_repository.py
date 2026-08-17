@@ -49,6 +49,8 @@ REQUIRED_FILES = (
     "docs/adr/0017-tax-payable-unwind-on-credit.md",
     "docs/adr/0018-invoice-draft-presentment.md",
     "docs/adr/0019-tenant-api-credentials.md",
+    "docs/adr/0020-operator-presentment-storybook.md",
+    "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
     "docs/doctoring/STANDARD_TRACEABILITY.md",
@@ -100,6 +102,10 @@ REQUIRED_FILES = (
     "metering_billing/tax_assessment.py",
     "metering_billing/tenant_api_credential.py",
     "metering_billing/contracts.py",
+    "operator_console/package.json",
+    "operator_console/src/index.js",
+    "operator_console/tokens/design_tokens.json",
+    "operator_console/fixtures/taxed_partial_credit.json",
     "requirements-quality.txt",
     ".github/workflows/ci.yml",
 )
@@ -256,7 +262,10 @@ def _iter_contract_files(root: Path) -> tuple[Path, ...]:
         relative_parts = file_path.relative_to(root).parts
         if not file_path.is_file() or file_path.suffix not in included_suffixes:
             continue
-        if any(part in {".git", "__pycache__", "tests"} for part in relative_parts):
+        if any(
+            part in {".git", "__pycache__", "tests", "node_modules", "storybook-static"}
+            for part in relative_parts
+        ):
             continue
         files.append(file_path)
     return tuple(sorted(files))

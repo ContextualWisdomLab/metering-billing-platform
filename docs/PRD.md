@@ -149,7 +149,8 @@ contextual-orchestrator usage
 - `GET /v1/invoice-drafts/{invoice_draft_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/invoice-drafts` lists summaries `{invoice_draft_id, amount_due, currency_code, drafted_at}` with `{invoice_drafts, next_cursor}`.
 - Missing tenant, float money, and unknown ids fail closed.
-- Operators open the draft statement, then collect or credit. This slice does not add PDF, email, or a web UI.
+- Operators open the draft statement, then collect or credit. HTTP presentment does not add PDF or email.
+- `operator_console` Storybook renders that statement with tokenized amount due, line table, status chip, and tenant pin. Fixtures are taxed plus partial credit, untaxed, and settled. Amounts stay exact-decimal strings. Customer copy is amount due and the next operator action: collect or credit. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Tenant-API-credential acceptance
 
@@ -194,4 +195,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, and tenant API credentials reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, tenant API credentials, and operator-console fixture checks reach 100% statement and branch coverage.

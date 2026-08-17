@@ -1,0 +1,66 @@
+#!/usr/bin/env node
+/** Lint operator-console fixtures and tokens.  Float money fails closed. */
+
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { EXACT_DECIMAL_PATTERN } from "../src/exact_decimal.js";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const moneyFields = [
+  "tax_exclusive_amount",
+  "tax_amount",
+  "tax_inclusive_amount",
+  "credited_amount",
+  "amount_due",
+  "collection_outstanding",
+];
+const lineMoneyFields = ["quantity", "unit_amount", "line_amount"];
+
+function fail(message) {
+  console.error(message);
+  process.exitCode = 1;
+}
+
+const tokens = JSON.parse(readFileSync(join(root, "tokens", "design_tokens.json"), "utf8"));
+for (const groupName of ["color", "spacing", "type", "radius"]) {
+  if (tokens[groupName] === undefined || Object.keys(tokens[groupName]).length === 0) {
+    fail(`design tokens must include a non-empty ${groupName} group`);
+  }
+}
+
+const fixturesDirectory = join(root, "fixtures");
+for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.endsWith(".json"))) {
+  const payload = JSON.parse(readFileSync(join(fixturesDirectory, fileName), "utf8"));
+  for (const fieldName of moneyFields) {
+    if (!(fieldName in payload)) {
+      continue;
+    }
+    const value = payload[fieldName];
+    if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+      fail(`${fileName}: ${fieldName} must be an exact-decimal string`);
+    }
+  }
+  for (const [index, line] of payload.invoice_lines.entries()) {
+    for (const fieldName of lineMoneyFields) {
+      const value = line[fieldName];
+      if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+        fail(`${fileName}: invoice_lines[${index}].${fieldName} must be an exact-decimal string`);
+      }
+    }
+  }
+}
+
+const sourceDirectory = join(root, "src");
+for (const fileName of readdirSync(sourceDirectory).filter((name) => name.endsWith(".js"))) {
+  const source = readFileSync(join(sourceDirectory, fileName), "utf8");
+  if (source.includes("parseFloat") || source.includes("Number.parseFloat")) {
+    fail(`${fileName}: presentment money must not use parseFloat`);
+  }
+}
+
+if (process.exitCode) {
+  process.exit(process.exitCode);
+}
+console.log("operator console lint passed");
