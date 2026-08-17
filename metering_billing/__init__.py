@@ -7,7 +7,8 @@ windows against a persisted version, draft invoice-intent documents, present
 those drafts as statements, publish tax rates, assess tax on a draft, emit
 journal proposals, open collection cases, project provider-neutral payment
 intents, apply commercial payment receipts, record commercial credits,
-register webhook callbacks for accepted commercial facts, and
+register webhook callbacks for accepted commercial facts, drain
+AIS posting-receipt outbox events into stored observations, and
 accept those writes over a stdlib HTTP adapter without taking a
 payment-provider dependency.
 
@@ -21,6 +22,7 @@ Commercial credits stay ``recorded`` and emit a validated journal proposal
 that AIS later pulls.
 """
 
+from metering_billing.ais_outbox_drain import AisOutboxDrainService
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
 from metering_billing.contracts import (
@@ -34,6 +36,7 @@ from metering_billing.contracts import (
     INVOICE_DRAFT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
     TENANT_API_CREDENTIAL_SCHEMA_NAME,
+    AIS_OUTBOX_DRAIN_SCHEMA_NAME,
     WEBHOOK_DELIVERY_SCHEMA_NAME,
     WEBHOOK_SUBSCRIPTION_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
@@ -53,6 +56,7 @@ from metering_billing.contracts import (
     validate_invoice_draft,
     validate_invoice_presentment,
     validate_tenant_api_credential,
+    validate_ais_outbox_drain,
     validate_webhook_delivery,
     validate_webhook_subscription,
     validate_journal_proposal,
@@ -87,6 +91,8 @@ from metering_billing.errors import (
     TenantApiCredentialOutcomeCode,
     TenantApiCredentialQueryError,
     TenantApiCredentialRejectionReasonCode,
+    AisOutboxDrainOutcomeCode,
+    AisOutboxDrainRejectionReasonCode,
     WebhookDeliveryOutcomeCode,
     WebhookDeliveryRejectionReasonCode,
     WebhookSubscriptionOutcomeCode,
@@ -131,6 +137,7 @@ __all__ = (
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
+    "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
@@ -138,6 +145,9 @@ __all__ = (
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
     "USAGE_INGESTION_RECEIPT_SCHEMA_NAME",
+    "AisOutboxDrainOutcomeCode",
+    "AisOutboxDrainRejectionReasonCode",
+    "AisOutboxDrainService",
     "AccountingExportService",
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
@@ -212,6 +222,7 @@ __all__ = (
     "validate_invoice_draft",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
+    "validate_ais_outbox_drain",
     "validate_webhook_delivery",
     "validate_webhook_subscription",
     "validate_journal_proposal",

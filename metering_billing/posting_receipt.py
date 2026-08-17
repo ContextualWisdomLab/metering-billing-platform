@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from uuid import UUID
 
@@ -53,6 +53,27 @@ class AisLookupResult:
 
     status_code: int
     raw_body: bytes
+
+
+@dataclass(frozen=True)
+class AisOutboxEvent:
+    """One AIS outbox row.  References are opaque strings until Billing matches them."""
+
+    outbox_event_id: str
+    event_type_code: str
+    aggregate_reference: str
+    payload_reference: str
+    payload_hash: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class AisOutboxPage:
+    """One AIS ``GET /outbox-events`` page.  Never uses body ``items`` or ``cursor``."""
+
+    status_code: int
+    outbox_events: tuple[AisOutboxEvent, ...]
+    next_cursor: str | None
 
 
 @dataclass(frozen=True)
@@ -144,8 +165,34 @@ class PostingReceiptObservationResult:
         return payload
 
 
+def ais_base_url_is_allowed(ais_base_url: str) -> bool:
+    """Return whether *ais_base_url* is https, or http on a local test host.
+
+    ``file://`` and non-local http origins are refused.  The drain never takes
+    a host from the caller body; ``AIS_BASE_URL`` is operator-configured.
+    """
+    if not isinstance(ais_base_url, str) or not ais_base_url:
+        return False
+    parsed = urlparse(ais_base_url)
+    if parsed.scheme == "https" and parsed.hostname:
+        return True
+    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    return False
+
+
+def posting_receipt_payload_reference(proposal_id: UUID) -> str:
+    """Return the AIS-pinned payload URN for one Billing ``proposal_id``."""
+    return f"urn:cwl:accounting:posting_receipt:{proposal_id}"
+
+
+def general_journal_aggregate_reference(proposal_id: UUID) -> str:
+    """Return the AIS-pinned aggregate URN for one Billing ``proposal_id``."""
+    return f"urn:cwl:accounting:general_journal:{proposal_id}"
+
+
 class AisPostingReceiptClient:
-    """Stdlib HTTP client for AIS ``GET /posting-receipts``."""
+    """Stdlib HTTP client for AIS posting-receipt and outbox routes."""
 
     def __init__(
         self,
@@ -181,6 +228,116 @@ class AisPostingReceiptClient:
         if status_code != 200:
             raise AisTransportError("transport_failure")
         return AisLookupResult(status_code=200, raw_body=raw_body)
+
+    def list_outbox_events(
+        self,
+        tenant_reference: str,
+        event_type_code: str = "posting_receipt",
+        page_limit: int = 50,
+        cursor: str | None = None,
+    ) -> AisOutboxPage:
+        """GET unpublished AIS outbox events.  Query ``event_type_code`` is required.
+
+        The client reads ``outbox_events`` and ``next_cursor`` only.  It never
+        reads body ``items`` or body ``cursor``.
+        """
+        if event_type_code != "posting_receipt":
+            raise AisTransportError("transport_failure")
+        if not isinstance(page_limit, int) or isinstance(page_limit, bool):
+            raise AisTransportError("transport_failure")
+        if page_limit < 1 or page_limit > 100:
+            raise AisTransportError("transport_failure")
+        query_fields: dict[str, str] = {
+            "event_type_code": event_type_code,
+            "page_limit": str(page_limit),
+        }
+        if cursor is not None:
+            if not isinstance(cursor, str) or not cursor:
+                raise AisTransportError("transport_failure")
+            query_fields["cursor"] = cursor
+        query = urlencode(query_fields)
+        request = Request(
+            f"{self.ais_base_url}/outbox-events?{query}",
+            method="GET",
+            headers={
+                "X-CWL-Tenant-Reference": tenant_reference,
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with self._urlopen(request, timeout=self.timeout_seconds) as response:
+                status_code = int(getattr(response, "status", 200))
+                raw_body = response.read()
+        except HTTPError as error:
+            if error.code in {403, 404}:
+                return AisOutboxPage(status_code=error.code, outbox_events=(), next_cursor=None)
+            raise AisTransportError("transport_failure") from error
+        except (URLError, TimeoutError, OSError) as error:
+            raise AisTransportError("transport_failure") from error
+        if status_code != 200:
+            raise AisTransportError("transport_failure")
+        return _parse_outbox_page(raw_body)
+
+    def publish_outbox_event(self, tenant_reference: str, outbox_event_id: str) -> AisLookupResult:
+        """POST AIS ``/outbox-events/{id}/publish``.  GET on that path is not used."""
+        if not isinstance(outbox_event_id, str) or not outbox_event_id:
+            raise AisTransportError("transport_failure")
+        request = Request(
+            f"{self.ais_base_url}/outbox-events/{outbox_event_id}/publish",
+            data=b"",
+            method="POST",
+            headers={
+                "X-CWL-Tenant-Reference": tenant_reference,
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with self._urlopen(request, timeout=self.timeout_seconds) as response:
+                status_code = int(getattr(response, "status", 200))
+                raw_body = response.read()
+        except HTTPError as error:
+            if error.code in {403, 404}:
+                return AisLookupResult(status_code=error.code, raw_body=b"")
+            raise AisTransportError("transport_failure") from error
+        except (URLError, TimeoutError, OSError) as error:
+            raise AisTransportError("transport_failure") from error
+        if status_code not in {200, 204}:
+            raise AisTransportError("transport_failure")
+        return AisLookupResult(status_code=status_code, raw_body=raw_body)
+
+
+def _parse_outbox_page(raw_body: bytes) -> AisOutboxPage:
+    """Decode one AIS outbox envelope without reading ``items`` or ``cursor``."""
+    try:
+        loaded = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AisTransportError("transport_failure") from error
+    if not isinstance(loaded, dict):
+        raise AisTransportError("transport_failure")
+    events = loaded.get("outbox_events")
+    if not isinstance(events, list):
+        raise AisTransportError("transport_failure")
+    next_cursor = loaded.get("next_cursor")
+    if next_cursor is not None and not isinstance(next_cursor, str):
+        raise AisTransportError("transport_failure")
+    parsed: list[AisOutboxEvent] = []
+    for item in events:
+        if not isinstance(item, dict):
+            raise AisTransportError("transport_failure")
+        try:
+            parsed.append(
+                AisOutboxEvent(
+                    outbox_event_id=str(item["outbox_event_id"]),
+                    event_type_code=str(item["event_type_code"]),
+                    aggregate_reference=str(item["aggregate_reference"]),
+                    payload_reference=str(item["payload_reference"]),
+                    payload_hash=str(item["payload_hash"]),
+                    created_at=str(item["created_at"]),
+                )
+            )
+        except KeyError as error:
+            raise AisTransportError("transport_failure") from error
+    return AisOutboxPage(status_code=200, outbox_events=tuple(parsed), next_cursor=next_cursor)
 
 
 def urlopen_default(request: Request, timeout: float | None = None) -> Any:

@@ -285,6 +285,24 @@ class PostingReceiptObservationQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class AisOutboxDrainOutcomeCode(StrEnum):
+    """Terminal result of one explicit AIS outbox drain."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class AisOutboxDrainRejectionReasonCode(StrEnum):
+    """Why an AIS outbox drain was refused without writing observations."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    AIS_ENDPOINT_UNCONFIGURED = "ais_endpoint_unconfigured"
+    AIS_BASE_URL_INSECURE = "ais_base_url_insecure"
+    AIS_OUTBOX_INVALID = "ais_outbox_invalid"
+    CROSS_TENANT = "cross_tenant"
+    TRANSPORT_FAILURE = "transport_failure"
+
+
 class CollectionCaseOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one collection case or notice."""
 

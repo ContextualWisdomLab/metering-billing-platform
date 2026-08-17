@@ -25,7 +25,7 @@
 - `collection_dunning_event`: append-only commercial reminder that does not capture money.
 - `payment_intent`: provider-neutral payment initiation projection for one collection case; cancellation updates current status.
 - `payment_receipt`: append-only commercial receipt applied against one projected payment intent.
-- `posting_receipt_observation`: append-only commercial observation of one AIS posting receipt. AIS `receipt_id` is an external reference, not the internal primary key.
+- `posting_receipt_observation`: append-only commercial observation of one AIS posting receipt. AIS `receipt_id` is an external reference, not the internal primary key. AIS outbox drain reuses this table and does not add a drain row.
 - `credit_adjustment`: append-only commercial credit against one tenant invoice draft. The paired journal proposal reuses `journal_proposal`.
 - `tax_rate_schedule`: tenant-scoped tax-rate header identified by `(tenant_account_id, tax_code)`.
 - `tax_rate_version`: append-only published tax rate. Identity is `(tenant_account_id, tax_rate_schedule_id, source_payload_hash, tax_rate_contract_version)`.

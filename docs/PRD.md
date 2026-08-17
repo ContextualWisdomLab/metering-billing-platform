@@ -176,6 +176,17 @@ contextual-orchestrator usage
 - Revoked subscriptions are not POSTed. Missing tenant, insecure production callbacks, unknown event types, and secret leakage on list JSON fail closed.
 - AIS pull stays bootstrap. Operators register an https callback, then run deliveries; AIS may keep polling. This slice does not flip `proposal_status`, call AIS posting-receipt, or emit statutory IDs.
 
+## AIS-outbox-drain acceptance
+
+- An operator can drain AIS `posting_receipt` outbox events for a known tenant through `AisOutboxDrainService.drain_ais_outbox` or `POST /v1/ais-outbox-drains`.
+- Empty unpublished `outbox_events` is success and performs zero receipt GETs.
+- Matching uses equality against URNs constructed from our stored `proposal_id`: `urn:cwl:accounting:posting_receipt:{proposal_id}` and `urn:cwl:accounting:general_journal:{proposal_id}`. Billing does not parse `payload_reference`.
+- Receipt lookup stays `GET /posting-receipts?idempotency_key=` with the stored Billing key (`invoice_draft`, `cash_receipt`, or `credit_adjustment` as published). The payload URN is never the query.
+- A successful or existing observation for the matched proposal POSTs `/outbox-events/{outbox_event_id}/publish`. AIS 403 is cross-tenant and is not retried as another tenant. AIS 404 does not invent a row.
+- `journal_reversal` and `period_close` are not drained. `proposal_status` stays `validated`.
+- Missing tenant, unconfigured AIS, insecure `AIS_BASE_URL`, invalid outbox envelopes, and transport failure fail closed. There is no scheduler.
+- Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.
+
 ## Credit-adjustment acceptance
 
 - A known invoice draft records one commercial credit whose exact amount does not exceed remaining adjustable consideration.
@@ -207,4 +218,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, tenant API credentials, operator-console fixture checks, and webhook outbox reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, tenant API credentials, operator-console fixture checks, webhook outbox, and AIS outbox drain reach 100% statement and branch coverage.

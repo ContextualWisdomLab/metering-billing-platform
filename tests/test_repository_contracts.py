@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from metering_billing.contracts import (
+    validate_ais_outbox_drain,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -658,6 +659,44 @@ class RepositoryContractTests(unittest.TestCase):
             "webhook_delivery_outcome_code": "posted",
         }
         self.assertTrue(validate_webhook_delivery(unknown_delivery))
+        drain = {
+            "ais_outbox_drain_contract_version": 1,
+            "ais_outbox_drain_outcome_code": "accepted",
+            "outbox_event_count": 0,
+            "receipt_lookup_count": 0,
+            "observed_receipt_count": 0,
+            "published_event_count": 0,
+            "skipped_event_count": 0,
+            "next_cursor": None,
+        }
+        self.assertEqual(validate_ais_outbox_drain(drain), ())
+        self.assertNotEqual(validate_ais_outbox_drain([]), ())
+        missing_drain_counts = {
+            "ais_outbox_drain_contract_version": 1,
+            "ais_outbox_drain_outcome_code": "accepted",
+        }
+        self.assertTrue(
+            any("must include" in error for error in validate_ais_outbox_drain(missing_drain_counts))
+        )
+        rejected_drain = {
+            "ais_outbox_drain_contract_version": 1,
+            "ais_outbox_drain_outcome_code": "rejected",
+            "rejection_reason_code": "tenant_not_found",
+        }
+        self.assertEqual(validate_ais_outbox_drain(rejected_drain), ())
+        missing_drain_reason = {
+            "ais_outbox_drain_contract_version": 1,
+            "ais_outbox_drain_outcome_code": "rejected",
+        }
+        self.assertIn(
+            "$: rejected drains must include rejection_reason_code",
+            validate_ais_outbox_drain(missing_drain_reason),
+        )
+        unknown_drain = {
+            "ais_outbox_drain_contract_version": 1,
+            "ais_outbox_drain_outcome_code": "posted",
+        }
+        self.assertTrue(validate_ais_outbox_drain(unknown_drain))
 
     def test_webhook_outbox_migration_stores_keyed_hash(self) -> None:
         """Webhook tables persist a keyed HMAC and append-only delivery attempts."""

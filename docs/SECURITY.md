@@ -8,6 +8,8 @@ Issue a key, then send it on every `/v1` call; revoke when leaked.
 
 Register an https callback, then run deliveries; AIS may keep polling.
 
+Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.
+
 ```bash
 # Bootstrap: tenant pin only, until a key exists for that tenant.
 # POST /v1/tenant-api-credentials

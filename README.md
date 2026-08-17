@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, tenant API credentials, webhook subscriptions, webhook deliveries, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
 - a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, and webhook-outbox migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
+- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, drains AIS posting-receipt outbox events, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
 - an importable `operator_console` Storybook that renders the invoice-draft presentment contract with design tokens and exact-decimal fixtures;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
@@ -176,6 +176,15 @@ python3 -c "from metering_billing import PostingReceiptPullService"
 ```
 
 After AIS accepts a validated proposal, an operator pulls the AIS `posting_receipt` and Billing stores it as a commercial observation. If AIS returns 404, accept the proposal on AIS and retry. `posting_status_code` stays an AIS fact. Billing `proposal_status` stays `validated`. GET reads a previously stored observation and does not call AIS.
+
+## Drain the AIS outbox
+
+```bash
+python3 -c "from metering_billing import AisOutboxDrainService"
+# POST /v1/ais-outbox-drains
+```
+
+Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty. `AisOutboxDrainService.drain_ais_outbox` GETs `GET /outbox-events?event_type_code=posting_receipt`, matches constructed `urn:cwl:accounting:posting_receipt:{proposal_id}` and `urn:cwl:accounting:general_journal:{proposal_id}` by equality, then GETs `/posting-receipts?idempotency_key=` with the stored Billing key. Empty unpublished pages skip receipt GETs. After a stored observation, POST `/outbox-events/{outbox_event_id}/publish`. This path does not parse the payload URN, drain `journal_reversal` or `period_close`, or flip `proposal_status`.
 
 ## Record a credit adjustment
 

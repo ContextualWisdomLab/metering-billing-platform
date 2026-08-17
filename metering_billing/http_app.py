@@ -30,6 +30,10 @@ The application is a thin WSGI adapter:
 11. Let an operator register an https webhook callback, then run deliveries.
     AIS may keep polling journal proposals.  This path does not flip
     ``proposal_status`` or call AIS posting-receipt.
+12. Let an operator drain AIS ``posting_receipt`` outbox events.  Empty
+    unpublished pages skip receipt GETs.  Matched rows use the stored
+    Billing idempotency key, never the payload URN.  Observations stay
+    observations; ``proposal_status`` stays ``validated``.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -47,6 +51,7 @@ from uuid import UUID
 from wsgiref.simple_server import make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
+from metering_billing.ais_outbox_drain import AisOutboxDrainService
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
 from metering_billing.credit_adjustment import CreditAdjustmentService
@@ -112,6 +117,7 @@ WEBHOOK_SUBSCRIPTION_REVOKE_PATH = re.compile(
     r"^/v1/webhook-subscriptions/([0-9a-fA-F-]{36})/revoke$"
 )
 WEBHOOK_DELIVERY_COLLECTION_PATH = "/v1/webhook-deliveries"
+AIS_OUTBOX_DRAIN_COLLECTION_PATH = "/v1/ais-outbox-drains"
 API_KEY_HEADER_ENVIRON = "HTTP_X_CWL_API_KEY"
 AUTHORIZATION_HEADER_ENVIRON = "HTTP_AUTHORIZATION"
 KNOWN_POST_PATHS = frozenset(
@@ -167,6 +173,7 @@ def create_http_app(
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
+    drains = AisOutboxDrainService(shared_ledger, ais_client=resolved_ais_client)
 
     def _authorized_tenant(
         environ: WSGIEnvironment,
@@ -354,6 +361,22 @@ def create_http_app(
                 if not isinstance(idempotency_key, str) or not idempotency_key:
                     raise HttpRequestError("idempotency_key_missing")
                 result = pulls.pull_posting_receipt(tenant_reference, idempotency_key)
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "ais_outbox_drains":
+            try:
+                payload = _read_json_object(environ)
+                tenant_reference = _authorized_tenant(environ, payload)
+                result = drains.drain_ais_outbox(tenant_reference)
                 return _send_json(
                     start_response, _status_for_result(result), result.as_contract_dict()
                 )
@@ -594,6 +617,10 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == WEBHOOK_DELIVERY_COLLECTION_PATH:
         if method == "POST":
             return "webhook_deliveries", {}
+        return "method_not_allowed", {}
+    if path == AIS_OUTBOX_DRAIN_COLLECTION_PATH:
+        if method == "POST":
+            return "ais_outbox_drains", {}
         return "method_not_allowed", {}
     webhook_revoke_match = WEBHOOK_SUBSCRIPTION_REVOKE_PATH.fullmatch(path)
     if webhook_revoke_match is not None:
