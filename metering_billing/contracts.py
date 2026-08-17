@@ -65,39 +65,60 @@ def validate_usage_event(
 
 
 def validate_usage_ingestion_receipt(
-    receipt: Mapping[str, Any], schemas_directory: Path | None = None
+    receipt: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate receipt shape plus outcome evidence and count invariants."""
     schema = load_json_schema(USAGE_INGESTION_RECEIPT_SCHEMA_NAME, schemas_directory)
     errors = list(validate_schema_instance(schema, receipt))
-    if errors:
+    if not isinstance(receipt, Mapping):
+        return tuple(errors)
+    event_receipts = receipt.get("event_receipts")
+    if not isinstance(event_receipts, list):
         return tuple(errors)
 
-    event_receipts = receipt["event_receipts"]
     accepted = 0
     duplicate_replays = 0
     rejected = 0
     for event_receipt in event_receipts:
-        outcome = event_receipt["ingestion_outcome_code"]
+        if not isinstance(event_receipt, Mapping):
+            continue
+        outcome = event_receipt.get("ingestion_outcome_code")
         if outcome == "accepted":
             accepted += 1
-            if "usage_event_id" not in event_receipt:
-                errors.append("$: accepted receipts must include usage_event_id")
+            errors.extend(
+                _missing_success_receipt_fields(event_receipt, "accepted")
+            )
         elif outcome == "duplicate_replay":
             duplicate_replays += 1
-            if "usage_event_id" not in event_receipt:
-                errors.append("$: duplicate_replay receipts must include usage_event_id")
-        else:
+            errors.extend(
+                _missing_success_receipt_fields(event_receipt, "duplicate_replay")
+            )
+        elif outcome == "rejected":
             rejected += 1
             if "rejection_reason_code" not in event_receipt:
                 errors.append("$: rejected receipts must include rejection_reason_code")
-    if accepted != receipt["accepted_event_count"]:
+    if accepted != receipt.get("accepted_event_count"):
         errors.append("$: accepted_event_count must match event_receipts")
-    if duplicate_replays != receipt["duplicate_replay_count"]:
+    if duplicate_replays != receipt.get("duplicate_replay_count"):
         errors.append("$: duplicate_replay_count must match event_receipts")
-    if rejected != receipt["rejected_event_count"]:
+    if rejected != receipt.get("rejected_event_count"):
         errors.append("$: rejected_event_count must match event_receipts")
     return tuple(errors)
+
+
+def _missing_success_receipt_fields(
+    event_receipt: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay receipt lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "usage_event_id",
+        "event_contract_version",
+        "source_payload_hash",
+    ):
+        if field_name not in event_receipt:
+            missing.append(f"$: {outcome} receipts must include {field_name}")
+    return tuple(missing)
 
 
 def validate_journal_proposal(

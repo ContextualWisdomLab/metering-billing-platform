@@ -874,6 +874,8 @@ class LedgerAndContractUnitTests(unittest.TestCase):
                     "source_event_key": "workflow_381:step_04:attempt_01",
                     "ingestion_outcome_code": "accepted",
                     "usage_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+                    "event_contract_version": 1,
+                    "source_payload_hash": "sha256:" + "d" * 64,
                 }
             ],
         }
@@ -884,14 +886,37 @@ class LedgerAndContractUnitTests(unittest.TestCase):
             "$: accepted receipts must include usage_event_id",
             validate_usage_ingestion_receipt(missing_id),
         )
+        missing_version = json.loads(json.dumps(valid))
+        del missing_version["event_receipts"][0]["event_contract_version"]
+        self.assertIn(
+            "$: accepted receipts must include event_contract_version",
+            validate_usage_ingestion_receipt(missing_version),
+        )
+        missing_hash = json.loads(json.dumps(valid))
+        del missing_hash["event_receipts"][0]["source_payload_hash"]
+        self.assertIn(
+            "$: accepted receipts must include source_payload_hash",
+            validate_usage_ingestion_receipt(missing_hash),
+        )
         replay = json.loads(json.dumps(valid))
         replay["accepted_event_count"] = 0
         replay["duplicate_replay_count"] = 1
         replay["event_receipts"][0]["ingestion_outcome_code"] = "duplicate_replay"
         del replay["event_receipts"][0]["usage_event_id"]
+        del replay["event_receipts"][0]["event_contract_version"]
+        del replay["event_receipts"][0]["source_payload_hash"]
+        replay_errors = validate_usage_ingestion_receipt(replay)
         self.assertIn(
             "$: duplicate_replay receipts must include usage_event_id",
-            validate_usage_ingestion_receipt(replay),
+            replay_errors,
+        )
+        self.assertIn(
+            "$: duplicate_replay receipts must include event_contract_version",
+            replay_errors,
+        )
+        self.assertIn(
+            "$: duplicate_replay receipts must include source_payload_hash",
+            replay_errors,
         )
         rejected = json.loads(json.dumps(valid))
         rejected["accepted_event_count"] = 0
@@ -925,6 +950,20 @@ class LedgerAndContractUnitTests(unittest.TestCase):
         self.assertTrue(
             validate_usage_ingestion_receipt({"batch_receipt_id": 1})
         )
+        self.assertTrue(validate_usage_ingestion_receipt(["not-an-object"]))
+        malformed_items = json.loads(json.dumps(valid))
+        malformed_items["event_receipts"] = ["not-an-object"]
+        malformed_items["accepted_event_count"] = 0
+        self.assertTrue(validate_usage_ingestion_receipt(malformed_items))
+        unknown_outcome = json.loads(json.dumps(valid))
+        unknown_outcome["event_receipts"] = [
+            {
+                "source_event_key": "mystery_event",
+                "ingestion_outcome_code": "mystery",
+            },
+            unknown_outcome["event_receipts"][0],
+        ]
+        self.assertTrue(validate_usage_ingestion_receipt(unknown_outcome))
         self.assertEqual(validate_schema_instance({"type": "object"}, {}), ())
 
     def test_schema_loader_rejects_missing_and_non_object_contracts(self) -> None:

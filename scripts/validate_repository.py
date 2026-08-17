@@ -60,7 +60,7 @@ SCHEMA_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 COLUMN_NAME_PATTERN = re.compile(
-    r"^\s+(?:ADD\s+COLUMN\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+"
+    r"(?:^\s+|ADD\s+COLUMN\s+)([a-zA-Z_][a-zA-Z0-9_]*)\s+"
     r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean)\b",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -151,9 +151,13 @@ def validate_repository(root: Path) -> tuple[str, ...]:
     if migrations_directory.is_dir():
         for migration_path in sorted(migrations_directory.glob("*.sql")):
             sql_text = migration_path.read_text(encoding="utf-8")
-            errors.extend(validate_sql_object_names(sql_text))
+            relative_path = migration_path.relative_to(root).as_posix()
+            for sql_error in validate_sql_object_names(sql_text):
+                errors.append(f"{relative_path}: {sql_error}")
             if "provider_customer_id" in sql_text or "stripe_customer_id" in sql_text:
-                errors.append("provider-specific identifiers must remain in mapping tables")
+                errors.append(
+                    f"{relative_path}: provider-specific identifiers must remain in mapping tables"
+                )
 
     requirements_path = root / "requirements-quality.txt"
     if requirements_path.is_file():

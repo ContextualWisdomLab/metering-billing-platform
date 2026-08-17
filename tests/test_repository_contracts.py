@@ -86,6 +86,8 @@ class RepositoryContractTests(unittest.TestCase):
                 {
                     "source_event_key": "workflow_381:step_04:attempt_01",
                     "ingestion_outcome_code": "duplicate_replay",
+                    "event_contract_version": 1,
+                    "source_payload_hash": "sha256:" + "d" * 64,
                     "usage_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
                 },
                 {
@@ -96,6 +98,39 @@ class RepositoryContractTests(unittest.TestCase):
             ],
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
+
+    def test_usage_ingestion_receipt_schema_requires_outcome_evidence(self) -> None:
+        """Accepted and replay receipts need identity fields; rejected receipts need a reason."""
+        schema = self._schema("usage-ingestion-receipt.schema.json")
+        accepted = {
+            "batch_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "receipt_contract_version": 1,
+            "accepted_event_count": 1,
+            "duplicate_replay_count": 0,
+            "rejected_event_count": 0,
+            "event_receipts": [
+                {
+                    "source_event_key": "workflow_381:step_04:attempt_01",
+                    "ingestion_outcome_code": "accepted",
+                    "usage_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61c",
+                }
+            ],
+        }
+        self.assertTrue(validate_schema_instance(schema, accepted))
+        rejected = {
+            "batch_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf621",
+            "receipt_contract_version": 1,
+            "accepted_event_count": 0,
+            "duplicate_replay_count": 0,
+            "rejected_event_count": 1,
+            "event_receipts": [
+                {
+                    "source_event_key": "unavailable_source_event_key",
+                    "ingestion_outcome_code": "rejected",
+                }
+            ],
+        }
+        self.assertTrue(validate_schema_instance(schema, rejected))
 
     def test_usage_event_rejects_prompt_content(self) -> None:
         """Billing events must reject undeclared prompt or response content."""
@@ -333,8 +368,21 @@ class RepositoryContractTests(unittest.TestCase):
                 + "\n# invalid fixture\n# uses: actions/checkout@v4\n",
                 encoding="utf-8",
             )
+            second_migration = copied_root / "database/migrations/0002_usage_event_idempotency.sql"
+            second_migration.write_text(
+                second_migration.read_text(encoding="utf-8")
+                + "\n-- stripe_customer_id must not be placed in the core.\n",
+                encoding="utf-8",
+            )
             errors = validate_repository(copied_root)
-        self.assertIn("provider-specific identifiers must remain in mapping tables", errors)
+        self.assertIn(
+            "database/migrations/0001_initial_billing_core.sql: provider-specific identifiers must remain in mapping tables",
+            errors,
+        )
+        self.assertIn(
+            "database/migrations/0002_usage_event_idempotency.sql: provider-specific identifiers must remain in mapping tables",
+            errors,
+        )
         self.assertIn("quality dependencies must be hash locked", errors)
         self.assertIn("unresolved placeholder in README.md: TODO", errors)
         self.assertIn(
@@ -513,6 +561,36 @@ class RepositoryContractTests(unittest.TestCase):
                 "table name must contain at least two snake_case words: invoice",
                 "column name must contain at least two snake_case words: status",
             ),
+        )
+
+    def test_alter_table_add_column_is_checked_for_two_word_names(self) -> None:
+        """ADD COLUMN identifiers must use two-or-more-word snake_case names."""
+        self.assertEqual(
+            validate_sql_object_names("ALTER TABLE usage_event ADD COLUMN status text;\n"),
+            ("column name must contain at least two snake_case words: status",),
+        )
+
+    def test_repository_prefixes_sql_name_errors_with_migration_path(self) -> None:
+        """SQL naming failures name the migration that introduced them."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            copied_root = Path(temporary_directory) / "repository"
+            shutil.copytree(ROOT, copied_root)
+            (
+                copied_root / "database/migrations/0002_usage_event_idempotency.sql"
+            ).write_text(
+                "ALTER TABLE usage_event ADD COLUMN status text;\n",
+                encoding="utf-8",
+            )
+            errors = validate_repository(copied_root)
+        self.assertTrue(
+            any(
+                error
+                == (
+                    "database/migrations/0002_usage_event_idempotency.sql: "
+                    "column name must contain at least two snake_case words: status"
+                )
+                for error in errors
+            )
         )
 
     def test_placeholder_tokens_are_rejected(self) -> None:

@@ -94,7 +94,7 @@
 ## Verification Evidence
 
 - The first contract-test run failed because `scripts.validate_repository` did not exist, proving the initial red state.
-- The final local suite executes 17 tests.
-- Repository tooling records 223 statements and 130 branches at 100% coverage.
+- The live local suite executes 44 tests.
+- `scripts` and `metering_billing` record 888 statements and 338 branches at 100% coverage.
 - `python scripts/validate_repository.py .` reports a valid repository.
-- `python -m compileall -q scripts tests` completes without errors.
+- `python -m compileall -q scripts tests metering_billing` completes without errors.

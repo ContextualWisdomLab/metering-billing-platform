@@ -28,15 +28,44 @@
   },
   "$defs": {
     "event_receipt": {
+      "oneOf": [
+        {"$ref": "#/$defs/accepted_or_replay_receipt"},
+        {"$ref": "#/$defs/rejected_event_receipt"}
+      ]
+    },
+    "accepted_or_replay_receipt": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source_event_key", "ingestion_outcome_code"],
+      "required": [
+        "source_event_key",
+        "ingestion_outcome_code",
+        "usage_event_id",
+        "event_contract_version",
+        "source_payload_hash"
+      ],
       "properties": {
         "source_event_key": {"type": "string", "minLength": 1, "maxLength": 256},
         "ingestion_outcome_code": {
           "type": "string",
-          "enum": ["accepted", "duplicate_replay", "rejected"]
+          "enum": ["accepted", "duplicate_replay"]
         },
+        "event_contract_version": {"type": "integer", "minimum": 1},
+        "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "usage_event_id": {"type": "string", "format": "uuid"}
+      }
+    },
+    "rejected_event_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_event_key",
+        "ingestion_outcome_code",
+        "rejection_reason_code"
+      ],
+      "properties": {
+        "source_event_key": {"type": "string", "minLength": 1, "maxLength": 256},
+        "ingestion_outcome_code": {"type": "string", "const": "rejected"},
         "event_contract_version": {"type": "integer", "minimum": 1},
         "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
