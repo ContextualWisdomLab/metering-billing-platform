@@ -200,14 +200,6 @@ class PaymentSettlementService:
         if parsed_amount <= 0:
             return _rejected(PaymentSettlementRejectionReasonCode.PAYMENT_AMOUNT_INVALID)
 
-        collection_case = self.ledger.get_collection_case(payment_intent.collection_case_id)
-        if collection_case is None:
-            return _rejected(PaymentSettlementRejectionReasonCode.PAYMENT_INTENT_NOT_FOUND)
-        if parsed_amount > collection_case.outstanding_amount:
-            return _rejected(
-                PaymentSettlementRejectionReasonCode.PAYMENT_AMOUNT_EXCEEDS_OUTSTANDING
-            )
-
         source_payload_hash = compute_settlement_payload_hash(
             _canonical_receipt_snapshot(payment_intent, parsed_amount)
         )
@@ -228,6 +220,14 @@ class PaymentSettlementService:
                 tenant.tenant_reference,
                 PaymentSettlementOutcomeCode.DUPLICATE_REPLAY,
                 self.ledger.list_collection_dunning_events(current_case.collection_case_id),
+            )
+
+        collection_case = self.ledger.get_collection_case(payment_intent.collection_case_id)
+        if collection_case is None:
+            return _rejected(PaymentSettlementRejectionReasonCode.PAYMENT_INTENT_NOT_FOUND)
+        if parsed_amount > collection_case.outstanding_amount:
+            return _rejected(
+                PaymentSettlementRejectionReasonCode.PAYMENT_AMOUNT_EXCEEDS_OUTSTANDING
             )
 
         stored = self.ledger.insert_payment_receipt(

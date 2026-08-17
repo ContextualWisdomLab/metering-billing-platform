@@ -277,7 +277,7 @@ class PaymentSettlementTests(unittest.TestCase):
         cancelled = empty.cancel_payment_intent(TENANT_ONE, generate_record_id())
         self.assertEqual(
             cancelled.rejection_reason_code,
-            PaymentSettlementRejectionReasonCode.PAYMENT_INTENT_NOT_FOUND,
+            PaymentSettlementRejectionReasonCode.TENANT_NOT_FOUND,
         )
 
 
