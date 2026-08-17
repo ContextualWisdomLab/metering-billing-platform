@@ -1180,6 +1180,16 @@ class RepositoryContractTests(unittest.TestCase):
                 for error in validate_rating_run_presentment(bad_line_total)
             )
         )
+        numeric_total = dict(instance)
+        numeric_total["rated_total_amount"] = 2
+        self.assertEqual(
+            [
+                error
+                for error in validate_rating_run_presentment(numeric_total)
+                if "exact decimal" in error
+            ],
+            [],
+        )
         numeric = dict(instance)
         numeric["rating_lines"] = [
             {
