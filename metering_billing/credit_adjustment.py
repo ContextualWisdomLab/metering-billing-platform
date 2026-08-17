@@ -357,18 +357,19 @@ class CreditAdjustmentService:
             result.as_contract_dict(),
             stored.recorded_at,
         )
-        if result.proposal_id is not None:
-            journal = AccountingExportService(self.ledger).get_journal_proposal(
-                tenant.tenant_reference, result.proposal_id
-            )
-            enqueue_accepted_fact(
-                self.ledger,
-                tenant.tenant_reference,
-                EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-                result.proposal_id,
-                journal.as_contract_dict(),
-                journal.proposed_at or stored.recorded_at,
-            )
+        assert result.proposal_id is not None
+        journal = AccountingExportService(self.ledger).get_journal_proposal(
+            tenant.tenant_reference, result.proposal_id
+        )
+        assert journal.proposed_at is not None
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            result.proposal_id,
+            journal.as_contract_dict(),
+            journal.proposed_at,
+        )
         return result
 
     def get_credit_adjustment(

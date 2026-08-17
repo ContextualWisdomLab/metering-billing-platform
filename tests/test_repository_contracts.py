@@ -648,6 +648,16 @@ class RepositoryContractTests(unittest.TestCase):
             "$: rejected deliveries must include rejection_reason_code",
             validate_webhook_delivery(missing_delivery_reason),
         )
+        unknown_subscription = {
+            "webhook_subscription_contract_version": 1,
+            "webhook_subscription_outcome_code": "posted",
+        }
+        self.assertTrue(validate_webhook_subscription(unknown_subscription))
+        unknown_delivery = {
+            "webhook_delivery_contract_version": 1,
+            "webhook_delivery_outcome_code": "posted",
+        }
+        self.assertTrue(validate_webhook_delivery(unknown_delivery))
 
     def test_webhook_outbox_migration_stores_keyed_hash(self) -> None:
         """Webhook tables persist a keyed HMAC and append-only delivery attempts."""

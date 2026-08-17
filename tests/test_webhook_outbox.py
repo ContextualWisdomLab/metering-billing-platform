@@ -429,6 +429,51 @@ class WebhookOutboxTests(unittest.TestCase):
             (EVENT_TYPE_PAYMENT_RECEIPT_APPLIED,),
         )
         self.assertEqual(unused.webhook_subscription_outcome_code, WebhookSubscriptionOutcomeCode.ACCEPTED)
+        source_id = uuid4()
+        first_enqueue = enqueue_accepted_fact(
+            ledger,
+            TENANT_ONE,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            source_id,
+            {"proposal_id": str(source_id)},
+            ISSUED_AT,
+        )
+        replay_enqueue = enqueue_accepted_fact(
+            ledger,
+            TENANT_ONE,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            source_id,
+            {"proposal_id": str(source_id)},
+            ISSUED_AT,
+        )
+        self.assertIsNotNone(first_enqueue)
+        self.assertIs(first_enqueue, replay_enqueue)
+        mixed_statuses = [200, 500, 200]
+
+        def mixed_transport(url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str | None]:
+            del url, body, headers
+            status = mixed_statuses.pop(0)
+            if status >= 300:
+                return status, "webhook_http_error"
+            return status, None
+
+        mixed_ledger, mixed_draft_id = draft_known_morning()
+        WebhookSubscriptionService(mixed_ledger).register_subscription(
+            TENANT_ONE, "https://hooks.example.test/one", EVENT_SET
+        )
+        WebhookSubscriptionService(mixed_ledger).register_subscription(
+            TENANT_ONE, "https://hooks.example.test/two", EVENT_SET
+        )
+        AccountingExportService(mixed_ledger).propose_journal(TENANT_ONE, mixed_draft_id)
+        mixed_first = WebhookDeliveryService(mixed_ledger, transport=mixed_transport).deliver_due_events(
+            TENANT_ONE
+        )
+        self.assertEqual(mixed_first.failed_delivery_count, 1)
+        mixed_second = WebhookDeliveryService(mixed_ledger, transport=mixed_transport).deliver_due_events(
+            TENANT_ONE
+        )
+        self.assertEqual(mixed_second.delivered_event_count, 1)
+        self.assertEqual(mixed_second.attempted_delivery_count, 1)
         self.assertIsNone(enqueue_accepted_fact(ledger, TENANT_ONE, "invoice.posted", uuid4(), {}, ISSUED_AT))
         self.assertIsNone(
             enqueue_accepted_fact(MemoryUsageLedger(), TENANT_ONE, EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED, uuid4(), {}, ISSUED_AT)
@@ -559,6 +604,14 @@ class WebhookOutboxTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ledger.insert_webhook_subscription(
                 replace(stored, webhook_subscription_id=generate_record_id(), callback_url="https://dup.test/a")
+            )
+        with self.assertRaises(ValueError):
+            ledger.insert_webhook_subscription(
+                replace(
+                    stored,
+                    webhook_subscription_id=generate_record_id(),
+                    webhook_secret_hash="hmac-sha256:" + ("c" * 64),
+                )
             )
         with self.assertRaises(ValueError):
             ledger.store_webhook_subscription_secret(stored.webhook_subscription_id, "")
