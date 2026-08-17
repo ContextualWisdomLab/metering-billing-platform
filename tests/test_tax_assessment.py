@@ -173,7 +173,7 @@ class TaxAssessmentTests(unittest.TestCase):
         )
 
     def test_credit_remaining_adjustable_is_inclusive(self) -> None:
-        """Credits cap at tax-inclusive remaining and still emit two-line journals."""
+        """Credits cap at tax-inclusive remaining and unwind tax_payable."""
         ledger = seed_rated_ledger()
         TaxRateService(ledger).publish_tax_rate(TENANT_ONE, "vat", STANDARD_TAX_RATE)
         draft_id = insert_commercial_draft(ledger, TENANT_ONE, "USD", HUNDRED)
@@ -182,11 +182,12 @@ class TaxAssessmentTests(unittest.TestCase):
             TENANT_ONE, draft_id, Decimal("10.00"), "goodwill"
         )
         self.assertEqual(credit.remaining_adjustable_amount, Decimal("100.00"))
+        self.assertEqual(credit.tax_exclusive_amount + credit.tax_amount, credit.credit_amount)
         proposal = ledger.get_journal_proposal(credit.proposal_id)
-        self.assertEqual(len(proposal.proposal_lines), 2)
+        self.assertEqual(len(proposal.proposal_lines), 3)
         self.assertEqual(
             {line.account_role_code for line in proposal.proposal_lines},
-            {"usage_revenue", "accounts_receivable"},
+            {"usage_revenue", "tax_payable", "accounts_receivable"},
         )
 
     def test_replay_and_version_increment(self) -> None:
