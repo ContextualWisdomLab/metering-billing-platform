@@ -19,6 +19,7 @@ const moneyFields = [
   "received_amount",
   "remaining_outstanding_amount",
   "credit_amount",
+  "rated_total_amount",
 ];
 const lineMoneyFields = ["quantity", "unit_amount", "line_amount"];
 
@@ -73,6 +74,18 @@ for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.ends
     }
     if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
       fail(`${fileName}: measurements[${index}].quantity must be an exact-decimal string`);
+    }
+  }
+  const ratingLines = Array.isArray(payload.rating_lines) ? payload.rating_lines : [];
+  for (const [index, line] of ratingLines.entries()) {
+    for (const fieldName of ["rated_quantity", "unit_price_amount", "line_total_amount"]) {
+      const value = line[fieldName];
+      if (value === undefined) {
+        continue;
+      }
+      if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+        fail(`${fileName}: rating_lines[${index}].${fieldName} must be an exact-decimal string`);
+      }
     }
   }
 }

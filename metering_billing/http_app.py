@@ -25,6 +25,9 @@ The application is a thin WSGI adapter:
    Let a buyer GET a stored usage event as a commercial statement.  The
    write stays the existing #5 ingest and refuses PAN and provider secrets.
    Ingest usage, then rate a window against a published card.
+   Let a buyer GET a stored rating run as a commercial statement.  The
+   write stays the existing #7 rate-a-window command and refuses PAN and
+   provider secrets.  Rate a window, then draft an invoice.
 8. Let a buyer POST a tax rate, assess a draft, and GET those records.
    Publish a tax rate, assess the draft, then propose the journal and let
    AIS pull.  AIS must map ``tax_payable``.
@@ -79,6 +82,7 @@ from metering_billing.errors import (
     CreditAdjustmentPresentmentQueryError,
     RateCardPresentmentQueryError,
     UsageEventPresentmentQueryError,
+    RatingRunPresentmentQueryError,
     PaymentIntentPresentmentQueryError,
     PaymentReceiptPresentmentQueryError,
     ExactDecimalError,
@@ -102,6 +106,7 @@ from metering_billing.payment_intent_presentment import PaymentIntentPresentment
 from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
 from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.usage_event_presentment import UsageEventPresentmentService
+from metering_billing.rating_run_presentment import RatingRunPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
@@ -146,6 +151,8 @@ CREDIT_ADJUSTMENT_COLLECTION_PATH = "/v1/credit-adjustments"
 CREDIT_ADJUSTMENT_ITEM_PATH = re.compile(r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})$")
 USAGE_EVENT_COLLECTION_PATH = "/v1/usage-events"
 USAGE_EVENT_ITEM_PATH = re.compile(r"^/v1/usage-events/([0-9a-fA-F-]{36})$")
+RATING_RUN_COLLECTION_PATH = "/v1/rating-runs"
+RATING_RUN_ITEM_PATH = re.compile(r"^/v1/rating-runs/([0-9a-fA-F-]{36})$")
 RATE_CARD_COLLECTION_PATH = "/v1/rate-cards"
 RATE_CARD_ITEM_PATH = re.compile(r"^/v1/rate-cards/([0-9a-fA-F-]{36})$")
 RATE_CARD_VERSIONS_PATH = re.compile(r"^/v1/rate-cards/([0-9a-fA-F-]{36})/versions$")
@@ -174,7 +181,6 @@ API_KEY_HEADER_ENVIRON = "HTTP_X_CWL_API_KEY"
 AUTHORIZATION_HEADER_ENVIRON = "HTTP_AUTHORIZATION"
 KNOWN_POST_PATHS = frozenset(
     {
-        "/v1/rating-runs",
         "/v1/journal-proposals",
         "/v1/cash-journal-proposals",
     }
@@ -224,6 +230,7 @@ def create_http_app(
     credit_presentments = CreditAdjustmentPresentmentService(shared_ledger)
     catalog_presentments = RateCardPresentmentService(shared_ledger)
     usage_presentments = UsageEventPresentmentService(shared_ledger)
+    rating_presentments = RatingRunPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -494,6 +501,39 @@ def create_http_app(
             except UsageEventPresentmentQueryError as error:
                 status_code = (
                     404 if error.rejection_reason_code == "usage_event_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_rating_runs", "get_rating_run"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_rating_runs":
+                    page = rating_presentments.list_rating_runs(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = rating_presentments.present_rating_run(
+                    tenant_reference,
+                    _parse_uuid(path_values["rating_run_id"], "rating_run_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except RatingRunPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "rating_run_not_found" else 422
                 )
                 return _send_json(
                     start_response,
@@ -922,6 +962,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "get_usage_event", {"usage_event_id": usage_match.group(1)}
         return "method_not_allowed", {}
+    if path == RATING_RUN_COLLECTION_PATH:
+        if method == "POST":
+            return "rating_runs", {}
+        if method == "GET":
+            return "list_rating_runs", {}
+        return "method_not_allowed", {}
+    rating_match = RATING_RUN_ITEM_PATH.fullmatch(path)
+    if rating_match is not None:
+        if method == "GET":
+            return "get_rating_run", {"rating_run_id": rating_match.group(1)}
+        return "method_not_allowed", {}
     if path == RATE_CARD_COLLECTION_PATH:
         if method == "POST":
             return "rate_cards", {}
@@ -1152,6 +1203,8 @@ def _dispatch_write(
         result = ingestion.ingest_usage_event(payload)
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "rating_runs":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
         window = TimeWindow.from_iso8601(
             str(payload.get("window_started_at")),
             str(payload.get("window_ended_at")),

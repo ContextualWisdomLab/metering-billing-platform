@@ -34,3 +34,8 @@ export {
   USAGE_EVENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextUsageEventActionCopy,
 } from "./usage_event.js";
+export {
+  renderRatingRun,
+  RATING_RUN_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextRatingRunActionCopy,
+} from "./rating_run.js";

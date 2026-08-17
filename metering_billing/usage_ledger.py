@@ -1987,11 +1987,16 @@ class MemoryUsageLedger:
             if payment_receipt.tenant_account_id == tenant_account_id
         )
 
-    def list_rating_runs(self, tenant_account_id: UUID) -> tuple[StoredRatingRun, ...]:
-        """Return rating runs limited to one tenant."""
+    def list_rating_runs(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredRatingRun, ...]:
+        """Return stored rating runs, optionally filtered by tenant."""
+        runs = tuple(self.rating_runs.values())
+        if tenant_account_id is None:
+            return runs
         return tuple(
             rating_run
-            for rating_run in self.rating_runs.values()
+            for rating_run in runs
             if rating_run.tenant_account_id == tenant_account_id
         )
 

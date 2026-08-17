@@ -39,6 +39,11 @@ import {
   USAGE_EVENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextUsageEventActionCopy,
 } from "../src/usage_event.js";
+import {
+  renderRatingRun,
+  RATING_RUN_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextRatingRunActionCopy,
+} from "../src/rating_run.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -226,6 +231,26 @@ test("stored partial token usage keeps quantity as a string", () => {
   assert.equal(typeof statement.measurements[0].quantity, "string");
 });
 
+test("rated morning window shows total and draft an invoice", () => {
+  const statement = loadFixture("rated_morning_window.json");
+  const html = renderRatingRun(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /Draft an invoice/);
+  assert.match(html, /Rate a window, then draft an invoice/);
+  assert.equal(RATING_RUN_CUSTOMER_COPY, "Rate a window, then draft an invoice.");
+  assert.equal(nextRatingRunActionCopy("draft_invoice"), "Draft an invoice");
+  assert.equal(nextRatingRunActionCopy("rate"), "Rate a window");
+  assert.equal(typeof statement.rated_total_amount, "string");
+});
+
+test("rated partial window keeps total as a string", () => {
+  const statement = loadFixture("rated_partial_window.json");
+  const html = renderRatingRun(statement);
+  assert.match(html, /0\.000085 USD/);
+  assert.equal(statement.next_operator_action, "draft_invoice");
+  assert.equal(typeof statement.rated_total_amount, "string");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -250,6 +275,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderUsageEvent({ measurements: [{ quantity: 1810, unit_code: "token" }] }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderRatingRun({ rated_total_amount: 0.003705, currency_code: "USD" }),
     TypeError,
   );
   assert.throws(

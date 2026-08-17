@@ -66,6 +66,10 @@ contextual-orchestrator usage
 - Another tenant's usage is invisible to the rated total.
 - Estimated, reconstructed, and other non-billable qualities stay stored and stay out of invoice-intent money when `meter_quality_rule` says so.
 - Rating does not create an invoice draft, a payment-provider command, or a posted accounting journal.
+- `POST /v1/rating-runs` remains the #7 rate-a-window command. Replay of the same tenant, window, rate-card version, and usage snapshot returns the same `rating_run_id`. PAN, CVC, and provider secrets are refused.
+- A known stored rating run presents one tenant-scoped statement with window bounds, `rate_card_version`, exact `rated_total_amount`, rating lines, and `next_operator_action` (`draft_invoice`).
+- `GET /v1/rating-runs/{rating_run_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/rating-runs` lists summaries as `{rating_runs, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{recorded_at}|{rating_run_id}`.
 
 ## Journal-proposal acceptance
 

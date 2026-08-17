@@ -15,7 +15,7 @@
 - `rate_card`: tenant-scoped commercial price-book header identified by `(tenant_account_id, rate_card_name)`.
 - `rate_card_version`: append-only published price list for one card. Identity is `(tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version)`.
 - `rate_card_line`: exact flat `unit_amount` for one `metric_code` on one published version. Currency must match the version.
-- `rating_run`: append-only invoice-intent total for one tenant, half-open window, rate card, and usage snapshot.
+- `rating_run`: append-only invoice-intent total for one tenant, half-open window, rate card, and usage snapshot. Presentment projects a statement from this row; it does not add a snapshot table.
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
 - `invoice_draft`: append-only draft-only commercial document for one tenant and rating run. Presentment projects a statement from this row plus tax, credit, and collection facts; it does not add a snapshot table.
 - `invoice_draft_line`: append-only draft line copied from a rating line.
@@ -111,6 +111,8 @@ Credit-adjustment presentment does not add a table.  `GET /v1/credit-adjustments
 Rate-card presentment does not add a table.  `GET /v1/rate-cards/{rate_card_id}` projects stored `rate_card` and latest `rate_card_version` rows.  `unit_amount` values are the exact stored prices.  Next operator action is `rate_window`.
 
 Usage-event presentment does not add a table.  `GET /v1/usage-events/{usage_event_id}` projects stored `usage_event` rows.  Measurement quantities are the exact stored amounts.  Next operator action is `rate_window`.
+
+Rating-run presentment does not add a table.  `GET /v1/rating-runs/{rating_run_id}` projects stored `rating_run` rows.  `rated_total_amount` and line amounts are the exact stored amounts.  Next operator action is `draft_invoice`.
 
 Payment-receipt presentment does not add a table.  `GET /v1/payment-receipts/{payment_receipt_id}` projects stored `payment_receipt` rows and the current `collection_case`.  `received_amount` is the exact stored amount.  `remaining_outstanding_amount` is the current case outstanding.  `payment_receipt_status` stays `applied`.  Next operator action is `record_receipt` or `drain_or_wait`.
 

@@ -4,6 +4,9 @@
 
 ### Added
 
+- `RatingRunPresentmentService.present_rating_run` projects one tenant-scoped rating statement from stored `rating_run` rows.  Totals stay exact-decimal strings.  Next operator action is `draft_invoice`.  `POST /v1/rating-runs` remains the #7 rate-a-window command and refuses PAN and provider secrets.  `GET /v1/rating-runs/{rating_run_id}` is HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/rating-runs` lists `{rating_runs, next_cursor}` ordered by `recorded_at` then `rating_run_id`.  Rate a window, then draft an invoice.
+- `operator_console` Storybook adds a `RatingRun` story using `AmountDue` and `StatusChip`.  Fixtures are rated-morning and rated-partial.  There is no login wall, Figma-only work, or production SPA.
+- ADR 0030 for rating-run HTTP presentment.
 - `UsageEventPresentmentService.present_usage_event` projects one tenant-scoped usage statement from stored `usage_event` rows.  Quantities stay exact-decimal strings.  Next operator action is `rate_window`.  `POST /v1/usage-events` remains the #5 ingest and refuses PAN and provider secrets.  `GET /v1/usage-events/{usage_event_id}` is HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/usage-events` lists `{usage_events, next_cursor}` ordered by `recorded_at` then `usage_event_id`.  Ingest usage, then rate a window against a published card.
 - `operator_console` Storybook adds a `UsageEvent` story using `AmountDue` and `StatusChip`.  Fixtures are stored-morning and stored-partial-token.  There is no login wall, Figma-only work, or production SPA.
 - ADR 0029 for usage-event HTTP presentment.

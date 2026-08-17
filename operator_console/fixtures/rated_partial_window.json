@@ -1,0 +1,25 @@
+{
+  "rating_run_presentment_contract_version": 1,
+  "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf691",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "rate_card_code": "cwl_standard",
+  "rate_card_version": 1,
+  "window_started_at": "2026-08-16T10:00:00Z",
+  "window_ended_at": "2026-08-16T12:00:00Z",
+  "usage_snapshot_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "currency_code": "USD",
+  "rated_total_amount": "0.000085",
+  "recorded_at": "2026-08-17T22:00:00Z",
+  "next_operator_action": "draft_invoice",
+  "rating_lines": [
+    {
+      "line_number": 1,
+      "billing_account_reference": "urn:cwl:account_001",
+      "meter_code": "gen_ai_output_token",
+      "unit_code": "token",
+      "rated_quantity": "42.5",
+      "unit_price_amount": "0.000002",
+      "line_total_amount": "0.000085"
+    }
+  ]
+}

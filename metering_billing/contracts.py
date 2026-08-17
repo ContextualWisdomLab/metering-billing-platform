@@ -36,6 +36,7 @@ __all__ = (
     "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_PRESENTMENT_SCHEMA_NAME",
     "USAGE_EVENT_PRESENTMENT_SCHEMA_NAME",
+    "RATING_RUN_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
@@ -55,6 +56,7 @@ __all__ = (
     "validate_credit_adjustment_presentment",
     "validate_rate_card_presentment",
     "validate_usage_event_presentment",
+    "validate_rating_run_presentment",
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
@@ -86,6 +88,7 @@ PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.js
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
 RATE_CARD_PRESENTMENT_SCHEMA_NAME = "rate-card-presentment.schema.json"
 USAGE_EVENT_PRESENTMENT_SCHEMA_NAME = "usage-event-presentment.schema.json"
+RATING_RUN_PRESENTMENT_SCHEMA_NAME = "rating-run-presentment.schema.json"
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
@@ -487,6 +490,47 @@ def validate_usage_event_presentment(
                     errors.append(f"$: measurements[{index}].quantity must be an exact decimal")
     if action is not None and action != "rate_window":
         errors.append("$: stored usage must rate a window")
+    return tuple(errors)
+
+
+def validate_rating_run_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate rating-run presentment shape plus exact money invariants."""
+    schema = load_json_schema(RATING_RUN_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    total = statement.get("rated_total_amount")
+    if isinstance(total, str):
+        try:
+            parsed_total = Decimal(total)
+            if parsed_total < Decimal("0"):
+                errors.append("$: rated_total_amount must not be negative")
+        except Exception:
+            errors.append("$: rated_total_amount must be an exact decimal")
+    lines = statement.get("rating_lines")
+    if isinstance(lines, list):
+        for index, line in enumerate(lines):
+            if not isinstance(line, Mapping):
+                errors.append(f"$: rating_lines[{index}] must be an object")
+                continue
+            for field_name in ("rated_quantity", "unit_price_amount", "line_total_amount"):
+                value = line.get(field_name)
+                if isinstance(value, str):
+                    try:
+                        parsed = Decimal(value)
+                        if parsed < Decimal("0"):
+                            errors.append(
+                                f"$: rating_lines[{index}].{field_name} must not be negative"
+                            )
+                    except Exception:
+                        errors.append(
+                            f"$: rating_lines[{index}].{field_name} must be an exact decimal"
+                        )
+    if action is not None and action != "draft_invoice":
+        errors.append("$: stored rating must draft an invoice")
     return tuple(errors)
 
 

@@ -21,6 +21,7 @@ from metering_billing.contracts import (
     validate_credit_adjustment_presentment,
     validate_rate_card_presentment,
     validate_usage_event_presentment,
+    validate_rating_run_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -1006,6 +1007,195 @@ class RepositoryContractTests(unittest.TestCase):
             [
                 error
                 for error in validate_usage_event_presentment(numeric)
+                if "exact decimal" in error
+            ],
+            [],
+        )
+
+    def test_rating_run_presentment_accepts_total_and_rejects_outcome(self) -> None:
+        """A rating-run statement records exact totals and cannot claim a write outcome."""
+        schema = self._schema("rating-run-presentment.schema.json")
+        instance = {
+            "rating_run_presentment_contract_version": 1,
+            "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf690",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "rate_card_code": "cwl_standard",
+            "rate_card_version": 1,
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "usage_snapshot_hash": "sha256:" + ("c" * 64),
+            "currency_code": "USD",
+            "rated_total_amount": "0.003705",
+            "recorded_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "draft_invoice",
+            "rating_lines": [
+                {
+                    "line_number": 1,
+                    "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                    "meter_code": "gen_ai_output_token",
+                    "unit_code": "token",
+                    "rated_quantity": "1852.5",
+                    "unit_price_amount": "0.000002",
+                    "line_total_amount": "0.003705",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_rating_run_presentment(instance), ())
+        posted = dict(instance)
+        posted["rating_outcome_code"] = "accepted"
+        self.assertIn(
+            "$: additional property is not allowed: rating_outcome_code",
+            validate_schema_instance(schema, posted),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: stored rating must draft an invoice",
+            validate_rating_run_presentment(wait_action),
+        )
+        self.assertNotEqual(validate_rating_run_presentment([]), ())
+        missing_lines = dict(instance)
+        missing_lines.pop("rating_lines")
+        self.assertNotEqual(validate_rating_run_presentment(missing_lines), ())
+        negative = dict(instance)
+        negative["rated_total_amount"] = "-1"
+        self.assertIn(
+            "$: rated_total_amount must not be negative",
+            validate_rating_run_presentment(negative),
+        )
+        bad_total = dict(instance)
+        bad_total["rated_total_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "rated_total_amount must be an exact decimal" in error
+                for error in validate_rating_run_presentment(bad_total)
+            )
+        )
+        not_object = dict(instance)
+        not_object["rating_lines"] = ["not-a-line"]
+        self.assertIn(
+            "$: rating_lines[0] must be an object",
+            validate_rating_run_presentment(not_object),
+        )
+        negative_line = dict(instance)
+        negative_line["rating_lines"] = [
+            {
+                "line_number": 1,
+                "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                "meter_code": "gen_ai_output_token",
+                "unit_code": "token",
+                "rated_quantity": "-1",
+                "unit_price_amount": "0.000002",
+                "line_total_amount": "0.003705",
+            }
+        ]
+        self.assertIn(
+            "$: rating_lines[0].rated_quantity must not be negative",
+            validate_rating_run_presentment(negative_line),
+        )
+        negative_price = dict(instance)
+        negative_price["rating_lines"] = [
+            {
+                "line_number": 1,
+                "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                "meter_code": "gen_ai_output_token",
+                "unit_code": "token",
+                "rated_quantity": "1852.5",
+                "unit_price_amount": "-1",
+                "line_total_amount": "0.003705",
+            }
+        ]
+        self.assertIn(
+            "$: rating_lines[0].unit_price_amount must not be negative",
+            validate_rating_run_presentment(negative_price),
+        )
+        negative_line_total = dict(instance)
+        negative_line_total["rating_lines"] = [
+            {
+                "line_number": 1,
+                "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                "meter_code": "gen_ai_output_token",
+                "unit_code": "token",
+                "rated_quantity": "1852.5",
+                "unit_price_amount": "0.000002",
+                "line_total_amount": "-1",
+            }
+        ]
+        self.assertIn(
+            "$: rating_lines[0].line_total_amount must not be negative",
+            validate_rating_run_presentment(negative_line_total),
+        )
+        bad_line = dict(instance)
+        bad_line["rating_lines"] = [
+            {
+                "line_number": 1,
+                "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                "meter_code": "gen_ai_output_token",
+                "unit_code": "token",
+                "rated_quantity": "not-decimal",
+                "unit_price_amount": "0.000002",
+                "line_total_amount": "0.003705",
+            }
+        ]
+        self.assertTrue(
+            any(
+                "rated_quantity must be an exact decimal" in error
+                for error in validate_rating_run_presentment(bad_line)
+            )
+        )
+        bad_price = dict(instance)
+        bad_price["rating_lines"] = [
+            {
+                "line_number": 1,
+                "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                "meter_code": "gen_ai_output_token",
+                "unit_code": "token",
+                "rated_quantity": "1852.5",
+                "unit_price_amount": "not-decimal",
+                "line_total_amount": "0.003705",
+            }
+        ]
+        self.assertTrue(
+            any(
+                "unit_price_amount must be an exact decimal" in error
+                for error in validate_rating_run_presentment(bad_price)
+            )
+        )
+        bad_line_total = dict(instance)
+        bad_line_total["rating_lines"] = [
+            {
+                "line_number": 1,
+                "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                "meter_code": "gen_ai_output_token",
+                "unit_code": "token",
+                "rated_quantity": "1852.5",
+                "unit_price_amount": "0.000002",
+                "line_total_amount": "not-decimal",
+            }
+        ]
+        self.assertTrue(
+            any(
+                "line_total_amount must be an exact decimal" in error
+                for error in validate_rating_run_presentment(bad_line_total)
+            )
+        )
+        numeric = dict(instance)
+        numeric["rating_lines"] = [
+            {
+                "line_number": 1,
+                "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                "meter_code": "gen_ai_output_token",
+                "unit_code": "token",
+                "rated_quantity": 1852.5,
+                "unit_price_amount": "0.000002",
+                "line_total_amount": "0.003705",
+            }
+        ]
+        self.assertEqual(
+            [
+                error
+                for error in validate_rating_run_presentment(numeric)
                 if "exact decimal" in error
             ],
             [],

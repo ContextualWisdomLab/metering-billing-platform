@@ -423,6 +423,7 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         for method, path in (
             ("POST", "/healthz"),
             ("PUT", "/v1/usage-events"),
+            ("PUT", "/v1/rating-runs"),
             ("GET", f"/v1/collection-cases/{uuid4()}/dunning-events"),
             ("GET", f"/v1/payment-intents/{uuid4()}/cancel"),
         ):

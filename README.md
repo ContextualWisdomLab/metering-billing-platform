@@ -20,10 +20,10 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, collection-case presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, credit adjustments, credit-adjustment presentment, rate cards, rate-card presentment, tax rates, tax assessments, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, credit adjustments, credit-adjustment presentment, rate cards, rate-card presentment, tax rates, tax assessments, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
 - a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, and webhook-outbox migrations with tenant-scoped attribution constraints;
 - an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, drains AIS posting-receipt outbox events, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
-- an importable `operator_console` Storybook that renders the invoice-draft, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, and usage-event presentment contracts with design tokens and exact-decimal fixtures;
+- an importable `operator_console` Storybook that renders the invoice-draft, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, and rating-run presentment contracts with design tokens and exact-decimal fixtures;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -61,9 +61,12 @@ Call `RateCardService.publish_rate_card` with a tenant, a two-or-more-word `snak
 
 ```bash
 python3 -c "from metering_billing import TimeWindow, UsageRatingService"
+# POST /v1/rating-runs
+# GET /v1/rating-runs/{rating_run_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/rating-runs?tenant_reference=urn:cwl:tenant_001
 ```
 
-Publish a rate card, then call `UsageRatingService.rate_usage_window` with a tenant, a half-open ISO 8601 window, and that persisted rate-card version. Only `meter_quality_rule` billable quality enters the invoice-intent total. Rating uses the stored `unit_amount` for the matching `metric_code`. An unknown version, a cross-tenant version, or a missing metric fails closed. An identical replay returns the same `rating_run_id` and exact totals. Rating does not draft an invoice, call a payment provider, or post a journal.
+Publish a rate card, then call `UsageRatingService.rate_usage_window` with a tenant, a half-open ISO 8601 window, and that persisted rate-card version. Only `meter_quality_rule` billable quality enters the invoice-intent total. Rating uses the stored `unit_amount` for the matching `metric_code`. An unknown version, a cross-tenant version, or a missing metric fails closed. An identical replay returns the same `rating_run_id` and exact totals. `POST /v1/rating-runs` stays that command and refuses PAN and provider secrets. After a `rating_run` exists, `GET /v1/rating-runs/{rating_run_id}` returns the tenant-scoped statement. `GET /v1/rating-runs` lists `{rating_runs, next_cursor}`. Rate a window, then draft an invoice. Rating does not draft an invoice, call a payment provider, or post a journal.
 
 ## Draft an invoice
 
@@ -144,7 +147,7 @@ python3 -c "from metering_billing.http_app import create_http_app"
 python3 -m metering_billing.http_app
 ```
 
-`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, usage event, invoice draft, collection case, payment intent, payment receipt, or API credential. The adapter does not post journals or call a named payment provider.
+`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, usage event, rating run, invoice draft, collection case, payment intent, payment receipt, or API credential. The adapter does not post journals or call a named payment provider.
 
 Until a tenant has an active API credential, the existing tenant pin is enough (bootstrap window). AIS can keep pulling with `X-CWL-Tenant-Reference` until a key is issued for that tenant. After a key exists, send it on every `/v1` call.
 
@@ -199,7 +202,7 @@ npm install
 npm run storybook
 ```
 
-`operator_console` renders the #21 invoice statement, the collection-case statement, the payment-intent statement, the payment-receipt statement, the credit-adjustment statement, the rate-card statement, and the usage-event statement with tokenized amount due, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy on a usage event is: ingest usage, then rate a window against a published card. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
+`operator_console` renders the #21 invoice statement, the collection-case statement, the payment-intent statement, the payment-receipt statement, the credit-adjustment statement, the rate-card statement, the usage-event statement, and the rating-run statement with tokenized amount due, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy on a rating run is: rate a window, then draft an invoice. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
 
 ## Pull journal proposals
 

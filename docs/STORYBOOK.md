@@ -16,6 +16,8 @@ Customer copy on every rate card: unit price and the next operator action. Publi
 
 Customer copy on every usage event: quantity and the next operator action. Ingest usage, then rate a window against a published card.
 
+Customer copy on every rating run: rated total and the next operator action. Rate a window, then draft an invoice.
+
 ## Stories
 
 | Story | Module | Fixtures |
@@ -30,6 +32,7 @@ Customer copy on every usage event: quantity and the next operator action. Inges
 | CreditAdjustment | `src/credit_adjustment.js` | `recorded_morning_credit.json`, `recorded_taxed_credit.json` |
 | RateCard | `src/rate_card.js` | `published_standard_rate.json`, `published_premium_rate.json` |
 | UsageEvent | `src/usage_event.js` | `stored_morning_usage.json`, `stored_partial_token_usage.json` |
+| RatingRun | `src/rating_run.js` | `rated_morning_window.json`, `rated_partial_window.json` |
 
 The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is not a one-off style.
 
@@ -53,5 +56,7 @@ The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is no
 | `published_premium_rate.json` | Premium token card | `unit_amount` `0.000005`, action `rate_window` |
 | `stored_morning_usage.json` | Known morning tokens | `quantity` `1810`, action `rate_window` |
 | `stored_partial_token_usage.json` | Partial token event | `quantity` `42.5`, action `rate_window` |
+| `rated_morning_window.json` | Known morning window | `rated_total_amount` `0.003705`, action `draft_invoice` |
+| `rated_partial_window.json` | Partial token window | `rated_total_amount` `0.000085`, action `draft_invoice` |
 
-Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, and `schemas/usage-event-presentment.schema.json`.  They are never IEEE binary floats.
+Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, and `schemas/rating-run-presentment.schema.json`.  They are never IEEE binary floats.
