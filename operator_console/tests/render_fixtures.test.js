@@ -44,6 +44,11 @@ import {
   RATING_RUN_CUSTOMER_COPY,
   nextOperatorActionCopy as nextRatingRunActionCopy,
 } from "../src/rating_run.js";
+import {
+  renderTaxAssessment,
+  TAX_ASSESSMENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextTaxAssessmentActionCopy,
+} from "../src/tax_assessment.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -251,6 +256,32 @@ test("rated partial window keeps total as a string", () => {
   assert.equal(typeof statement.rated_total_amount, "string");
 });
 
+test("assessed morning vat shows inclusive and propose the journal", () => {
+  const statement = loadFixture("assessed_morning_vat.json");
+  const html = renderTaxAssessment(statement);
+  assert.match(html, /110\.00 USD/);
+  assert.match(html, /Propose the journal/);
+  assert.match(
+    html,
+    /Publish a tax rate, assess the draft, then propose the journal and let AIS pull/,
+  );
+  assert.equal(
+    TAX_ASSESSMENT_CUSTOMER_COPY,
+    "Publish a tax rate, assess the draft, then propose the journal and let AIS pull.",
+  );
+  assert.equal(nextTaxAssessmentActionCopy("propose_journal"), "Propose the journal");
+  assert.equal(nextTaxAssessmentActionCopy("assess"), "Assess the draft");
+  assert.equal(typeof statement.tax_inclusive_amount, "string");
+});
+
+test("assessed partial vat keeps inclusive as a string", () => {
+  const statement = loadFixture("assessed_partial_vat.json");
+  const html = renderTaxAssessment(statement);
+  assert.match(html, /22\.00 USD/);
+  assert.equal(statement.next_operator_action, "propose_journal");
+  assert.equal(typeof statement.tax_inclusive_amount, "string");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -279,6 +310,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderRatingRun({ rated_total_amount: 0.003705, currency_code: "USD" }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderTaxAssessment({ tax_inclusive_amount: 110.0, currency_code: "USD" }),
     TypeError,
   );
   assert.throws(

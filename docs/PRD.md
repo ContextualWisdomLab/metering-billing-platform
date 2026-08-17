@@ -46,6 +46,10 @@ contextual-orchestrator usage
 - Another tenant cannot list, fetch, or assess the first tenant's rate or assessment.
 - Missing tenant, float rates, rates outside `[0, 1]`, unknown `tax_code`, unknown currency exponents, and zero drafts fail closed.
 - Operators publish a tax rate, assess the draft, then propose the journal and let AIS pull. AIS must map `tax_payable`. This slice does not add an OSS engine, exemptions, or UI.
+- `POST /v1/tax-assessments` remains the #19 assess command keyed on `invoice_draft_id` and `tax_rate_version`. PAN, CVC, and provider secrets are refused.
+- A known stored tax assessment presents one tenant-scoped statement with `invoice_draft_id`, exact `tax_exclusive_amount`, `tax_amount`, `tax_inclusive_amount`, stored `tax_code`/`tax_rate`, and `next_operator_action` (`propose_journal`).
+- `GET /v1/tax-assessments/{tax_assessment_id}` stays the existing #19 item read. HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/tax-assessments` lists summaries as `{tax_assessments, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{assessed_at}|{tax_assessment_id}`.
 
 ## Rate-card catalog acceptance
 
@@ -279,4 +283,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, and AIS outbox drain reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, AIS outbox drain, and tax-assessment presentment reach 100% statement and branch coverage.

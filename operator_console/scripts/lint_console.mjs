@@ -20,6 +20,7 @@ const moneyFields = [
   "remaining_outstanding_amount",
   "credit_amount",
   "rated_total_amount",
+  "tax_rate",
 ];
 const lineMoneyFields = ["quantity", "unit_amount", "line_amount"];
 

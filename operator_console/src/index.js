@@ -39,3 +39,8 @@ export {
   RATING_RUN_CUSTOMER_COPY,
   nextOperatorActionCopy as nextRatingRunActionCopy,
 } from "./rating_run.js";
+export {
+  renderTaxAssessment,
+  TAX_ASSESSMENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextTaxAssessmentActionCopy,
+} from "./tax_assessment.js";

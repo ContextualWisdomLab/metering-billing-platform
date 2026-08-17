@@ -4,7 +4,8 @@ This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
-those drafts as statements, publish tax rates, assess tax on a draft, emit
+those drafts as statements, publish tax rates, assess tax on a draft, present
+those assessments, emit
 journal proposals, open collection cases, present those cases as statements, project provider-neutral payment
 intents, present those intents as statements, apply commercial payment receipts, present those receipts as statements, record commercial credits,
 register webhook callbacks for accepted commercial facts, drain
@@ -42,6 +43,7 @@ from metering_billing.contracts import (
     RATE_CARD_PRESENTMENT_SCHEMA_NAME,
     USAGE_EVENT_PRESENTMENT_SCHEMA_NAME,
     RATING_RUN_PRESENTMENT_SCHEMA_NAME,
+    TAX_ASSESSMENT_PRESENTMENT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
     TENANT_API_CREDENTIAL_SCHEMA_NAME,
     AIS_OUTBOX_DRAIN_SCHEMA_NAME,
@@ -69,6 +71,7 @@ from metering_billing.contracts import (
     validate_rate_card_presentment,
     validate_usage_event_presentment,
     validate_rating_run_presentment,
+    validate_tax_assessment_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_ais_outbox_drain,
@@ -109,6 +112,7 @@ from metering_billing.errors import (
     RateCardPresentmentQueryError,
     UsageEventPresentmentQueryError,
     RatingRunPresentmentQueryError,
+    TaxAssessmentPresentmentQueryError,
     PaymentReceiptPresentmentQueryError,
     TenantApiCredentialOutcomeCode,
     TenantApiCredentialQueryError,
@@ -146,6 +150,7 @@ from metering_billing.credit_adjustment_presentment import CreditAdjustmentPrese
 from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.usage_event_presentment import UsageEventPresentmentService
 from metering_billing.rating_run_presentment import RatingRunPresentmentService
+from metering_billing.tax_assessment_presentment import TaxAssessmentPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
@@ -170,6 +175,7 @@ __all__ = (
     "RATE_CARD_PRESENTMENT_SCHEMA_NAME",
     "USAGE_EVENT_PRESENTMENT_SCHEMA_NAME",
     "RATING_RUN_PRESENTMENT_SCHEMA_NAME",
+    "TAX_ASSESSMENT_PRESENTMENT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
@@ -198,6 +204,8 @@ __all__ = (
     "UsageEventPresentmentService",
     "RatingRunPresentmentQueryError",
     "RatingRunPresentmentService",
+    "TaxAssessmentPresentmentQueryError",
+    "TaxAssessmentPresentmentService",
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
     "CollectionCaseService",
@@ -276,6 +284,7 @@ __all__ = (
     "validate_rate_card_presentment",
     "validate_usage_event_presentment",
     "validate_rating_run_presentment",
+    "validate_tax_assessment_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_ais_outbox_drain",

@@ -814,7 +814,7 @@ class TaxAssessmentTests(unittest.TestCase):
         self.assertEqual(method_assessment_status, 422)
         collection_get_status, collection_get_body = invoke_http(app, "GET", "/v1/tax-assessments")
         self.assertEqual(collection_get_status, 422)
-        self.assertEqual(collection_get_body["rejection_reason_code"], "request_invalid")
+        self.assertEqual(collection_get_body["rejection_reason_code"], "tenant_not_found")
         bad_uuid_status, bad_uuid_body = invoke_http(
             app,
             "GET",

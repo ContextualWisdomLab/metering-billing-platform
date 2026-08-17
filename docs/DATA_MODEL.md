@@ -114,6 +114,8 @@ Usage-event presentment does not add a table.  `GET /v1/usage-events/{usage_even
 
 Rating-run presentment does not add a table.  `GET /v1/rating-runs/{rating_run_id}` projects stored `rating_run` rows.  `rated_total_amount` and line amounts are the exact stored amounts.  Next operator action is `draft_invoice`.
 
+Tax-assessment presentment does not add a table.  `GET /v1/tax-assessments/{tax_assessment_id}` stays the existing #19 item read of stored `tax_assessment` rows.  `GET /v1/tax-assessments` lists summaries from those same rows.  `tax_exclusive_amount`, `tax_amount`, and `tax_inclusive_amount` are the exact stored amounts.  Next operator action is `propose_journal`.
+
 Payment-receipt presentment does not add a table.  `GET /v1/payment-receipts/{payment_receipt_id}` projects stored `payment_receipt` rows and the current `collection_case`.  `received_amount` is the exact stored amount.  `remaining_outstanding_amount` is the current case outstanding.  `payment_receipt_status` stays `applied`.  Next operator action is `record_receipt` or `drain_or_wait`.
 
 ## Tax-assessment identity

@@ -20,10 +20,10 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, credit adjustments, credit-adjustment presentment, rate cards, rate-card presentment, tax rates, tax assessments, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, credit adjustments, credit-adjustment presentment, rate cards, rate-card presentment, tax rates, tax assessments, tax-assessment presentment, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
 - a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, and webhook-outbox migrations with tenant-scoped attribution constraints;
 - an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, drains AIS posting-receipt outbox events, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
-- an importable `operator_console` Storybook that renders the invoice-draft, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, and rating-run presentment contracts with design tokens and exact-decimal fixtures;
+- an importable `operator_console` Storybook that renders the invoice-draft, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, and tax-assessment presentment contracts with design tokens and exact-decimal fixtures;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -202,7 +202,7 @@ npm install
 npm run storybook
 ```
 
-`operator_console` renders the #21 invoice statement, the collection-case statement, the payment-intent statement, the payment-receipt statement, the credit-adjustment statement, the rate-card statement, the usage-event statement, and the rating-run statement with tokenized amount due, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy on a rating run is: rate a window, then draft an invoice. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
+`operator_console` renders the #21 invoice statement, the collection-case statement, the payment-intent statement, the payment-receipt statement, the credit-adjustment statement, the rate-card statement, the usage-event statement, the rating-run statement, and the tax-assessment statement with tokenized amount due, status chip, and tenant pin. Amounts stay exact-decimal strings. Customer copy on a tax assessment is: publish a tax rate, assess the draft, then propose the journal and let AIS pull. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
 
 ## Pull journal proposals
 
@@ -246,9 +246,12 @@ After an `invoice_draft` exists, call `CreditAdjustmentService.record_credit_adj
 
 ```bash
 python3 -c "from metering_billing import TaxRateService, TaxAssessmentService"
+# POST /v1/tax-assessments
+# GET /v1/tax-assessments/{tax_assessment_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/tax-assessments?tenant_reference=urn:cwl:tenant_001
 ```
 
-Call `TaxRateService.publish_tax_rate` with a tenant, a closed `tax_code` (`vat`, `gst`, or `sales_tax`), and an exact `tax_rate` in `[0, 1]`. Then call `TaxAssessmentService.assess_tax` with the tenant, `invoice_draft_id`, and that persisted version. Tax is half-even rounded to the documented ISO 4217 minor units. Assess before opening a collection case. A taxed `propose_journal` credits semantic `tax_payable`; AIS must map that role.
+Call `TaxRateService.publish_tax_rate` with a tenant, a closed `tax_code` (`vat`, `gst`, or `sales_tax`), and an exact `tax_rate` in `[0, 1]`. Then call `TaxAssessmentService.assess_tax` with the tenant, `invoice_draft_id`, and that persisted version, or `POST /v1/tax-assessments`. Tax is half-even rounded to the documented ISO 4217 minor units. Assess before opening a collection case. A taxed `propose_journal` credits semantic `tax_payable`; AIS must map that role. After a `tax_assessment` exists, `GET /v1/tax-assessments/{tax_assessment_id}` stays the existing #19 item read. `GET /v1/tax-assessments` lists `{tax_assessments, next_cursor}`. Publish a tax rate, assess the draft, then propose the journal and let AIS pull.
 
 ## Next action
 

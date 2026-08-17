@@ -1212,6 +1212,19 @@ class MemoryUsageLedger:
         """Return one tax assessment by internal identifier, if present."""
         return self.tax_assessments.get(tax_assessment_id)
 
+    def list_tax_assessments(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredTaxAssessment, ...]:
+        """Return stored tax assessments, optionally filtered by tenant."""
+        assessments = tuple(self.tax_assessments.values())
+        if tenant_account_id is None:
+            return assessments
+        return tuple(
+            assessment
+            for assessment in assessments
+            if assessment.tenant_account_id == tenant_account_id
+        )
+
     def insert_tax_assessment(
         self, assessment: StoredTaxAssessment
     ) -> StoredTaxAssessment:

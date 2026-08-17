@@ -1,0 +1,17 @@
+{
+  "tax_assessment_presentment_contract_version": 1,
+  "tax_assessment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6a1",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6b1",
+  "tax_rate_version_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6c0",
+  "tax_rate_version": 1,
+  "tax_code": "vat",
+  "tax_rate": "0.10",
+  "currency_code": "USD",
+  "tax_exclusive_amount": "20.00",
+  "tax_amount": "2.00",
+  "tax_inclusive_amount": "22.00",
+  "source_payload_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "assessed_at": "2026-08-17T22:00:00Z",
+  "next_operator_action": "propose_journal"
+}

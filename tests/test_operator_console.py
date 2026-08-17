@@ -16,6 +16,7 @@ from metering_billing.contracts import (
     validate_rate_card_presentment,
     validate_usage_event_presentment,
     validate_rating_run_presentment,
+    validate_tax_assessment_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -55,6 +56,10 @@ USAGE_EVENT_FIXTURE_NAMES = (
 RATING_RUN_FIXTURE_NAMES = (
     "rated_morning_window.json",
     "rated_partial_window.json",
+)
+TAX_ASSESSMENT_FIXTURE_NAMES = (
+    "assessed_morning_vat.json",
+    "assessed_partial_vat.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -196,6 +201,22 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("rated_partial_window.json")["rated_total_amount"],
             "0.000085",
         )
+        for fixture_name in TAX_ASSESSMENT_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_tax_assessment_presentment(payload), ())
+            for field_name in ("tax_exclusive_amount", "tax_amount", "tax_inclusive_amount"):
+                value = payload[field_name]
+                self.assertIsInstance(value, str)
+                self.assertNotIsInstance(value, float)
+                parse_exact_decimal(value)
+        self.assertEqual(
+            self._fixture("assessed_morning_vat.json")["next_operator_action"],
+            "propose_journal",
+        )
+        self.assertEqual(
+            self._fixture("assessed_partial_vat.json")["tax_inclusive_amount"],
+            "22.00",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -226,6 +247,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "RateCard",
             "UsageEvent",
             "RatingRun",
+            "TaxAssessment",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -237,6 +259,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + RATE_CARD_FIXTURE_NAMES
             + USAGE_EVENT_FIXTURE_NAMES
             + RATING_RUN_FIXTURE_NAMES
+            + TAX_ASSESSMENT_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -250,6 +273,10 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Publish a rate card, then rate a window against that version", inventory)
         self.assertIn("Ingest usage, then rate a window against a published card", inventory)
         self.assertIn("Rate a window, then draft an invoice", inventory)
+        self.assertIn(
+            "Publish a tax rate, assess the draft, then propose the journal and let AIS pull",
+            inventory,
+        )
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

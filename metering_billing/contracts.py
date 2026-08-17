@@ -57,6 +57,7 @@ __all__ = (
     "validate_rate_card_presentment",
     "validate_usage_event_presentment",
     "validate_rating_run_presentment",
+    "validate_tax_assessment_presentment",
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
@@ -89,6 +90,7 @@ CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schem
 RATE_CARD_PRESENTMENT_SCHEMA_NAME = "rate-card-presentment.schema.json"
 USAGE_EVENT_PRESENTMENT_SCHEMA_NAME = "usage-event-presentment.schema.json"
 RATING_RUN_PRESENTMENT_SCHEMA_NAME = "rating-run-presentment.schema.json"
+TAX_ASSESSMENT_PRESENTMENT_SCHEMA_NAME = "tax-assessment-presentment.schema.json"
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
@@ -531,6 +533,47 @@ def validate_rating_run_presentment(
                         )
     if action is not None and action != "draft_invoice":
         errors.append("$: stored rating must draft an invoice")
+    return tuple(errors)
+
+
+def validate_tax_assessment_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate tax-assessment presentment shape plus exact money invariants."""
+    schema = load_json_schema(TAX_ASSESSMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    exclusive = statement.get("tax_exclusive_amount")
+    tax_amount = statement.get("tax_amount")
+    inclusive = statement.get("tax_inclusive_amount")
+    tax_rate = statement.get("tax_rate")
+    for field_name, value in (
+        ("tax_exclusive_amount", exclusive),
+        ("tax_amount", tax_amount),
+        ("tax_inclusive_amount", inclusive),
+        ("tax_rate", tax_rate),
+    ):
+        if isinstance(value, str):
+            try:
+                parsed = Decimal(value)
+                if parsed < Decimal("0"):
+                    errors.append(f"$: {field_name} must not be negative")
+            except Exception:
+                errors.append(f"$: {field_name} must be an exact decimal")
+    if (
+        isinstance(exclusive, str)
+        and isinstance(tax_amount, str)
+        and isinstance(inclusive, str)
+    ):
+        try:
+            if Decimal(exclusive) + Decimal(tax_amount) != Decimal(inclusive):
+                errors.append("$: tax_inclusive_amount must equal exclusive plus tax")
+        except Exception:
+            errors.append("$: tax amounts must be exact decimals")
+    if action is not None and action != "propose_journal":
+        errors.append("$: stored tax must propose a journal")
     return tuple(errors)
 
 

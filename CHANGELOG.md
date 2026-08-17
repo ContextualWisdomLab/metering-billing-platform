@@ -4,6 +4,9 @@
 
 ### Added
 
+- `TaxAssessmentPresentmentService.present_tax_assessment` projects one tenant-scoped tax statement from stored `tax_assessment` rows.  Amounts stay exact-decimal strings.  Next operator action is `propose_journal`.  `POST /v1/tax-assessments` remains the #19 assess command and refuses PAN and provider secrets.  `GET /v1/tax-assessments/{tax_assessment_id}` stays the existing #19 item read: HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/tax-assessments` lists `{tax_assessments, next_cursor}` ordered by `assessed_at` then `tax_assessment_id`.  Publish a tax rate, assess the draft, then propose the journal and let AIS pull.
+- `operator_console` Storybook adds a `TaxAssessment` story using `AmountDue` and `StatusChip`.  Fixtures are assessed-morning and assessed-partial VAT.  There is no login wall, Figma-only work, or production SPA.
+- ADR 0031 for tax-assessment HTTP presentment.
 - `RatingRunPresentmentService.present_rating_run` projects one tenant-scoped rating statement from stored `rating_run` rows.  Totals stay exact-decimal strings.  Next operator action is `draft_invoice`.  `POST /v1/rating-runs` remains the #7 rate-a-window command and refuses PAN and provider secrets.  `GET /v1/rating-runs/{rating_run_id}` is HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/rating-runs` lists `{rating_runs, next_cursor}` ordered by `recorded_at` then `rating_run_id`.  Rate a window, then draft an invoice.
 - `operator_console` Storybook adds a `RatingRun` story using `AmountDue` and `StatusChip`.  Fixtures are rated-morning and rated-partial.  There is no login wall, Figma-only work, or production SPA.
 - ADR 0030 for rating-run HTTP presentment.

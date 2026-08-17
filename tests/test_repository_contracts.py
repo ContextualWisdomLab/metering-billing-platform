@@ -22,6 +22,7 @@ from metering_billing.contracts import (
     validate_rate_card_presentment,
     validate_usage_event_presentment,
     validate_rating_run_presentment,
+    validate_tax_assessment_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -1206,6 +1207,150 @@ class RepositoryContractTests(unittest.TestCase):
             [
                 error
                 for error in validate_rating_run_presentment(numeric)
+                if "exact decimal" in error
+            ],
+            [],
+        )
+
+    def test_tax_assessment_presentment_accepts_amounts_and_rejects_outcome(self) -> None:
+        """A tax-assessment statement records exact amounts and cannot claim a write outcome."""
+        schema = self._schema("tax-assessment-presentment.schema.json")
+        instance = {
+            "tax_assessment_presentment_contract_version": 1,
+            "tax_assessment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6a0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6b0",
+            "tax_rate_version_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6c0",
+            "tax_rate_version": 1,
+            "tax_code": "vat",
+            "tax_rate": "0.10",
+            "currency_code": "USD",
+            "tax_exclusive_amount": "100.00",
+            "tax_amount": "10.00",
+            "tax_inclusive_amount": "110.00",
+            "source_payload_hash": "sha256:" + ("d" * 64),
+            "assessed_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "propose_journal",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_tax_assessment_presentment(instance), ())
+        posted = dict(instance)
+        posted["tax_assessment_outcome_code"] = "accepted"
+        self.assertIn(
+            "$: additional property is not allowed: tax_assessment_outcome_code",
+            validate_schema_instance(schema, posted),
+        )
+        statused = dict(instance)
+        statused["tax_assessment_status"] = "assessed"
+        self.assertIn(
+            "$: additional property is not allowed: tax_assessment_status",
+            validate_schema_instance(schema, statused),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: stored tax must propose a journal",
+            validate_tax_assessment_presentment(wait_action),
+        )
+        self.assertNotEqual(validate_tax_assessment_presentment([]), ())
+        negative = dict(instance)
+        negative["tax_inclusive_amount"] = "-1"
+        self.assertIn(
+            "$: tax_inclusive_amount must not be negative",
+            validate_tax_assessment_presentment(negative),
+        )
+        bad_total = dict(instance)
+        bad_total["tax_inclusive_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "tax_inclusive_amount must be an exact decimal" in error
+                for error in validate_tax_assessment_presentment(bad_total)
+            )
+        )
+        negative_exclusive = dict(instance)
+        negative_exclusive["tax_exclusive_amount"] = "-1"
+        self.assertIn(
+            "$: tax_exclusive_amount must not be negative",
+            validate_tax_assessment_presentment(negative_exclusive),
+        )
+        negative_tax = dict(instance)
+        negative_tax["tax_amount"] = "-1"
+        self.assertIn(
+            "$: tax_amount must not be negative",
+            validate_tax_assessment_presentment(negative_tax),
+        )
+        negative_rate = dict(instance)
+        negative_rate["tax_rate"] = "-1"
+        self.assertIn(
+            "$: tax_rate must not be negative",
+            validate_tax_assessment_presentment(negative_rate),
+        )
+        bad_exclusive = dict(instance)
+        bad_exclusive["tax_exclusive_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "tax_exclusive_amount must be an exact decimal" in error
+                for error in validate_tax_assessment_presentment(bad_exclusive)
+            )
+        )
+        bad_tax = dict(instance)
+        bad_tax["tax_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "tax_amount must be an exact decimal" in error
+                for error in validate_tax_assessment_presentment(bad_tax)
+            )
+        )
+        bad_rate = dict(instance)
+        bad_rate["tax_rate"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "tax_rate must be an exact decimal" in error
+                for error in validate_tax_assessment_presentment(bad_rate)
+            )
+        )
+        unbalanced = dict(instance)
+        unbalanced["tax_inclusive_amount"] = "111.00"
+        self.assertIn(
+            "$: tax_inclusive_amount must equal exclusive plus tax",
+            validate_tax_assessment_presentment(unbalanced),
+        )
+        numeric_inclusive = dict(instance)
+        numeric_inclusive["tax_inclusive_amount"] = 110
+        self.assertEqual(
+            [
+                error
+                for error in validate_tax_assessment_presentment(numeric_inclusive)
+                if "exact decimal" in error
+            ],
+            [],
+        )
+        numeric_exclusive = dict(instance)
+        numeric_exclusive["tax_exclusive_amount"] = 100
+        self.assertEqual(
+            [
+                error
+                for error in validate_tax_assessment_presentment(numeric_exclusive)
+                if "exact decimal" in error
+            ],
+            [],
+        )
+        numeric_tax = dict(instance)
+        numeric_tax["tax_amount"] = 10
+        self.assertEqual(
+            [
+                error
+                for error in validate_tax_assessment_presentment(numeric_tax)
+                if "exact decimal" in error
+            ],
+            [],
+        )
+        numeric_rate = dict(instance)
+        numeric_rate["tax_rate"] = 0.1
+        self.assertEqual(
+            [
+                error
+                for error in validate_tax_assessment_presentment(numeric_rate)
                 if "exact decimal" in error
             ],
             [],

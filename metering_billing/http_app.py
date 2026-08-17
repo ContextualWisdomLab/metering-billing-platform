@@ -28,6 +28,10 @@ The application is a thin WSGI adapter:
    Let a buyer GET a stored rating run as a commercial statement.  The
    write stays the existing #7 rate-a-window command and refuses PAN and
    provider secrets.  Rate a window, then draft an invoice.
+   Let a buyer GET a stored tax assessment as a commercial statement.  The
+   write stays the existing #19 assess command and refuses PAN and
+   provider secrets.  Publish a tax rate, assess the draft, then propose
+   the journal and let AIS pull.
 8. Let a buyer POST a tax rate, assess a draft, and GET those records.
    Publish a tax rate, assess the draft, then propose the journal and let
    AIS pull.  AIS must map ``tax_payable``.
@@ -83,6 +87,7 @@ from metering_billing.errors import (
     RateCardPresentmentQueryError,
     UsageEventPresentmentQueryError,
     RatingRunPresentmentQueryError,
+    TaxAssessmentPresentmentQueryError,
     PaymentIntentPresentmentQueryError,
     PaymentReceiptPresentmentQueryError,
     ExactDecimalError,
@@ -107,6 +112,7 @@ from metering_billing.credit_adjustment_presentment import CreditAdjustmentPrese
 from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.usage_event_presentment import UsageEventPresentmentService
 from metering_billing.rating_run_presentment import RatingRunPresentmentService
+from metering_billing.tax_assessment_presentment import TaxAssessmentPresentmentService
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
@@ -231,6 +237,7 @@ def create_http_app(
     catalog_presentments = RateCardPresentmentService(shared_ledger)
     usage_presentments = UsageEventPresentmentService(shared_ledger)
     rating_presentments = RatingRunPresentmentService(shared_ledger)
+    tax_assessment_presentments = TaxAssessmentPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -645,15 +652,31 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
-        if route_name == "get_tax_assessment":
+        if route_name in {"list_tax_assessments", "get_tax_assessment"}:
             try:
                 query = _read_query(environ)
                 tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_tax_assessments":
+                    page = tax_assessment_presentments.list_tax_assessments(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
                 result = assessments.get_tax_assessment(
                     tenant_reference,
                     _parse_uuid(path_values["tax_assessment_id"], "tax_assessment_id"),
                 )
                 return _send_json(start_response, 200, result.as_contract_dict())
+            except TaxAssessmentPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "tax_assessment_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
             except TaxAssessmentQueryError as error:
                 status_code = (
                     404 if error.rejection_reason_code == "tax_assessment_not_found" else 422
@@ -993,6 +1016,8 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == TAX_ASSESSMENT_COLLECTION_PATH:
         if method == "POST":
             return "tax_assessments", {}
+        if method == "GET":
+            return "list_tax_assessments", {}
         return "method_not_allowed", {}
     tax_assessment_match = TAX_ASSESSMENT_ITEM_PATH.fullmatch(path)
     if tax_assessment_match is not None:
@@ -1310,6 +1335,8 @@ def _dispatch_write(
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "tax_assessments":
         if assessments is None:
+            raise HttpRequestError("request_invalid")
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
             raise HttpRequestError("request_invalid")
         version_value = payload.get("tax_rate_version")
         if isinstance(version_value, str):
