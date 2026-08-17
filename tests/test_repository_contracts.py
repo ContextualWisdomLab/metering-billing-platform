@@ -449,6 +449,18 @@ class RepositoryContractTests(unittest.TestCase):
             validate_invoice_presentment(wrong_due),
         )
         self.assertNotEqual(validate_invoice_presentment([]), ())
+        non_string_tax = dict(instance)
+        non_string_tax["tax_exclusive_amount"] = 100
+        self.assertEqual(
+            [error for error in validate_invoice_presentment(non_string_tax) if "exclusive plus tax" in error],
+            [],
+        )
+        non_string_due = dict(instance)
+        non_string_due["credited_amount"] = 11
+        self.assertEqual(
+            [error for error in validate_invoice_presentment(non_string_due) if "inclusive minus credits" in error],
+            [],
+        )
         scientific = dict(instance)
         scientific["tax_exclusive_amount"] = "1e2"
         scientific["tax_amount"] = "1e1"

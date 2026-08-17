@@ -305,6 +305,8 @@ class InvoicePresentmentTests(unittest.TestCase):
             service.list_invoice_drafts(TENANT_ONE, page_limit=101)
         with self.assertRaises(InvoicePresentmentQueryError):
             service.list_invoice_drafts(TENANT_ONE, page_limit=1.5)
+        with self.assertRaises(InvoicePresentmentQueryError):
+            service.list_invoice_drafts(TENANT_ONE, page_limit="abc")
         TaxRateService(ledger).publish_tax_rate(TENANT_ONE, "vat", STANDARD_TAX_RATE)
         assessed_id = insert_commercial_draft(ledger, TENANT_ONE, "USD", Decimal("20.00"))
         assessed = TaxAssessmentService(ledger).assess_tax(TENANT_ONE, assessed_id, 1)
