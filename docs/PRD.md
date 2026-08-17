@@ -100,7 +100,7 @@ contextual-orchestrator usage
 - AIS can GET persisted proposals as the published `accounting_journal_proposal` contract.
 - Every read requires a tenant via optional `X-CWL-Tenant-Reference` or `tenant_reference`. If both are present they must match. Another tenant cannot list or fetch the first tenant's proposals.
 - Optional filters are `proposal_status` (`draft|validated|exported|rejected` only), inclusive `proposed_after`, and a bounded `cursor` / `page_limit`.
-- Cash and AR proposals share `journal_proposal` and appear in the same list. There is no cash-specific GET route.
+- Cash, AR, and credit proposals share `journal_proposal` and appear in the same list. There is no cash-specific GET route.
 - HTTP 200 is a successful read. HTTP 422 is a missing tenant or illegal filter. HTTP 404 is an unknown route or unknown/cross-tenant proposal.
 - Query never mutates `proposal_status` and never emits `posted`. AIS pulls validated proposals and owns `posting_receipt`.
 
@@ -113,6 +113,18 @@ contextual-orchestrator usage
 - `posting_status_code` values `posted`, `held`, `rejected`, and `reversed` store as observations. Billing `proposal_status` stays `validated`.
 - GET of a stored observation is tenant-scoped, returns 404 across tenants, and does not call AIS.
 - Missing tenant, missing key, illegal `posting_status_code`, tenant mismatch, float JSON, and transport failure fail closed.
+
+## Credit-adjustment acceptance
+
+- A known invoice draft records one commercial credit whose exact amount does not exceed remaining adjustable consideration.
+- A full credit of the draft total zeros remaining adjustable. If a collection case exists, outstanding is reduced by the same amount and remaining zero marks the case `settled`.
+- A partial credit leaves residual adjustable consideration and, when a case exists, residual outstanding.
+- A second credit of the same tenant, `invoice_draft_id`, amount, reason, source-payload hash, and contract version returns the same `credit_adjustment_id` and `proposal_id`.
+- Another tenant cannot see or credit the first tenant's draft.
+- The paired journal proposal debits `usage_revenue` and credits `accounts_receivable`. Status stays `validated` and is never `posted`.
+- Closed reasons are `rating_correction`, `goodwill`, and `billing_error`. Unknown codes fail closed.
+- Missing drafts, cross-tenant IDs, float money, zero or negative amounts, over-remaining amounts, and credits that exceed case outstanding fail closed.
+- Operators record the credit, then let AIS pull the validated proposal. This slice does not call AIS, post, tax, refund-to-card, or chargeback.
 
 ## Usage-ingestion acceptance
 
@@ -132,4 +144,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, and posting-receipt observation reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, and credit adjustment reach 100% statement and branch coverage.

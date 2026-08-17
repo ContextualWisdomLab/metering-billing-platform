@@ -24,6 +24,7 @@ __all__ = (
     "COLLECTION_CASE_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
+    "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
@@ -35,6 +36,7 @@ __all__ = (
     "validate_invoice_draft",
     "validate_payment_intent",
     "validate_payment_receipt",
+    "validate_credit_adjustment",
     "validate_journal_proposal",
     "validate_rating_run",
     "validate_schema_instance",
@@ -52,6 +54,7 @@ INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 COLLECTION_CASE_SCHEMA_NAME = "collection-case.schema.json"
 PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
 PAYMENT_RECEIPT_SCHEMA_NAME = "payment-receipt.schema.json"
+CREDIT_ADJUSTMENT_SCHEMA_NAME = "credit-adjustment.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
@@ -389,6 +392,41 @@ def _missing_success_payment_receipt_fields(
     for field_name in required_fields:
         if field_name not in payment_receipt:
             missing.append(f"$: {outcome} payment receipts must include {field_name}")
+    return tuple(missing)
+
+
+def validate_credit_adjustment(
+    credit_adjustment: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate credit-adjustment shape plus identity and remaining amounts."""
+    schema = load_json_schema(CREDIT_ADJUSTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, credit_adjustment))
+    if not isinstance(credit_adjustment, Mapping):
+        return tuple(errors)
+    outcome = credit_adjustment.get("credit_adjustment_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_credit_adjustment_fields(credit_adjustment, str(outcome)))
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in credit_adjustment:
+            errors.append("$: rejected credit adjustments must include rejection_reason_code")
+    return tuple(errors)
+
+
+def _missing_success_credit_adjustment_fields(
+    credit_adjustment: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay credit lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "credit_adjustment_id",
+        "invoice_draft_id",
+        "credit_amount",
+        "remaining_adjustable_amount",
+        "proposal_id",
+        "source_payload_hash",
+    ):
+        if field_name not in credit_adjustment:
+            missing.append(f"$: {outcome} credit adjustments must include {field_name}")
     return tuple(missing)
 
 

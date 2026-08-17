@@ -18,13 +18,14 @@
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
 - `invoice_draft`: append-only draft-only commercial document for one tenant and rating run.
 - `invoice_draft_line`: append-only draft line copied from a rating line.
-- `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft or payment receipt. AIS pulls these rows; query does not add a second table.
+- `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft, payment receipt, or credit adjustment. AIS pulls these rows; query does not add a second table.
 - `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
 - `collection_case`: commercial collection case for one tenant invoice draft; receipts update outstanding and may mark the case settled.
 - `collection_dunning_event`: append-only commercial reminder that does not capture money.
 - `payment_intent`: provider-neutral payment initiation projection for one collection case; cancellation updates current status.
 - `payment_receipt`: append-only commercial receipt applied against one projected payment intent.
 - `posting_receipt_observation`: append-only commercial observation of one AIS posting receipt. AIS `receipt_id` is an external reference, not the internal primary key.
+- `credit_adjustment`: append-only commercial credit against one tenant invoice draft. The paired journal proposal reuses `journal_proposal`.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -41,7 +42,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, credits, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, or posting-receipt-observation keys.
+Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, or credit-adjustment keys.
 
 ## Usage identity
 
@@ -57,11 +58,11 @@ A stored invoice draft is identified by `(tenant_account_id, rating_run_id)` and
 
 ## Journal-proposal identity
 
-A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)` for invoice-draft exports, and by `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)` for cash exports.  Lines reference the proposal and tenant, carry unique `line_number` values, and must balance in the transaction currency.  Cash lines use semantic `cash_receipt` and `accounts_receivable` roles.  Status is proposal-only.  Statutory account IDs and posted journals are not stored here.
+A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)` for invoice-draft exports, by `(tenant_account_id, payment_receipt_id, source_payload_hash, proposal_contract_version)` for cash exports, and by `(tenant_account_id, credit_adjustment_id, source_payload_hash, proposal_contract_version)` for credit exports.  Lines reference the proposal and tenant, carry unique `line_number` values, and must balance in the transaction currency.  Cash lines use semantic `cash_receipt` and `accounts_receivable` roles.  Credit lines use semantic `usage_revenue` and `accounts_receivable` roles.  Status is proposal-only.  Statutory account IDs and posted journals are not stored here.
 
 ## Collection-case identity
 
-A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
+A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts or commercial credits reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
 
 ## Payment-intent identity
 
@@ -74,3 +75,7 @@ A stored payment receipt is identified by `(tenant_account_id, payment_intent_id
 ## Posting-receipt observation identity
 
 A stored posting-receipt observation is identified by `(tenant_account_id, idempotency_key)` plus `source_payload_hash` and AIS `receipt_id`.  Internal primary key is `posting_receipt_observation_id`.  `posting_status_code` is AIS-owned (`posted`, `held`, `rejected`, `reversed`) and is not mapped onto journal `proposal_status`.
+
+## Credit-adjustment identity
+
+A stored credit adjustment is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)`.  Internal primary key is `credit_adjustment_id`.  The hash covers the draft, exact credit amount, closed reason, and currency.  Status is `recorded` only.  Remaining adjustable is the draft total minus prior accepted credits.  If a collection case exists, outstanding is reduced by the same amount and cannot go negative.

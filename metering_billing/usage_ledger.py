@@ -22,6 +22,8 @@ from uuid import UUID
 from metering_billing.errors import RatingRejectionReasonCode, RejectionReasonCode
 from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
 
+CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
+
 
 def generate_record_id(uuid_module: ModuleType = uuid) -> UUID:
     """Return a UUIDv7 when available, otherwise a random UUID4."""
@@ -259,7 +261,7 @@ class StoredJournalProposalLine:
 
 @dataclass(frozen=True)
 class StoredJournalProposal:
-    """Append-only balanced journal proposal for one tenant draft or receipt."""
+    """Append-only balanced journal proposal for one tenant draft, receipt, or credit."""
 
     journal_proposal_id: UUID
     tenant_account_id: UUID
@@ -277,6 +279,7 @@ class StoredJournalProposal:
     source_event_reference: str
     proposal_lines: tuple[StoredJournalProposalLine, ...]
     payment_receipt_id: UUID | None = None
+    credit_adjustment_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -341,6 +344,27 @@ class StoredPaymentReceipt:
     received_amount: Decimal
     source_payload_hash: str
     received_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredCreditAdjustment:
+    """Persisted commercial credit against one invoice draft.
+
+    Identity is tenant-scoped
+    ``(invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)``.
+    The internal primary key is ``credit_adjustment_id``, never a provider
+    object identifier.
+    """
+
+    credit_adjustment_id: UUID
+    tenant_account_id: UUID
+    invoice_draft_id: UUID
+    credit_adjustment_contract_version: int
+    credit_reason_code: str
+    currency_code: str
+    credit_amount: Decimal
+    source_payload_hash: str
+    recorded_at: datetime
 
 
 @dataclass(frozen=True)
@@ -422,6 +446,13 @@ class MemoryUsageLedger:
     journal_proposals: dict[UUID, StoredJournalProposal] = field(default_factory=dict)
     journal_proposal_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
     cash_journal_proposal_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
+        default_factory=dict
+    )
+    credit_journal_proposal_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
+        default_factory=dict
+    )
+    credit_adjustments: dict[UUID, StoredCreditAdjustment] = field(default_factory=dict)
+    credit_adjustment_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
         default_factory=dict
     )
     journal_proposal_lines: list[StoredJournalProposalLine] = field(default_factory=list)
@@ -788,6 +819,96 @@ class MemoryUsageLedger:
         """Return a stored invoice draft by internal identifier."""
         return self.invoice_drafts.get(invoice_draft_id)
 
+    def find_credit_adjustment(
+        self,
+        tenant_account_id: UUID,
+        invoice_draft_id: UUID,
+        source_payload_hash: str,
+        credit_adjustment_contract_version: int,
+    ) -> StoredCreditAdjustment | None:
+        """Return the credit adjustment for one tenant-scoped identity, if any."""
+        credit_adjustment_id = self.credit_adjustment_index.get(
+            (
+                tenant_account_id,
+                invoice_draft_id,
+                source_payload_hash,
+                credit_adjustment_contract_version,
+            )
+        )
+        if credit_adjustment_id is None:
+            return None
+        return self.credit_adjustments[credit_adjustment_id]
+
+    def get_credit_adjustment(
+        self, credit_adjustment_id: UUID
+    ) -> StoredCreditAdjustment | None:
+        """Return one credit adjustment by internal identifier, if present."""
+        return self.credit_adjustments.get(credit_adjustment_id)
+
+    def insert_credit_adjustment(
+        self, credit: StoredCreditAdjustment
+    ) -> StoredCreditAdjustment:
+        """Persist one credit adjustment or return the existing identity row.
+
+        The same tenant-scoped identity is a duplicate replay.  Reusing
+        ``credit_adjustment_id`` for a different identity is rejected so a
+        provider or AIS identifier cannot become the internal key.
+        """
+        if credit.credit_reason_code not in CREDIT_REASON_CODES:
+            raise ValueError("credit_reason_code is not in the closed set")
+        credit_amount = parse_exact_decimal(format_exact_decimal(credit.credit_amount))
+        if credit_amount <= 0:
+            raise ValueError("credit amount must be a positive exact decimal")
+        existing_by_id = self.credit_adjustments.get(credit.credit_adjustment_id)
+        if existing_by_id is not None:
+            if (
+                existing_by_id.tenant_account_id != credit.tenant_account_id
+                or existing_by_id.invoice_draft_id != credit.invoice_draft_id
+                or existing_by_id.source_payload_hash != credit.source_payload_hash
+                or existing_by_id.credit_adjustment_contract_version
+                != credit.credit_adjustment_contract_version
+            ):
+                raise ValueError(
+                    "credit_adjustment_id already stored for a different identity"
+                )
+            return existing_by_id
+        identity = (
+            credit.tenant_account_id,
+            credit.invoice_draft_id,
+            credit.source_payload_hash,
+            credit.credit_adjustment_contract_version,
+        )
+        existing_id = self.credit_adjustment_index.get(identity)
+        if existing_id is not None:
+            return self.credit_adjustments[existing_id]
+        persisted = StoredCreditAdjustment(
+            credit_adjustment_id=credit.credit_adjustment_id,
+            tenant_account_id=credit.tenant_account_id,
+            invoice_draft_id=credit.invoice_draft_id,
+            credit_adjustment_contract_version=credit.credit_adjustment_contract_version,
+            credit_reason_code=credit.credit_reason_code,
+            currency_code=credit.currency_code,
+            credit_amount=credit_amount,
+            source_payload_hash=credit.source_payload_hash,
+            recorded_at=credit.recorded_at,
+        )
+        self.credit_adjustments[persisted.credit_adjustment_id] = persisted
+        self.credit_adjustment_index[identity] = persisted.credit_adjustment_id
+        return persisted
+
+    def list_credit_adjustments(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredCreditAdjustment, ...]:
+        """Return stored credit adjustments, optionally filtered by tenant."""
+        credits = tuple(self.credit_adjustments.values())
+        if tenant_account_id is None:
+            return credits
+        return tuple(
+            credit
+            for credit in credits
+            if credit.tenant_account_id == tenant_account_id
+        )
+
     def find_journal_proposal(
         self,
         tenant_account_id: UUID,
@@ -820,6 +941,26 @@ class MemoryUsageLedger:
             (
                 tenant_account_id,
                 payment_receipt_id,
+                source_payload_hash,
+                proposal_contract_version,
+            )
+        )
+        if journal_proposal_id is None:
+            return None
+        return self.journal_proposals[journal_proposal_id]
+
+    def find_journal_proposal_for_credit(
+        self,
+        tenant_account_id: UUID,
+        credit_adjustment_id: UUID,
+        source_payload_hash: str,
+        proposal_contract_version: int,
+    ) -> StoredJournalProposal | None:
+        """Return the credit proposal for one tenant-scoped credit, if it exists."""
+        journal_proposal_id = self.credit_journal_proposal_index.get(
+            (
+                tenant_account_id,
+                credit_adjustment_id,
                 source_payload_hash,
                 proposal_contract_version,
             )
@@ -874,11 +1015,24 @@ class MemoryUsageLedger:
                 journal_proposal.source_payload_hash,
                 journal_proposal.proposal_contract_version,
             )
+        credit_identity_key = None
+        if journal_proposal.credit_adjustment_id is not None:
+            credit_identity_key = (
+                journal_proposal.tenant_account_id,
+                journal_proposal.credit_adjustment_id,
+                journal_proposal.source_payload_hash,
+                journal_proposal.proposal_contract_version,
+            )
         if journal_proposal.journal_proposal_id in self.journal_proposals:
             raise ValueError("journal proposals are immutable and cannot be replaced")
         if identity_key in self.journal_proposal_index:
             raise ValueError("journal proposals are immutable and cannot be replaced")
         if cash_identity_key is not None and cash_identity_key in self.cash_journal_proposal_index:
+            raise ValueError("journal proposals are immutable and cannot be replaced")
+        if (
+            credit_identity_key is not None
+            and credit_identity_key in self.credit_journal_proposal_index
+        ):
             raise ValueError("journal proposals are immutable and cannot be replaced")
         persisted = StoredJournalProposal(
             journal_proposal_id=journal_proposal.journal_proposal_id,
@@ -897,11 +1051,14 @@ class MemoryUsageLedger:
             source_event_reference=journal_proposal.source_event_reference,
             proposal_lines=parsed_lines,
             payment_receipt_id=journal_proposal.payment_receipt_id,
+            credit_adjustment_id=journal_proposal.credit_adjustment_id,
         )
         self.journal_proposals[persisted.journal_proposal_id] = persisted
         self.journal_proposal_index[identity_key] = persisted.journal_proposal_id
         if cash_identity_key is not None:
             self.cash_journal_proposal_index[cash_identity_key] = persisted.journal_proposal_id
+        if credit_identity_key is not None:
+            self.credit_journal_proposal_index[credit_identity_key] = persisted.journal_proposal_id
         self.journal_proposal_lines.extend(parsed_lines)
         return persisted
 

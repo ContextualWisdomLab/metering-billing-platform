@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/credit-adjustment/v1",
+  "title": "Credit Adjustment",
+  "description": "Commercial credit adjustment against one tenant invoice draft. Replays acknowledge the stored credit_adjustment_id and proposal_id. The paired journal proposal stays validated and is never posted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "credit_adjustment_contract_version",
+    "credit_adjustment_outcome_code"
+  ],
+  "properties": {
+    "credit_adjustment_contract_version": {"type": "integer", "minimum": 1},
+    "credit_adjustment_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "credit_adjustment_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "credit_adjustment_status": {"type": "string", "enum": ["recorded"]},
+    "credit_reason_code": {
+      "type": "string",
+      "enum": ["rating_correction", "goodwill", "billing_error"]
+    },
+    "credit_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_adjustable_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled"]
+    },
+    "proposal_id": {"type": "string", "format": "uuid"},
+    "proposal_status": {
+      "type": "string",
+      "enum": ["draft", "validated", "exported", "rejected"]
+    },
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "invoice_draft_not_found",
+        "credit_amount_invalid",
+        "credit_reason_invalid",
+        "credit_exceeds_remaining",
+        "credit_exceeds_outstanding"
+      ]
+    }
+  }
+}

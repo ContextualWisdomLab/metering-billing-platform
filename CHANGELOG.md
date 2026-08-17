@@ -4,6 +4,11 @@
 
 ### Added
 
+- `CreditAdjustmentService.record_credit_adjustment` records one commercial `credit_adjustment` against a stored invoice draft.  `credit_amount` is an exact `Decimal` greater than zero and cannot exceed remaining adjustable consideration.  Closed reasons are `rating_correction`, `goodwill`, and `billing_error`.  If a collection case exists, outstanding is reduced by the same amount and remaining zero marks the case `settled`.  The path emits one balanced validated journal proposal that debits `usage_revenue` and credits `accounts_receivable`.
+- Idempotent credit identity on `(tenant, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)` so a replay returns the same `credit_adjustment_id` and `proposal_id`.
+- AIS-compatible credit idempotency key `{tenant}:credit_adjustment:{credit_adjustment_id}:{source_payload_hash}:v{contract_version}`.
+- `POST /v1/credit-adjustments` and tenant-scoped `GET /v1/credit-adjustments/{credit_adjustment_id}` on the existing WSGI app.  Credit proposals appear on existing `GET /v1/journal-proposals`.  This slice does not call AIS.
+- ADR 0014 for commercial credit without posting, tax, refund-to-card, or chargeback.
 - `PostingReceiptPullService.pull_posting_receipt` GETs an AIS posting receipt and stores one append-only `posting_receipt_observation`.  The AIS-owned contract is copied under `schemas/consumed/`.  `posting_status_code` is not mapped onto Billing `proposal_status`.  AIS 403 is cross-tenant and writes zero rows; AIS 404 is `not_yet_accepted` and writes zero rows.  `POST /v1/posting-receipt-observations` triggers the pull; `GET /v1/posting-receipt-observations/{idempotency_key}` reads a stored observation without calling AIS.
 - ADR 0013 for observation-only posting-receipt pull.
 - `GET /v1/journal-proposals` and `GET /v1/journal-proposals/{proposal_id}` let AIS pull persisted proposals without mutating `proposal_status`.  Cash and AR proposals share the same list.  Tenant is required via optional `X-CWL-Tenant-Reference` or `tenant_reference`.  If both are present they must match.  HTTP 200 is a successful read; HTTP 422 is a missing tenant, tenant mismatch, or illegal filter; HTTP 404 is an unknown or cross-tenant proposal.  Responses keep semantic account roles and do not emit statutory account IDs.

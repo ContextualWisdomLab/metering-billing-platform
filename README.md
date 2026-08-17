@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, and posting-receipt-observation migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, and credit-adjustment migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -109,7 +109,7 @@ python3 -m metering_billing.http_app
 # GET /v1/journal-proposals/{proposal_id}?tenant_reference=urn:cwl:tenant_001
 ```
 
-AIS pulls validated proposals from the same stdlib app. Pin the tenant with optional `X-CWL-Tenant-Reference` or with `tenant_reference` in the query or JSON body. If both are present they must match. Cash and AR proposals share `journal_proposal` and appear in the same list. Query never marks a proposal exported, posted, or consumed. Billing emits semantic account roles only; AIS maps `cash_receipt` to its own chart.
+AIS pulls validated proposals from the same stdlib app. Pin the tenant with optional `X-CWL-Tenant-Reference` or with `tenant_reference` in the query or JSON body. If both are present they must match. Cash, AR, and credit proposals share `journal_proposal` and appear in the same list. Query never marks a proposal exported, posted, or consumed. Billing emits semantic account roles only; AIS maps `cash_receipt` to its own chart.
 
 ## Pull a posting receipt
 
@@ -121,6 +121,16 @@ python3 -c "from metering_billing import PostingReceiptPullService"
 
 After AIS accepts a validated proposal, an operator pulls the AIS `posting_receipt` and Billing stores it as a commercial observation. If AIS returns 404, accept the proposal on AIS and retry. `posting_status_code` stays an AIS fact. Billing `proposal_status` stays `validated`. GET reads a previously stored observation and does not call AIS.
 
+## Record a credit adjustment
+
+```bash
+python3 -c "from metering_billing import CreditAdjustmentService"
+# POST /v1/credit-adjustments
+# GET /v1/credit-adjustments/{credit_adjustment_id}
+```
+
+After an `invoice_draft` exists, call `CreditAdjustmentService.record_credit_adjustment` with the tenant, `invoice_draft_id`, exact `credit_amount`, and a closed `credit_reason_code` (`rating_correction`, `goodwill`, or `billing_error`). The credit cannot exceed remaining adjustable consideration. If a collection case exists, outstanding is reduced by the same amount; remaining zero marks the case `settled`. The path emits one validated journal proposal that debits `usage_revenue` and credits `accounts_receivable`. An identical replay returns the same `credit_adjustment_id` and `proposal_id`. Record the credit, then let AIS pull the validated proposal. This path does not post, call AIS, tax, refund-to-card, or chargeback.
+
 ## Next action
 
-Operators pull the AIS posting receipt after accept. Do not flip `proposal_status`, do not open a fiscal period, and do not start credit or adjustment in this slice.
+Operators record the credit, then let AIS pull the validated proposal. Do not flip `proposal_status`, do not open a fiscal period, and do not start tax or rate-card CRUD in this slice.

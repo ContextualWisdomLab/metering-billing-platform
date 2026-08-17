@@ -12,6 +12,9 @@ The application is a thin WSGI adapter:
 5. Let an operator POST a posting-receipt pull and GET a stored observation.
    The pull stores AIS ``posting_status_code`` without flipping Billing
    ``proposal_status``.
+6. Let a buyer POST a commercial credit adjustment.  The adapter records the
+   credit and returns the paired validated proposal.  AIS later pulls that
+   proposal.  This path never posts and never calls AIS.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -31,7 +34,9 @@ from wsgiref.types import StartResponse, WSGIEnvironment
 
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
+from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
+    CreditAdjustmentQueryError,
     ExactDecimalError,
     JournalProposalQueryError,
     PostingReceiptObservationQueryError,
@@ -55,6 +60,8 @@ PAYMENT_CANCEL_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})/cance
 JOURNAL_PROPOSAL_ITEM_PATH = re.compile(r"^/v1/journal-proposals/([0-9a-fA-F-]{36})$")
 POSTING_RECEIPT_COLLECTION_PATH = "/v1/posting-receipt-observations"
 POSTING_RECEIPT_ITEM_PREFIX = "/v1/posting-receipt-observations/"
+CREDIT_ADJUSTMENT_COLLECTION_PATH = "/v1/credit-adjustments"
+CREDIT_ADJUSTMENT_ITEM_PATH = re.compile(r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})$")
 KNOWN_POST_PATHS = frozenset(
     {
         "/v1/usage-events",
@@ -101,6 +108,7 @@ def create_http_app(
     else:
         resolved_ais_client = None
     pulls = PostingReceiptPullService(shared_ledger, ais_client=resolved_ais_client)
+    credits = CreditAdjustmentService(shared_ledger)
 
     def application(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         """Dispatch one HTTP request onto the existing commercial services."""
@@ -188,6 +196,32 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "get_credit_adjustment":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _resolve_tenant_pin(environ, query)
+                result = credits.get_credit_adjustment(
+                    tenant_reference,
+                    _parse_uuid(path_values["credit_adjustment_id"], "credit_adjustment_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except CreditAdjustmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "credit_adjustment_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
             tenant_reference = _resolve_tenant_pin(environ, payload)
@@ -203,6 +237,7 @@ def create_http_app(
                 collections,
                 intents,
                 settlements,
+                credits,
             )
         except HttpRequestError as error:
             return _send_json(
@@ -253,6 +288,15 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "journal_proposals", {}
         if method == "GET":
             return "list_journal_proposals", {}
+        return "method_not_allowed", {}
+    if path == CREDIT_ADJUSTMENT_COLLECTION_PATH:
+        if method == "POST":
+            return "credit_adjustments", {}
+        return "method_not_allowed", {}
+    credit_match = CREDIT_ADJUSTMENT_ITEM_PATH.fullmatch(path)
+    if credit_match is not None:
+        if method == "GET":
+            return "get_credit_adjustment", {"credit_adjustment_id": credit_match.group(1)}
         return "method_not_allowed", {}
     if path == POSTING_RECEIPT_COLLECTION_PATH:
         if method == "POST":
@@ -371,6 +415,7 @@ def _dispatch_write(
     collections: CollectionCaseService,
     intents: PaymentIntentService,
     settlements: PaymentSettlementService,
+    credits: CreditAdjustmentService | None = None,
 ) -> tuple[dict[str, object], int]:
     """Call one commercial service and map its contract to an HTTP status."""
     if route_name == "usage_events":
@@ -443,6 +488,19 @@ def _dispatch_write(
         result = exports.propose_cash_journal(
             tenant_reference,
             _parse_uuid(payload.get("payment_receipt_id"), "payment_receipt_id"),
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "credit_adjustments":
+        if credits is None:
+            raise HttpRequestError("request_invalid")
+        reason = payload.get("credit_reason_code")
+        if not isinstance(reason, str):
+            raise HttpRequestError("request_invalid")
+        result = credits.record_credit_adjustment(
+            tenant_reference,
+            _parse_uuid(payload.get("invoice_draft_id"), "invoice_draft_id"),
+            payload.get("credit_amount"),
+            reason,
         )
         return result.as_contract_dict(), _status_for_result(result)
     raise HttpRequestError("request_invalid")

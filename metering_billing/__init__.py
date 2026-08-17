@@ -1,12 +1,12 @@
-"""Importable commercial contracts, usage, rating, draft, export, collection, intent, settlement, and HTTP services.
+"""Importable commercial contracts, usage, rating, draft, export, collection, intent, settlement, credit, and HTTP services.
 
 This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, rate tenant-scoped windows, draft invoice-intent
 documents, emit journal proposals, open collection cases, project
-provider-neutral payment intents, apply commercial payment receipts, and
-accept those writes over a stdlib HTTP adapter without taking a
-payment-provider dependency.
+provider-neutral payment intents, apply commercial payment receipts, record
+commercial credits, and accept those writes over a stdlib HTTP adapter
+without taking a payment-provider dependency.
 
 The package never posts statutory journals.  Accounting exports remain
 ``accounting_journal_proposal`` documents with proposal-only statuses.
@@ -14,6 +14,8 @@ Collection cases stay in commercial ``open``, ``dunning``, or ``settled``
 status.  Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
 Payment receipts stay ``applied`` and do not post to AIS.  AIS posting
 receipts are stored as observations and never flip ``proposal_status``.
+Commercial credits stay ``recorded`` and emit a validated journal proposal
+that AIS later pulls.
 """
 
 from metering_billing.accounting_export import AccountingExportService
@@ -22,6 +24,7 @@ from metering_billing.contracts import (
     ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME,
     ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME,
     COLLECTION_CASE_SCHEMA_NAME,
+    CREDIT_ADJUSTMENT_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
@@ -33,6 +36,7 @@ from metering_billing.contracts import (
     load_json_schema,
     validate_consumed_posting_receipt,
     validate_collection_case,
+    validate_credit_adjustment,
     validate_invoice_draft,
     validate_journal_proposal,
     validate_payment_intent,
@@ -40,9 +44,13 @@ from metering_billing.contracts import (
     validate_rating_run,
     validate_usage_event,
 )
+from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
     CollectionCaseOutcomeCode,
     CollectionCaseRejectionReasonCode,
+    CreditAdjustmentOutcomeCode,
+    CreditAdjustmentQueryError,
+    CreditAdjustmentRejectionReasonCode,
     IngestionOutcomeCode,
     InvoiceDraftOutcomeCode,
     InvoiceDraftRejectionReasonCode,
@@ -75,6 +83,7 @@ __all__ = (
     "ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME",
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
+    "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
@@ -85,6 +94,10 @@ __all__ = (
     "CollectionCaseOutcomeCode",
     "CollectionCaseRejectionReasonCode",
     "CollectionCaseService",
+    "CreditAdjustmentOutcomeCode",
+    "CreditAdjustmentQueryError",
+    "CreditAdjustmentRejectionReasonCode",
+    "CreditAdjustmentService",
     "IngestionOutcomeCode",
     "InvoiceDraftOutcomeCode",
     "InvoiceDraftRejectionReasonCode",
@@ -119,6 +132,7 @@ __all__ = (
     "parse_iso8601_datetime",
     "validate_consumed_posting_receipt",
     "validate_collection_case",
+    "validate_credit_adjustment",
     "validate_invoice_draft",
     "validate_journal_proposal",
     "validate_payment_intent",

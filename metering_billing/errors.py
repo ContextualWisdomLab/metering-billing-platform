@@ -173,6 +173,33 @@ class PaymentSettlementOutcomeCode(StrEnum):
     REJECTED = "rejected"
 
 
+class CreditAdjustmentOutcomeCode(StrEnum):
+    """Terminal result of recording one commercial credit adjustment."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class CreditAdjustmentRejectionReasonCode(StrEnum):
+    """Why a credit request was refused without writing a credit or proposal."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    CREDIT_AMOUNT_INVALID = "credit_amount_invalid"
+    CREDIT_REASON_INVALID = "credit_reason_invalid"
+    CREDIT_EXCEEDS_REMAINING = "credit_exceeds_remaining"
+    CREDIT_EXCEEDS_OUTSTANDING = "credit_exceeds_outstanding"
+
+
+class CreditAdjustmentQueryError(ValueError):
+    """Raised when a stored credit adjustment cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class PaymentSettlementRejectionReasonCode(StrEnum):
     """Why a settlement request was refused without capturing money or posting."""
 

@@ -27,7 +27,7 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 ## Accounting plane
 
-`metering_billing.AccountingExportService` produces semantically validated, balanced journal proposals from a persisted invoice draft or payment receipt using semantic account roles and an intended book role. Cash proposals debit `cash_receipt` and credit `accounts_receivable`. The Accounting Information Platform resolves authoritative chart-account IDs, accounting policy, legal entity, accounting book, fiscal period, currency treatment, revenue recognition, and final posting. Billing never claims that posting.
+`metering_billing.AccountingExportService` produces semantically validated, balanced journal proposals from a persisted invoice draft or payment receipt using semantic account roles and an intended book role. Cash proposals debit `cash_receipt` and credit `accounts_receivable`. Credit proposals debit `usage_revenue` and credit `accounts_receivable`. The Accounting Information Platform resolves authoritative chart-account IDs, accounting policy, legal entity, accounting book, fiscal period, currency treatment, revenue recognition, and final posting. Billing never claims that posting.
 
 `metering_billing.CollectionCaseService` opens commercial collection cases from those drafts and appends dunning reminders. Collection does not capture payment or post a journal.
 
@@ -37,9 +37,11 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.http_app.create_http_app` exposes those services as stdlib JSON HTTP. The adapter requires a tenant on every write, returns published `as_contract_dict` contracts, and never posts a journal.
 
-`GET /v1/journal-proposals` is a safe collection read (Fielding et al., 2022; Google, 2024). AIS pulls validated proposals and may pin `X-CWL-Tenant-Reference`. Body or query `tenant_reference` still works when the header is absent; a mismatch is HTTP 422. Cash and AR rows share `journal_proposal`. Query does not flip `proposal_status`; AIS later returns `posting_receipt`. Billing emits semantic account roles only.
+`GET /v1/journal-proposals` is a safe collection read (Fielding et al., 2022; Google, 2024). AIS pulls validated proposals and may pin `X-CWL-Tenant-Reference`. Body or query `tenant_reference` still works when the header is absent; a mismatch is HTTP 422. Cash, AR, and credit rows share `journal_proposal`. Query does not flip `proposal_status`; AIS later returns `posting_receipt`. Billing emits semantic account roles only.
 
 `metering_billing.PostingReceiptPullService` GETs that AIS receipt with stdlib `urllib` and stores a commercial observation. The consumed schema stays AIS-owned. `POST /v1/posting-receipt-observations` is the operator trigger; `GET /v1/posting-receipt-observations/{idempotency_key}` is a safe stored read and does not call AIS (Fielding et al., 2022). `posting_status_code` is not mapped onto `proposal_status`. If AIS returns 404, the operator accepts the proposal on AIS and retries.
+
+`metering_billing.CreditAdjustmentService` records a commercial credit against a stored invoice draft and emits one validated journal proposal. IFRS 15 treats the credit as variable consideration, not as proof that revenue has been reversed in the statutory books (IFRS Foundation, 2024). ISO 20022 keeps the commercial credit note separate from a posted `camt` settlement (International Organization for Standardization, 2026). `POST /v1/credit-adjustments` records the credit; AIS later pulls the proposal. `GET /v1/credit-adjustments/{credit_adjustment_id}` is a safe stored read and does not call AIS (Fielding et al., 2022).
 
 ## Security
 

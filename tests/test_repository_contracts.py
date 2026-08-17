@@ -568,6 +568,62 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_credit_adjustment_accepts_recorded_status_and_closed_reasons(self) -> None:
+        """A credit-adjustment contract records exact amounts and closed reasons."""
+        schema = self._schema("credit-adjustment.schema.json")
+        instance = {
+            "credit_adjustment_contract_version": 1,
+            "credit_adjustment_outcome_code": "accepted",
+            "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf660",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "currency_code": "USD",
+            "credit_adjustment_status": "recorded",
+            "credit_reason_code": "rating_correction",
+            "credit_amount": "0.001000",
+            "remaining_adjustable_amount": "0.002705",
+            "remaining_outstanding_amount": "0.002705",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "collection_case_status": "open",
+            "proposal_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf670",
+            "proposal_status": "validated",
+            "source_payload_hash": "sha256:" + "2" * 64,
+            "idempotency_key": "urn:cwl:tenant_001:credit_adjustment:019d7b92-1aa0-7a7f-b61c-962c0f4bf660:sha256:"
+            + "2" * 64
+            + ":v1",
+            "recorded_at": "2026-08-17T20:15:00Z",
+            "next_operator_action": "Let AIS pull the validated credit journal proposal.",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        posted = dict(instance, proposal_status="posted")
+        self.assertIn(
+            "$.proposal_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, posted),
+        )
+        unknown_reason = dict(instance, credit_reason_code="tax_refund")
+        self.assertIn(
+            "$.credit_reason_code: value is not in the allowed enumeration",
+            validate_schema_instance(schema, unknown_reason),
+        )
+
+    def test_credit_adjustment_migration_reuses_journal_proposal_for_credits(self) -> None:
+        """Credit rows stay tenant-scoped and reuse journal_proposal identity."""
+        sql = (ROOT / "database/migrations/0011_credit_adjustment.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.credit_adjustment",
+            "UNIQUE (tenant_account_id, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)",
+            "UNIQUE (tenant_account_id, credit_adjustment_id)",
+            "FOREIGN KEY (tenant_account_id, invoice_draft_id)",
+            "credit_reason_code text NOT NULL CHECK (credit_reason_code IN ('rating_correction', 'goodwill', 'billing_error'))",
+            "credit_amount numeric(38, 12) NOT NULL CHECK (credit_amount > 0)",
+            "ADD COLUMN credit_adjustment_id uuid",
+            "CREATE UNIQUE INDEX journal_proposal_credit_identity",
+            "credit_adjustment_id IS NOT NULL",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_posting_receipt_observation_migration_is_tenant_scoped_and_append_only(self) -> None:
         """The observation table must not use AIS receipt_id as the primary key."""
         sql = (ROOT / "database/migrations/0010_posting_receipt_observation.sql").read_text(
