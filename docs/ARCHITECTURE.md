@@ -63,7 +63,11 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## Invoice draft
 
-`metering_billing.InvoiceDraftService` copies one stored rating run into an append-only invoice-intent draft.  Identity is `(tenant_account_id, rating_run_id)` plus the rating run's usage-snapshot hash.  An identical replay returns the same `invoice_draft_id` and exact totals.  Status is `draft` only.  The draft is a commercial document, not revenue recognition and not a posted journal.  Emitting an accounting journal proposal is the next increment.
+`metering_billing.InvoiceDraftService` copies one stored rating run into an append-only invoice-intent draft.  Identity is `(tenant_account_id, rating_run_id)` plus the rating run's usage-snapshot hash.  An identical replay returns the same `invoice_draft_id` and exact totals.  Status is `draft` only.  The draft is a commercial document, not revenue recognition and not a posted journal.
+
+## Accounting export
+
+`metering_billing.AccountingExportService` copies one stored invoice draft into an append-only `accounting_journal_proposal`.  Identity is `(tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)`.  An identical replay returns the same `proposal_id`.  Lines use semantic account roles and an intended book role.  Status stays inside the proposal lifecycle and is never `posted`.  The operator next hands the proposal to the Accounting Information Platform.  This path does not open fiscal periods, resolve statutory account IDs, issue an invoice, or call a payment provider.
 
 ## Failure policy
 

@@ -416,6 +416,21 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_journal_proposal_migration_persists_append_only_balanced_lines(self) -> None:
+        """The journal-proposal migration must stay tenant-scoped and proposal-only."""
+        sql = (ROOT / "database/migrations/0005_journal_proposal.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.journal_proposal",
+            "CREATE TABLE billing_core.journal_proposal_line",
+            "UNIQUE (tenant_account_id, invoice_draft_id, source_payload_hash, proposal_contract_version)",
+            "UNIQUE (tenant_account_id, journal_proposal_id)",
+            "FOREIGN KEY (tenant_account_id, invoice_draft_id)",
+            "FOREIGN KEY (tenant_account_id, journal_proposal_id)",
+            "proposal_status text NOT NULL CHECK (proposal_status IN ('draft', 'validated', 'exported', 'rejected'))",
+            "UNIQUE (journal_proposal_id, line_number)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_rating_migration_persists_append_only_runs_and_lines(self) -> None:
         """The rating migration must keep run identity tenant-scoped and append-only."""
         sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(encoding="utf-8")

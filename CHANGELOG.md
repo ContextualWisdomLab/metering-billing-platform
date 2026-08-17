@@ -4,6 +4,10 @@
 
 ### Added
 
+- Importable `metering_billing` accounting-export service that copies a stored invoice draft into one balanced, exact-decimal `accounting_journal_proposal`.
+- Idempotent journal-proposal identity on `(tenant, invoice_draft_id, source_payload_hash, proposal_contract_version)` so a replay returns the same `proposal_id`.
+- Append-only `journal_proposal` and `journal_proposal_line` persistence that keeps debit totals equal to credit totals.
+- ADR 0006 for proposal-only journal export; AIS remains the posting consumer.
 - Importable `metering_billing` invoice-draft service that copies a stored rating run into an exact, tenant-scoped, draft-only invoice-intent document.
 - Idempotent invoice-draft identity on `(tenant, rating_run_id)` so a replay returns the same `invoice_draft_id` and totals.
 - Append-only `invoice_draft` and `invoice_draft_line` persistence and a closed invoice-draft contract.

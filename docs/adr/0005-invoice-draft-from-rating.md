@@ -20,5 +20,5 @@ Windowed rating already persists exact invoice-intent totals.  Buyers next need 
 
 - Known rating totals reproduce one exact draft total.
 - Tenants cannot see or total each other's drafts.
-- A later journal-proposal increment can explain every line from a persisted draft.
+- A later journal-proposal increment (`AccountingExportService`) explains every line from a persisted draft.
 - Payment-provider adapters and statutory posting remain subsequent increments.

@@ -27,7 +27,7 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 ## Accounting plane
 
-The platform produces semantically validated, balanced journal proposals using semantic account roles and an intended book role. The Accounting Information Platform resolves authoritative chart-account IDs, accounting policy, legal entity, accounting book, fiscal period, currency treatment, revenue recognition, and final posting.
+`metering_billing.AccountingExportService` produces semantically validated, balanced journal proposals from a persisted invoice draft using semantic account roles and an intended book role. The Accounting Information Platform resolves authoritative chart-account IDs, accounting policy, legal entity, accounting book, fiscal period, currency treatment, revenue recognition, and final posting. Billing never claims that posting.
 
 ## Security
 

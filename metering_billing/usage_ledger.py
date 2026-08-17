@@ -20,7 +20,7 @@ from typing import Callable
 from uuid import UUID
 
 from metering_billing.errors import RatingRejectionReasonCode, RejectionReasonCode
-from metering_billing.exact_decimal import parse_exact_decimal
+from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
 
 
 def generate_record_id(uuid_module: ModuleType = uuid) -> UUID:
@@ -245,6 +245,40 @@ class StoredInvoiceDraft:
 
 
 @dataclass(frozen=True)
+class StoredJournalProposalLine:
+    """Append-only proposal line using a semantic account role, not a chart ID."""
+
+    journal_proposal_line_id: UUID
+    journal_proposal_id: UUID
+    tenant_account_id: UUID
+    line_number: int
+    account_role_code: str
+    debit_amount: Decimal
+    credit_amount: Decimal
+
+
+@dataclass(frozen=True)
+class StoredJournalProposal:
+    """Append-only balanced journal proposal for one tenant invoice draft."""
+
+    journal_proposal_id: UUID
+    tenant_account_id: UUID
+    invoice_draft_id: UUID
+    proposal_contract_version: int
+    idempotency_key: str
+    legal_entity_reference: str
+    intended_book_role_code: str
+    transaction_currency: str
+    transaction_date: str
+    accounting_date: str
+    source_payload_hash: str
+    proposed_at: datetime
+    proposal_status: str
+    source_event_reference: str
+    proposal_lines: tuple[StoredJournalProposalLine, ...]
+
+
+@dataclass(frozen=True)
 class StoredIngestionReceipt:
     """Append-only audit row for one ingest attempt."""
 
@@ -286,6 +320,9 @@ class MemoryUsageLedger:
     invoice_drafts: dict[UUID, StoredInvoiceDraft] = field(default_factory=dict)
     invoice_draft_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     invoice_draft_lines: list[StoredInvoiceDraftLine] = field(default_factory=list)
+    journal_proposals: dict[UUID, StoredJournalProposal] = field(default_factory=dict)
+    journal_proposal_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
+    journal_proposal_lines: list[StoredJournalProposalLine] = field(default_factory=list)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -627,6 +664,102 @@ class MemoryUsageLedger:
             invoice_draft
             for invoice_draft in self.invoice_drafts.values()
             if invoice_draft.tenant_account_id == tenant_account_id
+        )
+
+    def get_invoice_draft(self, invoice_draft_id: UUID) -> StoredInvoiceDraft | None:
+        """Return a stored invoice draft by internal identifier."""
+        return self.invoice_drafts.get(invoice_draft_id)
+
+    def find_journal_proposal(
+        self,
+        tenant_account_id: UUID,
+        invoice_draft_id: UUID,
+        source_payload_hash: str,
+        proposal_contract_version: int,
+    ) -> StoredJournalProposal | None:
+        """Return the proposal for one tenant-scoped draft identity, if it exists."""
+        journal_proposal_id = self.journal_proposal_index.get(
+            (
+                tenant_account_id,
+                invoice_draft_id,
+                source_payload_hash,
+                proposal_contract_version,
+            )
+        )
+        if journal_proposal_id is None:
+            return None
+        return self.journal_proposals[journal_proposal_id]
+
+    def insert_journal_proposal(
+        self,
+        journal_proposal: StoredJournalProposal,
+        proposal_lines: tuple[StoredJournalProposalLine, ...],
+    ) -> StoredJournalProposal:
+        """Append an immutable balanced proposal.  Existing identity rows are never updated."""
+        if journal_proposal.proposal_status not in {"draft", "validated", "exported", "rejected"}:
+            raise ValueError("journal proposals cannot be posted")
+        line_numbers = [line.line_number for line in proposal_lines]
+        if len(set(line_numbers)) != len(line_numbers):
+            raise ValueError("journal proposal line numbers must be unique")
+        parsed_lines = tuple(
+            StoredJournalProposalLine(
+                journal_proposal_line_id=line.journal_proposal_line_id,
+                journal_proposal_id=line.journal_proposal_id,
+                tenant_account_id=line.tenant_account_id,
+                line_number=line.line_number,
+                account_role_code=line.account_role_code,
+                debit_amount=parse_exact_decimal(format_exact_decimal(line.debit_amount)),
+                credit_amount=parse_exact_decimal(format_exact_decimal(line.credit_amount)),
+            )
+            for line in proposal_lines
+        )
+        for line in parsed_lines:
+            debit_positive = line.debit_amount > 0
+            credit_positive = line.credit_amount > 0
+            if debit_positive == credit_positive:
+                raise ValueError("journal proposal lines must be debit XOR credit")
+        debit_total = sum((line.debit_amount for line in parsed_lines), Decimal("0"))
+        credit_total = sum((line.credit_amount for line in parsed_lines), Decimal("0"))
+        if debit_total != credit_total:
+            raise ValueError("journal proposal lines must balance")
+        identity_key = (
+            journal_proposal.tenant_account_id,
+            journal_proposal.invoice_draft_id,
+            journal_proposal.source_payload_hash,
+            journal_proposal.proposal_contract_version,
+        )
+        if journal_proposal.journal_proposal_id in self.journal_proposals:
+            raise ValueError("journal proposals are immutable and cannot be replaced")
+        if identity_key in self.journal_proposal_index:
+            raise ValueError("journal proposals are immutable and cannot be replaced")
+        persisted = StoredJournalProposal(
+            journal_proposal_id=journal_proposal.journal_proposal_id,
+            tenant_account_id=journal_proposal.tenant_account_id,
+            invoice_draft_id=journal_proposal.invoice_draft_id,
+            proposal_contract_version=journal_proposal.proposal_contract_version,
+            idempotency_key=journal_proposal.idempotency_key,
+            legal_entity_reference=journal_proposal.legal_entity_reference,
+            intended_book_role_code=journal_proposal.intended_book_role_code,
+            transaction_currency=journal_proposal.transaction_currency,
+            transaction_date=journal_proposal.transaction_date,
+            accounting_date=journal_proposal.accounting_date,
+            source_payload_hash=journal_proposal.source_payload_hash,
+            proposed_at=journal_proposal.proposed_at,
+            proposal_status=journal_proposal.proposal_status,
+            source_event_reference=journal_proposal.source_event_reference,
+            proposal_lines=parsed_lines,
+        )
+        self.journal_proposals[persisted.journal_proposal_id] = persisted
+        self.journal_proposal_index[identity_key] = persisted.journal_proposal_id
+        self.journal_proposal_lines.extend(parsed_lines)
+        return persisted
+
+    def list_journal_proposals(self, tenant_account_id: UUID) -> tuple[StoredJournalProposal, ...]:
+        """Return journal proposals limited to one tenant."""
+        return tuple(
+            proposal
+            for proposal in self.journal_proposals.values()
+            if proposal.tenant_account_id == tenant_account_id
         )
 
     def list_rating_runs(self, tenant_account_id: UUID) -> tuple[StoredRatingRun, ...]:

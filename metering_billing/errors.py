@@ -1,4 +1,4 @@
-"""Typed outcomes and rejection reasons for usage ingestion, rating, and drafts.
+"""Typed outcomes and rejection reasons for usage ingestion, rating, drafts, and exports.
 
 Reason codes are stable operational vocabulary.  They are safe to persist in
 audit receipts and do not require masking: they describe control failures, not
@@ -73,6 +73,22 @@ class InvoiceDraftRejectionReasonCode(StrEnum):
 
     TENANT_NOT_FOUND = "tenant_not_found"
     RATING_RUN_NOT_FOUND = "rating_run_not_found"
+
+
+class JournalProposalOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one accounting journal proposal."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class JournalProposalRejectionReasonCode(StrEnum):
+    """Why a proposal request was refused without writing a journal export."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    DRAFT_TOTAL_INVALID = "draft_total_invalid"
 
 
 class ExactDecimalError(ValueError):

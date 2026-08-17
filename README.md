@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, and semantically validated accounting journal proposals;
-- a normalized PostgreSQL 18 core plus usage-identity and rating-run migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage and rates tenant-scoped half-open windows into exact invoice-intent totals;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, and semantically validated accounting journal proposals;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, and journal-proposal migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, and emits proposal-only journals;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -61,6 +61,14 @@ python3 -c "from metering_billing import InvoiceDraftService"
 
 After a `rating_run` exists, call `InvoiceDraftService.draft_invoice` with the tenant and `rating_run_id`. The draft total equals the rating-run billable total. An identical replay returns the same `invoice_draft_id`. Status stays `draft`. The draft does not issue, collect, call a payment provider, or post a journal.
 
+## Propose a journal
+
+```bash
+python3 -c "from metering_billing import AccountingExportService"
+```
+
+After an `invoice_draft` exists, call `AccountingExportService.propose_journal` with the tenant and `invoice_draft_id`. The proposal is one balanced exact-decimal `accounting_journal_proposal` that uses semantic account roles and an intended book role. An identical replay returns the same `proposal_id`. Status stays inside the proposal lifecycle and is never `posted`.
+
 ## Next action
 
-After invoice-draft review, emit an `accounting_journal_proposal` from the persisted draft. Do not mark the proposal posted, and do not add a payment-provider adapter until the draft is the commercial source of the proposal.
+Hand the persisted `accounting_journal_proposal` to the Accounting Information Platform (AIS). AIS owns posting, fiscal-period control, and statutory account mapping. Do not mark the proposal posted here, and do not add a payment-provider adapter until issued invoices exist.

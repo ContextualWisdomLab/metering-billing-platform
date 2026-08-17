@@ -44,6 +44,14 @@ contextual-orchestrator usage
 - Estimated, reconstructed, and other non-billable qualities stay stored and stay out of invoice-intent money when `meter_quality_rule` says so.
 - Rating does not create an invoice draft, a payment-provider command, or a posted accounting journal.
 
+## Journal-proposal acceptance
+
+- A known invoice draft produces one balanced exact-decimal `accounting_journal_proposal` whose debit total equals its credit total.
+- A second propose of the same tenant, `invoice_draft_id`, source-payload hash, and contract version returns the same `proposal_id`.
+- Another tenant cannot see or propose from the first tenant's draft.
+- Missing drafts, zero draft totals, float money, and unbalanced lines fail closed.
+- Status stays inside the proposal lifecycle and is never `posted`. Operators hand the proposal to AIS.
+
 ## Usage-ingestion acceptance
 
 - A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.
@@ -62,4 +70,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, and the windowed-rating package reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, and accounting-export reach 100% statement and branch coverage.
