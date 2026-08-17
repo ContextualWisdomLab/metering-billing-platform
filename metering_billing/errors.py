@@ -191,6 +191,44 @@ class TenantApiCredentialQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class WebhookSubscriptionOutcomeCode(StrEnum):
+    """Terminal result of registering or revoking one webhook subscription."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class WebhookSubscriptionRejectionReasonCode(StrEnum):
+    """Why a webhook command was refused without writing a subscription."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    WEBHOOK_CALLBACK_URL_INSECURE = "webhook_callback_url_insecure"
+    WEBHOOK_EVENT_TYPE_UNKNOWN = "webhook_event_type_unknown"
+    WEBHOOK_SUBSCRIPTION_NOT_FOUND = "webhook_subscription_not_found"
+
+
+class WebhookSubscriptionQueryError(ValueError):
+    """Raised when a stored webhook subscription cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
+class WebhookDeliveryOutcomeCode(StrEnum):
+    """Terminal result of one explicit webhook delivery run."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class WebhookDeliveryRejectionReasonCode(StrEnum):
+    """Why an explicit delivery run was refused without posting callbacks."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+
+
 class JournalProposalOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one accounting journal proposal."""
 

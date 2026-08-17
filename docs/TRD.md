@@ -51,9 +51,11 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.TenantApiCredentialService` issues append-only HTTP API credentials. NIST SP 800-63B requires the verifier to store a keyed hash, never the recoverable secret (National Institute of Standards and Technology, 2020). OWASP treats leaked keys as revocable bearer credentials (OWASP, 2023). SOC 2 CC6 requires logical access control on a shippable HTTP surface (American Institute of Certified Public Accountants, 2017). `POST /v1/tenant-api-credentials` returns the secret once. `GET /v1/tenant-api-credentials` is a safe metadata list and never includes the secret (Fielding et al., 2022). `GET /healthz` stays unauthenticated. Issue a key, then send it on every `/v1` call; revoke when leaked.
 
+`metering_billing.WebhookSubscriptionService` registers an https callback and returns the signing secret once. The verifier stores a keyed HMAC, never the recoverable secret (Krawczyk et al., 1997; National Institute of Standards and Technology, 2020). `WebhookDeliveryService.deliver_due_events` POSTs the published commercial envelope and signs the raw body; receivers check `X-CWL-Webhook-Signature` rather than HTTP Message Signatures (Fielding et al., 2022; Backman et al., 2024). `GET /v1/webhook-subscriptions` is a safe metadata list and never includes the secret. Register an https callback, then run deliveries; AIS may keep polling.
+
 ## Security
 
-- No card number, CVC, provider secret, PAT plaintext, prompt, response, or tenant API credential plaintext is accepted in billing contracts after issue. The issue response is the only place the secret appears.
+- No card number, CVC, provider secret, PAT plaintext, prompt, response, tenant API credential plaintext, or webhook-subscription plaintext is accepted in billing contracts after issue or register. The issue and register responses are the only places those secrets appear.
 - Webhooks are evidence until signature verification and normalization succeed.
 - Tenant isolation is enforced in the application and database layers.
 - Historical facts are corrected by compensating records.

@@ -6,6 +6,8 @@ This repository is the CWL commercial usage and billing authority.  It is not th
 
 Issue a key, then send it on every `/v1` call; revoke when leaked.
 
+Register an https callback, then run deliveries; AIS may keep polling.
+
 ```bash
 # Bootstrap: tenant pin only, until a key exists for that tenant.
 # POST /v1/tenant-api-credentials
@@ -30,7 +32,7 @@ A tenant with zero active credentials keeps the existing tenant pin.  AIS can ke
 
 ## Stored secrets
 
-NIST SP 800-63B requires verifier secrets to be stored as a salted or keyed hash, never in recoverable form (National Institute of Standards and Technology, 2020).  This repository persists `hmac-sha256:` HMAC-SHA256(pepper, secret) on `tenant_api_credential`.  The plaintext secret is returned once on issue and is never logged, listed, or placed on AIS contracts.
+NIST SP 800-63B requires verifier secrets to be stored as a salted or keyed hash, never in recoverable form (National Institute of Standards and Technology, 2020).  This repository persists `hmac-sha256:` HMAC-SHA256(pepper, secret) on `tenant_api_credential` and `webhook_subscription`.  The plaintext secret is returned once on issue or register and is never logged, listed, or placed on AIS contracts.
 
 OWASP API authentication treats leaked keys as revocable bearer credentials (OWASP, 2023).  `revoke_credential` is idempotent.  Unknown and revoked keys are indistinguishable (`api_credential_invalid`).
 
@@ -44,5 +46,8 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
 - Missing key after an active key exists: `api_credential_missing`
 - Header mismatch between `Authorization` and `X-CWL-Api-Key`: `request_invalid`
 - Non-Bearer `Authorization` or an empty Bearer secret: `api_credential_invalid`
+- Non-https production webhook callback: `webhook_callback_url_insecure`
+- Unknown webhook event type: `webhook_event_type_unknown`
+- Unknown or cross-tenant webhook subscription: `webhook_subscription_not_found`
 
-Do not store card data, PAT plaintext, prompt text, response text, or provider secrets.  Do not start a web UI in this slice.
+Do not store card data, PAT plaintext, prompt text, response text, provider secrets, or webhook-subscription plaintext.  Do not start a web UI in this slice.

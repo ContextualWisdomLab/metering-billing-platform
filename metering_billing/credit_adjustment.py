@@ -28,6 +28,7 @@ from typing import Any, Callable, Mapping
 from uuid import UUID
 
 from metering_billing.accounting_export import (
+    AccountingExportService,
     INTENDED_BOOK_ROLE_CODE,
     PROPOSAL_CONTRACT_VERSION,
     PROPOSAL_STATUS,
@@ -54,6 +55,11 @@ from metering_billing.usage_ledger import (
     StoredJournalProposal,
     StoredJournalProposalLine,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED,
+    EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+    enqueue_accepted_fact,
 )
 
 
@@ -334,7 +340,7 @@ class CreditAdjustmentService:
             collection_case = self.ledger.apply_collection_settlement(
                 collection_case.collection_case_id, parsed_amount
             )
-        return _from_stored(
+        result = _from_stored(
             stored,
             invoice_draft,
             proposal,
@@ -343,6 +349,27 @@ class CreditAdjustmentService:
             CreditAdjustmentOutcomeCode.ACCEPTED,
             remaining_adjustable - parsed_amount,
         )
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED,
+            stored.credit_adjustment_id,
+            result.as_contract_dict(),
+            stored.recorded_at,
+        )
+        if result.proposal_id is not None:
+            journal = AccountingExportService(self.ledger).get_journal_proposal(
+                tenant.tenant_reference, result.proposal_id
+            )
+            enqueue_accepted_fact(
+                self.ledger,
+                tenant.tenant_reference,
+                EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+                result.proposal_id,
+                journal.as_contract_dict(),
+                journal.proposed_at or stored.recorded_at,
+            )
+        return result
 
     def get_credit_adjustment(
         self, tenant_reference: str, credit_adjustment_id: UUID

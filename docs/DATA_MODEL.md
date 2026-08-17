@@ -31,6 +31,9 @@
 - `tax_rate_version`: append-only published tax rate. Identity is `(tenant_account_id, tax_rate_schedule_id, source_payload_hash, tax_rate_contract_version)`.
 - `tax_assessment`: append-only commercial tax on one tenant invoice draft. `tax_inclusive_amount` drives collection outstanding and the AR journal debit when present.
 - `tenant_api_credential`: append-only HTTP API credential for one tenant. Stores `credential_prefix` and a keyed `credential_secret_hash` only; never the plaintext secret. Status is `active` or `revoked`.
+- `webhook_subscription`: tenant-scoped https callback. Stores `webhook_secret_prefix` and a keyed `webhook_secret_hash` only; never the plaintext secret. Status is `active` or `revoked`.
+- `webhook_outbox_event`: append-only commercial fact (`journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`) identified by `(tenant_account_id, event_type_code, source_id, payload_hash)`.
+- `webhook_delivery_attempt`: append-only POST attempt against one outbox event and subscription.
 - `provider_account`: provider and role registration.
 - `provider_capability`: effective-dated supported capability.
 - `provider_object_mapping`: provider-neutral internal-to-external mapping.
@@ -47,7 +50,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, or tenant-api-credential keys.
+Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, or webhook-outbox keys.
 
 ## Usage identity
 
@@ -100,3 +103,7 @@ A stored tax-rate schedule is identified by `(tenant_account_id, tax_code)`.  A 
 ## Tenant-API-credential identity
 
 A stored tenant API credential is identified by `tenant_api_credential_id` and is unique on `credential_secret_hash`.  Internal primary key is `tenant_api_credential_id`.  The hash is `hmac-sha256:` plus HMAC-SHA256(pepper, secret).  The plaintext secret is never stored.  `credential_label` is two-or-more-word `snake_case`.  Status is `active` or `revoked`.  A second issue of the same tenant, label, and contract version inserts a new row with a new secret.  Revocation updates `credential_status` and `revoked_at` on the same row and does not delete history.
+
+## Webhook-outbox identity
+
+A stored webhook subscription is identified by `(tenant_account_id, callback_url, event_type_set, webhook_subscription_contract_version)`.  Internal primary key is `webhook_subscription_id`.  The hash is `hmac-sha256:` plus HMAC-SHA256(pepper, secret).  The plaintext secret is never stored in SQL.  Status is `active` or `revoked`.  A stored outbox event is identified by `(tenant_account_id, event_type_code, source_id, payload_hash)`.  Delivery attempts are unique on `(outbox_event_id, webhook_subscription_id, attempt_number)` and never update a prior attempt.

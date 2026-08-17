@@ -4,7 +4,11 @@ Cloud Native Computing Foundation. (2025). *CloudEvents specification (Version 1
 
 Cowlishaw, M. (2009). *General decimal arithmetic specification* (Version 1.70). IBM. https://speleotrove.com/decimal/decarith.pdf
 
+Backman, A., Richer, J., & Sporny, M. (2024). *HTTP message signatures* (RFC 9421). Internet Engineering Task Force. https://doi.org/10.17487/RFC9421
+
 Fielding, R., Nottingham, M., & Reschke, J. (Eds.). (2022). *HTTP semantics* (RFC 9110). Internet Engineering Task Force. https://doi.org/10.17487/RFC9110
+
+Krawczyk, H., Bellare, M., & Canetti, R. (1997). *HMAC: Keyed-hashing for message authentication* (RFC 2104). Internet Engineering Task Force. https://doi.org/10.17487/RFC2104
 
 Google. (2024). *AIP-158: Pagination*. https://google.aip.dev/158
 

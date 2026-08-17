@@ -6,7 +6,8 @@ canonical usage events, publish versioned rate cards, rate tenant-scoped
 windows against a persisted version, draft invoice-intent documents, present
 those drafts as statements, publish tax rates, assess tax on a draft, emit
 journal proposals, open collection cases, project provider-neutral payment
-intents, apply commercial payment receipts, record commercial credits, and
+intents, apply commercial payment receipts, record commercial credits,
+register webhook callbacks for accepted commercial facts, and
 accept those writes over a stdlib HTTP adapter without taking a
 payment-provider dependency.
 
@@ -33,6 +34,8 @@ from metering_billing.contracts import (
     INVOICE_DRAFT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
     TENANT_API_CREDENTIAL_SCHEMA_NAME,
+    WEBHOOK_DELIVERY_SCHEMA_NAME,
+    WEBHOOK_SUBSCRIPTION_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
     RATING_RUN_SCHEMA_NAME,
@@ -50,6 +53,8 @@ from metering_billing.contracts import (
     validate_invoice_draft,
     validate_invoice_presentment,
     validate_tenant_api_credential,
+    validate_webhook_delivery,
+    validate_webhook_subscription,
     validate_journal_proposal,
     validate_payment_intent,
     validate_payment_receipt,
@@ -82,6 +87,11 @@ from metering_billing.errors import (
     TenantApiCredentialOutcomeCode,
     TenantApiCredentialQueryError,
     TenantApiCredentialRejectionReasonCode,
+    WebhookDeliveryOutcomeCode,
+    WebhookDeliveryRejectionReasonCode,
+    WebhookSubscriptionOutcomeCode,
+    WebhookSubscriptionQueryError,
+    WebhookSubscriptionRejectionReasonCode,
     JournalProposalOutcomeCode,
     JournalProposalRejectionReasonCode,
     PaymentIntentOutcomeCode,
@@ -100,6 +110,7 @@ from metering_billing.http_app import create_http_app
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
+from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -120,6 +131,8 @@ __all__ = (
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
+    "WEBHOOK_DELIVERY_SCHEMA_NAME",
+    "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -155,6 +168,13 @@ __all__ = (
     "TenantApiCredentialQueryError",
     "TenantApiCredentialRejectionReasonCode",
     "TenantApiCredentialService",
+    "WebhookDeliveryOutcomeCode",
+    "WebhookDeliveryRejectionReasonCode",
+    "WebhookDeliveryService",
+    "WebhookSubscriptionOutcomeCode",
+    "WebhookSubscriptionQueryError",
+    "WebhookSubscriptionRejectionReasonCode",
+    "WebhookSubscriptionService",
     "JournalProposalOutcomeCode",
     "JournalProposalRejectionReasonCode",
     "MemoryUsageLedger",
@@ -192,6 +212,8 @@ __all__ = (
     "validate_invoice_draft",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
+    "validate_webhook_delivery",
+    "validate_webhook_subscription",
     "validate_journal_proposal",
     "validate_payment_intent",
     "validate_payment_receipt",

@@ -27,6 +27,9 @@ The application is a thin WSGI adapter:
 10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
     Issue a key, then send it on every ``/v1`` call; revoke when leaked.
+11. Let an operator register an https webhook callback, then run deliveries.
+    AIS may keep polling journal proposals.  This path does not flip
+    ``proposal_status`` or call AIS posting-receipt.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -58,6 +61,7 @@ from metering_billing.errors import (
     TaxAssessmentQueryError,
     TaxRateQueryError,
     TimeWindowError,
+    WebhookSubscriptionQueryError,
 )
 from metering_billing.rate_card import RateCardService
 from metering_billing.tax_assessment import TaxAssessmentService
@@ -65,6 +69,7 @@ from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
+from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
@@ -102,6 +107,11 @@ TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
 TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
     r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})/revoke$"
 )
+WEBHOOK_SUBSCRIPTION_COLLECTION_PATH = "/v1/webhook-subscriptions"
+WEBHOOK_SUBSCRIPTION_REVOKE_PATH = re.compile(
+    r"^/v1/webhook-subscriptions/([0-9a-fA-F-]{36})/revoke$"
+)
+WEBHOOK_DELIVERY_COLLECTION_PATH = "/v1/webhook-deliveries"
 API_KEY_HEADER_ENVIRON = "HTTP_X_CWL_API_KEY"
 AUTHORIZATION_HEADER_ENVIRON = "HTTP_AUTHORIZATION"
 KNOWN_POST_PATHS = frozenset(
@@ -155,6 +165,8 @@ def create_http_app(
     assessments = TaxAssessmentService(shared_ledger)
     presentments = InvoicePresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
+    webhooks = WebhookSubscriptionService(shared_ledger)
+    deliveries = WebhookDeliveryService(shared_ledger)
 
     def _authorized_tenant(
         environ: WSGIEnvironment,
@@ -214,6 +226,56 @@ def create_http_app(
             except TenantApiCredentialQueryError as error:
                 status_code = (
                     404 if error.rejection_reason_code == "api_credential_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_webhook_subscriptions",
+            "webhook_subscriptions",
+            "revoke_webhook_subscription",
+            "webhook_deliveries",
+        }:
+            try:
+                if route_name == "list_webhook_subscriptions":
+                    query = _read_query(environ)
+                    tenant_reference = _authorized_tenant(environ, query)
+                    page = webhooks.list_subscriptions(tenant_reference)
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                payload = _read_json_object(environ)
+                tenant_reference = _authorized_tenant(environ, payload)
+                if route_name == "webhook_subscriptions":
+                    result = webhooks.register_subscription(
+                        tenant_reference,
+                        payload.get("callback_url"),
+                        payload.get("event_type_codes"),
+                    )
+                    return _send_json(
+                        start_response, _status_for_result(result), result.as_contract_dict()
+                    )
+                if route_name == "webhook_deliveries":
+                    result = deliveries.deliver_due_events(tenant_reference)
+                    return _send_json(
+                        start_response, _status_for_result(result), result.as_contract_dict()
+                    )
+                result = webhooks.revoke_subscription(
+                    tenant_reference,
+                    _parse_uuid(path_values["webhook_subscription_id"], "webhook_subscription_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except WebhookSubscriptionQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "webhook_subscription_not_found" else 422
                 )
                 return _send_json(
                     start_response,
@@ -522,6 +584,23 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "tenant_api_credentials", {}
         if method == "GET":
             return "list_tenant_api_credentials", {}
+        return "method_not_allowed", {}
+    if path == WEBHOOK_SUBSCRIPTION_COLLECTION_PATH:
+        if method == "POST":
+            return "webhook_subscriptions", {}
+        if method == "GET":
+            return "list_webhook_subscriptions", {}
+        return "method_not_allowed", {}
+    if path == WEBHOOK_DELIVERY_COLLECTION_PATH:
+        if method == "POST":
+            return "webhook_deliveries", {}
+        return "method_not_allowed", {}
+    webhook_revoke_match = WEBHOOK_SUBSCRIPTION_REVOKE_PATH.fullmatch(path)
+    if webhook_revoke_match is not None:
+        if method == "POST":
+            return "revoke_webhook_subscription", {
+                "webhook_subscription_id": webhook_revoke_match.group(1)
+            }
         return "method_not_allowed", {}
     revoke_match = TENANT_API_CREDENTIAL_REVOKE_PATH.fullmatch(path)
     if revoke_match is not None:

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/webhook-delivery/v1",
+  "title": "Webhook Delivery",
+  "description": "Result of one explicit deliver_due_events run. There is no scheduler. Success marks matching outbox events delivered. Failed attempts stay append-only and may be retried.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "webhook_delivery_contract_version",
+    "webhook_delivery_outcome_code"
+  ],
+  "properties": {
+    "webhook_delivery_contract_version": {"type": "integer", "minimum": 1},
+    "webhook_delivery_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "rejected"]
+    },
+    "delivered_event_count": {"type": "integer", "minimum": 0},
+    "attempted_delivery_count": {"type": "integer", "minimum": 0},
+    "failed_delivery_count": {"type": "integer", "minimum": 0},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": ["tenant_not_found"]
+    }
+  }
+}

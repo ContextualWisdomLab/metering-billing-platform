@@ -13,7 +13,11 @@ from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
-from metering_billing.contracts import validate_tenant_api_credential
+from metering_billing.contracts import (
+    validate_tenant_api_credential,
+    validate_webhook_delivery,
+    validate_webhook_subscription,
+)
 from scripts.validate_repository import (
     main,
     find_mutable_action_references,
@@ -550,6 +554,115 @@ class RepositoryContractTests(unittest.TestCase):
         replay["tenant_api_credential_outcome_code"] = "duplicate_replay"
         del replay["api_credential_secret"]
         self.assertEqual(validate_tenant_api_credential(replay), ())
+
+    def test_webhook_subscription_accepts_register_secret_and_rejects_hash(self) -> None:
+        """Register may return the secret once; hashes and rejected secrets are forbidden."""
+        schema = self._schema("webhook-subscription.schema.json")
+        instance = {
+            "webhook_subscription_contract_version": 1,
+            "webhook_subscription_outcome_code": "accepted",
+            "webhook_subscription_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6a0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "callback_url": "https://hooks.example.test/cwl",
+            "event_type_codes": ["journal_proposal.validated"],
+            "webhook_secret_prefix": "cwlwh_xxxxxx",
+            "webhook_secret": "cwlwh_" + ("x" * 32),
+            "subscription_status": "active",
+            "issued_at": "2026-08-17T22:00:00Z",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_webhook_subscription(instance), ())
+        hashed = dict(instance)
+        hashed["webhook_secret_hash"] = "hmac-sha256:" + ("a" * 64)
+        self.assertIn(
+            "$: additional property is not allowed: webhook_secret_hash",
+            validate_schema_instance(schema, hashed),
+        )
+        self.assertIn(
+            "$: persisted hashes must not appear on the HTTP contract",
+            validate_webhook_subscription(hashed),
+        )
+        rejected = {
+            "webhook_subscription_contract_version": 1,
+            "webhook_subscription_outcome_code": "rejected",
+            "rejection_reason_code": "tenant_not_found",
+        }
+        self.assertEqual(validate_schema_instance(schema, rejected), ())
+        leaked = dict(rejected)
+        leaked["webhook_secret"] = "should-not-be-here"
+        self.assertIn(
+            "$: rejected subscriptions must not include webhook_secret",
+            validate_webhook_subscription(leaked),
+        )
+        missing_reason = {
+            "webhook_subscription_contract_version": 1,
+            "webhook_subscription_outcome_code": "rejected",
+        }
+        self.assertIn(
+            "$: rejected subscriptions must include rejection_reason_code",
+            validate_webhook_subscription(missing_reason),
+        )
+        self.assertNotEqual(validate_webhook_subscription([]), ())
+        accepted_missing = {
+            "webhook_subscription_contract_version": 1,
+            "webhook_subscription_outcome_code": "accepted",
+        }
+        self.assertTrue(
+            any("must include" in error for error in validate_webhook_subscription(accepted_missing))
+        )
+        replay = dict(instance)
+        replay["webhook_subscription_outcome_code"] = "duplicate_replay"
+        self.assertIn(
+            "$: replayed subscriptions must not include webhook_secret",
+            validate_webhook_subscription(replay),
+        )
+        del replay["webhook_secret"]
+        self.assertEqual(validate_webhook_subscription(replay), ())
+        delivery = {
+            "webhook_delivery_contract_version": 1,
+            "webhook_delivery_outcome_code": "accepted",
+            "delivered_event_count": 1,
+            "attempted_delivery_count": 1,
+            "failed_delivery_count": 0,
+        }
+        self.assertEqual(validate_webhook_delivery(delivery), ())
+        self.assertNotEqual(validate_webhook_delivery([]), ())
+        missing_counts = {
+            "webhook_delivery_contract_version": 1,
+            "webhook_delivery_outcome_code": "accepted",
+        }
+        self.assertTrue(
+            any("must include" in error for error in validate_webhook_delivery(missing_counts))
+        )
+        rejected_delivery = {
+            "webhook_delivery_contract_version": 1,
+            "webhook_delivery_outcome_code": "rejected",
+            "rejection_reason_code": "tenant_not_found",
+        }
+        self.assertEqual(validate_webhook_delivery(rejected_delivery), ())
+        missing_delivery_reason = {
+            "webhook_delivery_contract_version": 1,
+            "webhook_delivery_outcome_code": "rejected",
+        }
+        self.assertIn(
+            "$: rejected deliveries must include rejection_reason_code",
+            validate_webhook_delivery(missing_delivery_reason),
+        )
+
+    def test_webhook_outbox_migration_stores_keyed_hash(self) -> None:
+        """Webhook tables persist a keyed HMAC and append-only delivery attempts."""
+        sql = (ROOT / "database/migrations/0016_webhook_outbox.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.webhook_subscription",
+            "CREATE TABLE billing_core.webhook_outbox_event",
+            "CREATE TABLE billing_core.webhook_delivery_attempt",
+            "webhook_secret_hash text NOT NULL CHECK (webhook_secret_hash ~ '^hmac-sha256:[0-9a-f]{64}$')",
+            "subscription_status text NOT NULL CHECK (subscription_status IN ('active', 'revoked'))",
+            "UNIQUE (tenant_account_id, callback_url, event_type_set, webhook_subscription_contract_version)",
+            "UNIQUE (tenant_account_id, event_type_code, source_id, payload_hash)",
+            "UNIQUE (outbox_event_id, webhook_subscription_id, attempt_number)",
+        ):
+            self.assertIn(expected_fragment, sql)
 
     def test_tenant_api_credential_migration_stores_keyed_hash(self) -> None:
         """API credentials persist a keyed HMAC and never a recoverable secret."""

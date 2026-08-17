@@ -41,6 +41,10 @@ from metering_billing.usage_ledger import (
     StoredTaxAssessment,
     generate_record_id,
 )
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+    enqueue_accepted_fact,
+)
 
 
 Clock = Callable[[], datetime]
@@ -268,7 +272,16 @@ class AccountingExportService:
             ),
             stored_lines,
         )
-        return _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            stored.journal_proposal_id,
+            result.as_contract_dict(),
+            stored.proposed_at,
+        )
+        return result
 
     def propose_cash_journal(
         self, tenant_reference: str, payment_receipt_id: UUID
@@ -359,7 +372,16 @@ class AccountingExportService:
             ),
             stored_lines,
         )
-        return _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            stored.journal_proposal_id,
+            result.as_contract_dict(),
+            stored.proposed_at,
+        )
+        return result
 
     def list_journal_proposals(
         self,

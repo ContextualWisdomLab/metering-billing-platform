@@ -519,6 +519,51 @@ class StoredTenantApiCredential:
     revoked_at: datetime | None
 
 
+@dataclass(frozen=True)
+class StoredWebhookSubscription:
+    """Tenant-scoped webhook callback.  SQL stores hash and prefix only."""
+
+    webhook_subscription_id: UUID
+    tenant_account_id: UUID
+    webhook_subscription_contract_version: int
+    callback_url: str
+    event_type_set: str
+    webhook_secret_prefix: str
+    webhook_secret_hash: str
+    subscription_status: str
+    issued_at: datetime
+    revoked_at: datetime | None
+
+
+@dataclass(frozen=True)
+class StoredWebhookOutboxEvent:
+    """Append-only commercial fact waiting for webhook delivery."""
+
+    outbox_event_id: UUID
+    tenant_account_id: UUID
+    event_type_code: str
+    payload_hash: str
+    source_id: UUID
+    occurred_at: datetime
+    delivery_status: str
+    payload_json: str
+    enqueued_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredWebhookDeliveryAttempt:
+    """Append-only POST attempt against one subscription and outbox event."""
+
+    delivery_attempt_id: UUID
+    outbox_event_id: UUID
+    webhook_subscription_id: UUID
+    attempt_number: int
+    http_status: int | None
+    delivered_at: datetime | None
+    failure_reason_code: str | None
+    attempted_at: datetime
+
+
 @dataclass
 class MemoryUsageLedger:
     """Mutable catalog plus append-only usage tables with tenant isolation."""
@@ -599,6 +644,17 @@ class MemoryUsageLedger:
     tax_assessment_draft_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     tenant_api_credentials: dict[UUID, StoredTenantApiCredential] = field(default_factory=dict)
     tenant_api_credential_hash_index: dict[str, UUID] = field(default_factory=dict)
+    webhook_subscriptions: dict[UUID, StoredWebhookSubscription] = field(default_factory=dict)
+    webhook_subscription_identity_index: dict[tuple[UUID, str, str, int], UUID] = field(
+        default_factory=dict
+    )
+    webhook_subscription_hash_index: dict[str, UUID] = field(default_factory=dict)
+    webhook_subscription_secrets: dict[UUID, str] = field(default_factory=dict)
+    webhook_outbox_events: dict[UUID, StoredWebhookOutboxEvent] = field(default_factory=dict)
+    webhook_outbox_identity_index: dict[tuple[UUID, str, UUID, str], UUID] = field(
+        default_factory=dict
+    )
+    webhook_delivery_attempts: list[StoredWebhookDeliveryAttempt] = field(default_factory=list)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -2014,6 +2070,208 @@ class MemoryUsageLedger:
         )
         self.tenant_api_credentials[updated.tenant_api_credential_id] = updated
         return updated
+
+    def insert_webhook_subscription(
+        self, subscription: StoredWebhookSubscription
+    ) -> StoredWebhookSubscription:
+        """Persist one webhook subscription.  Secrets stay in the process vault."""
+        if subscription.subscription_status not in {"active", "revoked"}:
+            raise ValueError("subscription_status must be active or revoked")
+        if not subscription.webhook_secret_hash.startswith("hmac-sha256:"):
+            raise ValueError("webhook_secret_hash must be a keyed HMAC")
+        if subscription.webhook_subscription_id in self.webhook_subscriptions:
+            raise ValueError("webhook_subscription_id already stored")
+        if subscription.webhook_secret_hash in self.webhook_subscription_hash_index:
+            raise ValueError("webhook_secret_hash already stored")
+        identity = (
+            subscription.tenant_account_id,
+            subscription.callback_url,
+            subscription.event_type_set,
+            subscription.webhook_subscription_contract_version,
+        )
+        if identity in self.webhook_subscription_identity_index:
+            raise ValueError("webhook subscription identity already stored")
+        self.webhook_subscriptions[subscription.webhook_subscription_id] = subscription
+        self.webhook_subscription_identity_index[identity] = subscription.webhook_subscription_id
+        self.webhook_subscription_hash_index[subscription.webhook_secret_hash] = (
+            subscription.webhook_subscription_id
+        )
+        return subscription
+
+    def store_webhook_subscription_secret(
+        self, webhook_subscription_id: UUID, webhook_secret: str
+    ) -> None:
+        """Keep the minted secret in process memory.  SQL never stores it."""
+        if not webhook_secret:
+            raise ValueError("webhook secret must be a non-empty string")
+        self.webhook_subscription_secrets[webhook_subscription_id] = webhook_secret
+
+    def get_webhook_subscription_secret(self, webhook_subscription_id: UUID) -> str | None:
+        """Return the process-local secret for one subscription, if present."""
+        return self.webhook_subscription_secrets.get(webhook_subscription_id)
+
+    def get_webhook_subscription(
+        self, webhook_subscription_id: UUID
+    ) -> StoredWebhookSubscription | None:
+        """Return one webhook subscription by internal identifier, if present."""
+        return self.webhook_subscriptions.get(webhook_subscription_id)
+
+    def find_webhook_subscription(
+        self,
+        tenant_account_id: UUID,
+        callback_url: str,
+        event_type_set: str,
+        webhook_subscription_contract_version: int,
+    ) -> StoredWebhookSubscription | None:
+        """Return the subscription for one tenant, URL, event set, and version."""
+        subscription_id = self.webhook_subscription_identity_index.get(
+            (
+                tenant_account_id,
+                callback_url,
+                event_type_set,
+                webhook_subscription_contract_version,
+            )
+        )
+        if subscription_id is None:
+            return None
+        return self.webhook_subscriptions[subscription_id]
+
+    def list_webhook_subscriptions(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredWebhookSubscription, ...]:
+        """Return webhook subscriptions limited to one tenant."""
+        return tuple(
+            subscription
+            for subscription in self.webhook_subscriptions.values()
+            if subscription.tenant_account_id == tenant_account_id
+        )
+
+    def list_active_webhook_subscriptions(
+        self, tenant_account_id: UUID, event_type_code: str
+    ) -> tuple[StoredWebhookSubscription, ...]:
+        """Return active same-tenant subscriptions that include one event type."""
+        return tuple(
+            subscription
+            for subscription in self.list_webhook_subscriptions(tenant_account_id)
+            if subscription.subscription_status == "active"
+            and event_type_code in subscription.event_type_set.split(",")
+        )
+
+    def revoke_webhook_subscription(
+        self, webhook_subscription_id: UUID, revoked_at: datetime
+    ) -> StoredWebhookSubscription:
+        """Mark one stored subscription revoked.  A second revoke is idempotent."""
+        stored = self.webhook_subscriptions.get(webhook_subscription_id)
+        if stored is None:
+            raise ValueError("webhook subscription revocation requires a stored subscription")
+        if stored.subscription_status == "revoked":
+            return stored
+        updated = StoredWebhookSubscription(
+            webhook_subscription_id=stored.webhook_subscription_id,
+            tenant_account_id=stored.tenant_account_id,
+            webhook_subscription_contract_version=stored.webhook_subscription_contract_version,
+            callback_url=stored.callback_url,
+            event_type_set=stored.event_type_set,
+            webhook_secret_prefix=stored.webhook_secret_prefix,
+            webhook_secret_hash=stored.webhook_secret_hash,
+            subscription_status="revoked",
+            issued_at=stored.issued_at,
+            revoked_at=revoked_at,
+        )
+        self.webhook_subscriptions[updated.webhook_subscription_id] = updated
+        return updated
+
+    def insert_webhook_outbox_event(
+        self, outbox_event: StoredWebhookOutboxEvent
+    ) -> StoredWebhookOutboxEvent:
+        """Persist one commercial outbox event.  Replay of the same fact is a no-op."""
+        if outbox_event.delivery_status not in {"pending", "delivered"}:
+            raise ValueError("delivery_status must be pending or delivered")
+        if outbox_event.outbox_event_id in self.webhook_outbox_events:
+            raise ValueError("outbox_event_id already stored")
+        identity = (
+            outbox_event.tenant_account_id,
+            outbox_event.event_type_code,
+            outbox_event.source_id,
+            outbox_event.payload_hash,
+        )
+        if identity in self.webhook_outbox_identity_index:
+            raise ValueError("webhook outbox identity already stored")
+        self.webhook_outbox_events[outbox_event.outbox_event_id] = outbox_event
+        self.webhook_outbox_identity_index[identity] = outbox_event.outbox_event_id
+        return outbox_event
+
+    def find_webhook_outbox_event(
+        self,
+        tenant_account_id: UUID,
+        event_type_code: str,
+        source_id: UUID,
+        payload_hash: str,
+    ) -> StoredWebhookOutboxEvent | None:
+        """Return the outbox row for one tenant, event type, source, and hash."""
+        outbox_event_id = self.webhook_outbox_identity_index.get(
+            (tenant_account_id, event_type_code, source_id, payload_hash)
+        )
+        if outbox_event_id is None:
+            return None
+        return self.webhook_outbox_events[outbox_event_id]
+
+    def list_pending_webhook_outbox_events(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredWebhookOutboxEvent, ...]:
+        """Return pending outbox events limited to one tenant."""
+        return tuple(
+            outbox_event
+            for outbox_event in self.webhook_outbox_events.values()
+            if outbox_event.tenant_account_id == tenant_account_id
+            and outbox_event.delivery_status == "pending"
+        )
+
+    def mark_webhook_outbox_event_delivered(
+        self, outbox_event_id: UUID
+    ) -> StoredWebhookOutboxEvent:
+        """Mark one outbox event delivered.  A second mark is idempotent."""
+        stored = self.webhook_outbox_events.get(outbox_event_id)
+        if stored is None:
+            raise ValueError("outbox delivery requires a stored event")
+        if stored.delivery_status == "delivered":
+            return stored
+        updated = StoredWebhookOutboxEvent(
+            outbox_event_id=stored.outbox_event_id,
+            tenant_account_id=stored.tenant_account_id,
+            event_type_code=stored.event_type_code,
+            payload_hash=stored.payload_hash,
+            source_id=stored.source_id,
+            occurred_at=stored.occurred_at,
+            delivery_status="delivered",
+            payload_json=stored.payload_json,
+            enqueued_at=stored.enqueued_at,
+        )
+        self.webhook_outbox_events[updated.outbox_event_id] = updated
+        return updated
+
+    def insert_webhook_delivery_attempt(
+        self, attempt: StoredWebhookDeliveryAttempt
+    ) -> StoredWebhookDeliveryAttempt:
+        """Append one delivery attempt.  Attempts are never updated."""
+        if attempt.attempt_number < 1:
+            raise ValueError("attempt_number must be at least 1")
+        self.webhook_delivery_attempts.append(attempt)
+        return attempt
+
+    def list_webhook_delivery_attempts(
+        self, outbox_event_id: UUID, webhook_subscription_id: UUID | None = None
+    ) -> tuple[StoredWebhookDeliveryAttempt, ...]:
+        """Return attempts for one outbox event, optionally one subscription."""
+        return tuple(
+            attempt
+            for attempt in self.webhook_delivery_attempts
+            if attempt.outbox_event_id == outbox_event_id
+            and (
+                webhook_subscription_id is None
+                or attempt.webhook_subscription_id == webhook_subscription_id
+            )
+        )
 
     def require_tenant(self, tenant_reference: str) -> TenantAccount:
         """Return the tenant or raise if the catalog does not contain it."""

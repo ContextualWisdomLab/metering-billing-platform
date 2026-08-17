@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, tenant API credentials, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, and tenant-api-credential migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, issues tenant API credentials, and accepts those writes over a stdlib HTTP adapter;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, tenant API credentials, webhook subscriptions, webhook deliveries, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, and webhook-outbox migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
 - an importable `operator_console` Storybook that renders the invoice-draft presentment contract with design tokens and exact-decimal fixtures;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
@@ -125,6 +125,18 @@ python3 -c "from metering_billing import TenantApiCredentialService"
 ```
 
 Call `TenantApiCredentialService.issue_credential` with a tenant and an optional two-or-more-word `snake_case` `credential_label`. The response includes the secret once. The ledger stores only a keyed HMAC. A second issue always mints a new secret. After one or more active keys exist, every `/v1` write and GET except credential issue requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals `X-CWL-Tenant-Reference` / `tenant_reference`. `GET /v1/tenant-api-credentials` lists id, label, prefix, status, and issued_at and never the secret or hash. `GET /healthz` stays unauthenticated. Issue a key, then send it on every `/v1` call; revoke when leaked.
+
+## Register a webhook callback
+
+```bash
+python3 -c "from metering_billing import WebhookSubscriptionService, WebhookDeliveryService"
+# POST /v1/webhook-subscriptions
+# GET /v1/webhook-subscriptions
+# POST /v1/webhook-subscriptions/{id}/revoke
+# POST /v1/webhook-deliveries
+```
+
+Register an https callback, then run deliveries; AIS may keep polling. `WebhookSubscriptionService.register_subscription` accepts a tenant, https `callback_url`, and a closed event-type set (`journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`). http is allowed only for localhost tests. The secret is returned once. Replay of the same tenant, URL, event set, and contract version returns the same `webhook_subscription_id`. `GET /v1/webhook-subscriptions` lists metadata and never the secret or hash. Accepted commercial facts append `webhook_outbox_event` rows. `POST /v1/webhook-deliveries` POSTs the envelope and signs the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`. This path does not flip `proposal_status` or call AIS posting-receipt.
 
 ## Present an invoice draft
 

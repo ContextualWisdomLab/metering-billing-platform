@@ -40,6 +40,10 @@ from metering_billing.usage_ledger import (
     StoredPaymentReceipt,
     generate_record_id,
 )
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_PAYMENT_RECEIPT_APPLIED,
+    enqueue_accepted_fact,
+)
 
 
 Clock = Callable[[], datetime]
@@ -247,7 +251,7 @@ class PaymentSettlementService:
         updated_case = self.ledger.apply_collection_settlement(
             payment_intent.collection_case_id, parsed_amount
         )
-        return _from_receipt(
+        result = _from_receipt(
             stored,
             payment_intent,
             updated_case,
@@ -255,6 +259,15 @@ class PaymentSettlementService:
             PaymentSettlementOutcomeCode.ACCEPTED,
             self.ledger.list_collection_dunning_events(updated_case.collection_case_id),
         )
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_PAYMENT_RECEIPT_APPLIED,
+            stored.payment_receipt_id,
+            result.as_contract_dict(),
+            stored.received_at,
+        )
+        return result
 
     def cancel_payment_intent(
         self, tenant_reference: str, payment_intent_id: UUID

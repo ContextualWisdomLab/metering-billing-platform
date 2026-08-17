@@ -164,6 +164,18 @@ contextual-orchestrator usage
 - Missing tenant, missing key after bootstrap closes, unknown or revoked key, and cross-tenant key use fail closed.
 - Operators issue a key, then send it on every `/v1` call; revoke when leaked. This slice does not log the secret, put it on AIS contracts, change journal/tax/credit/presentment shapes, or start a web UI.
 
+## Webhook-outbox acceptance
+
+- An operator can register one tenant-scoped `webhook_subscription` for a known tenant. `callback_url` must be https. http is allowed only for localhost tests.
+- Replay of the same tenant, callback URL, event-type set, and contract version returns the same `webhook_subscription_id` as `duplicate_replay` and does not mint a second secret.
+- The secret is returned once. `GET /v1/webhook-subscriptions` lists id, URL, event types, prefix, status, and issued_at and never the secret or hash.
+- When a journal proposal is validated, a payment receipt is applied, or a credit is recorded, one `webhook_outbox_event` is appended. Replay of the commercial fact does not enqueue a second row.
+- Event types in this slice are `journal_proposal.validated`, `payment_receipt.applied`, and `credit_adjustment.recorded`. The payload is a thin envelope around the published contract.
+- `WebhookDeliveryService.deliver_due_events` and `POST /v1/webhook-deliveries` POST JSON to active same-tenant subscriptions and sign the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`.
+- Delivery attempts are append-only. Success marks the outbox event delivered. Later explicit runs may retry. There is no scheduler.
+- Revoked subscriptions are not POSTed. Missing tenant, insecure production callbacks, unknown event types, and secret leakage on list JSON fail closed.
+- AIS pull stays bootstrap. Operators register an https callback, then run deliveries; AIS may keep polling. This slice does not flip `proposal_status`, call AIS posting-receipt, or emit statutory IDs.
+
 ## Credit-adjustment acceptance
 
 - A known invoice draft records one commercial credit whose exact amount does not exceed remaining adjustable consideration.
@@ -195,4 +207,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, tenant API credentials, and operator-console fixture checks reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, tenant API credentials, operator-console fixture checks, and webhook outbox reach 100% statement and branch coverage.
