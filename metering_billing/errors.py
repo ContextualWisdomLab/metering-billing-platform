@@ -1,4 +1,4 @@
-"""Typed outcomes and rejection reasons for usage ingestion.
+"""Typed outcomes and rejection reasons for usage ingestion and rating.
 
 Reason codes are stable operational vocabulary.  They are safe to persist in
 audit receipts and do not require masking: they describe control failures, not
@@ -40,6 +40,24 @@ class RejectionReasonCode(StrEnum):
     SOURCE_EVENT_CONFLICT = "source_event_conflict"
     PAYLOAD_HASH_CONFLICT = "payload_hash_conflict"
     PRODUCER_EVENT_CONFLICT = "producer_event_conflict"
+
+
+class RatingOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one windowed rating run."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class RatingRejectionReasonCode(StrEnum):
+    """Why a rating request was refused without writing invoice-intent money."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    RATE_CARD_NOT_FOUND = "rate_card_not_found"
+    RATE_CARD_NOT_EFFECTIVE = "rate_card_not_effective"
+    METER_PRICE_MISSING = "meter_price_missing"
+    BILLING_DISPOSITION_UNKNOWN = "billing_disposition_unknown"
 
 
 class ExactDecimalError(ValueError):

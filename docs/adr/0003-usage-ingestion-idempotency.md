@@ -21,4 +21,4 @@ Buyers emit usage at least once.  A replay must not create a second stored fact,
 - Known event batches reproduce the same stored usage set.
 - Producers can retry safely after timeouts.
 - Cross-tenant attribution cannot create a billable fact.
-- Rating, invoice intent, and payment-provider adapters remain subsequent increments.
+- Invoice draft and payment-provider adapters remain subsequent increments.  Windowed rating is specified in ADR 0004.

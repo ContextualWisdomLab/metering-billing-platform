@@ -18,11 +18,11 @@ CWL products
 
 ## Initial foundation
 
-The first milestone contains:
+The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, and semantically validated accounting journal proposals;
-- a normalized PostgreSQL 18 core migration with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage and deduplicates by source-event key plus source-payload hash and contract version;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, and semantically validated accounting journal proposals;
+- a normalized PostgreSQL 18 core plus usage-identity and rating-run migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage and rates tenant-scoped half-open windows into exact invoice-intent totals;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -45,6 +45,14 @@ python3 -c "from metering_billing import UsageIngestionService, MemoryUsageLedge
 
 Register the tenant, billing account, principal, meter, and quality rules on a `MemoryUsageLedger`, then call `UsageIngestionService.ingest_usage_batch`. Identical retries return `duplicate_replay` and leave the stored usage set unchanged. A changed hash or contract version for the same source key is rejected.
 
+## Rate a usage window
+
+```bash
+python3 -c "from metering_billing import TimeWindow, UsageRatingService"
+```
+
+Register a versioned rate card and exact unit prices on the same ledger, then call `UsageRatingService.rate_usage_window` with a tenant, a half-open ISO 8601 window, and a rate-card version. Only `meter_quality_rule` billable quality enters the invoice-intent total. An identical replay returns the same `rating_run_id` and exact totals. Rating does not draft an invoice, call a payment provider, or post a journal.
+
 ## Next action
 
-After usage ingestion merges, implement deterministic meter aggregation and commercial rating before adding a payment-provider adapter. Do not post accounting journals from billing.
+After windowed rating merges, implement invoice draft from persisted rating runs before adding a payment-provider adapter. Do not post accounting journals from billing.

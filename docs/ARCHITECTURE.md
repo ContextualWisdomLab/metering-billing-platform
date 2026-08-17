@@ -57,6 +57,10 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 `metering_billing.UsageIngestionService` is the write path for canonical usage events.  It validates the published schema, verifies the source-payload hash for the declared contract version, resolves tenant-scoped attribution, stores exact decimal measurements, and returns a receipt.  Optional batch bounds and usage queries use half-open ISO 8601 windows.  Ingestion never writes a posted journal and never calls a payment provider.
 
+## Commercial rating
+
+`metering_billing.UsageRatingService` is the read-and-rate path for already-stored usage.  A buyer supplies a tenant, a half-open ISO 8601 window, and a rate-card version.  The service aggregates billable quality only, multiplies exact quantities by exact unit prices, and persists append-only `rating_run` and `rating_line` rows.  Identity is `(tenant_account_id, window_started_at, window_ended_at, rate_card_id, usage_snapshot_hash)`.  An identical replay returns the same `rating_run_id` and totals.  Rating never drafts an invoice, never calls a payment provider, and never writes a posted journal.
+
 ## Failure policy
 
 - Duplicate input returns the existing receipt.

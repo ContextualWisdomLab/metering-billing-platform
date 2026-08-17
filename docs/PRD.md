@@ -35,6 +35,15 @@ contextual-orchestrator usage
 -> accounting journal proposal
 ```
 
+## Windowed-rating acceptance
+
+- A known stored-usage set in a half-open ISO 8601 window produces one exact invoice-intent money total.
+- Equivalent decimal and UTC spellings (`1` vs `1.0`, `Z` vs `+00:00`) remain one stored fact and therefore one rated quantity.
+- A second rate of the same tenant, window, rate-card version, and usage snapshot returns the same `rating_run_id` and totals.
+- Another tenant's usage is invisible to the rated total.
+- Estimated, reconstructed, and other non-billable qualities stay stored and stay out of invoice-intent money when `meter_quality_rule` says so.
+- Rating does not create an invoice draft, a payment-provider command, or a posted accounting journal.
+
 ## Usage-ingestion acceptance
 
 - A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.
@@ -53,4 +62,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling and the usage-ingestion package reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, and the windowed-rating package reach 100% statement and branch coverage.

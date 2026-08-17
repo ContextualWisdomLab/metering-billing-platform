@@ -308,6 +308,67 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_rating_run_accepts_exact_invoice_intent_totals(self) -> None:
+        """A rating-run contract records exact decimal invoice-intent lines."""
+        schema = self._schema("rating-run.schema.json")
+        instance = {
+            "rating_contract_version": 1,
+            "rating_outcome_code": "accepted",
+            "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "rate_card_code": "cwl_standard",
+            "rate_card_version": 1,
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "usage_snapshot_hash": "sha256:" + "d" * 64,
+            "currency_code": "USD",
+            "rated_total_amount": "0.003705",
+            "rating_lines": [
+                {
+                    "line_number": 1,
+                    "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                    "meter_code": "gen_ai_output_token",
+                    "unit_code": "token",
+                    "rated_quantity": "1852.5",
+                    "unit_price_amount": "0.000002",
+                    "line_total_amount": "0.003705",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+
+    def test_rating_run_schema_rejects_posted_journal_and_open_properties(self) -> None:
+        """Rating remains invoice-intent only and cannot claim statutory posting."""
+        schema = self._schema("rating-run.schema.json")
+        instance = {
+            "rating_contract_version": 1,
+            "rating_outcome_code": "rejected",
+            "rejection_reason_code": "tenant_not_found",
+            "proposal_status": "posted",
+        }
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, instance),
+        )
+
+    def test_rating_migration_persists_append_only_runs_and_lines(self) -> None:
+        """The rating migration must keep run identity tenant-scoped and append-only."""
+        sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.rate_card",
+            "CREATE TABLE billing_core.rate_card_price",
+            "CREATE TABLE billing_core.rating_run",
+            "CREATE TABLE billing_core.rating_line",
+            "UNIQUE (rate_card_code, rate_card_version)",
+            "UNIQUE (tenant_account_id, window_started_at, window_ended_at, rate_card_id, usage_snapshot_hash)",
+            "UNIQUE (tenant_account_id, rating_run_id)",
+            "FOREIGN KEY (tenant_account_id, rating_run_id)",
+            "FOREIGN KEY (tenant_account_id, billing_account_id)",
+            "unit_price_amount numeric(38, 12)",
+            "rated_total_amount numeric(38, 12)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
         """The offline validator covers required, type, reference, and one-of rules."""
         schema = self._schema("accounting-journal-proposal.schema.json")

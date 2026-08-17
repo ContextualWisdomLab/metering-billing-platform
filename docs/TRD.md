@@ -15,7 +15,7 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 
 ## Usage-ingestion plane
 
-The importable `metering_billing` package is the first runtime module.  It can run in-process against the in-memory third-normal-form ledger that mirrors the PostgreSQL constraints.  A later adapter can persist the same rows without changing the hash, tenant, or decimal rules.  Canonical source-payload hashing excludes envelope identifiers (`event_id`, `source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest and usage queries accept optional half-open ISO 8601 windows.
+The importable `metering_billing` package is the first runtime module.  It can run in-process against the in-memory third-normal-form ledger that mirrors the PostgreSQL constraints.  A later adapter can persist the same rows without changing the hash, tenant, decimal, or rating-identity rules.  Canonical source-payload hashing excludes envelope identifiers (`event_id`, `source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest, usage queries, and rating accept half-open ISO 8601 windows.  Rating identity is tenant, window, rate-card version, and usage-snapshot hash.
 
 ## Persistence plane
 

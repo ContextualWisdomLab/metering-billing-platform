@@ -20,4 +20,5 @@
 - Document every public API and every accounting or monetary invariant.
 - Update architecture, ADRs, and CHANGELOG when authority or behavior changes.
 - Keep usage ingestion append-only.  Deduplicate by tenant-scoped source-event key and by source-payload hash plus contract version.
+- Rate stored usage through `metering_billing.UsageRatingService` so a tenant window, rate-card version, and usage snapshot replay the same `rating_run_id` and exact totals.
 - Leave principal, account, and project identifiers usable for invoicing.  Purpose-limit access; do not mask operational billing identifiers.

@@ -38,7 +38,7 @@ Combining these questions would couple product pricing to accounting policy, mak
 
 ## Integration contract
 
-Usage ingestion writes commercial usage facts only.  It does not emit a journal proposal and cannot mark any accounting document as posted.
+Usage ingestion writes commercial usage facts only.  Windowed rating writes invoice-intent `rating_run` and `rating_line` facts only.  Neither path emits a journal proposal, drafts an invoice, or marks any accounting document as posted.
 
 The billing platform emits `accounting_journal_proposal` with:
 

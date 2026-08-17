@@ -4,6 +4,11 @@
 
 ### Added
 
+- Importable `metering_billing` rating service that turns a tenant plus half-open ISO 8601 window into exact invoice-intent line totals from already-stored usage.
+- Idempotent rating-run identity on `(tenant, window, rate_card_version, usage snapshot)` so a replay returns the same `rating_run_id` and totals.
+- Append-only `rating_run` and `rating_line` persistence, versioned `rate_card` prices, and a closed rating-run contract.
+- Billable-only rating against `meter_quality_rule`; analytics-only and manual-review measurements stay out of invoice-intent money.
+- ADR 0004 for deterministic time-windowed rating.
 - Importable `metering_billing` usage-ingestion service with tenant-scoped attribution, exact-decimal measurements, and half-open ISO 8601 query windows.
 - Idempotent deduplication on `(tenant, source_event_key)` and `(tenant, source_payload_hash, event_contract_version)`.
 - Internal `usage_event_id` generation so a reused producer `event_id` cannot overwrite stored usage.

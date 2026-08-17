@@ -19,7 +19,8 @@ from types import ModuleType
 from typing import Callable
 from uuid import UUID
 
-from metering_billing.errors import RejectionReasonCode
+from metering_billing.errors import RatingRejectionReasonCode, RejectionReasonCode
+from metering_billing.exact_decimal import parse_exact_decimal
 
 
 def generate_record_id(uuid_module: ModuleType = uuid) -> UUID:
@@ -153,6 +154,64 @@ class StoredUsageEvent:
 
 
 @dataclass(frozen=True)
+class RateCard:
+    """Versioned commercial price book used to rate a usage window."""
+
+    rate_card_id: UUID
+    rate_card_code: str
+    rate_card_version: int
+    currency_code: str
+    valid_from: datetime
+    valid_to: datetime | None
+
+
+@dataclass(frozen=True)
+class RateCardPrice:
+    """Exact unit price for one meter on one rate-card version."""
+
+    rate_card_price_id: UUID
+    rate_card_id: UUID
+    meter_definition_id: UUID
+    unit_price_amount: Decimal
+
+
+@dataclass(frozen=True)
+class StoredRatingLine:
+    """Append-only invoice-intent line for one account and meter."""
+
+    rating_line_id: UUID
+    rating_run_id: UUID
+    tenant_account_id: UUID
+    billing_account_id: UUID
+    billing_account_reference: str
+    meter_definition_id: UUID
+    meter_code: str
+    unit_code: str
+    rated_quantity: Decimal
+    unit_price_amount: Decimal
+    line_total_amount: Decimal
+    line_number: int
+
+
+@dataclass(frozen=True)
+class StoredRatingRun:
+    """Append-only rating of one tenant window, rate card, and usage snapshot."""
+
+    rating_run_id: UUID
+    tenant_account_id: UUID
+    rate_card_id: UUID
+    rate_card_code: str
+    rate_card_version: int
+    window_started_at: datetime
+    window_ended_at: datetime
+    usage_snapshot_hash: str
+    currency_code: str
+    rated_total_amount: Decimal
+    recorded_at: datetime
+    rating_lines: tuple[StoredRatingLine, ...]
+
+
+@dataclass(frozen=True)
 class StoredIngestionReceipt:
     """Append-only audit row for one ingest attempt."""
 
@@ -184,6 +243,13 @@ class MemoryUsageLedger:
     producer_event_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     usage_ingestion_receipts: list[StoredIngestionReceipt] = field(default_factory=list)
     accounting_export_records: list[dict[str, str]] = field(default_factory=list)
+    rate_cards: dict[tuple[str, int], RateCard] = field(default_factory=dict)
+    rate_card_prices: dict[tuple[UUID, UUID], RateCardPrice] = field(default_factory=dict)
+    rating_runs: dict[UUID, StoredRatingRun] = field(default_factory=dict)
+    rating_run_index: dict[tuple[UUID, datetime, datetime, UUID, str], UUID] = field(
+        default_factory=dict
+    )
+    rating_lines: list[StoredRatingLine] = field(default_factory=list)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -351,6 +417,141 @@ class MemoryUsageLedger:
         )
         self.meter_quality_rules[key] = rule
         return rule
+
+    def register_rate_card(
+        self,
+        rate_card_code: str,
+        rate_card_version: int,
+        currency_code: str,
+        valid_from: datetime,
+        valid_to: datetime | None = None,
+    ) -> RateCard:
+        """Register a versioned rate card.  The same code and version is idempotent."""
+        key = (rate_card_code, rate_card_version)
+        existing = self.rate_cards.get(key)
+        if existing is not None:
+            return existing
+        rate_card = RateCard(
+            rate_card_id=generate_record_id(),
+            rate_card_code=rate_card_code,
+            rate_card_version=rate_card_version,
+            currency_code=currency_code,
+            valid_from=valid_from,
+            valid_to=valid_to,
+        )
+        self.rate_cards[key] = rate_card
+        return rate_card
+
+    def register_rate_card_price(
+        self,
+        rate_card_id: UUID,
+        meter_definition_id: UUID,
+        unit_price_amount: str,
+    ) -> RateCardPrice:
+        """Register an exact unit price.  Binary floating-point values are rejected."""
+        parsed_amount = parse_exact_decimal(unit_price_amount)
+        key = (rate_card_id, meter_definition_id)
+        existing = self.rate_card_prices.get(key)
+        if existing is not None:
+            return existing
+        price = RateCardPrice(
+            rate_card_price_id=generate_record_id(),
+            rate_card_id=rate_card_id,
+            meter_definition_id=meter_definition_id,
+            unit_price_amount=parsed_amount,
+        )
+        self.rate_card_prices[key] = price
+        return price
+
+    def resolve_rate_card(
+        self, rate_card_code: str, rate_card_version: int, occurred_at: datetime
+    ) -> tuple[RateCard | None, RatingRejectionReasonCode | None]:
+        """Resolve one rate-card version and require it to be effective at *occurred_at*."""
+        rate_card = self.rate_cards.get((rate_card_code, rate_card_version))
+        if rate_card is None:
+            return None, RatingRejectionReasonCode.RATE_CARD_NOT_FOUND
+        if not _is_effective(rate_card.valid_from, rate_card.valid_to, occurred_at):
+            return None, RatingRejectionReasonCode.RATE_CARD_NOT_EFFECTIVE
+        return rate_card, None
+
+    def find_rate_card_price(
+        self, rate_card_id: UUID, meter_definition_id: UUID
+    ) -> RateCardPrice | None:
+        """Return the unit price for one meter on one rate-card version."""
+        return self.rate_card_prices.get((rate_card_id, meter_definition_id))
+
+    def billing_account_reference_for(self, billing_account_id: UUID) -> str:
+        """Return the catalog URN for a stored billing account identifier."""
+        for account in self.billing_accounts.values():
+            if account.billing_account_id == billing_account_id:
+                return account.billing_account_reference
+        raise KeyError(billing_account_id)
+
+    def find_rating_run(
+        self,
+        tenant_account_id: UUID,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+        rate_card_id: UUID,
+        usage_snapshot_hash: str,
+    ) -> StoredRatingRun | None:
+        """Return the append-only run for one rating identity, if it exists."""
+        rating_run_id = self.rating_run_index.get(
+            (
+                tenant_account_id,
+                window_started_at,
+                window_ended_at,
+                rate_card_id,
+                usage_snapshot_hash,
+            )
+        )
+        if rating_run_id is None:
+            return None
+        return self.rating_runs[rating_run_id]
+
+    def insert_rating_run(
+        self,
+        rating_run: StoredRatingRun,
+        rating_lines: tuple[StoredRatingLine, ...],
+    ) -> StoredRatingRun:
+        """Append an immutable rating run.  Existing identity rows are never updated."""
+        identity_key = (
+            rating_run.tenant_account_id,
+            rating_run.window_started_at,
+            rating_run.window_ended_at,
+            rating_run.rate_card_id,
+            rating_run.usage_snapshot_hash,
+        )
+        if rating_run.rating_run_id in self.rating_runs:
+            raise ValueError("rating runs are immutable and cannot be replaced")
+        if identity_key in self.rating_run_index:
+            raise ValueError("rating runs are immutable and cannot be replaced")
+        persisted = StoredRatingRun(
+            rating_run_id=rating_run.rating_run_id,
+            tenant_account_id=rating_run.tenant_account_id,
+            rate_card_id=rating_run.rate_card_id,
+            rate_card_code=rating_run.rate_card_code,
+            rate_card_version=rating_run.rate_card_version,
+            window_started_at=rating_run.window_started_at,
+            window_ended_at=rating_run.window_ended_at,
+            usage_snapshot_hash=rating_run.usage_snapshot_hash,
+            currency_code=rating_run.currency_code,
+            rated_total_amount=rating_run.rated_total_amount,
+            recorded_at=rating_run.recorded_at,
+            rating_lines=rating_lines,
+        )
+        self.rating_runs[persisted.rating_run_id] = persisted
+        self.rating_run_index[identity_key] = persisted.rating_run_id
+        self.rating_lines.extend(rating_lines)
+        return persisted
+
+    def list_rating_runs(self, tenant_account_id: UUID) -> tuple[StoredRatingRun, ...]:
+        """Return rating runs limited to one tenant."""
+        return tuple(
+            rating_run
+            for rating_run in self.rating_runs.values()
+            if rating_run.tenant_account_id == tenant_account_id
+        )
 
     def require_tenant(self, tenant_reference: str) -> TenantAccount:
         """Return the tenant or raise if the catalog does not contain it."""
