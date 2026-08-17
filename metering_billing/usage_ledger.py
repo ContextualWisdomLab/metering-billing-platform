@@ -329,6 +329,48 @@ class StoredInvoiceDraft:
 
 
 @dataclass(frozen=True)
+class StoredIssuedInvoiceLine:
+    """Append-only commercial line frozen from one invoice-draft line."""
+
+    issued_invoice_line_id: UUID
+    issued_invoice_id: UUID
+    tenant_account_id: UUID
+    line_number: int
+    billing_account_reference: str
+    meter_code: str
+    unit_code: str
+    rated_quantity: Decimal
+    unit_price_amount: Decimal
+    line_total_amount: Decimal
+
+
+@dataclass(frozen=True)
+class StoredIssuedInvoice:
+    """Append-only commercial invoice snapshot issued from one tenant draft.
+
+    Identity is ``(tenant_account_id, invoice_draft_id)``.  One draft holds
+    at most one issued snapshot.  ``issued_invoice_id`` is the opaque
+    generated invoice identifier, not a statutory number.
+    """
+
+    issued_invoice_id: UUID
+    tenant_account_id: UUID
+    invoice_draft_id: UUID
+    issued_invoice_contract_version: int
+    rating_run_id: UUID
+    usage_snapshot_hash: str
+    source_payload_hash: str
+    currency_code: str
+    tax_exclusive_amount: Decimal
+    tax_amount: Decimal
+    tax_inclusive_amount: Decimal
+    issued_invoice_status: str
+    issued_at: datetime
+    due_at: datetime | None
+    issued_invoice_lines: tuple[StoredIssuedInvoiceLine, ...]
+
+
+@dataclass(frozen=True)
 class StoredJournalProposalLine:
     """Append-only proposal line using a semantic account role, not a chart ID."""
 
@@ -655,6 +697,9 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     webhook_delivery_attempts: list[StoredWebhookDeliveryAttempt] = field(default_factory=list)
+    issued_invoices: dict[UUID, StoredIssuedInvoice] = field(default_factory=dict)
+    issued_invoice_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    issued_invoice_lines: list[StoredIssuedInvoiceLine] = field(default_factory=list)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -1394,6 +1439,75 @@ class MemoryUsageLedger:
     def get_invoice_draft(self, invoice_draft_id: UUID) -> StoredInvoiceDraft | None:
         """Return a stored invoice draft by internal identifier."""
         return self.invoice_drafts.get(invoice_draft_id)
+
+    def find_issued_invoice(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> StoredIssuedInvoice | None:
+        """Return the issued snapshot for one tenant draft, if any."""
+        issued_invoice_id = self.issued_invoice_index.get(
+            (tenant_account_id, invoice_draft_id)
+        )
+        if issued_invoice_id is None:
+            return None
+        return self.issued_invoices[issued_invoice_id]
+
+    def get_issued_invoice(self, issued_invoice_id: UUID) -> StoredIssuedInvoice | None:
+        """Return one issued invoice by internal identifier, if present."""
+        return self.issued_invoices.get(issued_invoice_id)
+
+    def list_issued_invoices_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredIssuedInvoice, ...]:
+        """Return issued invoices limited to one tenant."""
+        return tuple(
+            invoice
+            for invoice in self.issued_invoices.values()
+            if invoice.tenant_account_id == tenant_account_id
+        )
+
+    def insert_issued_invoice(
+        self,
+        issued_invoice: StoredIssuedInvoice,
+        issued_invoice_lines: tuple[StoredIssuedInvoiceLine, ...],
+    ) -> StoredIssuedInvoice:
+        """Append an immutable issued snapshot.  Existing identity rows are never updated."""
+        if issued_invoice.issued_invoice_status != "issued":
+            raise ValueError("issued invoices are immutable and cannot be replaced")
+        exclusive = parse_exact_decimal(
+            format_exact_decimal(issued_invoice.tax_exclusive_amount)
+        )
+        tax_amount = parse_exact_decimal(format_exact_decimal(issued_invoice.tax_amount))
+        inclusive = parse_exact_decimal(
+            format_exact_decimal(issued_invoice.tax_inclusive_amount)
+        )
+        if inclusive != exclusive + tax_amount:
+            raise ValueError("tax_inclusive_amount must equal exclusive plus tax")
+        if issued_invoice.issued_invoice_id in self.issued_invoices:
+            raise ValueError("issued invoices are immutable and cannot be replaced")
+        identity_key = (issued_invoice.tenant_account_id, issued_invoice.invoice_draft_id)
+        if identity_key in self.issued_invoice_index:
+            raise ValueError("issued invoices are immutable and cannot be replaced")
+        persisted = StoredIssuedInvoice(
+            issued_invoice_id=issued_invoice.issued_invoice_id,
+            tenant_account_id=issued_invoice.tenant_account_id,
+            invoice_draft_id=issued_invoice.invoice_draft_id,
+            issued_invoice_contract_version=issued_invoice.issued_invoice_contract_version,
+            rating_run_id=issued_invoice.rating_run_id,
+            usage_snapshot_hash=issued_invoice.usage_snapshot_hash,
+            source_payload_hash=issued_invoice.source_payload_hash,
+            currency_code=issued_invoice.currency_code,
+            tax_exclusive_amount=exclusive,
+            tax_amount=tax_amount,
+            tax_inclusive_amount=inclusive,
+            issued_invoice_status=issued_invoice.issued_invoice_status,
+            issued_at=issued_invoice.issued_at,
+            due_at=issued_invoice.due_at,
+            issued_invoice_lines=issued_invoice_lines,
+        )
+        self.issued_invoices[persisted.issued_invoice_id] = persisted
+        self.issued_invoice_index[identity_key] = persisted.issued_invoice_id
+        self.issued_invoice_lines.extend(issued_invoice_lines)
+        return persisted
 
     def find_credit_adjustment(
         self,

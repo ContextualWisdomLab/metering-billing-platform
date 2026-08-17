@@ -89,6 +89,22 @@ for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.ends
       }
     }
   }
+  const issuedLines = Array.isArray(payload.issued_invoice_lines)
+    ? payload.issued_invoice_lines
+    : [];
+  for (const [index, line] of issuedLines.entries()) {
+    for (const fieldName of ["rated_quantity", "unit_price_amount", "line_total_amount"]) {
+      const value = line[fieldName];
+      if (value === undefined) {
+        continue;
+      }
+      if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+        fail(
+          `${fileName}: issued_invoice_lines[${index}].${fieldName} must be an exact-decimal string`,
+        );
+      }
+    }
+  }
 }
 
 const sourceDirectory = join(root, "src");

@@ -4,7 +4,8 @@ This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
-those drafts as statements, publish tax rates, assess tax on a draft, present
+those drafts as statements, issue an immutable commercial invoice snapshot
+from a stored draft, present that issued invoice, publish tax rates, assess tax on a draft, present
 those assessments, present stored posting-receipt observations, emit
 journal proposals, open collection cases, present those cases as statements, present stored dunning events, project provider-neutral payment
 intents, present those intents as statements, apply commercial payment receipts, present those receipts as statements, record commercial credits,
@@ -56,6 +57,8 @@ from metering_billing.contracts import (
     WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME,
     DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME,
     WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME,
+    ISSUED_INVOICE_SCHEMA_NAME,
+    ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
     RATING_RUN_SCHEMA_NAME,
@@ -84,6 +87,8 @@ from metering_billing.contracts import (
     validate_webhook_subscription_presentment,
     validate_dunning_event_presentment,
     validate_webhook_outbox_event_presentment,
+    validate_issued_invoice,
+    validate_issued_invoice_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_tenant_api_credential_presentment,
@@ -121,6 +126,9 @@ from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
     InvoicePresentmentQueryError,
+    IssuedInvoiceOutcomeCode,
+    IssuedInvoicePresentmentQueryError,
+    IssuedInvoiceRejectionReasonCode,
     PaymentIntentPresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
     RateCardPresentmentQueryError,
@@ -160,6 +168,8 @@ from metering_billing.exact_decimal import format_exact_decimal, parse_exact_dec
 from metering_billing.http_app import create_http_app
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
+from metering_billing.issued_invoice import IssuedInvoiceService
+from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.tenant_api_credential_presentment import (
     TenantApiCredentialPresentmentService,
@@ -217,6 +227,8 @@ __all__ = (
     "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
     "DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_INVOICE_SCHEMA_NAME",
+    "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -277,6 +289,11 @@ __all__ = (
     "InvoiceDraftService",
     "InvoicePresentmentQueryError",
     "InvoicePresentmentService",
+    "IssuedInvoiceOutcomeCode",
+    "IssuedInvoicePresentmentQueryError",
+    "IssuedInvoicePresentmentService",
+    "IssuedInvoiceRejectionReasonCode",
+    "IssuedInvoiceService",
     "TenantApiCredentialOutcomeCode",
     "TenantApiCredentialPresentmentQueryError",
     "TenantApiCredentialPresentmentService",
@@ -338,6 +355,8 @@ __all__ = (
     "validate_webhook_subscription_presentment",
     "validate_dunning_event_presentment",
     "validate_webhook_outbox_event_presentment",
+    "validate_issued_invoice",
+    "validate_issued_invoice_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_tenant_api_credential_presentment",

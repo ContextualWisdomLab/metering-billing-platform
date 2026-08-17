@@ -30,6 +30,8 @@ from metering_billing.contracts import (
     validate_webhook_subscription_presentment,
     validate_dunning_event_presentment,
     validate_webhook_outbox_event_presentment,
+    validate_issued_invoice,
+    validate_issued_invoice_presentment,
     validate_webhook_delivery,
     validate_webhook_subscription,
 )
@@ -1753,6 +1755,182 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertNotEqual(validate_webhook_outbox_event_presentment([]), ())
 
+    def test_issued_invoice_accepts_snapshot_and_rejects_numbering(self) -> None:
+        """An issued-invoice contract freezes exact totals and cannot invent a number."""
+        schema = self._schema("issued-invoice.schema.json")
+        instance = {
+            "issued_invoice_contract_version": 1,
+            "issued_invoice_outcome_code": "accepted",
+            "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf631",
+            "usage_snapshot_hash": "sha256:" + ("a" * 64),
+            "currency_code": "USD",
+            "tax_exclusive_amount": "0.003705",
+            "tax_amount": "0",
+            "tax_inclusive_amount": "0.003705",
+            "issued_invoice_status": "issued",
+            "issued_at": "2026-08-17T21:00:00Z",
+            "source_payload_hash": "sha256:" + ("b" * 64),
+            "idempotency_key": "urn:cwl:tenant_001:issued_invoice:id:hash:v1",
+            "next_operator_action": "collect",
+            "issued_invoice_lines": [
+                {
+                    "line_number": 1,
+                    "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                    "meter_code": "gen_ai_output_token",
+                    "unit_code": "token",
+                    "rated_quantity": "1852.5",
+                    "unit_price_amount": "0.000002",
+                    "line_total_amount": "0.003705",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_issued_invoice(instance), ())
+        numbered = dict(instance)
+        numbered["invoice_number"] = "INV-0001"
+        self.assertIn(
+            "$: additional property is not allowed: invoice_number",
+            validate_schema_instance(schema, numbered),
+        )
+        self.assertIn(
+            "$: issued invoice must not include invoice_number",
+            validate_issued_invoice(numbered),
+        )
+        legal = dict(instance)
+        legal["legal_invoice_number"] = "2026/0001"
+        self.assertIn(
+            "$: issued invoice must not include legal_invoice_number",
+            validate_issued_invoice(legal),
+        )
+        pan = dict(instance)
+        pan["card_pan"] = "4111111111111111"
+        self.assertIn("$: issued invoice must not include card_pan", validate_issued_invoice(pan))
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "wait"
+        self.assertIn("$: issued invoice must collect", validate_issued_invoice(wait_action))
+        unbalanced = dict(instance)
+        unbalanced["tax_inclusive_amount"] = "1.00"
+        self.assertIn(
+            "$: tax_inclusive_amount must equal exclusive plus tax",
+            validate_issued_invoice(unbalanced),
+        )
+        negative = dict(instance)
+        negative["tax_exclusive_amount"] = "-1"
+        self.assertIn(
+            "$: tax_exclusive_amount must not be negative",
+            validate_issued_invoice(negative),
+        )
+        bad_decimal = dict(instance)
+        bad_decimal["tax_amount"] = "not-decimal"
+        self.assertTrue(
+            any("must be an exact decimal" in error for error in validate_issued_invoice(bad_decimal))
+        )
+        numeric = dict(instance)
+        numeric["tax_amount"] = 0
+        self.assertTrue(
+            any("must be an exact decimal" in error for error in validate_issued_invoice(numeric))
+        )
+        rejected = {
+            "issued_invoice_contract_version": 1,
+            "issued_invoice_outcome_code": "rejected",
+            "rejection_reason_code": "invoice_draft_not_found",
+        }
+        self.assertEqual(validate_issued_invoice(rejected), ())
+        missing_reason = {
+            "issued_invoice_contract_version": 1,
+            "issued_invoice_outcome_code": "rejected",
+        }
+        self.assertIn(
+            "$: rejected issued invoices must include rejection_reason_code",
+            validate_issued_invoice(missing_reason),
+        )
+        missing_id = {
+            "issued_invoice_contract_version": 1,
+            "issued_invoice_outcome_code": "accepted",
+        }
+        self.assertIn(
+            "$: accepted issued invoices must include issued_invoice_id",
+            validate_issued_invoice(missing_id),
+        )
+        self.assertNotEqual(validate_issued_invoice([]), ())
+
+    def test_issued_invoice_presentment_accepts_snapshot_and_rejects_numbering(self) -> None:
+        """An issued-invoice statement records frozen totals and cannot claim a write outcome."""
+        schema = self._schema("issued-invoice-presentment.schema.json")
+        instance = {
+            "issued_invoice_presentment_contract_version": 1,
+            "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf631",
+            "usage_snapshot_hash": "sha256:" + ("a" * 64),
+            "currency_code": "USD",
+            "tax_exclusive_amount": "100.00",
+            "tax_amount": "10.00",
+            "tax_inclusive_amount": "110.00",
+            "issued_invoice_status": "issued",
+            "issued_at": "2026-08-17T21:00:00Z",
+            "due_at": "2026-09-16T21:00:00Z",
+            "source_payload_hash": "sha256:" + ("b" * 64),
+            "issued_invoice_contract_version": 1,
+            "next_operator_action": "collect",
+            "issued_invoice_lines": [
+                {
+                    "line_number": 1,
+                    "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+                    "meter_code": "gen_ai_output_token",
+                    "unit_code": "token",
+                    "rated_quantity": "50000",
+                    "unit_price_amount": "0.002",
+                    "line_total_amount": "100.00",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_issued_invoice_presentment(instance), ())
+        posted = dict(instance)
+        posted["issued_invoice_outcome_code"] = "accepted"
+        self.assertIn(
+            "$: additional property is not allowed: issued_invoice_outcome_code",
+            validate_schema_instance(schema, posted),
+        )
+        numbered = dict(instance)
+        numbered["invoice_number"] = "INV-0001"
+        self.assertIn(
+            "$: issued invoice must not include invoice_number",
+            validate_issued_invoice_presentment(numbered),
+        )
+        wait_action = dict(instance)
+        wait_action["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: stored issued invoice must collect",
+            validate_issued_invoice_presentment(wait_action),
+        )
+        negative = dict(instance)
+        negative["tax_amount"] = "-1"
+        self.assertIn(
+            "$: tax_amount must not be negative",
+            validate_issued_invoice_presentment(negative),
+        )
+        numeric = dict(instance)
+        numeric["tax_inclusive_amount"] = 110.0
+        self.assertTrue(
+            any(
+                "must be an exact decimal" in error
+                for error in validate_issued_invoice_presentment(numeric)
+            )
+        )
+        unbalanced = dict(instance)
+        unbalanced["tax_inclusive_amount"] = "999.00"
+        self.assertIn(
+            "$: tax_inclusive_amount must equal exclusive plus tax",
+            validate_issued_invoice_presentment(unbalanced),
+        )
+        self.assertNotEqual(validate_issued_invoice_presentment([]), ())
+
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:
         """Issue may return the secret once; hashes and rejected secrets are forbidden."""
         schema = self._schema("tenant-api-credential.schema.json")
@@ -1987,6 +2165,24 @@ class RepositoryContractTests(unittest.TestCase):
             "UNIQUE (tenant_account_id, tenant_api_credential_id)",
         ):
             self.assertIn(expected_fragment, sql)
+
+    def test_issued_invoice_migration_persists_append_only_snapshots(self) -> None:
+        """The issued-invoice migration must stay tenant-scoped and number-free."""
+        sql = (ROOT / "database/migrations/0017_issued_invoice.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.issued_invoice",
+            "CREATE TABLE billing_core.issued_invoice_line",
+            "UNIQUE (tenant_account_id, invoice_draft_id)",
+            "UNIQUE (tenant_account_id, issued_invoice_id)",
+            "FOREIGN KEY (tenant_account_id, invoice_draft_id)",
+            "FOREIGN KEY (tenant_account_id, issued_invoice_id)",
+            "issued_invoice_status text NOT NULL CHECK (issued_invoice_status IN ('issued'))",
+            "CHECK (source_payload_hash ~ '^sha256:[0-9a-f]{64}$')",
+            "CHECK (tax_inclusive_amount = tax_exclusive_amount + tax_amount)",
+        ):
+            self.assertIn(expected_fragment, sql)
+        self.assertNotIn("invoice_number", sql)
+        self.assertNotIn("legal_invoice_number", sql)
 
     def test_invoice_draft_migration_persists_append_only_drafts(self) -> None:
         """The invoice-draft migration must keep identity tenant-scoped and draft-only."""

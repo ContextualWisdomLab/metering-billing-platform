@@ -39,9 +39,14 @@ The application is a thin WSGI adapter:
 8. Let a buyer POST a tax rate, assess a draft, and GET those records.
    Publish a tax rate, assess the draft, then propose the journal and let
    AIS pull.  AIS must map ``tax_payable``.
-9. Let an operator GET a stored invoice draft as a commercial statement.
+    9. Let an operator GET a stored invoice draft as a commercial statement.
    Open the draft statement, then collect or credit.  The read does not
    post, call AIS, or start a web UI.
+    9a. Let an operator POST an issued commercial invoice snapshot from a
+    stored invoice draft, then GET that snapshot.  Replay of the same
+    tenant and draft returns the stored ``issued_invoice_id``.  Refuse
+    PAN, CVC, and provider secrets.  Do not invent statutory numbering,
+    capture payment, enqueue a webhook, or call AIS.
     10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
     GET one stored credential or list ``{tenant_api_credentials,
@@ -111,6 +116,7 @@ from metering_billing.errors import (
     PostingReceiptObservationPresentmentQueryError,
     RateCardQueryError,
     InvoicePresentmentQueryError,
+    IssuedInvoicePresentmentQueryError,
     TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
@@ -125,6 +131,8 @@ from metering_billing.rate_card import RateCardService
 from metering_billing.tax_assessment import TaxAssessmentService
 from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
+from metering_billing.issued_invoice import IssuedInvoiceService
+from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
@@ -209,6 +217,11 @@ TAX_ASSESSMENT_COLLECTION_PATH = "/v1/tax-assessments"
 TAX_ASSESSMENT_ITEM_PATH = re.compile(r"^/v1/tax-assessments/([0-9a-fA-F-]{36})$")
 INVOICE_DRAFT_COLLECTION_PATH = "/v1/invoice-drafts"
 INVOICE_DRAFT_ITEM_PATH = re.compile(r"^/v1/invoice-drafts/([0-9a-fA-F-]{36})$")
+ISSUED_INVOICE_NESTED_PATH = re.compile(
+    r"^/v1/invoice-drafts/([0-9a-fA-F-]{36})/issued-invoices$"
+)
+ISSUED_INVOICE_COLLECTION_PATH = "/v1/issued-invoices"
+ISSUED_INVOICE_ITEM_PATH = re.compile(r"^/v1/issued-invoices/([0-9a-fA-F-]{36})$")
 TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
 TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
     r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})/revoke$"
@@ -261,6 +274,8 @@ def create_http_app(
     ingestion = UsageIngestionService(shared_ledger)
     rating = UsageRatingService(shared_ledger)
     drafts = InvoiceDraftService(shared_ledger)
+    issuers = IssuedInvoiceService(shared_ledger)
+    issued_presentments = IssuedInvoicePresentmentService(shared_ledger)
     exports = AccountingExportService(shared_ledger)
     collections = CollectionCaseService(shared_ledger)
     intents = PaymentIntentService(shared_ledger)
@@ -935,6 +950,39 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_issued_invoices", "get_issued_invoice"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_issued_invoices":
+                    page = issued_presentments.list_issued_invoices(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = issued_presentments.present_issued_invoice(
+                    tenant_reference,
+                    _parse_uuid(path_values["issued_invoice_id"], "issued_invoice_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except IssuedInvoicePresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "issued_invoice_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {"list_dunning_events", "get_dunning_event"}:
             try:
                 query = _read_query(environ)
@@ -1058,6 +1106,28 @@ def create_http_app(
                     start_response,
                     status_code,
                     {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "issued_invoices":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                result = issuers.issue_invoice(
+                    tenant_reference,
+                    _parse_uuid(path_values["invoice_draft_id"], "invoice_draft_id"),
+                    due_at=payload.get("due_at"),
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
                 )
             except HttpRequestError as error:
                 return _send_json(
@@ -1248,6 +1318,20 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "invoice_drafts", {}
         if method == "GET":
             return "list_invoice_drafts", {}
+        return "method_not_allowed", {}
+    issued_nested = ISSUED_INVOICE_NESTED_PATH.fullmatch(path)
+    if issued_nested is not None:
+        if method == "POST":
+            return "issued_invoices", {"invoice_draft_id": issued_nested.group(1)}
+        return "method_not_allowed", {}
+    if path == ISSUED_INVOICE_COLLECTION_PATH:
+        if method == "GET":
+            return "list_issued_invoices", {}
+        return "method_not_allowed", {}
+    issued_match = ISSUED_INVOICE_ITEM_PATH.fullmatch(path)
+    if issued_match is not None:
+        if method == "GET":
+            return "get_issued_invoice", {"issued_invoice_id": issued_match.group(1)}
         return "method_not_allowed", {}
     draft_match = INVOICE_DRAFT_ITEM_PATH.fullmatch(path)
     if draft_match is not None:

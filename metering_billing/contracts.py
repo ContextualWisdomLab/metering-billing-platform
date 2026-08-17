@@ -42,6 +42,8 @@ __all__ = (
     "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
     "DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_INVOICE_SCHEMA_NAME",
+    "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -70,6 +72,8 @@ __all__ = (
     "validate_webhook_subscription_presentment",
     "validate_dunning_event_presentment",
     "validate_webhook_outbox_event_presentment",
+    "validate_issued_invoice",
+    "validate_issued_invoice_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -115,6 +119,8 @@ DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME = "dunning-event-presentment.schema.json"
 WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME = (
     "webhook-outbox-event-presentment.schema.json"
 )
+ISSUED_INVOICE_SCHEMA_NAME = "issued-invoice.schema.json"
+ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME = "issued-invoice-presentment.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
 AIS_OUTBOX_DRAIN_SCHEMA_NAME = "ais-outbox-drain.schema.json"
@@ -1205,6 +1211,119 @@ def _missing_success_tax_assessment_fields(
         if field_name not in tax_assessment:
             missing.append(f"$: {outcome} tax assessments must include {field_name}")
     return tuple(missing)
+
+
+FORBIDDEN_ISSUED_INVOICE_FIELDS = (
+    "invoice_number",
+    "legal_invoice_number",
+    "card_pan",
+)
+
+
+def validate_issued_invoice(
+    issued_invoice: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate issued-invoice shape plus identity, totals, and numbering bans."""
+    schema = load_json_schema(ISSUED_INVOICE_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, issued_invoice))
+    if not isinstance(issued_invoice, Mapping):
+        return tuple(errors)
+    errors.extend(_forbidden_issued_invoice_field_errors(issued_invoice))
+    outcome = issued_invoice.get("issued_invoice_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_issued_invoice_fields(issued_invoice, str(outcome)))
+        errors.extend(_issued_invoice_total_errors(issued_invoice))
+        action = issued_invoice.get("next_operator_action")
+        if action is not None and action != "collect":
+            errors.append("$: issued invoice must collect")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in issued_invoice:
+            errors.append("$: rejected issued invoices must include rejection_reason_code")
+    return tuple(errors)
+
+
+def validate_issued_invoice_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate issued-invoice presentment shape plus exact money invariants."""
+    schema = load_json_schema(ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    errors.extend(_forbidden_issued_invoice_field_errors(statement))
+    errors.extend(_issued_invoice_total_errors(statement))
+    action = statement.get("next_operator_action")
+    if action is not None and action != "collect":
+        errors.append("$: stored issued invoice must collect")
+    return tuple(errors)
+
+
+def _forbidden_issued_invoice_field_errors(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return diagnostics when a commercial snapshot invents numbering or PAN."""
+    errors: list[str] = []
+    for field_name in FORBIDDEN_ISSUED_INVOICE_FIELDS:
+        if field_name in payload:
+            errors.append(f"$: issued invoice must not include {field_name}")
+    return tuple(errors)
+
+
+def _missing_success_issued_invoice_fields(
+    issued_invoice: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay snapshot lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "issued_invoice_id",
+        "invoice_draft_id",
+        "rating_run_id",
+        "usage_snapshot_hash",
+        "currency_code",
+        "tax_exclusive_amount",
+        "tax_amount",
+        "tax_inclusive_amount",
+        "issued_invoice_status",
+        "issued_at",
+        "source_payload_hash",
+        "idempotency_key",
+        "next_operator_action",
+        "issued_invoice_lines",
+    ):
+        if field_name not in issued_invoice:
+            missing.append(f"$: {outcome} issued invoices must include {field_name}")
+    return tuple(missing)
+
+
+def _issued_invoice_total_errors(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return diagnostics when exclusive plus tax does not equal inclusive."""
+    exclusive = payload.get("tax_exclusive_amount")
+    tax_amount = payload.get("tax_amount")
+    inclusive = payload.get("tax_inclusive_amount")
+    errors: list[str] = []
+    for field_name, value in (
+        ("tax_exclusive_amount", exclusive),
+        ("tax_amount", tax_amount),
+        ("tax_inclusive_amount", inclusive),
+    ):
+        if isinstance(value, str):
+            try:
+                parsed = Decimal(value)
+                if parsed < Decimal("0"):
+                    errors.append(f"$: {field_name} must not be negative")
+            except Exception:
+                errors.append(f"$: {field_name} must be an exact decimal")
+        elif value is not None:
+            errors.append(f"$: {field_name} must be an exact decimal")
+    if (
+        isinstance(exclusive, str)
+        and isinstance(tax_amount, str)
+        and isinstance(inclusive, str)
+    ):
+        try:
+            if Decimal(exclusive) + Decimal(tax_amount) != Decimal(inclusive):
+                errors.append("$: tax_inclusive_amount must equal exclusive plus tax")
+        except Exception:
+            errors.append("$: tax amounts must be exact decimals")
+    return tuple(errors)
 
 
 def validate_journal_proposal(

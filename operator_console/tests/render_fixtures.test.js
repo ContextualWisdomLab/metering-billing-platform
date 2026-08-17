@@ -79,6 +79,11 @@ import {
   WEBHOOK_OUTBOX_EVENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextWebhookOutboxEventActionCopy,
 } from "../src/webhook_outbox_event.js";
+import {
+  renderIssuedInvoice,
+  ISSUED_INVOICE_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedInvoiceActionCopy,
+} from "../src/issued_invoice.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -491,6 +496,32 @@ test("observed held receipt keeps AIS held status", () => {
   assert.equal(statement.posting_status_code, "held");
 });
 
+test("issued untaxed morning shows collect and known exact product", () => {
+  const statement = loadFixture("issued_untaxed_morning.json");
+  const html = renderIssuedInvoice(statement);
+  assert.match(html, /0\.003705/);
+  assert.match(html, /1852\.5/);
+  assert.match(html, /Collect or credit/);
+  assert.match(html, /Issue invoice, then collect or credit/);
+  assert.equal(ISSUED_INVOICE_CUSTOMER_COPY, "Issue invoice, then collect or credit.");
+  assert.equal(nextIssuedInvoiceActionCopy("collect"), "Collect or credit");
+  assert.equal(nextIssuedInvoiceActionCopy("wait"), "Issue invoice");
+  assert.equal(statement.next_operator_action, "collect");
+  assert.equal(typeof statement.tax_inclusive_amount, "string");
+  assert.ok(!("invoice_number" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("card_pan" in statement));
+});
+
+test("issued taxed hundred freezes inclusive 110.00", () => {
+  const statement = loadFixture("issued_taxed_hundred.json");
+  const html = renderIssuedInvoice(statement);
+  assert.match(html, /110\.00 USD/);
+  assert.match(html, /issued/);
+  assert.equal(statement.tax_inclusive_amount, "110.00");
+  assert.equal(statement.next_operator_action, "collect");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -523,6 +554,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderTaxAssessment({ tax_inclusive_amount: 110.0, currency_code: "USD" }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderIssuedInvoice({ tax_inclusive_amount: 110.0, currency_code: "USD" }),
     TypeError,
   );
   assert.throws(

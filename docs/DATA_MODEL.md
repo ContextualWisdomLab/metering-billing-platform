@@ -17,8 +17,10 @@
 - `rate_card_line`: exact flat `unit_amount` for one `metric_code` on one published version. Currency must match the version.
 - `rating_run`: append-only invoice-intent total for one tenant, half-open window, rate card, and usage snapshot. Presentment projects a statement from this row; it does not add a snapshot table.
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
-- `invoice_draft`: append-only draft-only commercial document for one tenant and rating run. Presentment projects a statement from this row plus tax, credit, and collection facts; it does not add a snapshot table.
+- `invoice_draft`: append-only draft-only commercial document for one tenant and rating run. Presentment projects a statement from this row plus tax, credit, and collection facts; it does not add a snapshot table. Draft status stays `draft` after commercial issue.
 - `invoice_draft_line`: append-only draft line copied from a rating line.
+- `issued_invoice`: append-only commercial invoice snapshot issued from one tenant draft. Identity is `(tenant_account_id, invoice_draft_id)`. `issued_invoice_id` is the opaque generated invoice identifier, not a statutory number.
+- `issued_invoice_line`: append-only commercial line frozen from one invoice-draft line.
 - `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft, payment receipt, or credit adjustment. AIS pulls these rows; query does not add a second table.
 - `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
 - `collection_case`: commercial collection case for one tenant invoice draft; receipts update outstanding and may mark the case settled.
@@ -50,7 +52,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, or webhook-outbox keys.
+Subsequent migrations add contracts, spend reservations, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, issued-invoice, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, or webhook-outbox keys.
 
 ## Usage identity
 
@@ -95,6 +97,10 @@ A stored credit adjustment is identified by `(tenant_account_id, invoice_draft_i
 ## Invoice-presentment projection
 
 Presentment does not add a table.  `GET /v1/invoice-drafts/{invoice_draft_id}` projects `invoice_draft`, optional `tax_assessment`, accepted `credit_adjustment` rows, optional `collection_case`, and `invoice_draft_line` quantities.  `amount_due` is `max(0, tax_inclusive_or_draft_total - sum(credit_amount))`.
+
+## Issued-invoice identity
+
+A stored issued invoice is identified by `(tenant_account_id, invoice_draft_id)`.  Internal primary key is the opaque generated `issued_invoice_id`.  The hash covers the draft, contract version, rating run, usage snapshot, currency, exclusive/tax/inclusive totals, and issued lines.  Status is `issued` only.  `due_at` is optional.  The snapshot does not store a statutory invoice number, fiscal signature, or customer PII.  `GET /v1/issued-invoices/{issued_invoice_id}` projects the stored row.  `GET /v1/issued-invoices` lists `{issued_invoices, next_cursor}` ordered by `issued_at` then `issued_invoice_id`.
 
 ## Collection-case-presentment projection
 

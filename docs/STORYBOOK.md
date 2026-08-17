@@ -32,6 +32,8 @@ Customer copy on every dunning notice: notice code, sequence, and the next opera
 
 Customer copy on every webhook outbox event: event type, delivery status, and the next operator action. Register an https callback, then run deliveries; AIS may keep polling.
 
+Customer copy on every issued invoice: frozen inclusive total and the next operator action. Issue invoice, then collect or credit.
+
 ## Stories
 
 | Story | Module | Fixtures |
@@ -54,6 +56,7 @@ Customer copy on every webhook outbox event: event type, delivery status, and th
 | WebhookSubscription | `src/webhook_subscription.js` | `active_https_callback.json`, `revoked_https_callback.json` |
 | DunningNotice | `src/dunning_notice.js` | `first_notice_morning.json`, `overdue_notice_evening.json` |
 | WebhookOutboxEvent | `src/webhook_outbox_event.js` | `pending_journal_validated.json`, `delivered_receipt_applied.json` |
+| IssuedInvoice | `src/issued_invoice.js` | `issued_untaxed_morning.json`, `issued_taxed_hundred.json` |
 
 The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is not a one-off style.
 
@@ -93,5 +96,7 @@ The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is no
 | `overdue_notice_evening.json` | Overdue commercial reminder | notice `overdue_notice`, action `collect` |
 | `pending_journal_validated.json` | Pending commercial outbox event | type `journal_proposal.validated`, action `run_deliveries` |
 | `delivered_receipt_applied.json` | Delivered commercial outbox event | type `payment_receipt.applied`, action `wait` |
+| `issued_untaxed_morning.json` | Issued morning snapshot | `tax_inclusive_amount` `0.003705`, action `collect` |
+| `issued_taxed_hundred.json` | Issued taxed snapshot | `tax_inclusive_amount` `110.00`, action `collect` |
 
-Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, `schemas/posting-receipt-observation-presentment.schema.json`, `schemas/webhook-delivery-presentment.schema.json`, `schemas/tenant-api-credential-presentment.schema.json`, `schemas/webhook-subscription-presentment.schema.json`, `schemas/dunning-event-presentment.schema.json`, and `schemas/webhook-outbox-event-presentment.schema.json`.  They are never IEEE binary floats.
+Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, `schemas/posting-receipt-observation-presentment.schema.json`, `schemas/webhook-delivery-presentment.schema.json`, `schemas/tenant-api-credential-presentment.schema.json`, `schemas/webhook-subscription-presentment.schema.json`, `schemas/dunning-event-presentment.schema.json`, `schemas/webhook-outbox-event-presentment.schema.json`, `schemas/issued-invoice.schema.json`, and `schemas/issued-invoice-presentment.schema.json`.  They are never IEEE binary floats.

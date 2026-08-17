@@ -197,6 +197,30 @@ class InvoicePresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class IssuedInvoiceOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one commercial issued invoice."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class IssuedInvoiceRejectionReasonCode(StrEnum):
+    """Why an issue request was refused without writing a commercial snapshot."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    REQUEST_INVALID = "request_invalid"
+
+
+class IssuedInvoicePresentmentQueryError(ValueError):
+    """Raised when a stored issued invoice cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class DunningEventPresentmentQueryError(ValueError):
     """Raised when a stored collection dunning event cannot be authorized or presented."""
 

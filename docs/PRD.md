@@ -164,6 +164,19 @@ contextual-orchestrator usage
 - Operators open the draft statement, then collect or credit. HTTP presentment does not add PDF or email.
 - `operator_console` Storybook renders that statement with tokenized amount due, line table, status chip, and tenant pin. Fixtures are taxed plus partial credit, untaxed, and settled. Amounts stay exact-decimal strings. Customer copy is amount due and the next operator action: collect or credit. There is no login wall, Stripe, AIS call, or production SPA.
 
+## Issued-invoice acceptance
+
+- A known stored invoice draft issues one append-only commercial `issued_invoice` whose currency, lines, and tax-exclusive/tax/inclusive totals match the draft or its tax assessment.
+- A second issue of the same tenant and `invoice_draft_id` returns the same `issued_invoice_id` as `duplicate_replay`. A later `due_at` is ignored.
+- `issued_invoice_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, QR/fiscal signatures, Peppol clearance, or jurisdiction-specific compliance claims.
+- Optional `due_at` is stored only when the caller supplies a valid timezone-aware instant. Drafts have no due terms today.
+- `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` is the nested issue command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422. Unknown or cross-tenant drafts reject `invoice_draft_not_found`.
+- A known stored issued invoice presents one tenant-scoped statement with identity, draft source, frozen totals, lines, `issued_at`, optional `due_at`, and `next_operator_action` (`collect`).
+- `GET /v1/issued-invoices/{issued_invoice_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/issued-invoices` lists summaries as `{issued_invoices, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{issued_invoice_id}`.
+- Invoice-draft, tax-assessment, journal-proposal, collection, payment, webhook, and AIS contracts stay unchanged. `invoice_draft_status` stays `draft`. `proposal_status` stays `validated`. No webhook event, payment capture, or AIS call is added.
+- Operators issue invoice, then collect or credit. `operator_console` Storybook adds one `IssuedInvoice` story. There is no login wall, Stripe, AIS call, or production SPA.
+
 ## Tenant-API-credential acceptance
 
 - An operator can issue one append-only `tenant_api_credential` for a known tenant. The secret is returned once (prefix plus secret). The ledger stores only a keyed HMAC.

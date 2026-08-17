@@ -74,3 +74,8 @@ export {
   WEBHOOK_OUTBOX_EVENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextWebhookOutboxEventActionCopy,
 } from "./webhook_outbox_event.js";
+export {
+  renderIssuedInvoice,
+  ISSUED_INVOICE_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedInvoiceActionCopy,
+} from "./issued_invoice.js";

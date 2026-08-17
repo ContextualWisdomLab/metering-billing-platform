@@ -78,6 +78,8 @@ After a `rating_run` exists, call `InvoiceDraftService.draft_invoice` with the t
 
 After an `invoice_draft` exists, call `InvoicePresentmentService.present_invoice_draft` or `GET /v1/invoice-drafts/{invoice_draft_id}` with the tenant. The statement shows exclusive, tax, inclusive, credited, and amount due as exact-decimal strings. Tax is zero when no assessment exists. Amount due is inclusive minus accepted credits and never below zero. `GET /v1/invoice-drafts` lists summaries. Open the draft statement, then collect or credit. The read does not post or call AIS.
 
+After an `invoice_draft` exists, call `IssuedInvoiceService.issue_invoice` or `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` with the tenant. Replay of the same tenant and draft returns the same `issued_invoice_id`. Totals freeze the draft or its tax assessment. `GET /v1/issued-invoices/{issued_invoice_id}` and `GET /v1/issued-invoices` present the snapshot. Issue invoice, then collect or credit. The path does not invent statutory numbering, capture payment, or call AIS.
+
 ## Propose a journal
 
 ```bash
@@ -189,6 +191,17 @@ python3 -c "from metering_billing import InvoicePresentmentService"
 ```
 
 After an `invoice_draft` exists, `GET /v1/invoice-drafts/{invoice_draft_id}` returns the tenant-scoped statement. Open the draft statement, then collect or credit.
+
+## Issue a commercial invoice
+
+```bash
+python3 -c "from metering_billing import IssuedInvoiceService, IssuedInvoicePresentmentService"
+# POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices
+# GET /v1/issued-invoices/{issued_invoice_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/issued-invoices?tenant_reference=urn:cwl:tenant_001
+```
+
+After an `invoice_draft` exists, `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` writes one immutable commercial snapshot. `GET /v1/issued-invoices/{issued_invoice_id}` returns the tenant-scoped statement. Issue invoice, then collect or credit.
 
 ## Present a collection case
 
