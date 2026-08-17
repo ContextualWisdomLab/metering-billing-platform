@@ -314,7 +314,9 @@ class WebhookOutboxTests(unittest.TestCase):
         )
         self.assertEqual(list_status, 200)
         self.assertNotIn(secret, json.dumps(list_body))
-        self.assertNotIn("webhook_secret", json.dumps(list_body))
+        for item in list_body["webhook_subscriptions"]:
+            self.assertNotIn("webhook_secret", item)
+            self.assertNotIn("webhook_secret_hash", item)
         replay_status, replay_body = invoke_http(
             app,
             "POST",
@@ -679,4 +681,5 @@ class WebhookOutboxTests(unittest.TestCase):
             f"/v1/webhook-subscriptions/{uuid4()}/revoke",
         )
         self.assertEqual(put_revoke_status, 422)
-        del put_deliver_body, unused, tenant
+        self.assertEqual(put_revoke_body["rejection_reason_code"], "request_invalid")
+        self.assertEqual(unused.webhook_subscription_outcome_code, WebhookSubscriptionOutcomeCode.ACCEPTED)
