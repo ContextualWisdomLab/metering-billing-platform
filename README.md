@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, and semantically validated accounting journal proposals;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, and collection-case migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, and opens commercial collection cases;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, and semantically validated accounting journal proposals;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, and payment-intent migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, and projects provider-neutral payment intents;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -77,6 +77,14 @@ python3 -c "from metering_billing import CollectionCaseService"
 
 After an `invoice_draft` exists, call `CollectionCaseService.open_collection_case` with the tenant and `invoice_draft_id`. Outstanding equals the exact draft total. An identical replay returns the same `collection_case_id`. Status stays `open` or `dunning`. Then call `record_dunning_event` with `first_notice` or `overdue_notice`. Reminders do not capture money or post journals.
 
+## Project a payment intent
+
+```bash
+python3 -c "from metering_billing import PaymentIntentService"
+```
+
+After a `collection_case` exists, call `PaymentIntentService.project_payment_intent` with the tenant and `collection_case_id`. The intent amount equals the exact case outstanding. An identical replay returns the same `payment_intent_id`. Status stays `projected`. The intent does not capture, settle, store a card PAN, or post a journal.
+
 ## Next action
 
-Open the collection case from the persisted invoice draft, then send a dunning notice. Do not add a payment-provider adapter or payment intent until the case is the commercial source of collection. Do not mark the case paid, written off, or posted.
+Bind a payment-provider projection later, or cancel the intent. Do not mark the intent captured, settled, or posted, and do not add a named provider adapter until that later increment.

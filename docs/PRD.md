@@ -61,6 +61,14 @@ contextual-orchestrator usage
 - Missing drafts, cross-tenant IDs, float money, and zero outstanding fail closed.
 - Status stays `open` or `dunning`. Operators open the case, then send a dunning notice.
 
+## Payment-intent acceptance
+
+- A known collection case projects one payment intent whose amount equals the exact case outstanding.
+- A second project of the same tenant, `collection_case_id`, source-payload hash, and contract version returns the same `payment_intent_id`.
+- Another tenant cannot see or project the first tenant's case.
+- Missing cases, cross-tenant IDs, float money, and zero amounts fail closed.
+- Status stays `projected`, `cancelled`, or `rejected`. Operators next bind a provider projection or cancel the intent.
+
 ## Usage-ingestion acceptance
 
 - A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.
@@ -79,4 +87,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, and collection-case reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, and payment-intent reach 100% statement and branch coverage.

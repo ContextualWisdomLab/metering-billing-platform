@@ -29,7 +29,9 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.AccountingExportService` produces semantically validated, balanced journal proposals from a persisted invoice draft using semantic account roles and an intended book role. The Accounting Information Platform resolves authoritative chart-account IDs, accounting policy, legal entity, accounting book, fiscal period, currency treatment, revenue recognition, and final posting. Billing never claims that posting.
 
-`metering_billing.CollectionCaseService` opens commercial collection cases from those drafts and appends dunning reminders. Collection does not capture payment, open a payment intent, or post a journal.
+`metering_billing.CollectionCaseService` opens commercial collection cases from those drafts and appends dunning reminders. Collection does not capture payment or post a journal.
+
+`metering_billing.PaymentIntentService` projects a provider-neutral payment intent from a stored collection case. The intent does not capture, settle, store a card PAN, or post a journal.
 
 ## Security
 

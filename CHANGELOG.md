@@ -4,6 +4,10 @@
 
 ### Added
 
+- Importable `metering_billing` payment-intent service that projects a provider-neutral initiation record from a stored collection case.
+- Idempotent payment-intent identity on `(tenant, collection_case_id, source_payload_hash, payment_intent_contract_version)` so a replay returns the same `payment_intent_id`.
+- Append-only `payment_intent` persistence.  Status stays `projected`, `cancelled`, or `rejected`.
+- ADR 0008 for projected payment initiation without capture, settlement, PAN storage, or journal posting.
 - Importable `metering_billing` collection-case service that opens a tenant-scoped commercial case from a stored invoice draft and appends dunning reminders.
 - Idempotent collection-case identity on `(tenant, invoice_draft_id)` so a replay returns the same `collection_case_id` and exact outstanding.
 - Append-only `collection_case` and `collection_dunning_event` persistence.  Status stays `open` or `dunning`.

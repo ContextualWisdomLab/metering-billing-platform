@@ -304,6 +304,21 @@ class StoredCollectionCase:
 
 
 @dataclass(frozen=True)
+class StoredPaymentIntent:
+    """Append-only provider-neutral payment intent for one collection case."""
+
+    payment_intent_id: UUID
+    tenant_account_id: UUID
+    collection_case_id: UUID
+    payment_intent_contract_version: int
+    currency_code: str
+    payment_intent_status: str
+    payment_amount: Decimal
+    source_payload_hash: str
+    projected_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredIngestionReceipt:
     """Append-only audit row for one ingest attempt."""
 
@@ -353,6 +368,8 @@ class MemoryUsageLedger:
     collection_dunning_events: list[StoredCollectionDunningEvent] = field(default_factory=list)
     collection_dunning_notice_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
     collection_dunning_number_index: dict[tuple[UUID, int], UUID] = field(default_factory=dict)
+    payment_intents: dict[UUID, StoredPaymentIntent] = field(default_factory=dict)
+    payment_intent_index: dict[tuple[UUID, UUID, str, int], UUID] = field(default_factory=dict)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -885,6 +902,70 @@ class MemoryUsageLedger:
         self.collection_dunning_notice_index[notice_key] = dunning_event.collection_dunning_event_id
         self.collection_dunning_number_index[number_key] = dunning_event.collection_dunning_event_id
         return dunning_event
+
+    def get_payment_intent(self, payment_intent_id: UUID) -> StoredPaymentIntent | None:
+        """Return a stored payment intent by internal identifier."""
+        return self.payment_intents.get(payment_intent_id)
+
+    def find_payment_intent(
+        self,
+        tenant_account_id: UUID,
+        collection_case_id: UUID,
+        source_payload_hash: str,
+        payment_intent_contract_version: int,
+    ) -> StoredPaymentIntent | None:
+        """Return the intent for one tenant-scoped case snapshot, if it exists."""
+        payment_intent_id = self.payment_intent_index.get(
+            (
+                tenant_account_id,
+                collection_case_id,
+                source_payload_hash,
+                payment_intent_contract_version,
+            )
+        )
+        if payment_intent_id is None:
+            return None
+        return self.payment_intents[payment_intent_id]
+
+    def insert_payment_intent(self, payment_intent: StoredPaymentIntent) -> StoredPaymentIntent:
+        """Append an immutable payment intent.  Existing identity rows are never updated."""
+        if payment_intent.payment_intent_status not in {"projected", "cancelled", "rejected"}:
+            raise ValueError("payment intents cannot be captured, settled, or posted")
+        payment_amount = parse_exact_decimal(format_exact_decimal(payment_intent.payment_amount))
+        if payment_amount <= 0:
+            raise ValueError("payment intent amount must be a positive exact decimal")
+        identity_key = (
+            payment_intent.tenant_account_id,
+            payment_intent.collection_case_id,
+            payment_intent.source_payload_hash,
+            payment_intent.payment_intent_contract_version,
+        )
+        if payment_intent.payment_intent_id in self.payment_intents:
+            raise ValueError("payment intents are immutable and cannot be replaced")
+        if identity_key in self.payment_intent_index:
+            raise ValueError("payment intents are immutable and cannot be replaced")
+        persisted = StoredPaymentIntent(
+            payment_intent_id=payment_intent.payment_intent_id,
+            tenant_account_id=payment_intent.tenant_account_id,
+            collection_case_id=payment_intent.collection_case_id,
+            payment_intent_contract_version=payment_intent.payment_intent_contract_version,
+            currency_code=payment_intent.currency_code,
+            payment_intent_status=payment_intent.payment_intent_status,
+            payment_amount=payment_amount,
+            source_payload_hash=payment_intent.source_payload_hash,
+            projected_at=payment_intent.projected_at,
+        )
+        self.payment_intents[persisted.payment_intent_id] = persisted
+        self.payment_intent_index[identity_key] = persisted.payment_intent_id
+        return persisted
+
+    def list_payment_intents(self, tenant_account_id: UUID) -> tuple[StoredPaymentIntent, ...]:
+        """Return payment intents limited to one tenant."""
+        return tuple(
+            payment_intent
+            for payment_intent in self.payment_intents.values()
+            if payment_intent.tenant_account_id == tenant_account_id
+        )
 
     def list_rating_runs(self, tenant_account_id: UUID) -> tuple[StoredRatingRun, ...]:
         """Return rating runs limited to one tenant."""

@@ -1,4 +1,4 @@
-"""Typed outcomes and rejection reasons for usage ingestion, rating, drafts, exports, and collections.
+"""Typed outcomes and rejection reasons for usage, rating, drafts, exports, collections, and intents.
 
 Reason codes are stable operational vocabulary.  They are safe to persist in
 audit receipts and do not require masking: they describe control failures, not
@@ -107,6 +107,22 @@ class CollectionCaseRejectionReasonCode(StrEnum):
     COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
     OUTSTANDING_AMOUNT_INVALID = "outstanding_amount_invalid"
     DUNNING_NOTICE_INVALID = "dunning_notice_invalid"
+
+
+class PaymentIntentOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one payment intent."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class PaymentIntentRejectionReasonCode(StrEnum):
+    """Why a payment-intent request was refused without capturing money."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
+    PAYMENT_AMOUNT_INVALID = "payment_amount_invalid"
 
 
 class ExactDecimalError(ValueError):

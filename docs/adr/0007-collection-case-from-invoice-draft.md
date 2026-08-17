@@ -23,4 +23,4 @@ This path must not capture payment, issue a statutory invoice, call a payment pr
 
 - Known invoice-draft totals reproduce one exact outstanding.
 - Tenants cannot see or collect each other's cases.
-- Operators open the case, then send a dunning notice.  Payment capture remains the next increment.
+- Operators open the case, then send a dunning notice.  A later payment-intent increment projects initiation without capture.

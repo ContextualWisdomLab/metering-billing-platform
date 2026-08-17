@@ -26,4 +26,6 @@ IFRS Foundation. (n.d.). *IAS 21 the effects of changes in foreign exchange rate
 
 International Organization for Standardization. (2026). *ISO 20022-1:2026 financial services—Universal financial industry message scheme—Part 1: Metamodel.* https://www.iso.org/standard/20022-1
 
+PCI Security Standards Council. (2024). *Payment Card Industry Data Security Standard: Requirements and testing procedures* (Version 4.0.1). https://www.pcisecuritystandards.org/document_library/
+
 PostgreSQL Global Development Group. (2026). *PostgreSQL versioning policy.* https://www.postgresql.org/support/versioning/

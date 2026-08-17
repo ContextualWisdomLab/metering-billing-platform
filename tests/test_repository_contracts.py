@@ -475,6 +475,41 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_payment_intent_accepts_projected_status_only(self) -> None:
+        """A payment-intent contract records exact amounts and projected-only status."""
+        schema = self._schema("payment-intent.schema.json")
+        instance = {
+            "payment_intent_contract_version": 1,
+            "payment_intent_outcome_code": "accepted",
+            "payment_intent_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf640",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "currency_code": "USD",
+            "payment_intent_status": "projected",
+            "payment_amount": "0.003705",
+            "source_payload_hash": "sha256:" + "1" * 64,
+            "projected_at": "2026-08-17T19:30:00Z",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        captured = dict(instance, payment_intent_status="captured")
+        self.assertIn(
+            "$.payment_intent_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, captured),
+        )
+
+    def test_payment_intent_migration_persists_append_only_projected_intents(self) -> None:
+        """The payment-intent migration must stay tenant-scoped and capture-free."""
+        sql = (ROOT / "database/migrations/0007_payment_intent.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.payment_intent",
+            "UNIQUE (tenant_account_id, collection_case_id, source_payload_hash, payment_intent_contract_version)",
+            "UNIQUE (tenant_account_id, payment_intent_id)",
+            "FOREIGN KEY (tenant_account_id, collection_case_id)",
+            "payment_intent_status text NOT NULL CHECK (payment_intent_status IN ('projected', 'cancelled', 'rejected'))",
+            "payment_amount numeric(38, 12)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_rating_migration_persists_append_only_runs_and_lines(self) -> None:
         """The rating migration must keep run identity tenant-scoped and append-only."""
         sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(encoding="utf-8")

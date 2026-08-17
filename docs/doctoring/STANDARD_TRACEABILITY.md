@@ -14,5 +14,6 @@
 | IFRS Accounting Taxonomy 2025 | Financial-report output remains taxonomy-versioned, with the 2025 taxonomy retained for 2026 reporting. |
 | IAS 7 | Bank and settlement facts are classified and presented by Accounting rather than inferred from a payment-provider status alone. |
 | IAS 21 | Transaction, functional, and presentation currencies are separate accounting concepts; Billing preserves source currency and amounts. |
-| ISO 20022-1:2026 | Bank and treasury adapters use versioned financial-message mappings rather than proprietary fields in the accounting core. |
+| ISO 20022-1:2026 | Bank and treasury adapters use versioned financial-message mappings rather than proprietary fields in the accounting core. Payment initiation stays a provider-neutral `payment_intent` until a later adapter projects an ISO 20022 initiation message. |
+| PCI DSS 4.0.1 | Payment intents never store card PAN, CVC, or provider charge identifiers, reducing cardholder-data scope in this repository. |
 | PostgreSQL 18 | UUIDv7 and exact numeric persistence support ordered identifiers and monetary precision. |

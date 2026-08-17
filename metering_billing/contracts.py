@@ -22,6 +22,7 @@ __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
+    "PAYMENT_INTENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
@@ -31,6 +32,7 @@ __all__ = (
     "validate_accounting_journal_proposal",
     "validate_collection_case",
     "validate_invoice_draft",
+    "validate_payment_intent",
     "validate_journal_proposal",
     "validate_rating_run",
     "validate_schema_instance",
@@ -43,6 +45,7 @@ USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 COLLECTION_CASE_SCHEMA_NAME = "collection-case.schema.json"
+PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 
@@ -272,6 +275,41 @@ def _missing_success_collection_case_fields(
     ):
         if field_name not in collection_case:
             missing.append(f"$: {outcome} collection cases must include {field_name}")
+    return tuple(missing)
+
+
+def validate_payment_intent(
+    payment_intent: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate payment-intent shape plus identity and projected-only status."""
+    schema = load_json_schema(PAYMENT_INTENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, payment_intent))
+    if not isinstance(payment_intent, Mapping):
+        return tuple(errors)
+    outcome = payment_intent.get("payment_intent_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_payment_intent_fields(payment_intent, str(outcome)))
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in payment_intent:
+            errors.append("$: rejected payment intents must include rejection_reason_code")
+    return tuple(errors)
+
+
+def _missing_success_payment_intent_fields(
+    payment_intent: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay intent lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "payment_intent_id",
+        "collection_case_id",
+        "payment_amount",
+        "currency_code",
+        "payment_intent_status",
+        "source_payload_hash",
+    ):
+        if field_name not in payment_intent:
+            missing.append(f"$: {outcome} payment intents must include {field_name}")
     return tuple(missing)
 
 
