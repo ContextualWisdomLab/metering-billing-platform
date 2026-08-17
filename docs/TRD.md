@@ -35,6 +35,8 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.PaymentSettlementService` applies a commercial payment receipt against a projected intent and reduces collection outstanding. Receipts stay `applied` and do not capture via a provider or post a journal. AIS consumes the later cash journal proposal, not the receipt itself.
 
+`metering_billing.http_app.create_http_app` exposes those services as stdlib JSON HTTP. The adapter requires a tenant on every write, returns published `as_contract_dict` contracts, and never posts a journal.
+
 ## Security
 
 - No card number, CVC, provider secret, PAT plaintext, prompt, or response is accepted in billing contracts.

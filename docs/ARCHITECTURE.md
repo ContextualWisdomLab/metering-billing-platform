@@ -81,6 +81,10 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 `metering_billing.PaymentSettlementService` applies one commercial `payment_receipt` against a stored projected payment intent.  Identity is `(tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)`.  The hash covers the intent amount, currency, status, and received amount.  Receipt status is `applied` only.  The linked collection-case outstanding is reduced by the same exact amount; remaining zero marks the case `settled`.  An identical replay returns the same `payment_receipt_id`.  `cancel_payment_intent` flips a projected intent to `cancelled` without writing a receipt or changing outstanding.  This path does not store a card PAN, call a named provider, emit an `accounting_journal_proposal`, or post a journal.  The operator next proposes a cash journal to AIS, or records another partial receipt.
 
+## HTTP accept surface
+
+`metering_billing.http_app.create_http_app` is a stdlib WSGI adapter.  It parses JSON, requires `tenant_reference` on every write, calls the existing in-process services, and returns each `as_contract_dict` result.  Standalone serving is `python -m metering_billing.http_app` on `0.0.0.0:$PORT`.  HTTP 200 means `accepted` or `duplicate_replay`.  HTTP 422 means `rejected` or an unreadable request.  HTTP 404 is only an unknown route.  Money stays exact-decimal strings.  The adapter never posts a journal, never stores a card PAN, and never calls Stripe, Adyen, or Toss.  AIS remains the consumer of journal proposals and later posting receipts.
+
 ## Failure policy
 
 - Duplicate input returns the existing receipt.

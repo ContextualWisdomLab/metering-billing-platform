@@ -88,6 +88,13 @@ contextual-orchestrator usage
 - Missing receipts, cross-tenant IDs, float money, and zero or negative amounts fail closed.
 - Collection outstanding is not changed. Status stays inside the proposal lifecycle and is never `posted`. Operators hand the persisted cash proposal to AIS.
 
+## HTTP accept-surface acceptance
+
+- Buyers and AIS can POST the already-built commercial path as JSON without importing in-process Python services.
+- Every write requires `tenant_reference`. Money stays exact-decimal strings.
+- HTTP 200 means `accepted` or `duplicate_replay`. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is only an unknown route.
+- HTTP does not post journals, store a card PAN, or add Stripe, Adyen, or Toss.
+
 ## Usage-ingestion acceptance
 
 - A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.
@@ -106,4 +113,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, and cash-journal export reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, and the HTTP accept surface reach 100% statement and branch coverage.

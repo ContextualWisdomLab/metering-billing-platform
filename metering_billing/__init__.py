@@ -1,11 +1,12 @@
-"""Importable commercial contracts, usage, rating, draft, export, collection, intent, and settlement services.
+"""Importable commercial contracts, usage, rating, draft, export, collection, intent, settlement, and HTTP services.
 
 This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, rate tenant-scoped windows, draft invoice-intent
 documents, emit journal proposals, open collection cases, project
-provider-neutral payment intents, and apply commercial payment receipts
-without taking a payment-provider dependency.
+provider-neutral payment intents, apply commercial payment receipts, and
+accept those writes over a stdlib HTTP adapter without taking a
+payment-provider dependency.
 
 The package never posts statutory journals.  Accounting exports remain
 ``accounting_journal_proposal`` documents with proposal-only statuses.
@@ -52,6 +53,7 @@ from metering_billing.errors import (
     RejectionReasonCode,
 )
 from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
+from metering_billing.http_app import create_http_app
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
@@ -94,6 +96,7 @@ __all__ = (
     "UsageIngestionService",
     "UsageRatingService",
     "compute_source_payload_hash",
+    "create_http_app",
     "default_schemas_directory",
     "format_exact_decimal",
     "load_json_schema",

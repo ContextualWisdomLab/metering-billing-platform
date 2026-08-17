@@ -4,6 +4,8 @@
 
 ### Added
 
+- Stdlib HTTP accept surface (`python -m metering_billing.http_app` or `create_http_app(ledger=...)`) exposes the existing commercial services as JSON.  Money stays exact-decimal strings.  Tenant is required on every write.  HTTP 200 means `accepted` or `duplicate_replay`; HTTP 422 means `rejected`; HTTP 404 is only an unknown route.
+- ADR 0011 for HTTP as a thin adapter that does not post journals or add a named payment provider.
 - `AccountingExportService.propose_cash_journal` emits one balanced cash/AR `accounting_journal_proposal` from a stored payment receipt.
 - Idempotent cash-proposal identity on `(tenant, payment_receipt_id, source_payload_hash, proposal_contract_version)` so a replay returns the same `proposal_id`.
 - AIS-compatible cash idempotency key `{tenant}:cash_receipt:{payment_receipt_id}:{source_payload_hash}:v{version}`.

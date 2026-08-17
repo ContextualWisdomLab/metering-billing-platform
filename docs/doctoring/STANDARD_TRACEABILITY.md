@@ -4,7 +4,7 @@
 | --- | --- |
 | CloudEvents 1.0.2 | Future event envelopes preserve source and event identity for deduplication. |
 | Cowlishaw decimal arithmetic 1.70 | Billable quantities are exact decimals, never binary floating-point values. |
-| RFC 9110 | At-least-once delivery is made safe by idempotent ingest of the same source key and payload. |
+| RFC 9110 | At-least-once delivery is made safe by idempotent ingest of the same source key and payload. The HTTP accept surface maps `accepted` and `duplicate_replay` to 200, `rejected` to 422, and unknown routes to 404. |
 | Helland (2012) | Replays acknowledge the stored fact; a mutated payload is a conflict, not an update. |
 | IEEE 754-2019 | Decimal interchange stays in the decimal domain; binary inexact types are rejected. |
 | ISO 8601-1:2019 | `occurred_at` and usage windows are timezone-aware instants; naive timestamps fail closed. |
