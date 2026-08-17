@@ -80,6 +80,12 @@ class CreditAdjustmentTests(unittest.TestCase):
             ),
         )
         self.assertEqual(validate_credit_adjustment(result.as_contract_dict()), ())
+        loaded = CreditAdjustmentService(ledger).get_credit_adjustment(
+            TENANT_ONE, result.credit_adjustment_id
+        )
+        self.assertEqual(loaded.credit_adjustment_id, result.credit_adjustment_id)
+        self.assertEqual(loaded.proposal_id, result.proposal_id)
+        self.assertEqual(loaded.credit_adjustment_outcome_code, CreditAdjustmentOutcomeCode.ACCEPTED)
         stored_case = ledger.collection_cases[collection_case_id]
         self.assertEqual(stored_case.outstanding_amount, Decimal("0"))
         self.assertEqual(stored_case.collection_case_status, "settled")
