@@ -786,10 +786,15 @@ class RateCardCatalogTests(unittest.TestCase):
         )
         self.assertEqual(method_status, 422)
         self.assertEqual(method_body["rejection_reason_code"], "request_invalid")
+        version_method_status, version_method_body = invoke_http(
+            app, "PUT", "/v1/rate-card-versions/1"
+        )
+        self.assertEqual(version_method_status, 422)
+        self.assertEqual(version_method_body["rejection_reason_code"], "request_invalid")
         invalid_uuid_status, invalid_uuid_body = invoke_http(
             app,
             "GET",
-            "/v1/rate-card-versions/ffffffffffffffffffffffffffffffffffffff",
+            "/v1/rate-card-versions/" + ("f" * 36),
             query={"tenant_reference": TENANT_ONE},
         )
         self.assertEqual(invalid_uuid_status, 422)
