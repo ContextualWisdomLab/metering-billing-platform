@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/payment-receipt-presentment/v1",
+  "title": "Payment Receipt Presentment",
+  "description": "Tenant-scoped commercial payment-receipt statement projected from a stored payment_receipt and current collection_case. Amounts are exact-decimal strings. Receipt status stays applied. Next operator action is record_receipt or drain_or_wait. The document is not a capture, posting, or statutory invoice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payment_receipt_presentment_contract_version",
+    "payment_receipt_id",
+    "tenant_reference",
+    "payment_intent_id",
+    "collection_case_id",
+    "currency_code",
+    "received_amount",
+    "remaining_outstanding_amount",
+    "payment_receipt_status",
+    "collection_case_status",
+    "received_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "payment_receipt_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "payment_receipt_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "payment_intent_id": {"type": "string", "format": "uuid"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "received_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "payment_receipt_status": {
+      "type": "string",
+      "enum": ["applied"]
+    },
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled"]
+    },
+    "received_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["record_receipt", "drain_or_wait"]
+    }
+  }
+}
