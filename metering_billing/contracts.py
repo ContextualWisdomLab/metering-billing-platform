@@ -41,6 +41,7 @@ __all__ = (
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
     "DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME",
+    "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -68,6 +69,7 @@ __all__ = (
     "validate_webhook_delivery_presentment",
     "validate_webhook_subscription_presentment",
     "validate_dunning_event_presentment",
+    "validate_webhook_outbox_event_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -110,6 +112,9 @@ WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME = (
     "webhook-subscription-presentment.schema.json"
 )
 DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME = "dunning-event-presentment.schema.json"
+WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME = (
+    "webhook-outbox-event-presentment.schema.json"
+)
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
 AIS_OUTBOX_DRAIN_SCHEMA_NAME = "ais-outbox-drain.schema.json"
@@ -823,6 +828,38 @@ def validate_webhook_subscription_presentment(
     ):
         if forbidden_name in statement:
             errors.append(f"$: subscription presentment must not include {forbidden_name}")
+    return tuple(errors)
+
+
+def validate_webhook_outbox_event_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate outbox-event presentment shape plus metadata-only invariants."""
+    schema = load_json_schema(
+        WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    status_code = statement.get("delivery_status")
+    if action is not None and action not in {"wait", "run_deliveries"}:
+        errors.append("$: next_operator_action must be wait or run_deliveries")
+    if status_code == "pending" and action is not None and action != "run_deliveries":
+        errors.append("$: pending outbox event must run_deliveries")
+    if status_code == "delivered" and action is not None and action != "wait":
+        errors.append("$: delivered outbox event must wait")
+    for forbidden_name in (
+        "payload_json",
+        "webhook_secret",
+        "webhook_secret_hash",
+        "webhook_secret_prefix",
+        "signature",
+        "card_pan",
+        "api_credential_secret",
+    ):
+        if forbidden_name in statement:
+            errors.append(f"$: outbox presentment must not include {forbidden_name}")
     return tuple(errors)
 
 

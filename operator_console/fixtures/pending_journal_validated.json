@@ -1,0 +1,13 @@
+{
+  "webhook_outbox_event_presentment_contract_version": 1,
+  "outbox_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfca0",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "event_type_code": "journal_proposal.validated",
+  "source_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfcb0",
+  "payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "occurred_at": "2026-08-17T21:00:00Z",
+  "enqueued_at": "2026-08-17T21:00:00Z",
+  "delivery_status": "pending",
+  "attempted_delivery_count": 0,
+  "next_operator_action": "run_deliveries"
+}

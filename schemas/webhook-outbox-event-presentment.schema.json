@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/webhook-outbox-event-presentment/v1",
+  "title": "Webhook Outbox Event Presentment",
+  "description": "Tenant-scoped commercial webhook-outbox metadata statement projected from a stored webhook_outbox_event. Next operator action is run_deliveries while pending, otherwise wait. The document is not a delivery run, webhook secret, signed body, or AIS outbox event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "webhook_outbox_event_presentment_contract_version",
+    "outbox_event_id",
+    "tenant_reference",
+    "event_type_code",
+    "source_id",
+    "payload_hash",
+    "occurred_at",
+    "enqueued_at",
+    "delivery_status",
+    "attempted_delivery_count",
+    "next_operator_action"
+  ],
+  "properties": {
+    "webhook_outbox_event_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "outbox_event_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "event_type_code": {
+      "type": "string",
+      "enum": [
+        "journal_proposal.validated",
+        "payment_receipt.applied",
+        "credit_adjustment.recorded"
+      ]
+    },
+    "source_id": {"type": "string", "format": "uuid"},
+    "payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "enqueued_at": {"type": "string", "format": "date-time"},
+    "delivery_status": {"type": "string", "enum": ["pending", "delivered"]},
+    "attempted_delivery_count": {"type": "integer", "minimum": 0},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait", "run_deliveries"]
+    }
+  }
+}

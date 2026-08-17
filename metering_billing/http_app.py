@@ -50,9 +50,11 @@ The application is a thin WSGI adapter:
     11. Let an operator register an https webhook callback, then run deliveries.
     GET one stored ``webhook_subscription`` or list
     ``{webhook_subscriptions, next_cursor}``.  GET one stored
-    ``webhook_delivery_attempt`` or list ``{webhook_deliveries,
-    next_cursor}``.  AIS may keep polling journal proposals.  This path
-    does not flip ``proposal_status`` or call AIS posting-receipt.
+    ``webhook_outbox_event`` or list ``{webhook_outbox_events,
+    next_cursor}``.  GET one stored ``webhook_delivery_attempt`` or list
+    ``{webhook_deliveries, next_cursor}``.  AIS may keep polling journal
+    proposals.  This path does not flip ``proposal_status`` or call AIS
+    posting-receipt.
 12. Let an operator drain AIS ``posting_receipt`` outbox events.  Empty
     unpublished pages skip receipt GETs.  Matched rows use the stored
     Billing idempotency key, never the payload URN.  Observations stay
@@ -115,6 +117,7 @@ from metering_billing.errors import (
     TaxRateQueryError,
     TimeWindowError,
     WebhookDeliveryPresentmentQueryError,
+    WebhookOutboxEventPresentmentQueryError,
     WebhookSubscriptionPresentmentQueryError,
     WebhookSubscriptionQueryError,
 )
@@ -135,6 +138,9 @@ from metering_billing.posting_receipt_observation_presentment import (
     PostingReceiptObservationPresentmentService,
 )
 from metering_billing.webhook_delivery_presentment import WebhookDeliveryPresentmentService
+from metering_billing.webhook_outbox_event_presentment import (
+    WebhookOutboxEventPresentmentService,
+)
 from metering_billing.webhook_subscription_presentment import (
     WebhookSubscriptionPresentmentService,
 )
@@ -219,6 +225,10 @@ WEBHOOK_SUBSCRIPTION_ITEM_PATH = re.compile(
 )
 WEBHOOK_DELIVERY_COLLECTION_PATH = "/v1/webhook-deliveries"
 WEBHOOK_DELIVERY_ITEM_PATH = re.compile(r"^/v1/webhook-deliveries/([0-9a-fA-F-]{36})$")
+WEBHOOK_OUTBOX_EVENT_COLLECTION_PATH = "/v1/webhook-outbox-events"
+WEBHOOK_OUTBOX_EVENT_ITEM_PATH = re.compile(
+    r"^/v1/webhook-outbox-events/([0-9a-fA-F-]{36})$"
+)
 AIS_OUTBOX_DRAIN_COLLECTION_PATH = "/v1/ais-outbox-drains"
 API_KEY_HEADER_ENVIRON = "HTTP_X_CWL_API_KEY"
 AUTHORIZATION_HEADER_ENVIRON = "HTTP_AUTHORIZATION"
@@ -278,6 +288,7 @@ def create_http_app(
     tax_assessment_presentments = TaxAssessmentPresentmentService(shared_ledger)
     observation_presentments = PostingReceiptObservationPresentmentService(shared_ledger)
     delivery_presentments = WebhookDeliveryPresentmentService(shared_ledger)
+    outbox_presentments = WebhookOutboxEventPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     credential_presentments = TenantApiCredentialPresentmentService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
@@ -494,6 +505,41 @@ def create_http_app(
                 status_code = (
                     404
                     if error.rejection_reason_code == "webhook_delivery_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_webhook_outbox_events", "get_webhook_outbox_event"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_webhook_outbox_events":
+                    page = outbox_presentments.list_webhook_outbox_events(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = outbox_presentments.present_webhook_outbox_event(
+                    tenant_reference,
+                    _parse_uuid(path_values["outbox_event_id"], "outbox_event_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except WebhookOutboxEventPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "webhook_outbox_event_not_found"
                     else 422
                 )
                 return _send_json(
@@ -1092,6 +1138,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "webhook_deliveries", {}
         if method == "GET":
             return "list_webhook_deliveries", {}
+        return "method_not_allowed", {}
+    if path == WEBHOOK_OUTBOX_EVENT_COLLECTION_PATH:
+        if method == "GET":
+            return "list_webhook_outbox_events", {}
+        return "method_not_allowed", {}
+    webhook_outbox_match = WEBHOOK_OUTBOX_EVENT_ITEM_PATH.fullmatch(path)
+    if webhook_outbox_match is not None:
+        if method == "GET":
+            return "get_webhook_outbox_event", {
+                "outbox_event_id": webhook_outbox_match.group(1)
+            }
         return "method_not_allowed", {}
     webhook_delivery_match = WEBHOOK_DELIVERY_ITEM_PATH.fullmatch(path)
     if webhook_delivery_match is not None:

@@ -9,7 +9,8 @@ those assessments, present stored posting-receipt observations, emit
 journal proposals, open collection cases, present those cases as statements, present stored dunning events, project provider-neutral payment
 intents, present those intents as statements, apply commercial payment receipts, present those receipts as statements, record commercial credits,
 register webhook callbacks for accepted commercial facts, present
-those subscriptions as statements, drain
+those subscriptions as statements, present stored commercial webhook
+outbox events as statements, drain
 AIS posting-receipt outbox events into stored observations, and
 accept those writes over a stdlib HTTP adapter without taking a
 payment-provider dependency.
@@ -54,6 +55,7 @@ from metering_billing.contracts import (
     WEBHOOK_SUBSCRIPTION_SCHEMA_NAME,
     WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME,
     DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME,
+    WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
     RATING_RUN_SCHEMA_NAME,
@@ -81,6 +83,7 @@ from metering_billing.contracts import (
     validate_webhook_delivery_presentment,
     validate_webhook_subscription_presentment,
     validate_dunning_event_presentment,
+    validate_webhook_outbox_event_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_tenant_api_credential_presentment,
@@ -134,6 +137,7 @@ from metering_billing.errors import (
     WebhookDeliveryOutcomeCode,
     WebhookDeliveryPresentmentQueryError,
     WebhookDeliveryRejectionReasonCode,
+    WebhookOutboxEventPresentmentQueryError,
     WebhookSubscriptionOutcomeCode,
     WebhookSubscriptionPresentmentQueryError,
     WebhookSubscriptionQueryError,
@@ -162,6 +166,9 @@ from metering_billing.tenant_api_credential_presentment import (
 )
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.webhook_delivery_presentment import WebhookDeliveryPresentmentService
+from metering_billing.webhook_outbox_event_presentment import (
+    WebhookOutboxEventPresentmentService,
+)
 from metering_billing.webhook_subscription_presentment import (
     WebhookSubscriptionPresentmentService,
 )
@@ -209,6 +216,7 @@ __all__ = (
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
     "DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME",
+    "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -240,6 +248,8 @@ __all__ = (
     "PostingReceiptObservationPresentmentService",
     "WebhookDeliveryPresentmentQueryError",
     "WebhookDeliveryPresentmentService",
+    "WebhookOutboxEventPresentmentQueryError",
+    "WebhookOutboxEventPresentmentService",
     "WebhookSubscriptionPresentmentQueryError",
     "WebhookSubscriptionPresentmentService",
     "CollectionCaseOutcomeCode",
@@ -327,6 +337,7 @@ __all__ = (
     "validate_webhook_delivery_presentment",
     "validate_webhook_subscription_presentment",
     "validate_dunning_event_presentment",
+    "validate_webhook_outbox_event_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_tenant_api_credential_presentment",

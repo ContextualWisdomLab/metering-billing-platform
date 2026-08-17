@@ -264,6 +264,16 @@ contextual-orchestrator usage
 - Presentment never returns recipient PII, channel, provider id, delivery status, or notice body. It does not invent a send engine.
 - Operators record the commercial reminder, then collect or credit.
 
+## Webhook-outbox-event-presentment acceptance
+
+- A known stored `webhook_outbox_event` presents one tenant-scoped statement with `outbox_event_id`, `event_type_code`, `source_id`, `payload_hash`, `occurred_at`, `enqueued_at`, `delivery_status`, `attempted_delivery_count`, and `next_operator_action` (`run_deliveries` while pending, otherwise `wait`).
+- `GET /v1/webhook-outbox-events/{outbox_event_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/webhook-outbox-events` lists summaries as `{webhook_outbox_events, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{enqueued_at}|{outbox_event_id}`.
+- Commercial-fact enqueue and `POST /v1/webhook-deliveries` stay the #24 write path. PAN, CVC, and provider secrets are refused on that write.
+- Presentment never returns `payload_json`, raw body, webhook secret, hash, prefix, signature, or callback auth. GET never publishes, sends, retries, or marks delivered.
+- This is the Billing commercial webhook outbox, not the AIS posting-receipt outbox. Known event types, HMAC `X-CWL-Webhook-Signature: sha256=<hex>`, SSRF policy, and secret one-time return stay unchanged.
+- Operators inspect the commercial webhook backlog, then run deliveries.
+
 ## AIS-outbox-drain acceptance
 
 - An operator can drain AIS `posting_receipt` outbox events for a known tenant through `AisOutboxDrainService.drain_ais_outbox` or `POST /v1/ais-outbox-drains`.
@@ -306,4 +316,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, AIS outbox drain, tax-assessment presentment, posting-receipt observation presentment, webhook-delivery presentment, tenant-api-credential presentment, webhook-subscription presentment, and dunning-event presentment reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, AIS outbox drain, tax-assessment presentment, posting-receipt observation presentment, webhook-delivery presentment, tenant-api-credential presentment, webhook-subscription presentment, dunning-event presentment, and webhook-outbox-event presentment reach 100% statement and branch coverage.

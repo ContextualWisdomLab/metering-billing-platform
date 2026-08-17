@@ -69,3 +69,8 @@ export {
   DUNNING_NOTICE_CUSTOMER_COPY,
   nextOperatorActionCopy as nextDunningNoticeActionCopy,
 } from "./dunning_notice.js";
+export {
+  renderWebhookOutboxEvent,
+  WEBHOOK_OUTBOX_EVENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextWebhookOutboxEventActionCopy,
+} from "./webhook_outbox_event.js";

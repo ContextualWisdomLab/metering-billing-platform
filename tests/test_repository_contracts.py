@@ -29,6 +29,7 @@ from metering_billing.contracts import (
     validate_tenant_api_credential_presentment,
     validate_webhook_subscription_presentment,
     validate_dunning_event_presentment,
+    validate_webhook_outbox_event_presentment,
     validate_webhook_delivery,
     validate_webhook_subscription,
 )
@@ -1681,6 +1682,76 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(validate_dunning_event_presentment(settled), ())
         self.assertNotEqual(validate_dunning_event_presentment([]), ())
+
+    def test_webhook_outbox_event_presentment_accepts_metadata_and_rejects_body(
+        self,
+    ) -> None:
+        """An outbox statement records metadata and cannot leak the signed body."""
+        schema = self._schema("webhook-outbox-event-presentment.schema.json")
+        instance = {
+            "webhook_outbox_event_presentment_contract_version": 1,
+            "outbox_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfca0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "event_type_code": "journal_proposal.validated",
+            "source_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfcb0",
+            "payload_hash": "sha256:" + ("a" * 64),
+            "occurred_at": "2026-08-17T21:00:00Z",
+            "enqueued_at": "2026-08-17T21:00:00Z",
+            "delivery_status": "pending",
+            "attempted_delivery_count": 0,
+            "next_operator_action": "run_deliveries",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_webhook_outbox_event_presentment(instance), ())
+        leaked = dict(instance)
+        leaked["payload_json"] = '{"secret_blob":"must-not-leak"}'
+        self.assertIn(
+            "$: additional property is not allowed: payload_json",
+            validate_schema_instance(schema, leaked),
+        )
+        self.assertIn(
+            "$: outbox presentment must not include payload_json",
+            validate_webhook_outbox_event_presentment(leaked),
+        )
+        secret = dict(instance)
+        secret["webhook_secret"] = "cwlwh_must-not-leak"
+        self.assertIn(
+            "$: outbox presentment must not include webhook_secret",
+            validate_webhook_outbox_event_presentment(secret),
+        )
+        send_action = dict(instance)
+        send_action["next_operator_action"] = "send"
+        self.assertIn(
+            "$: next_operator_action must be wait or run_deliveries",
+            validate_webhook_outbox_event_presentment(send_action),
+        )
+        pending_wait = dict(instance)
+        pending_wait["next_operator_action"] = "wait"
+        self.assertIn(
+            "$: pending outbox event must run_deliveries",
+            validate_webhook_outbox_event_presentment(pending_wait),
+        )
+        delivered = {
+            "webhook_outbox_event_presentment_contract_version": 1,
+            "outbox_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfcc0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "event_type_code": "payment_receipt.applied",
+            "source_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfcd0",
+            "payload_hash": "sha256:" + ("b" * 64),
+            "occurred_at": "2026-08-17T22:00:00Z",
+            "enqueued_at": "2026-08-17T22:00:00Z",
+            "delivery_status": "delivered",
+            "attempted_delivery_count": 1,
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_webhook_outbox_event_presentment(delivered), ())
+        delivered_run = dict(delivered)
+        delivered_run["next_operator_action"] = "run_deliveries"
+        self.assertIn(
+            "$: delivered outbox event must wait",
+            validate_webhook_outbox_event_presentment(delivered_run),
+        )
+        self.assertNotEqual(validate_webhook_outbox_event_presentment([]), ())
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:
         """Issue may return the secret once; hashes and rejected secrets are forbidden."""

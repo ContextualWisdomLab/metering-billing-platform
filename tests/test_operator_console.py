@@ -22,6 +22,7 @@ from metering_billing.contracts import (
     validate_tenant_api_credential_presentment,
     validate_webhook_subscription_presentment,
     validate_dunning_event_presentment,
+    validate_webhook_outbox_event_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -85,6 +86,10 @@ WEBHOOK_SUBSCRIPTION_FIXTURE_NAMES = (
 DUNNING_NOTICE_FIXTURE_NAMES = (
     "first_notice_morning.json",
     "overdue_notice_evening.json",
+)
+WEBHOOK_OUTBOX_EVENT_FIXTURE_NAMES = (
+    "pending_journal_validated.json",
+    "delivered_receipt_applied.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -306,6 +311,22 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("overdue_notice_evening.json")["dunning_notice_code"],
             "overdue_notice",
         )
+        for fixture_name in WEBHOOK_OUTBOX_EVENT_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_webhook_outbox_event_presentment(payload), ())
+            self.assertNotIn("payload_json", payload)
+            self.assertNotIn("webhook_secret", payload)
+            self.assertNotIn("webhook_secret_hash", payload)
+            self.assertNotIn("signature", payload)
+            self.assertTrue(str(payload["payload_hash"]).startswith("sha256:"))
+        self.assertEqual(
+            self._fixture("pending_journal_validated.json")["next_operator_action"],
+            "run_deliveries",
+        )
+        self.assertEqual(
+            self._fixture("delivered_receipt_applied.json")["delivery_status"],
+            "delivered",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -342,6 +363,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "TenantApiCredential",
             "WebhookSubscription",
             "DunningNotice",
+            "WebhookOutboxEvent",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -359,6 +381,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + TENANT_API_CREDENTIAL_FIXTURE_NAMES
             + WEBHOOK_SUBSCRIPTION_FIXTURE_NAMES
             + DUNNING_NOTICE_FIXTURE_NAMES
+            + WEBHOOK_OUTBOX_EVENT_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)

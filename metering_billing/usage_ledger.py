@@ -2264,6 +2264,16 @@ class MemoryUsageLedger:
             and outbox_event.delivery_status == "pending"
         )
 
+    def list_webhook_outbox_events_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredWebhookOutboxEvent, ...]:
+        """Return all commercial outbox events limited to one tenant."""
+        return tuple(
+            outbox_event
+            for outbox_event in self.webhook_outbox_events.values()
+            if outbox_event.tenant_account_id == tenant_account_id
+        )
+
     def mark_webhook_outbox_event_delivered(
         self, outbox_event_id: UUID
     ) -> StoredWebhookOutboxEvent:

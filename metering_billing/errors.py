@@ -325,6 +325,14 @@ class WebhookDeliveryPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class WebhookOutboxEventPresentmentQueryError(ValueError):
+    """Raised when a stored webhook outbox event cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class JournalProposalOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one accounting journal proposal."""
 

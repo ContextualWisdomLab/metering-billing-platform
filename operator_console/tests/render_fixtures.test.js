@@ -74,6 +74,11 @@ import {
   DUNNING_NOTICE_CUSTOMER_COPY,
   nextOperatorActionCopy as nextDunningNoticeActionCopy,
 } from "../src/dunning_notice.js";
+import {
+  renderWebhookOutboxEvent,
+  WEBHOOK_OUTBOX_EVENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextWebhookOutboxEventActionCopy,
+} from "../src/webhook_outbox_event.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -431,6 +436,37 @@ test("overdue notice evening shows collect", () => {
   assert.match(html, /overdue_notice/);
   assert.match(html, /Collect or credit/);
   assert.equal(statement.next_operator_action, "collect");
+});
+
+test("pending journal outbox event shows run deliveries and never leaks a body", () => {
+  const statement = loadFixture("pending_journal_validated.json");
+  const html = renderWebhookOutboxEvent(statement);
+  assert.match(html, /journal_proposal\.validated/);
+  assert.match(html, /Run deliveries/);
+  assert.match(
+    html,
+    /Register an https callback, then run deliveries; AIS may keep polling/,
+  );
+  assert.equal(
+    WEBHOOK_OUTBOX_EVENT_CUSTOMER_COPY,
+    "Register an https callback, then run deliveries; AIS may keep polling.",
+  );
+  assert.equal(nextWebhookOutboxEventActionCopy("run_deliveries"), "Run deliveries");
+  assert.equal(nextWebhookOutboxEventActionCopy("wait"), "Wait");
+  assert.equal(nextWebhookOutboxEventActionCopy("unknown"), "Run deliveries");
+  assert.equal(statement.next_operator_action, "run_deliveries");
+  assert.ok(!("payload_json" in statement));
+  assert.ok(!("webhook_secret" in statement));
+  assert.ok(!("signature" in statement));
+});
+
+test("delivered receipt outbox event shows wait", () => {
+  const statement = loadFixture("delivered_receipt_applied.json");
+  const html = renderWebhookOutboxEvent(statement);
+  assert.match(html, /payment_receipt\.applied/);
+  assert.match(html, />Wait</);
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.delivery_status, "delivered");
 });
 
 test("failed callback webhook shows run deliveries", () => {
