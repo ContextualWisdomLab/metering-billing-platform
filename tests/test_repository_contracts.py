@@ -1856,6 +1856,10 @@ class RepositoryContractTests(unittest.TestCase):
             validate_issued_invoice(missing_id),
         )
         self.assertNotEqual(validate_issued_invoice([]), ())
+        self.assertNotEqual(
+            validate_issued_invoice({"issued_invoice_contract_version": 1}),
+            (),
+        )
 
     def test_issued_invoice_presentment_accepts_snapshot_and_rejects_numbering(self) -> None:
         """An issued-invoice statement records frozen totals and cannot claim a write outcome."""

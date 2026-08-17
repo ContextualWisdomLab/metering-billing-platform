@@ -356,6 +356,18 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(not_found_status, 404)
         self.assertEqual(not_found_body["rejection_reason_code"], "issued_invoice_not_found")
         with mock.patch(
+            "metering_billing.http_app.IssuedInvoiceService.issue_invoice",
+            side_effect=ValueError("closed"),
+        ):
+            issue_value_status, issue_value_body = invoke_http(
+                create_http_app(ledger),
+                "POST",
+                f"/v1/invoice-drafts/{invoice_draft_id}/issued-invoices",
+                {"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(issue_value_status, 422)
+        self.assertEqual(issue_value_body["rejection_reason_code"], "request_invalid")
+        with mock.patch(
             "metering_billing.http_app.IssuedInvoicePresentmentService.list_issued_invoices",
             side_effect=ValueError("closed"),
         ):
