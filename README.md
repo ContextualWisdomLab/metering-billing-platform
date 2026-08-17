@@ -2,7 +2,7 @@
 
 CWL's intended commercial system of record for usage attribution, metering, rating, entitlements, invoice intent, payment-provider projection, and reconciliation.
 
-This repository is still a **foundation / bootstrap**. The default branch does not ship a runtime, HTTP API, SDK, or payment-provider adapter. Product contracts and the first offline validator live on draft [pull request #1](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/1) (`agent/initial-billing-foundation`). Treat that work as a reviewed proposal, not as shipped behavior.
+This repository is still a **foundation / bootstrap**. The default branch does not ship a runtime, HTTP API, SDK, or payment-provider adapter. Product contracts and the first offline validator live on open [pull request #1](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/1) (`agent/initial-billing-foundation`). Treat that work as a reviewed proposal, not as shipped behavior.
 
 Naruon is the CWL composition hub and may compose this product later. That is an intended host relationship, not a boot dependency. This platform is specified to run independently and does not require a Naruon checkout, process, or configuration.
 
@@ -49,8 +49,8 @@ Identity authentication remains with Keyverse or the credential issuer. Credenti
 
 | Location | What exists |
 | --- | --- |
-| Default branch (`agent/initial-foundation`, also `main`) | This buyer/operator README and contributor operation notes. No application code. |
-| Draft [PR #1](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/1) | PRD, TRD, architecture, data model, accounting boundary, two accepted ADRs, APA 7th reference list, JSON Schema Draft 2020-12 contracts, PostgreSQL 18 core migration, offline repository validator, exact-head CI. |
+| Default branch (`develop`, also `main`) | This buyer/operator README and contributor operation notes. No application code. |
+| Open [PR #1](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/1) | PRD, TRD, architecture, data model, accounting boundary, two accepted ADRs, APA 7th reference list, JSON Schema Draft 2020-12 contracts, PostgreSQL 18 core migration, offline repository validator, exact-head CI. |
 | Not present in this repository | A bindable HTTP server, OpenAPI/AsyncAPI, live PostgreSQL suite, rating engine, invoice API, provider webhook receiver, or published sibling SDK. |
 
 ## Independent run
@@ -66,23 +66,17 @@ That clone is the whole local product surface on the default branch: this README
 
 The foundation PR defines additional offline commands. They contact no external service, do not start a billing API, and do not require Naruon, contextual-orchestrator, or accounting-information-platform. They are absent from the default branch until that PR merges.
 
-Verified on PR #1 head `317f11a` (this repo only, no sibling checkouts):
-
-```bash
-python3 scripts/validate_repository.py
-# repository contracts valid
-```
-
-The same head also documents this test block:
+Verified on PR #1 head `79f727c` (this repo only, no sibling checkouts):
 
 ```bash
 python3 -m pip install --only-binary=:all: --require-hashes -r requirements-quality.txt
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m coverage run --branch -m unittest discover -s tests -p 'test_*.py'
 python3 -m coverage report --fail-under=100 --show-missing
+python3 scripts/validate_repository.py
 ```
 
-Those commands are defined, but they do not currently run on `317f11a`: `tests/test_repository_contracts.py` fails to import with `SyntaxError: '(' was never closed` at the escaped JSON Pointer assertion. Do not treat the test block as passing local verification until that head is repaired.
+Observed: 17 tests passed, 223/223 statements and 130/130 branches covered, `repository contracts valid`. Those files are not on `develop` until the foundation merges.
 
 The foundation design defers runtime APIs, deterministic rating, credits, spend reservation, invoice generation, provider adapters, and a live PostgreSQL integration suite to later reviewed increments.
 
