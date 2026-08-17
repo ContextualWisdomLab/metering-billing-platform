@@ -176,6 +176,17 @@ contextual-orchestrator usage
 - Revoked subscriptions are not POSTed. Missing tenant, insecure production callbacks, unknown event types, and secret leakage on list JSON fail closed.
 - AIS pull stays bootstrap. Operators register an https callback, then run deliveries; AIS may keep polling. This slice does not flip `proposal_status`, call AIS posting-receipt, or emit statutory IDs.
 
+## Payment-receipt-presentment acceptance
+
+- `POST /v1/payment-receipts` applies one #12 receipt against a projected `payment_intent_id`. Amount is the exact `received_amount`. Currency comes from the intent. Replay of the same tenant, intent snapshot, amount, and contract version returns the same `payment_receipt_id`. PAN, CVC, and provider secrets are refused.
+- Accept persists the receipt, reduces collection outstanding, and enqueues #24 `payment_receipt.applied`. It does not emit a cash journal. #13 stays `POST /v1/cash-journal-proposals` with `{tenant}:cash_receipt:{payment_receipt_id}:{source_payload_hash}:v{version}`.
+- A known stored payment receipt presents one tenant-scoped statement with `received_amount`, `remaining_outstanding_amount`, `payment_receipt_status` (`applied`), and `next_operator_action` (`record_receipt` or `drain_or_wait`).
+- `GET /v1/payment-receipts/{payment_receipt_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/payment-receipts` lists summaries as `{payment_receipts, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100.
+- Missing tenant, illegal cursor, and illegal page_limit fail closed.
+- Operators record the receipt, then drain or wait for AIS to pull the cash journal. HTTP presentment does not capture cards or call AIS.
+- `operator_console` Storybook renders that receipt with tokenized amount due and status chip. Fixtures are applied-full and applied-partial.
+
 ## Payment-intent-presentment acceptance
 
 - `POST /v1/payment-intents` projects one #11 intent from a stored `collection_case_id`. Amount and currency come from the case. Replay of the same tenant, case snapshot, and contract version returns the same `payment_intent_id`. PAN, CVC, and provider secrets are refused.
@@ -237,4 +248,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, tenant API credentials, operator-console fixture checks, webhook outbox, and AIS outbox drain reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, and AIS outbox drain reach 100% statement and branch coverage.

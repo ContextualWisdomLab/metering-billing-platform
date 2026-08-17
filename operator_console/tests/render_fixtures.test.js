@@ -19,6 +19,11 @@ import {
   PAYMENT_INTENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextPaymentIntentActionCopy,
 } from "../src/payment_intent.js";
+import {
+  renderPaymentReceipt,
+  PAYMENT_RECEIPT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextPaymentReceiptActionCopy,
+} from "../src/payment_receipt.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -112,6 +117,30 @@ test("cancelled payment intent waits", () => {
   assert.equal(statement.next_operator_action, "wait");
 });
 
+test("full payment receipt shows received amount and drain or wait", () => {
+  const statement = loadFixture("applied_full_payment_receipt.json");
+  const html = renderPaymentReceipt(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /Drain or wait for AIS/);
+  assert.match(html, /Record the receipt, then drain or wait for AIS to pull the cash journal/);
+  assert.equal(
+    PAYMENT_RECEIPT_CUSTOMER_COPY,
+    "Record the receipt, then drain or wait for AIS to pull the cash journal.",
+  );
+  assert.equal(nextPaymentReceiptActionCopy("drain_or_wait"), "Drain or wait for AIS");
+  assert.equal(nextPaymentReceiptActionCopy("record_receipt"), "Record the receipt");
+  assert.equal(typeof statement.received_amount, "string");
+});
+
+test("partial payment receipt keeps remaining outstanding as a string", () => {
+  const statement = loadFixture("applied_partial_payment_receipt.json");
+  const html = renderPaymentReceipt(statement);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, /Record the receipt/);
+  assert.equal(statement.next_operator_action, "record_receipt");
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -120,6 +149,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderPaymentIntent({ payment_amount: 100.0, currency_code: "USD" }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderPaymentReceipt({ received_amount: 100.0, remaining_outstanding_amount: "0.00" }),
     TypeError,
   );
   assert.throws(

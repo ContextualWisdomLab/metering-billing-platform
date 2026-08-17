@@ -4,6 +4,9 @@
 
 ### Added
 
+- `PaymentReceiptPresentmentService.present_payment_receipt` projects one tenant-scoped payment-receipt statement from stored `payment_receipt` rows and the current collection case.  `received_amount` and `remaining_outstanding_amount` are exact-decimal strings.  Receipt status stays `applied`.  Next operator action is `record_receipt` or `drain_or_wait`.  `POST /v1/payment-receipts` remains the #12 write from `payment_intent_id` and refuses PAN and provider secrets.  `GET /v1/payment-receipts/{payment_receipt_id}` is HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/payment-receipts` lists `{payment_receipts, next_cursor}`.  Record the receipt, then drain or wait for AIS to pull the cash journal.
+- `operator_console` Storybook adds a `PaymentReceipt` story using `AmountDue` and `StatusChip`.  Fixtures are applied-full and applied-partial.  There is no login wall, Figma-only work, or production SPA.
+- ADR 0025 for payment-receipt HTTP presentment.
 - `PaymentIntentPresentmentService.present_payment_intent` projects one tenant-scoped payment-intent statement from stored `payment_intent` rows.  `payment_amount` is an exact-decimal string.  Status stays `projected`, `cancelled`, or `rejected`.  Next operator action is `record_receipt` or `wait`.  `POST /v1/payment-intents` remains the #11 write from `collection_case_id` and refuses PAN and provider secrets.  `GET /v1/payment-intents/{payment_intent_id}` is HTTP 200 for the same tenant and 404 across tenants.  `GET /v1/payment-intents` lists `{payment_intents, next_cursor}`.  Create a projected payment intent, then record the receipt.
 - `operator_console` Storybook adds a `PaymentIntent` story using `AmountDue` and `StatusChip`.  Fixtures are projected and cancelled.  There is no login wall, Figma-only work, or production SPA.
 - ADR 0024 for payment-intent HTTP presentment.

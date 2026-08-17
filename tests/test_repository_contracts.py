@@ -17,6 +17,7 @@ from metering_billing.contracts import (
     validate_ais_outbox_drain,
     validate_collection_case_presentment,
     validate_payment_intent_presentment,
+    validate_payment_receipt_presentment,
     validate_tenant_api_credential,
     validate_webhook_delivery,
     validate_webhook_subscription,
@@ -634,6 +635,96 @@ class RepositoryContractTests(unittest.TestCase):
         scientific["payment_amount"] = "not-decimal"
         self.assertTrue(
             any("exact decimal" in error for error in validate_payment_intent_presentment(scientific))
+        )
+
+    def test_payment_receipt_presentment_accepts_amount_and_rejects_posted(self) -> None:
+        """A payment-receipt statement records exact amounts and cannot claim posting."""
+        schema = self._schema("payment-receipt-presentment.schema.json")
+        instance = {
+            "payment_receipt_presentment_contract_version": 1,
+            "payment_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf650",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "payment_intent_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf640",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "currency_code": "USD",
+            "received_amount": "0.003705",
+            "remaining_outstanding_amount": "0.00",
+            "payment_receipt_status": "applied",
+            "collection_case_status": "settled",
+            "received_at": "2026-08-17T21:00:00Z",
+            "next_operator_action": "drain_or_wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_payment_receipt_presentment(instance), ())
+        partial = dict(instance)
+        partial["received_amount"] = "0.001"
+        partial["remaining_outstanding_amount"] = "0.002705"
+        partial["collection_case_status"] = "open"
+        partial["next_operator_action"] = "record_receipt"
+        self.assertEqual(validate_payment_receipt_presentment(partial), ())
+        posted = dict(instance)
+        posted["proposal_status"] = "posted"
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        captured = dict(instance)
+        captured["payment_receipt_status"] = "captured"
+        self.assertIn(
+            "$.payment_receipt_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, captured),
+        )
+        negative_received = dict(instance)
+        negative_received["received_amount"] = "-1.00"
+        self.assertIn(
+            "$: received_amount must not be negative",
+            validate_payment_receipt_presentment(negative_received),
+        )
+        negative_remaining = dict(instance)
+        negative_remaining["remaining_outstanding_amount"] = "-1.00"
+        self.assertIn(
+            "$: remaining_outstanding_amount must not be negative",
+            validate_payment_receipt_presentment(negative_remaining),
+        )
+        settled_collect = dict(instance)
+        settled_collect["next_operator_action"] = "record_receipt"
+        self.assertIn(
+            "$: settled receipts must drain or wait",
+            validate_payment_receipt_presentment(settled_collect),
+        )
+        residual_wait = dict(partial)
+        residual_wait["next_operator_action"] = "drain_or_wait"
+        self.assertIn(
+            "$: residual receipts must record another receipt",
+            validate_payment_receipt_presentment(residual_wait),
+        )
+        self.assertNotEqual(validate_payment_receipt_presentment([]), ())
+        non_string = dict(instance)
+        non_string["received_amount"] = 100
+        non_string["remaining_outstanding_amount"] = 0
+        self.assertEqual(
+            [
+                error
+                for error in validate_payment_receipt_presentment(non_string)
+                if "exact decimal" in error
+            ],
+            [],
+        )
+        bad_received = dict(instance)
+        bad_received["received_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "received_amount must be an exact decimal" in error
+                for error in validate_payment_receipt_presentment(bad_received)
+            )
+        )
+        bad_remaining = dict(instance)
+        bad_remaining["remaining_outstanding_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "remaining_outstanding_amount must be an exact decimal" in error
+                for error in validate_payment_receipt_presentment(bad_remaining)
+            )
         )
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:

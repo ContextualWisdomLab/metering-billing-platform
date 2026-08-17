@@ -181,6 +181,14 @@ class PaymentIntentPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class PaymentReceiptPresentmentQueryError(ValueError):
+    """Raised when a stored payment receipt cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class TenantApiCredentialOutcomeCode(StrEnum):
     """Terminal result of issuing or revoking one tenant API credential."""
 

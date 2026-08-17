@@ -41,6 +41,11 @@ The application is a thin WSGI adapter:
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
     The read does not capture, settle, call AIS, or start a web UI.
+15. Let an operator POST an applied payment receipt and GET the stored
+    receipt as a commercial statement.  Record the receipt, then drain or
+    wait for AIS to pull the cash journal.  The write refuses PAN and
+    provider secrets.  The read does not capture, post, call AIS, or start
+    a web UI.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -66,6 +71,7 @@ from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
     CreditAdjustmentQueryError,
     PaymentIntentPresentmentQueryError,
+    PaymentReceiptPresentmentQueryError,
     ExactDecimalError,
     JournalProposalQueryError,
     PostingReceiptObservationQueryError,
@@ -84,6 +90,7 @@ from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
+from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.payment_intent import PaymentIntentService
@@ -104,6 +111,8 @@ COLLECTION_DUNNING_PATH = re.compile(
 PAYMENT_INTENT_COLLECTION_PATH = "/v1/payment-intents"
 PAYMENT_INTENT_ITEM_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})$")
 PAYMENT_CANCEL_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})/cancel$")
+PAYMENT_RECEIPT_COLLECTION_PATH = "/v1/payment-receipts"
+PAYMENT_RECEIPT_ITEM_PATH = re.compile(r"^/v1/payment-receipts/([0-9a-fA-F-]{36})$")
 FORBIDDEN_PAYMENT_INTENT_KEYS = frozenset(
     {
         "card_pan",
@@ -154,7 +163,6 @@ KNOWN_POST_PATHS = frozenset(
         "/v1/usage-events",
         "/v1/rating-runs",
         "/v1/journal-proposals",
-        "/v1/payment-receipts",
         "/v1/cash-journal-proposals",
     }
 )
@@ -199,6 +207,7 @@ def create_http_app(
     presentments = InvoicePresentmentService(shared_ledger)
     case_presentments = CollectionCasePresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
+    receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
     credentials = TenantApiCredentialService(shared_ledger)
     webhooks = WebhookSubscriptionService(shared_ledger)
     deliveries = WebhookDeliveryService(shared_ledger)
@@ -643,6 +652,39 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_payment_receipts", "get_payment_receipt"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_payment_receipts":
+                    page = receipt_presentments.list_payment_receipts(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = receipt_presentments.present_payment_receipt(
+                    tenant_reference,
+                    _parse_uuid(path_values["payment_receipt_id"], "payment_receipt_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except PaymentReceiptPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "payment_receipt_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
             tenant_reference = _authorized_tenant(environ, payload)
@@ -762,6 +804,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if payment_intent_match is not None:
         if method == "GET":
             return "get_payment_intent", {"payment_intent_id": payment_intent_match.group(1)}
+        return "method_not_allowed", {}
+    if path == PAYMENT_RECEIPT_COLLECTION_PATH:
+        if method == "POST":
+            return "payment_receipts", {}
+        if method == "GET":
+            return "list_payment_receipts", {}
+        return "method_not_allowed", {}
+    payment_receipt_match = PAYMENT_RECEIPT_ITEM_PATH.fullmatch(path)
+    if payment_receipt_match is not None:
+        if method == "GET":
+            return "get_payment_receipt", {"payment_receipt_id": payment_receipt_match.group(1)}
         return "method_not_allowed", {}
     if path == INVOICE_DRAFT_COLLECTION_PATH:
         if method == "POST":
@@ -1046,6 +1099,8 @@ def _dispatch_write(
         )
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "payment_receipts":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
         result = settlements.record_payment_receipt(
             tenant_reference,
             _parse_uuid(payload.get("payment_intent_id"), "payment_intent_id"),

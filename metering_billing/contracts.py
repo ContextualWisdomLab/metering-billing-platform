@@ -32,6 +32,7 @@ __all__ = (
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
+    "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
@@ -47,6 +48,7 @@ __all__ = (
     "validate_invoice_presentment",
     "validate_collection_case_presentment",
     "validate_payment_intent_presentment",
+    "validate_payment_receipt_presentment",
     "validate_tenant_api_credential",
     "validate_webhook_subscription",
     "validate_webhook_delivery",
@@ -74,6 +76,7 @@ INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
 COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
 PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json"
+PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 WEBHOOK_SUBSCRIPTION_SCHEMA_NAME = "webhook-subscription.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
@@ -352,6 +355,38 @@ def validate_payment_intent_presentment(
                 errors.append("$: cancelled or rejected intents must wait")
         except Exception:
             errors.append("$: payment_amount must be an exact decimal")
+    return tuple(errors)
+
+
+def validate_payment_receipt_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate payment-receipt presentment shape plus amount and action invariants."""
+    schema = load_json_schema(PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    received = statement.get("received_amount")
+    remaining = statement.get("remaining_outstanding_amount")
+    action = statement.get("next_operator_action")
+    if isinstance(received, str):
+        try:
+            parsed_received = Decimal(received)
+            if parsed_received < Decimal("0"):
+                errors.append("$: received_amount must not be negative")
+        except Exception:
+            errors.append("$: received_amount must be an exact decimal")
+    if isinstance(remaining, str):
+        try:
+            parsed_remaining = Decimal(remaining)
+            if parsed_remaining < Decimal("0"):
+                errors.append("$: remaining_outstanding_amount must not be negative")
+            if parsed_remaining == Decimal("0") and action != "drain_or_wait":
+                errors.append("$: settled receipts must drain or wait")
+            if parsed_remaining > Decimal("0") and action != "record_receipt":
+                errors.append("$: residual receipts must record another receipt")
+        except Exception:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
     return tuple(errors)
 
 

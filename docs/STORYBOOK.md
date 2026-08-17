@@ -8,6 +8,8 @@ Customer copy on every collection case: outstanding and the next operator action
 
 Customer copy on every payment intent: projected amount and the next operator action. Create a projected payment intent, then record the receipt.
 
+Customer copy on every payment receipt: received amount and the next operator action. Record the receipt, then drain or wait for AIS to pull the cash journal.
+
 ## Stories
 
 | Story | Module | Fixtures |
@@ -18,6 +20,7 @@ Customer copy on every payment intent: projected amount and the next operator ac
 | StatusChip | `src/status_chip.js` | `taxed_partial_credit.json`, `untaxed_morning.json`, `settled_statement.json` |
 | CollectionCase | `src/collection_case.js` | `open_collection_case.json`, `dunning_collection_case.json`, `settled_collection_case.json` |
 | PaymentIntent | `src/payment_intent.js` | `projected_payment_intent.json`, `cancelled_payment_intent.json` |
+| PaymentReceipt | `src/payment_receipt.js` | `applied_full_payment_receipt.json`, `applied_partial_payment_receipt.json` |
 
 The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is not a one-off style.
 
@@ -33,5 +36,7 @@ The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is no
 | `settled_collection_case.json` | Settled case | `collection_outstanding` `0.00`, action `wait` |
 | `projected_payment_intent.json` | Projected morning intent | `payment_amount` `0.003705`, action `record_receipt` |
 | `cancelled_payment_intent.json` | Cancelled intent | `payment_amount` `0.003705`, action `wait` |
+| `applied_full_payment_receipt.json` | Full morning receipt | `received_amount` `0.003705`, remaining `0.00`, action `drain_or_wait` |
+| `applied_partial_payment_receipt.json` | Partial receipt | `received_amount` `0.001`, remaining `0.002705`, action `record_receipt` |
 
-Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, and `schemas/payment-intent-presentment.schema.json`.  They are never IEEE binary floats.
+Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, and `schemas/payment-receipt-presentment.schema.json`.  They are never IEEE binary floats.

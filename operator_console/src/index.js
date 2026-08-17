@@ -14,3 +14,8 @@ export {
   PAYMENT_INTENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextPaymentIntentActionCopy,
 } from "./payment_intent.js";
+export {
+  renderPaymentReceipt,
+  PAYMENT_RECEIPT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextPaymentReceiptActionCopy,
+} from "./payment_receipt.js";
