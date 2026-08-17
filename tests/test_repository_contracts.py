@@ -867,6 +867,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_rate_card_presentment(wait_action),
         )
         self.assertNotEqual(validate_rate_card_presentment([]), ())
+        missing_lines = dict(instance)
+        missing_lines.pop("lines")
+        self.assertNotEqual(validate_rate_card_presentment(missing_lines), ())
         zero = dict(instance)
         zero["lines"] = [
             {

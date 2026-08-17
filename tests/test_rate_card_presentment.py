@@ -18,8 +18,8 @@ from metering_billing.errors import RateCardPresentmentQueryError
 from metering_billing.rate_card_presentment import next_operator_action
 from metering_billing.usage_ledger import StoredRateCard, generate_record_id
 from test_http_app import invoke_http
-from test_usage_ingestion import TENANT_ONE, TENANT_TWO
-from test_usage_rating import TOKEN_UNIT_PRICE, ingest_known_batch
+from test_usage_ingestion import TENANT_ONE, TENANT_TWO, seed_ledger
+from test_usage_rating import TOKEN_UNIT_PRICE
 
 
 def publish_named_card(ledger, rate_card_name, unit_amount, clock=None):
@@ -42,7 +42,7 @@ class RateCardPresentmentTests(unittest.TestCase):
 
     def test_published_card_projects_unit_price_and_rate_window(self) -> None:
         """A published standard card shows exact unit prices and rate_window."""
-        ledger = ingest_known_batch().ledger
+        ledger = seed_ledger()
         published = publish_named_card(ledger, "workflow_standard", TOKEN_UNIT_PRICE)
         first = RateCardPresentmentService(ledger).present_rate_card(
             TENANT_ONE, published.rate_card_id
@@ -71,7 +71,7 @@ class RateCardPresentmentTests(unittest.TestCase):
 
     def test_http_get_returns_presentment_and_list_envelope(self) -> None:
         """GET is 200 presentment; list uses {rate_cards, next_cursor}."""
-        ledger = ingest_known_batch().ledger
+        ledger = seed_ledger()
         first = RateCardService(
             ledger, clock=lambda: datetime(2026, 8, 17, 21, 0, tzinfo=UTC)
         ).publish_rate_card(
@@ -168,7 +168,7 @@ class RateCardPresentmentTests(unittest.TestCase):
 
     def test_http_post_stays_the_existing_write_and_refuses_card_data(self) -> None:
         """POST stays the #18 catalog write; PAN and secrets are refused."""
-        ledger = ingest_known_batch().ledger
+        ledger = seed_ledger()
         app = create_http_app(ledger)
         status, body = invoke_http(
             app,
@@ -206,7 +206,7 @@ class RateCardPresentmentTests(unittest.TestCase):
 
     def test_cross_tenant_and_unknown_reads_are_404_without_leak(self) -> None:
         """Missing tenant is 422; unknown or cross-tenant ids stay 404 with no card."""
-        ledger = ingest_known_batch().ledger
+        ledger = seed_ledger()
         published = publish_named_card(ledger, "workflow_standard", TOKEN_UNIT_PRICE)
         app = create_http_app(ledger)
         missing_status, missing_body = invoke_http(
@@ -241,7 +241,7 @@ class RateCardPresentmentTests(unittest.TestCase):
     def test_list_filters_and_helpers_fail_closed(self) -> None:
         """Illegal list filters stay 422; helpers cover page bounds and rate_window."""
         self.assertEqual(next_operator_action(), "rate_window")
-        ledger = ingest_known_batch().ledger
+        ledger = seed_ledger()
         published = publish_named_card(ledger, "workflow_standard", TOKEN_UNIT_PRICE)
         tenant = ledger.require_tenant(TENANT_ONE)
         ledger.insert_rate_card(

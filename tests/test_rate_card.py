@@ -69,6 +69,9 @@ class RateCardCatalogTests(unittest.TestCase):
         self.assertEqual(draft.drafted_total_amount, KNOWN_MORNING_TOTAL)
         self.assertEqual(validate_rate_card(published.as_contract_dict()), ())
         self.assertEqual(validate_invoice_draft(draft.as_contract_dict()), ())
+        loaded = RateCardService(ingest.ledger).get_rate_card(TENANT_ONE, published.rate_card_id)
+        self.assertEqual(loaded.rate_card_id, published.rate_card_id)
+        self.assertEqual(loaded.rate_card_outcome_code, RateCardOutcomeCode.ACCEPTED)
 
     def test_second_publish_increments_version_and_old_ratings_pin_the_old_version(self) -> None:
         """A new line set is version 2; rating version 1 still uses the old price."""
@@ -517,6 +520,18 @@ class RateCardCatalogTests(unittest.TestCase):
             )
         self.assertEqual(value_status, 422)
         self.assertEqual(value_body["rejection_reason_code"], "request_invalid")
+        with mock.patch(
+            "metering_billing.http_app.RateCardService.get_rate_card_version",
+            side_effect=ValueError("closed"),
+        ):
+            version_value_status, version_value_body = invoke_http(
+                create_http_app(ledger),
+                "GET",
+                f"/v1/rate-card-versions/{version.rate_card_version_id}",
+                query={"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(version_value_status, 422)
+        self.assertEqual(version_value_body["rejection_reason_code"], "request_invalid")
 
     def test_catalog_edges_cover_unique_versions_and_fail_closed_reads(self) -> None:
         """Header-only cards, colliding versions, and HTTP gaps fail closed."""
