@@ -30,6 +30,7 @@ __all__ = (
     "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
+    "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
     "USAGE_INGESTION_RECEIPT_SCHEMA_NAME",
@@ -39,6 +40,7 @@ __all__ = (
     "validate_collection_case",
     "validate_invoice_draft",
     "validate_invoice_presentment",
+    "validate_tenant_api_credential",
     "validate_payment_intent",
     "validate_payment_receipt",
     "validate_credit_adjustment",
@@ -60,6 +62,7 @@ USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
+TENANT_API_CREDENTIAL_SCHEMA_NAME = "tenant-api-credential.schema.json"
 COLLECTION_CASE_SCHEMA_NAME = "collection-case.schema.json"
 PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
 PAYMENT_RECEIPT_SCHEMA_NAME = "payment-receipt.schema.json"
@@ -318,6 +321,35 @@ def validate_invoice_presentment(
                 errors.append("$: amount_due must equal inclusive minus credits and not go below zero")
         except Exception:
             errors.append("$: presentment amounts must be exact decimals")
+    return tuple(errors)
+
+
+def validate_tenant_api_credential(
+    credential: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate credential shape plus issue-only secret and status invariants."""
+    schema = load_json_schema(TENANT_API_CREDENTIAL_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, credential))
+    if not isinstance(credential, Mapping):
+        return tuple(errors)
+    outcome = credential.get("tenant_api_credential_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        for field_name in (
+            "tenant_api_credential_id",
+            "credential_label",
+            "credential_prefix",
+            "credential_status",
+            "issued_at",
+        ):
+            if field_name not in credential:
+                errors.append(f"$: {outcome} credentials must include {field_name}")
+        if "credential_secret_hash" in credential:
+            errors.append("$: persisted hashes must not appear on the HTTP contract")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in credential:
+            errors.append("$: rejected credentials must include rejection_reason_code")
+        if "api_credential_secret" in credential:
+            errors.append("$: rejected credentials must not include api_credential_secret")
     return tuple(errors)
 
 

@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, and credit-tax-unwind migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, tax rates, tax assessments, tenant API credentials, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, and tenant-api-credential migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, issues tenant API credentials, and accepts those writes over a stdlib HTTP adapter;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -110,7 +110,20 @@ python3 -c "from metering_billing.http_app import create_http_app"
 python3 -m metering_billing.http_app
 ```
 
-`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, or invoice draft. The adapter does not post journals or call a named payment provider.
+`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, invoice draft, or API credential. The adapter does not post journals or call a named payment provider.
+
+Until a tenant has an active API credential, the existing tenant pin is enough (bootstrap window). AIS can keep pulling with `X-CWL-Tenant-Reference` until a key is issued for that tenant. After a key exists, send it on every `/v1` call.
+
+## Issue a tenant API credential
+
+```bash
+python3 -c "from metering_billing import TenantApiCredentialService"
+# POST /v1/tenant-api-credentials
+# GET /v1/tenant-api-credentials
+# POST /v1/tenant-api-credentials/{id}/revoke
+```
+
+Call `TenantApiCredentialService.issue_credential` with a tenant and an optional two-or-more-word `snake_case` `credential_label`. The response includes the secret once. The ledger stores only a keyed HMAC. A second issue always mints a new secret. After one or more active keys exist, every `/v1` write and GET except credential issue requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals `X-CWL-Tenant-Reference` / `tenant_reference`. `GET /v1/tenant-api-credentials` lists id, label, prefix, status, and issued_at and never the secret or hash. `GET /healthz` stays unauthenticated. Issue a key, then send it on every `/v1` call; revoke when leaked.
 
 ## Present an invoice draft
 
@@ -129,7 +142,7 @@ After an `invoice_draft` exists, `GET /v1/invoice-drafts/{invoice_draft_id}` ret
 # GET /v1/journal-proposals/{proposal_id}?tenant_reference=urn:cwl:tenant_001
 ```
 
-AIS pulls validated proposals from the same stdlib app. Pin the tenant with optional `X-CWL-Tenant-Reference` or with `tenant_reference` in the query or JSON body. If both are present they must match. Cash, AR, and credit proposals share `journal_proposal` and appear in the same list. Query never marks a proposal exported, posted, or consumed. Billing emits semantic account roles only; AIS maps `cash_receipt` to its own chart.
+AIS pulls validated proposals from the same stdlib app. Pin the tenant with optional `X-CWL-Tenant-Reference` or with `tenant_reference` in the query or JSON body. If both are present they must match. That pull keeps working until a key is issued for the tenant; after issue, send the key on every `/v1` call. Cash, AR, and credit proposals share `journal_proposal` and appear in the same list. Query never marks a proposal exported, posted, or consumed. Billing emits semantic account roles only; AIS maps `cash_receipt` to its own chart.
 
 ## Pull a posting receipt
 
@@ -161,4 +174,4 @@ Call `TaxRateService.publish_tax_rate` with a tenant, a closed `tax_code` (`vat`
 
 ## Next action
 
-Open the draft statement, then collect or credit. Do not start a web UI, PDF, or email in this slice.
+Issue a key, then send it on every `/v1` call; revoke when leaked. Do not start a web UI, PDF, or email in this slice.

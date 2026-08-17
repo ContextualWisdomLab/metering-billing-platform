@@ -4,6 +4,8 @@
 
 ### Added
 
+- `TenantApiCredentialService.issue_credential` mints one append-only `tenant_api_credential`, returns prefix plus secret once, and persists only a keyed HMAC.  A second issue of the same tenant, optional `credential_label`, and contract version always mints a new secret.  `revoke_credential` is idempotent.  After one or more active keys exist, every `/v1` write and GET except credential issue requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals the pin.  Zero active keys keep the tenant pin (bootstrap window) so AIS `X-CWL-Tenant-Reference` pull stays up until a key is issued.  `GET /healthz` stays unauthenticated.  `POST /v1/tenant-api-credentials` issues a key; `GET /v1/tenant-api-credentials` lists metadata only; `POST /v1/tenant-api-credentials/{id}/revoke` revokes.  Issue a key, then send it on every `/v1` call; revoke when leaked.
+- ADR 0019 and `docs/SECURITY.md` for tenant API credentials without changing journal, tax, credit, or presentment shapes.
 - `InvoicePresentmentService.present_invoice_draft` projects one tenant-scoped statement from stored draft, tax, credit, rating, and collection rows.  `amount_due` is tax-inclusive consideration minus accepted credits and never below zero.  Tax fields are zero when no assessment exists.  `GET /v1/invoice-drafts/{invoice_draft_id}` returns the statement; `GET /v1/invoice-drafts` lists summaries as `{invoice_drafts, next_cursor}`.  Cross-tenant or unknown is 404.  Open the draft statement, then collect or credit.
 - ADR 0018 for invoice-draft presentment without PDF, email, or a web UI.
 - Taxed `credit_adjustment` rows store `tax_exclusive_amount` and `tax_amount` using the proportional split `round_half_even(credit_amount * tax_amount / tax_inclusive_amount)`.  A full inclusive credit reconstructs the original exclusive and tax.  The paired journal debits `usage_revenue` and `tax_payable` and credits `accounts_receivable` when tax is positive.  Untaxed credits stay two-line.  The credit idempotency key is unchanged; the hash includes the tax split when the draft is taxed.  Record the credit; AIS pulls the validated three-line unwind.
@@ -76,5 +78,6 @@
 
 ### Security
 
+- Tenant HTTP API credentials persist only a keyed HMAC.  The plaintext secret is returned once on issue and is never logged, listed, or placed on AIS contracts.  Unknown, revoked, and cross-tenant keys fail closed.
 - Excluded prompt, response, credential plaintext, provider secrets, and card data from initial contracts.
 - Required commit-pinned GitHub Actions.

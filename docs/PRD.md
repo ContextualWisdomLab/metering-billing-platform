@@ -115,7 +115,8 @@ contextual-orchestrator usage
 
 - Buyers and AIS can POST the already-built commercial path as JSON without importing in-process Python services.
 - Every write requires `tenant_reference`. Money stays exact-decimal strings.
-- HTTP 200 means `accepted` or `duplicate_replay`. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is only an unknown route.
+- After a tenant has one or more active API credentials, every `/v1` call except credential issue requires a matching bearer or `X-CWL-Api-Key` secret. Zero active keys keep the tenant pin (bootstrap window).
+- HTTP 200 means `accepted` or `duplicate_replay`. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant credential.
 - HTTP does not post journals, store a card PAN, or add Stripe, Adyen, or Toss.
 
 ## Journal-proposal query acceptance
@@ -150,6 +151,18 @@ contextual-orchestrator usage
 - Missing tenant, float money, and unknown ids fail closed.
 - Operators open the draft statement, then collect or credit. This slice does not add PDF, email, or a web UI.
 
+## Tenant-API-credential acceptance
+
+- An operator can issue one append-only `tenant_api_credential` for a known tenant. The secret is returned once (prefix plus secret). The ledger stores only a keyed HMAC.
+- A second issue of the same tenant, optional two-or-more-word `snake_case` `credential_label`, and contract version mints a new secret and a new row. It is not a silent duplicate of the first secret.
+- `revoke_credential` is idempotent. Revoked and unknown keys fail closed as `api_credential_invalid`.
+- After one or more active keys exist, every `/v1` write and GET except credential issue requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals `X-CWL-Tenant-Reference` / `tenant_reference`. A mismatch is HTTP 422.
+- Zero active keys keep the existing tenant pin (bootstrap window). AIS `X-CWL-Tenant-Reference` pull stays up until a key is issued for that tenant.
+- `GET /healthz` stays unauthenticated.
+- `POST /v1/tenant-api-credentials` may use the tenant pin alone. `GET /v1/tenant-api-credentials` lists id, label, prefix, status, and issued_at and never the secret or hash. `POST /v1/tenant-api-credentials/{id}/revoke` revokes.
+- Missing tenant, missing key after bootstrap closes, unknown or revoked key, and cross-tenant key use fail closed.
+- Operators issue a key, then send it on every `/v1` call; revoke when leaked. This slice does not log the secret, put it on AIS contracts, change journal/tax/credit/presentment shapes, or start a web UI.
+
 ## Credit-adjustment acceptance
 
 - A known invoice draft records one commercial credit whose exact amount does not exceed remaining adjustable consideration.
@@ -181,4 +194,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, and invoice-draft presentment reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, and tenant API credentials reach 100% statement and branch coverage.

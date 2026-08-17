@@ -35,9 +35,9 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.PaymentSettlementService` applies a commercial payment receipt against a projected intent and reduces collection outstanding. Receipts stay `applied` and do not capture via a provider or post a journal. AIS consumes the later cash journal proposal, not the receipt itself.
 
-`metering_billing.http_app.create_http_app` exposes those services as stdlib JSON HTTP. The adapter requires a tenant on every write, returns published `as_contract_dict` contracts, and never posts a journal.
+`metering_billing.http_app.create_http_app` exposes those services as stdlib JSON HTTP. The adapter requires a tenant on every write, returns published `as_contract_dict` contracts, and never posts a journal. After a tenant has one or more active API credentials, every `/v1` call except credential issue also requires a matching bearer or `X-CWL-Api-Key` secret (National Institute of Standards and Technology, 2020; OWASP, 2023; American Institute of Certified Public Accountants, 2017).
 
-`GET /v1/journal-proposals` is a safe collection read (Fielding et al., 2022; Google, 2024). AIS pulls validated proposals and may pin `X-CWL-Tenant-Reference`. Body or query `tenant_reference` still works when the header is absent; a mismatch is HTTP 422. Cash, AR, and credit rows share `journal_proposal`. Query does not flip `proposal_status`; AIS later returns `posting_receipt`. Billing emits semantic account roles only.
+`GET /v1/journal-proposals` is a safe collection read (Fielding et al., 2022; Google, 2024). AIS pulls validated proposals and may pin `X-CWL-Tenant-Reference`. Body or query `tenant_reference` still works when the header is absent; a mismatch is HTTP 422. That pull keeps working until a key is issued for the tenant. Cash, AR, and credit rows share `journal_proposal`. Query does not flip `proposal_status`; AIS later returns `posting_receipt`. Billing emits semantic account roles only.
 
 `metering_billing.PostingReceiptPullService` GETs that AIS receipt with stdlib `urllib` and stores a commercial observation. The consumed schema stays AIS-owned. `POST /v1/posting-receipt-observations` is the operator trigger; `GET /v1/posting-receipt-observations/{idempotency_key}` is a safe stored read and does not call AIS (Fielding et al., 2022). `posting_status_code` is not mapped onto `proposal_status`. If AIS returns 404, the operator accepts the proposal on AIS and retries.
 
@@ -49,9 +49,11 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.InvoicePresentmentService` projects a stored invoice draft into a commercial statement. IFRS 15 treats that statement as presentation of consideration, not earned revenue (IFRS Foundation, 2024). ISO 20022 keeps the commercial invoice document separate from a posted financial message (International Organization for Standardization, 2026). `GET /v1/invoice-drafts/{invoice_draft_id}` and `GET /v1/invoice-drafts` are safe tenant-scoped reads (Fielding et al., 2022; Google, 2024). Open the draft statement, then collect or credit.
 
+`metering_billing.TenantApiCredentialService` issues append-only HTTP API credentials. NIST SP 800-63B requires the verifier to store a keyed hash, never the recoverable secret (National Institute of Standards and Technology, 2020). OWASP treats leaked keys as revocable bearer credentials (OWASP, 2023). SOC 2 CC6 requires logical access control on a shippable HTTP surface (American Institute of Certified Public Accountants, 2017). `POST /v1/tenant-api-credentials` returns the secret once. `GET /v1/tenant-api-credentials` is a safe metadata list and never includes the secret (Fielding et al., 2022). `GET /healthz` stays unauthenticated. Issue a key, then send it on every `/v1` call; revoke when leaked.
+
 ## Security
 
-- No card number, CVC, provider secret, PAT plaintext, prompt, or response is accepted in billing contracts.
+- No card number, CVC, provider secret, PAT plaintext, prompt, response, or tenant API credential plaintext is accepted in billing contracts after issue. The issue response is the only place the secret appears.
 - Webhooks are evidence until signature verification and normalization succeed.
 - Tenant isolation is enforced in the application and database layers.
 - Historical facts are corrected by compensating records.

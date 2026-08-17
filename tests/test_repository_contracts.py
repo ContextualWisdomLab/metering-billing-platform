@@ -13,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
+from metering_billing.contracts import validate_tenant_api_credential
 from scripts.validate_repository import (
     main,
     find_mutable_action_references,
@@ -474,6 +475,75 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertTrue(
             any("presentment amounts" in error for error in validate_invoice_presentment(due_scientific))
         )
+
+    def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:
+        """Issue may return the secret once; hashes and rejected secrets are forbidden."""
+        schema = self._schema("tenant-api-credential.schema.json")
+        instance = {
+            "tenant_api_credential_contract_version": 1,
+            "tenant_api_credential_outcome_code": "accepted",
+            "tenant_api_credential_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6a0",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "credential_label": "operator_key",
+            "credential_prefix": "cwlak_xxxxxx",
+            "api_credential_secret": "cwlak_" + ("x" * 32),
+            "credential_status": "active",
+            "issued_at": "2026-08-17T22:00:00Z",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_tenant_api_credential(instance), ())
+        hashed = dict(instance)
+        hashed["credential_secret_hash"] = "hmac-sha256:" + ("a" * 64)
+        self.assertIn(
+            "$: additional property is not allowed: credential_secret_hash",
+            validate_schema_instance(schema, hashed),
+        )
+        self.assertIn(
+            "$: persisted hashes must not appear on the HTTP contract",
+            validate_tenant_api_credential(hashed),
+        )
+        rejected = {
+            "tenant_api_credential_contract_version": 1,
+            "tenant_api_credential_outcome_code": "rejected",
+            "rejection_reason_code": "tenant_not_found",
+        }
+        self.assertEqual(validate_schema_instance(schema, rejected), ())
+        leaked = dict(rejected)
+        leaked["api_credential_secret"] = "should-not-be-here"
+        self.assertIn(
+            "$: rejected credentials must not include api_credential_secret",
+            validate_tenant_api_credential(leaked),
+        )
+        missing_reason = {
+            "tenant_api_credential_contract_version": 1,
+            "tenant_api_credential_outcome_code": "rejected",
+        }
+        self.assertIn(
+            "$: rejected credentials must include rejection_reason_code",
+            validate_tenant_api_credential(missing_reason),
+        )
+        self.assertNotEqual(validate_tenant_api_credential([]), ())
+        accepted_missing = {
+            "tenant_api_credential_contract_version": 1,
+            "tenant_api_credential_outcome_code": "accepted",
+        }
+        self.assertTrue(
+            any("must include" in error for error in validate_tenant_api_credential(accepted_missing))
+        )
+
+    def test_tenant_api_credential_migration_stores_keyed_hash(self) -> None:
+        """API credentials persist a keyed HMAC and never a recoverable secret."""
+        sql = (ROOT / "database/migrations/0015_tenant_api_credential.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.tenant_api_credential",
+            "credential_secret_hash text NOT NULL CHECK (credential_secret_hash ~ '^hmac-sha256:[0-9a-f]{64}$')",
+            "credential_status text NOT NULL CHECK (credential_status IN ('active', 'revoked'))",
+            "UNIQUE (credential_secret_hash)",
+            "UNIQUE (tenant_account_id, tenant_api_credential_id)",
+        ):
+            self.assertIn(expected_fragment, sql)
 
     def test_invoice_draft_migration_persists_append_only_drafts(self) -> None:
         """The invoice-draft migration must keep identity tenant-scoped and draft-only."""

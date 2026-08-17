@@ -34,6 +34,12 @@ IFRS Foundation. (n.d.). *IAS 21 the effects of changes in foreign exchange rate
 
 International Organization for Standardization. (2026). *ISO 20022-1:2026 financial services—Universal financial industry message scheme—Part 1: Metamodel.* https://www.iso.org/standard/20022-1
 
+American Institute of Certified Public Accountants. (2017). *Trust services criteria for security, availability, processing integrity, confidentiality, and privacy.* https://www.aicpa-cima.com/topic/audit-assurance/audit-and-assurance-greater-than-soc-2
+
+National Institute of Standards and Technology. (2020). *Digital identity guidelines: Authentication and lifecycle management* (NIST Special Publication 800-63B). https://doi.org/10.6028/NIST.SP.800-63b
+
+OWASP. (2023). *API security top 10 2023: API2:2023 Broken authentication.* https://owasp.org/API-Security/editions/2023/en/0xa2-broken-authentication/
+
 PCI Security Standards Council. (2024). *Payment Card Industry Data Security Standard: Requirements and testing procedures* (Version 4.0.1). https://www.pcisecuritystandards.org/document_library/
 
 TM Forum. (2024). *TMF620 Product Catalog Management API (Version 5.0.0).* https://www.tmforum.org/oda/open-apis/directory/product-catalog-management-api-TMF620

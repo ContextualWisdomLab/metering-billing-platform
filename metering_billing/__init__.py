@@ -32,6 +32,7 @@ from metering_billing.contracts import (
     TAX_ASSESSMENT_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
     INVOICE_PRESENTMENT_SCHEMA_NAME,
+    TENANT_API_CREDENTIAL_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
     RATING_RUN_SCHEMA_NAME,
@@ -48,6 +49,7 @@ from metering_billing.contracts import (
     validate_tax_assessment,
     validate_invoice_draft,
     validate_invoice_presentment,
+    validate_tenant_api_credential,
     validate_journal_proposal,
     validate_payment_intent,
     validate_payment_receipt,
@@ -77,6 +79,9 @@ from metering_billing.errors import (
     InvoiceDraftOutcomeCode,
     InvoiceDraftRejectionReasonCode,
     InvoicePresentmentQueryError,
+    TenantApiCredentialOutcomeCode,
+    TenantApiCredentialQueryError,
+    TenantApiCredentialRejectionReasonCode,
     JournalProposalOutcomeCode,
     JournalProposalRejectionReasonCode,
     PaymentIntentOutcomeCode,
@@ -94,6 +99,7 @@ from metering_billing.exact_decimal import format_exact_decimal, parse_exact_dec
 from metering_billing.http_app import create_http_app
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
+from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -113,6 +119,7 @@ __all__ = (
     "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
+    "TENANT_API_CREDENTIAL_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -144,6 +151,10 @@ __all__ = (
     "InvoiceDraftService",
     "InvoicePresentmentQueryError",
     "InvoicePresentmentService",
+    "TenantApiCredentialOutcomeCode",
+    "TenantApiCredentialQueryError",
+    "TenantApiCredentialRejectionReasonCode",
+    "TenantApiCredentialService",
     "JournalProposalOutcomeCode",
     "JournalProposalRejectionReasonCode",
     "MemoryUsageLedger",
@@ -180,6 +191,7 @@ __all__ = (
     "validate_tax_assessment",
     "validate_invoice_draft",
     "validate_invoice_presentment",
+    "validate_tenant_api_credential",
     "validate_journal_proposal",
     "validate_payment_intent",
     "validate_payment_receipt",

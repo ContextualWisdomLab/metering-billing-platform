@@ -24,6 +24,9 @@ The application is a thin WSGI adapter:
 9. Let an operator GET a stored invoice draft as a commercial statement.
    Open the draft statement, then collect or credit.  The read does not
    post, call AIS, or start a web UI.
+10. Let an operator issue a tenant API credential.  After one active key
+    exists, every ``/v1`` call except credential issue requires that key.
+    Issue a key, then send it on every ``/v1`` call; revoke when leaked.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -51,6 +54,7 @@ from metering_billing.errors import (
     PostingReceiptObservationQueryError,
     RateCardQueryError,
     InvoicePresentmentQueryError,
+    TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
     TaxRateQueryError,
     TimeWindowError,
@@ -60,6 +64,7 @@ from metering_billing.tax_assessment import TaxAssessmentService
 from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
+from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
@@ -93,6 +98,12 @@ TAX_ASSESSMENT_COLLECTION_PATH = "/v1/tax-assessments"
 TAX_ASSESSMENT_ITEM_PATH = re.compile(r"^/v1/tax-assessments/([0-9a-fA-F-]{36})$")
 INVOICE_DRAFT_COLLECTION_PATH = "/v1/invoice-drafts"
 INVOICE_DRAFT_ITEM_PATH = re.compile(r"^/v1/invoice-drafts/([0-9a-fA-F-]{36})$")
+TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
+TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
+    r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})/revoke$"
+)
+API_KEY_HEADER_ENVIRON = "HTTP_X_CWL_API_KEY"
+AUTHORIZATION_HEADER_ENVIRON = "HTTP_AUTHORIZATION"
 KNOWN_POST_PATHS = frozenset(
     {
         "/v1/usage-events",
@@ -143,6 +154,23 @@ def create_http_app(
     tax_rates = TaxRateService(shared_ledger)
     assessments = TaxAssessmentService(shared_ledger)
     presentments = InvoicePresentmentService(shared_ledger)
+    credentials = TenantApiCredentialService(shared_ledger)
+
+    def _authorized_tenant(
+        environ: WSGIEnvironment,
+        payload: Mapping[str, Any],
+        *,
+        require_credential: bool = True,
+    ) -> str:
+        """Resolve the tenant pin and enforce an active key after bootstrap."""
+        tenant_reference = _resolve_tenant_pin(environ, payload)
+        if not require_credential:
+            return tenant_reference
+        try:
+            credentials.authorize_request(tenant_reference, _extract_api_key(environ))
+        except TenantApiCredentialQueryError as error:
+            raise HttpRequestError(error.rejection_reason_code) from error
+        return tenant_reference
 
     def application(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         """Dispatch one HTTP request onto the existing commercial services."""
@@ -155,10 +183,55 @@ def create_http_app(
             return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "healthz":
             return _send_json(start_response, 200, {"status": "ok"})
+        if route_name in {
+            "list_tenant_api_credentials",
+            "tenant_api_credentials",
+            "revoke_tenant_api_credential",
+        }:
+            try:
+                if route_name == "list_tenant_api_credentials":
+                    query = _read_query(environ)
+                    tenant_reference = _authorized_tenant(environ, query)
+                    page = credentials.list_credentials(tenant_reference)
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                payload = _read_json_object(environ)
+                if route_name == "tenant_api_credentials":
+                    tenant_reference = _authorized_tenant(
+                        environ, payload, require_credential=False
+                    )
+                    result = credentials.issue_credential(
+                        tenant_reference, payload.get("credential_label")
+                    )
+                    return _send_json(
+                        start_response, _status_for_result(result), result.as_contract_dict()
+                    )
+                tenant_reference = _authorized_tenant(environ, payload)
+                result = credentials.revoke_credential(
+                    tenant_reference,
+                    _parse_uuid(path_values["tenant_api_credential_id"], "tenant_api_credential_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except TenantApiCredentialQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "api_credential_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {"list_journal_proposals", "get_journal_proposal"}:
             try:
                 query = _read_query(environ)
-                tenant_reference = _resolve_tenant_pin(environ, query)
+                tenant_reference = _authorized_tenant(environ, query)
                 if route_name == "list_journal_proposals":
                     page = exports.list_journal_proposals(
                         tenant_reference,
@@ -191,7 +264,7 @@ def create_http_app(
         if route_name == "get_posting_receipt_observation":
             try:
                 query = _read_query(environ)
-                tenant_reference = _resolve_tenant_pin(environ, query)
+                tenant_reference = _authorized_tenant(environ, query)
                 result = pulls.get_posting_receipt_observation(
                     tenant_reference, path_values["idempotency_key"]
                 )
@@ -214,7 +287,7 @@ def create_http_app(
         if route_name == "posting_receipt_observations":
             try:
                 payload = _read_json_object(environ)
-                tenant_reference = _resolve_tenant_pin(environ, payload)
+                tenant_reference = _authorized_tenant(environ, payload)
                 idempotency_key = payload.get("idempotency_key")
                 if not isinstance(idempotency_key, str) or not idempotency_key:
                     raise HttpRequestError("idempotency_key_missing")
@@ -233,7 +306,7 @@ def create_http_app(
         if route_name == "get_credit_adjustment":
             try:
                 query = _read_query(environ)
-                tenant_reference = _resolve_tenant_pin(environ, query)
+                tenant_reference = _authorized_tenant(environ, query)
                 result = credits.get_credit_adjustment(
                     tenant_reference,
                     _parse_uuid(path_values["credit_adjustment_id"], "credit_adjustment_id"),
@@ -264,7 +337,7 @@ def create_http_app(
         }:
             try:
                 query = _read_query(environ)
-                tenant_reference = _resolve_tenant_pin(environ, query)
+                tenant_reference = _authorized_tenant(environ, query)
                 if route_name == "list_rate_cards":
                     page = catalogs.list_rate_cards(tenant_reference)
                     return _send_json(start_response, 200, page.as_contract_dict())
@@ -305,7 +378,7 @@ def create_http_app(
         if route_name in {"list_tax_rates", "get_tax_rate_version"}:
             try:
                 query = _read_query(environ)
-                tenant_reference = _resolve_tenant_pin(environ, query)
+                tenant_reference = _authorized_tenant(environ, query)
                 if route_name == "list_tax_rates":
                     page = tax_rates.list_tax_rates(tenant_reference)
                     return _send_json(start_response, 200, page.as_contract_dict())
@@ -334,7 +407,7 @@ def create_http_app(
         if route_name == "get_tax_assessment":
             try:
                 query = _read_query(environ)
-                tenant_reference = _resolve_tenant_pin(environ, query)
+                tenant_reference = _authorized_tenant(environ, query)
                 result = assessments.get_tax_assessment(
                     tenant_reference,
                     _parse_uuid(path_values["tax_assessment_id"], "tax_assessment_id"),
@@ -360,7 +433,7 @@ def create_http_app(
         if route_name in {"list_invoice_drafts", "get_invoice_draft"}:
             try:
                 query = _read_query(environ)
-                tenant_reference = _resolve_tenant_pin(environ, query)
+                tenant_reference = _authorized_tenant(environ, query)
                 if route_name == "list_invoice_drafts":
                     page = presentments.list_invoice_drafts(
                         tenant_reference,
@@ -392,7 +465,7 @@ def create_http_app(
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
-            tenant_reference = _resolve_tenant_pin(environ, payload)
+            tenant_reference = _authorized_tenant(environ, payload)
             body, status_code = _dispatch_write(
                 route_name,
                 path_values,
@@ -443,6 +516,19 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == "/healthz":
         if method == "GET":
             return "healthz", {}
+        return "method_not_allowed", {}
+    if path == TENANT_API_CREDENTIAL_COLLECTION_PATH:
+        if method == "POST":
+            return "tenant_api_credentials", {}
+        if method == "GET":
+            return "list_tenant_api_credentials", {}
+        return "method_not_allowed", {}
+    revoke_match = TENANT_API_CREDENTIAL_REVOKE_PATH.fullmatch(path)
+    if revoke_match is not None:
+        if method == "POST":
+            return "revoke_tenant_api_credential", {
+                "tenant_api_credential_id": revoke_match.group(1)
+            }
         return "method_not_allowed", {}
     dunning_match = COLLECTION_DUNNING_PATH.fullmatch(path)
     if dunning_match is not None:
@@ -571,6 +657,31 @@ def _read_json_object(environ: WSGIEnvironment) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise HttpRequestError("request_invalid")
     return loaded
+
+
+def _extract_api_key(environ: WSGIEnvironment) -> str | None:
+    """Return the Bearer or X-CWL-Api-Key secret, if present.
+
+    Both headers may be sent when they match.  A scheme other than Bearer, an
+    empty secret, or a header mismatch fails closed.
+    """
+    authorization = environ.get(AUTHORIZATION_HEADER_ENVIRON)
+    header_key = environ.get(API_KEY_HEADER_ENVIRON)
+    bearer: str | None = None
+    if isinstance(authorization, str) and authorization:
+        if not authorization.startswith("Bearer "):
+            raise HttpRequestError("api_credential_invalid")
+        bearer = authorization[len("Bearer ") :]
+        if not bearer:
+            raise HttpRequestError("api_credential_invalid")
+    api_key = header_key if isinstance(header_key, str) and header_key else None
+    if bearer is not None and api_key is not None:
+        if bearer != api_key:
+            raise HttpRequestError("request_invalid")
+        return bearer
+    if bearer is not None:
+        return bearer
+    return api_key
 
 
 def _header_tenant(environ: WSGIEnvironment) -> str | None:

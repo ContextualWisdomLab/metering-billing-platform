@@ -500,6 +500,25 @@ class StoredIngestionReceipt:
     recorded_at: datetime
 
 
+@dataclass(frozen=True)
+class StoredTenantApiCredential:
+    """Append-only HTTP API credential for one tenant.
+
+    The plaintext secret is never stored.  ``credential_secret_hash`` is a
+    keyed HMAC.  Revocation updates ``credential_status`` on the same row.
+    """
+
+    tenant_api_credential_id: UUID
+    tenant_account_id: UUID
+    tenant_api_credential_contract_version: int
+    credential_label: str
+    credential_prefix: str
+    credential_secret_hash: str
+    credential_status: str
+    issued_at: datetime
+    revoked_at: datetime | None
+
+
 @dataclass
 class MemoryUsageLedger:
     """Mutable catalog plus append-only usage tables with tenant isolation."""
@@ -578,6 +597,8 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     tax_assessment_draft_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    tenant_api_credentials: dict[UUID, StoredTenantApiCredential] = field(default_factory=dict)
+    tenant_api_credential_hash_index: dict[str, UUID] = field(default_factory=dict)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -1917,6 +1938,82 @@ class MemoryUsageLedger:
             for rating_run in self.rating_runs.values()
             if rating_run.tenant_account_id == tenant_account_id
         )
+
+    def insert_tenant_api_credential(
+        self, credential: StoredTenantApiCredential
+    ) -> StoredTenantApiCredential:
+        """Persist one API credential.  Secrets are never replayed or stored."""
+        if credential.credential_status not in {"active", "revoked"}:
+            raise ValueError("credential_status must be active or revoked")
+        if not credential.credential_secret_hash.startswith("hmac-sha256:"):
+            raise ValueError("credential_secret_hash must be a keyed HMAC")
+        if credential.tenant_api_credential_id in self.tenant_api_credentials:
+            raise ValueError("tenant_api_credential_id already stored")
+        if credential.credential_secret_hash in self.tenant_api_credential_hash_index:
+            raise ValueError("credential_secret_hash already stored")
+        self.tenant_api_credentials[credential.tenant_api_credential_id] = credential
+        self.tenant_api_credential_hash_index[credential.credential_secret_hash] = (
+            credential.tenant_api_credential_id
+        )
+        return credential
+
+    def get_tenant_api_credential(
+        self, tenant_api_credential_id: UUID
+    ) -> StoredTenantApiCredential | None:
+        """Return one API credential by internal identifier, if present."""
+        return self.tenant_api_credentials.get(tenant_api_credential_id)
+
+    def find_tenant_api_credential_by_hash(
+        self, credential_secret_hash: str
+    ) -> StoredTenantApiCredential | None:
+        """Return the credential for one keyed hash, if present."""
+        credential_id = self.tenant_api_credential_hash_index.get(credential_secret_hash)
+        if credential_id is None:
+            return None
+        return self.tenant_api_credentials[credential_id]
+
+    def list_tenant_api_credentials(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredTenantApiCredential, ...]:
+        """Return API credentials limited to one tenant."""
+        return tuple(
+            credential
+            for credential in self.tenant_api_credentials.values()
+            if credential.tenant_account_id == tenant_account_id
+        )
+
+    def list_active_tenant_api_credentials(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredTenantApiCredential, ...]:
+        """Return active API credentials limited to one tenant."""
+        return tuple(
+            credential
+            for credential in self.list_tenant_api_credentials(tenant_account_id)
+            if credential.credential_status == "active"
+        )
+
+    def revoke_tenant_api_credential(
+        self, tenant_api_credential_id: UUID, revoked_at: datetime
+    ) -> StoredTenantApiCredential:
+        """Mark one stored credential revoked.  A second revoke is idempotent."""
+        stored = self.tenant_api_credentials.get(tenant_api_credential_id)
+        if stored is None:
+            raise ValueError("api credential revocation requires a stored credential")
+        if stored.credential_status == "revoked":
+            return stored
+        updated = StoredTenantApiCredential(
+            tenant_api_credential_id=stored.tenant_api_credential_id,
+            tenant_account_id=stored.tenant_account_id,
+            tenant_api_credential_contract_version=stored.tenant_api_credential_contract_version,
+            credential_label=stored.credential_label,
+            credential_prefix=stored.credential_prefix,
+            credential_secret_hash=stored.credential_secret_hash,
+            credential_status="revoked",
+            issued_at=stored.issued_at,
+            revoked_at=revoked_at,
+        )
+        self.tenant_api_credentials[updated.tenant_api_credential_id] = updated
+        return updated
 
     def require_tenant(self, tenant_reference: str) -> TenantAccount:
         """Return the tenant or raise if the catalog does not contain it."""

@@ -165,6 +165,32 @@ class InvoicePresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class TenantApiCredentialOutcomeCode(StrEnum):
+    """Terminal result of issuing or revoking one tenant API credential."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class TenantApiCredentialRejectionReasonCode(StrEnum):
+    """Why a credential command was refused without minting a secret."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    CREDENTIAL_LABEL_INVALID = "credential_label_invalid"
+    API_CREDENTIAL_NOT_FOUND = "api_credential_not_found"
+    API_CREDENTIAL_MISSING = "api_credential_missing"
+    API_CREDENTIAL_INVALID = "api_credential_invalid"
+
+
+class TenantApiCredentialQueryError(ValueError):
+    """Raised when a stored API credential cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class JournalProposalOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one accounting journal proposal."""
 
