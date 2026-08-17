@@ -21,6 +21,9 @@ The application is a thin WSGI adapter:
 8. Let a buyer POST a tax rate, assess a draft, and GET those records.
    Publish a tax rate, assess the draft, then propose the journal and let
    AIS pull.  AIS must map ``tax_payable``.
+9. Let an operator GET a stored invoice draft as a commercial statement.
+   Open the draft statement, then collect or credit.  The read does not
+   post, call AIS, or start a web UI.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -47,6 +50,7 @@ from metering_billing.errors import (
     JournalProposalQueryError,
     PostingReceiptObservationQueryError,
     RateCardQueryError,
+    InvoicePresentmentQueryError,
     TaxAssessmentQueryError,
     TaxRateQueryError,
     TimeWindowError,
@@ -55,6 +59,7 @@ from metering_billing.rate_card import RateCardService
 from metering_billing.tax_assessment import TaxAssessmentService
 from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
+from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
@@ -86,11 +91,12 @@ TAX_RATE_VERSION_ITEM_PATH = re.compile(
 )
 TAX_ASSESSMENT_COLLECTION_PATH = "/v1/tax-assessments"
 TAX_ASSESSMENT_ITEM_PATH = re.compile(r"^/v1/tax-assessments/([0-9a-fA-F-]{36})$")
+INVOICE_DRAFT_COLLECTION_PATH = "/v1/invoice-drafts"
+INVOICE_DRAFT_ITEM_PATH = re.compile(r"^/v1/invoice-drafts/([0-9a-fA-F-]{36})$")
 KNOWN_POST_PATHS = frozenset(
     {
         "/v1/usage-events",
         "/v1/rating-runs",
-        "/v1/invoice-drafts",
         "/v1/journal-proposals",
         "/v1/collection-cases",
         "/v1/payment-intents",
@@ -136,6 +142,7 @@ def create_http_app(
     catalogs = RateCardService(shared_ledger)
     tax_rates = TaxRateService(shared_ledger)
     assessments = TaxAssessmentService(shared_ledger)
+    presentments = InvoicePresentmentService(shared_ledger)
 
     def application(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         """Dispatch one HTTP request onto the existing commercial services."""
@@ -350,6 +357,39 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_invoice_drafts", "get_invoice_draft"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _resolve_tenant_pin(environ, query)
+                if route_name == "list_invoice_drafts":
+                    page = presentments.list_invoice_drafts(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = presentments.present_invoice_draft(
+                    tenant_reference,
+                    _parse_uuid(path_values["invoice_draft_id"], "invoice_draft_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except InvoicePresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "invoice_draft_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
             tenant_reference = _resolve_tenant_pin(environ, payload)
@@ -413,6 +453,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if cancel_match is not None:
         if method == "POST":
             return "cancel_payment_intent", {"payment_intent_id": cancel_match.group(1)}
+        return "method_not_allowed", {}
+    if path == INVOICE_DRAFT_COLLECTION_PATH:
+        if method == "POST":
+            return "invoice_drafts", {}
+        if method == "GET":
+            return "list_invoice_drafts", {}
+        return "method_not_allowed", {}
+    draft_match = INVOICE_DRAFT_ITEM_PATH.fullmatch(path)
+    if draft_match is not None:
+        if method == "GET":
+            return "get_invoice_draft", {"invoice_draft_id": draft_match.group(1)}
         return "method_not_allowed", {}
     if path == "/v1/journal-proposals":
         if method == "POST":

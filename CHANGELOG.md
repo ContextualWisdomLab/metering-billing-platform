@@ -4,6 +4,8 @@
 
 ### Added
 
+- `InvoicePresentmentService.present_invoice_draft` projects one tenant-scoped statement from stored draft, tax, credit, rating, and collection rows.  `amount_due` is tax-inclusive consideration minus accepted credits and never below zero.  Tax fields are zero when no assessment exists.  `GET /v1/invoice-drafts/{invoice_draft_id}` returns the statement; `GET /v1/invoice-drafts` lists summaries as `{invoice_drafts, next_cursor}`.  Cross-tenant or unknown is 404.  Open the draft statement, then collect or credit.
+- ADR 0018 for invoice-draft presentment without PDF, email, or a web UI.
 - Taxed `credit_adjustment` rows store `tax_exclusive_amount` and `tax_amount` using the proportional split `round_half_even(credit_amount * tax_amount / tax_inclusive_amount)`.  A full inclusive credit reconstructs the original exclusive and tax.  The paired journal debits `usage_revenue` and `tax_payable` and credits `accounts_receivable` when tax is positive.  Untaxed credits stay two-line.  The credit idempotency key is unchanged; the hash includes the tax split when the draft is taxed.  Record the credit; AIS pulls the validated three-line unwind.
 - ADR 0017 for tax-payable unwind without AIS journal-reversals or operator UI.
 - `TaxRateService.publish_tax_rate` writes one tenant-scoped `tax_rate_schedule` and one immutable `tax_rate_version`.  Closed codes are `vat`, `gst`, and `sales_tax`.  `tax_rate` is an exact `Decimal` in `[0, 1]`.  The same tenant, code, rate, and contract version replay the stored version.

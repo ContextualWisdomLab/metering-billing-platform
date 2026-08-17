@@ -17,7 +17,7 @@
 - `rate_card_line`: exact flat `unit_amount` for one `metric_code` on one published version. Currency must match the version.
 - `rating_run`: append-only invoice-intent total for one tenant, half-open window, rate card, and usage snapshot.
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
-- `invoice_draft`: append-only draft-only commercial document for one tenant and rating run.
+- `invoice_draft`: append-only draft-only commercial document for one tenant and rating run. Presentment projects a statement from this row plus tax, credit, and collection facts; it does not add a snapshot table.
 - `invoice_draft_line`: append-only draft line copied from a rating line.
 - `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft, payment receipt, or credit adjustment. AIS pulls these rows; query does not add a second table.
 - `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
@@ -87,6 +87,10 @@ A stored posting-receipt observation is identified by `(tenant_account_id, idemp
 ## Credit-adjustment identity
 
 A stored credit adjustment is identified by `(tenant_account_id, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)`.  Internal primary key is `credit_adjustment_id`.  The hash covers the draft, exact credit amount, closed reason, currency, and the tax split when the draft is taxed.  Status is `recorded` only.  Remaining adjustable is the tax-inclusive amount when an assessment exists, otherwise the draft total, minus prior accepted credits.  If a collection case exists, outstanding is reduced by the same inclusive amount and cannot go negative.  `tax_exclusive_amount` plus `tax_amount` equals `credit_amount`.  A taxed journal debits `usage_revenue` and `tax_payable` and credits `accounts_receivable`.
+
+## Invoice-presentment projection
+
+Presentment does not add a table.  `GET /v1/invoice-drafts/{invoice_draft_id}` projects `invoice_draft`, optional `tax_assessment`, accepted `credit_adjustment` rows, optional `collection_case`, and `invoice_draft_line` quantities.  `amount_due` is `max(0, tax_inclusive_or_draft_total - sum(credit_amount))`.
 
 ## Tax-assessment identity
 

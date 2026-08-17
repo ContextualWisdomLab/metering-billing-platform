@@ -69,6 +69,8 @@ python3 -c "from metering_billing import InvoiceDraftService"
 
 After a `rating_run` exists, call `InvoiceDraftService.draft_invoice` with the tenant and `rating_run_id`. The draft total equals the rating-run billable total. An identical replay returns the same `invoice_draft_id`. Status stays `draft`. The draft does not issue, collect, call a payment provider, or post a journal.
 
+After an `invoice_draft` exists, call `InvoicePresentmentService.present_invoice_draft` or `GET /v1/invoice-drafts/{invoice_draft_id}` with the tenant. The statement shows exclusive, tax, inclusive, credited, and amount due as exact-decimal strings. Tax is zero when no assessment exists. Amount due is inclusive minus accepted credits and never below zero. `GET /v1/invoice-drafts` lists summaries. Open the draft statement, then collect or credit. The read does not post, call AIS, or start a web UI.
+
 ## Propose a journal
 
 ```bash
@@ -108,7 +110,17 @@ python3 -c "from metering_billing.http_app import create_http_app"
 python3 -m metering_billing.http_app
 ```
 
-`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, or rate-card version. The adapter does not post journals or call a named payment provider.
+`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, or invoice draft. The adapter does not post journals or call a named payment provider.
+
+## Present an invoice draft
+
+```bash
+python3 -c "from metering_billing import InvoicePresentmentService"
+# GET /v1/invoice-drafts/{invoice_draft_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/invoice-drafts?tenant_reference=urn:cwl:tenant_001
+```
+
+After an `invoice_draft` exists, `GET /v1/invoice-drafts/{invoice_draft_id}` returns the tenant-scoped statement. Open the draft statement, then collect or credit.
 
 ## Pull journal proposals
 
@@ -149,4 +161,4 @@ Call `TaxRateService.publish_tax_rate` with a tenant, a closed `tax_code` (`vat`
 
 ## Next action
 
-Record the credit; AIS pulls the validated three-line unwind. Do not call an OSS tax engine, do not store exemption certificates, and do not start operator UI in this slice.
+Open the draft statement, then collect or credit. Do not start a web UI, PDF, or email in this slice.

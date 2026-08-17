@@ -137,6 +137,19 @@ contextual-orchestrator usage
 - GET of a stored observation is tenant-scoped, returns 404 across tenants, and does not call AIS.
 - Missing tenant, missing key, illegal `posting_status_code`, tenant mismatch, float JSON, and transport failure fail closed.
 
+## Invoice-presentment acceptance
+
+- A known stored invoice draft presents one tenant-scoped statement with `tax_exclusive_amount`, `tax_amount`, `tax_inclusive_amount`, `credited_amount`, and `amount_due`.
+- Tax fields are zero when no assessment exists. Inclusive equals exclusive plus tax when assessed.
+- `credited_amount` is the sum of accepted credits. `amount_due` is inclusive minus credits and never below zero.
+- Line items project `metric_code`, `quantity`, `unit_amount`, and `line_amount` as exact-decimal strings.
+- When a collection case exists the statement includes `collection_case_id` and `collection_outstanding`.
+- A second presentment of the same tenant and `invoice_draft_id` returns the same amounts.
+- `GET /v1/invoice-drafts/{invoice_draft_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/invoice-drafts` lists summaries `{invoice_draft_id, amount_due, currency_code, drafted_at}` with `{invoice_drafts, next_cursor}`.
+- Missing tenant, float money, and unknown ids fail closed.
+- Operators open the draft statement, then collect or credit. This slice does not add PDF, email, or a web UI.
+
 ## Credit-adjustment acceptance
 
 - A known invoice draft records one commercial credit whose exact amount does not exceed remaining adjustable consideration.
@@ -168,4 +181,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, and tax-payable unwind reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, and invoice-draft presentment reach 100% statement and branch coverage.

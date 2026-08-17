@@ -47,6 +47,8 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.TaxRateService` publishes a tenant-scoped tax-rate version. `metering_billing.TaxAssessmentService` applies that version to a stored invoice draft and half-even rounds to ISO 4217 minor units (International Organization for Standardization, 2015; OECD, 2017). IFRS 15 keeps amounts collected for a tax authority out of revenue (IFRS Foundation, 2024). A taxed journal proposal credits semantic `tax_payable`; AIS must map that role and owns IAS 12 presentation (IFRS Foundation, n.d.). `POST /v1/tax-rates` and `POST /v1/tax-assessments` write; GET list, version, and assessment routes are safe tenant-scoped reads (Fielding et al., 2022). Publish a tax rate, assess the draft, then propose the journal and let AIS pull.
 
+`metering_billing.InvoicePresentmentService` projects a stored invoice draft into a commercial statement. IFRS 15 treats that statement as presentation of consideration, not earned revenue (IFRS Foundation, 2024). ISO 20022 keeps the commercial invoice document separate from a posted financial message (International Organization for Standardization, 2026). `GET /v1/invoice-drafts/{invoice_draft_id}` and `GET /v1/invoice-drafts` are safe tenant-scoped reads (Fielding et al., 2022; Google, 2024). Open the draft statement, then collect or credit.
+
 ## Security
 
 - No card number, CVC, provider secret, PAT plaintext, prompt, or response is accepted in billing contracts.

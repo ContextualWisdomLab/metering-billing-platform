@@ -157,6 +157,14 @@ class InvoiceDraftRejectionReasonCode(StrEnum):
     RATING_RUN_NOT_FOUND = "rating_run_not_found"
 
 
+class InvoicePresentmentQueryError(ValueError):
+    """Raised when a stored invoice draft cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class JournalProposalOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one accounting journal proposal."""
 

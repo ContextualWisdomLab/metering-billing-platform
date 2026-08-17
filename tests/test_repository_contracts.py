@@ -401,6 +401,68 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(schema, issued),
         )
 
+    def test_invoice_presentment_accepts_statement_totals_and_rejects_posted(self) -> None:
+        """A presentment contract records exact due amounts and cannot claim posting."""
+        from metering_billing.contracts import validate_invoice_presentment
+
+        schema = self._schema("invoice-draft-presentment.schema.json")
+        instance = {
+            "invoice_presentment_contract_version": 1,
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "currency_code": "USD",
+            "drafted_at": "2026-08-17T21:00:00Z",
+            "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf621",
+            "tax_exclusive_amount": "100.00",
+            "tax_amount": "10.00",
+            "tax_inclusive_amount": "110.00",
+            "credited_amount": "11.00",
+            "amount_due": "99.00",
+            "invoice_lines": [
+                {
+                    "line_number": 1,
+                    "metric_code": "gen_ai_output_token",
+                    "quantity": "100",
+                    "unit_amount": "1.00",
+                    "line_amount": "100.00",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_invoice_presentment(instance), ())
+        posted = dict(instance)
+        posted["proposal_status"] = "posted"
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        unbalanced = dict(instance)
+        unbalanced["tax_inclusive_amount"] = "200.00"
+        self.assertIn(
+            "$: tax_inclusive_amount must equal exclusive plus tax",
+            validate_invoice_presentment(unbalanced),
+        )
+        wrong_due = dict(instance)
+        wrong_due["amount_due"] = "1.00"
+        self.assertIn(
+            "$: amount_due must equal inclusive minus credits and not go below zero",
+            validate_invoice_presentment(wrong_due),
+        )
+        self.assertNotEqual(validate_invoice_presentment([]), ())
+        scientific = dict(instance)
+        scientific["tax_exclusive_amount"] = "1e2"
+        scientific["tax_amount"] = "1e1"
+        scientific["tax_inclusive_amount"] = "not-decimal"
+        self.assertTrue(
+            any("exact decimals" in error for error in validate_invoice_presentment(scientific))
+        )
+        due_scientific = dict(instance)
+        due_scientific["credited_amount"] = "1e1"
+        due_scientific["amount_due"] = "not-decimal"
+        self.assertTrue(
+            any("presentment amounts" in error for error in validate_invoice_presentment(due_scientific))
+        )
+
     def test_invoice_draft_migration_persists_append_only_drafts(self) -> None:
         """The invoice-draft migration must keep identity tenant-scoped and draft-only."""
         sql = (ROOT / "database/migrations/0004_invoice_draft.sql").read_text(encoding="utf-8")

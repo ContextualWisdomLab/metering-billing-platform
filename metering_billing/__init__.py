@@ -3,11 +3,12 @@
 This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, rate tenant-scoped
-windows against a persisted version, draft invoice-intent documents, publish
-tax rates, assess tax on a draft, emit journal proposals, open collection
-cases, project provider-neutral payment intents, apply commercial payment
-receipts, record commercial credits, and accept those writes over a stdlib
-HTTP adapter without taking a payment-provider dependency.
+windows against a persisted version, draft invoice-intent documents, present
+those drafts as statements, publish tax rates, assess tax on a draft, emit
+journal proposals, open collection cases, project provider-neutral payment
+intents, apply commercial payment receipts, record commercial credits, and
+accept those writes over a stdlib HTTP adapter without taking a
+payment-provider dependency.
 
 The package never posts statutory journals.  Accounting exports remain
 ``accounting_journal_proposal`` documents with proposal-only statuses.
@@ -30,6 +31,7 @@ from metering_billing.contracts import (
     TAX_RATE_SCHEMA_NAME,
     TAX_ASSESSMENT_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
+    INVOICE_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
     RATING_RUN_SCHEMA_NAME,
@@ -45,6 +47,7 @@ from metering_billing.contracts import (
     validate_tax_rate,
     validate_tax_assessment,
     validate_invoice_draft,
+    validate_invoice_presentment,
     validate_journal_proposal,
     validate_payment_intent,
     validate_payment_receipt,
@@ -73,6 +76,7 @@ from metering_billing.errors import (
     IngestionOutcomeCode,
     InvoiceDraftOutcomeCode,
     InvoiceDraftRejectionReasonCode,
+    InvoicePresentmentQueryError,
     JournalProposalOutcomeCode,
     JournalProposalRejectionReasonCode,
     PaymentIntentOutcomeCode,
@@ -89,6 +93,7 @@ from metering_billing.errors import (
 from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
 from metering_billing.http_app import create_http_app
 from metering_billing.invoice_draft import InvoiceDraftService
+from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -107,6 +112,7 @@ __all__ = (
     "TAX_RATE_SCHEMA_NAME",
     "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
+    "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -136,6 +142,8 @@ __all__ = (
     "InvoiceDraftOutcomeCode",
     "InvoiceDraftRejectionReasonCode",
     "InvoiceDraftService",
+    "InvoicePresentmentQueryError",
+    "InvoicePresentmentService",
     "JournalProposalOutcomeCode",
     "JournalProposalRejectionReasonCode",
     "MemoryUsageLedger",
@@ -171,6 +179,7 @@ __all__ = (
     "validate_tax_rate",
     "validate_tax_assessment",
     "validate_invoice_draft",
+    "validate_invoice_presentment",
     "validate_journal_proposal",
     "validate_payment_intent",
     "validate_payment_receipt",

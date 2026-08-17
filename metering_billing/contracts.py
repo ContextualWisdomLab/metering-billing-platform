@@ -29,6 +29,7 @@ __all__ = (
     "TAX_RATE_SCHEMA_NAME",
     "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
+    "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
     "USAGE_INGESTION_RECEIPT_SCHEMA_NAME",
@@ -37,6 +38,7 @@ __all__ = (
     "validate_accounting_journal_proposal",
     "validate_collection_case",
     "validate_invoice_draft",
+    "validate_invoice_presentment",
     "validate_payment_intent",
     "validate_payment_receipt",
     "validate_credit_adjustment",
@@ -57,6 +59,7 @@ USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
 USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
+INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
 COLLECTION_CASE_SCHEMA_NAME = "collection-case.schema.json"
 PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
 PAYMENT_RECEIPT_SCHEMA_NAME = "payment-receipt.schema.json"
@@ -282,6 +285,40 @@ def _invoice_draft_total_errors(invoice_draft: Mapping[str, Any]) -> tuple[str, 
     if line_total != Decimal(drafted_total_amount):
         return ("$: invoice draft line totals must equal drafted_total_amount",)
     return ()
+
+
+def validate_invoice_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate presentment shape plus tax-sum and amount-due invariants."""
+    schema = load_json_schema(INVOICE_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    exclusive = statement.get("tax_exclusive_amount")
+    tax_amount = statement.get("tax_amount")
+    inclusive = statement.get("tax_inclusive_amount")
+    credited = statement.get("credited_amount")
+    amount_due = statement.get("amount_due")
+    if (
+        isinstance(exclusive, str)
+        and isinstance(tax_amount, str)
+        and isinstance(inclusive, str)
+    ):
+        try:
+            if Decimal(exclusive) + Decimal(tax_amount) != Decimal(inclusive):
+                errors.append("$: tax_inclusive_amount must equal exclusive plus tax")
+        except Exception:
+            errors.append("$: tax amounts must be exact decimals")
+    if isinstance(inclusive, str) and isinstance(credited, str) and isinstance(amount_due, str):
+        try:
+            remaining = Decimal(inclusive) - Decimal(credited)
+            expected = remaining if remaining >= Decimal("0") else Decimal("0")
+            if Decimal(amount_due) != expected:
+                errors.append("$: amount_due must equal inclusive minus credits and not go below zero")
+        except Exception:
+            errors.append("$: presentment amounts must be exact decimals")
+    return tuple(errors)
 
 
 def validate_collection_case(
