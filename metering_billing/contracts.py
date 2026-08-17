@@ -25,6 +25,7 @@ __all__ = (
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
+    "RATE_CARD_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
@@ -37,6 +38,7 @@ __all__ = (
     "validate_payment_intent",
     "validate_payment_receipt",
     "validate_credit_adjustment",
+    "validate_rate_card",
     "validate_journal_proposal",
     "validate_rating_run",
     "validate_schema_instance",
@@ -55,6 +57,7 @@ COLLECTION_CASE_SCHEMA_NAME = "collection-case.schema.json"
 PAYMENT_INTENT_SCHEMA_NAME = "payment-intent.schema.json"
 PAYMENT_RECEIPT_SCHEMA_NAME = "payment-receipt.schema.json"
 CREDIT_ADJUSTMENT_SCHEMA_NAME = "credit-adjustment.schema.json"
+RATE_CARD_SCHEMA_NAME = "rate-card.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
@@ -427,6 +430,42 @@ def _missing_success_credit_adjustment_fields(
     ):
         if field_name not in credit_adjustment:
             missing.append(f"$: {outcome} credit adjustments must include {field_name}")
+    return tuple(missing)
+
+
+def validate_rate_card(
+    rate_card: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate rate-card shape plus identity and published lines."""
+    schema = load_json_schema(RATE_CARD_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, rate_card))
+    if not isinstance(rate_card, Mapping):
+        return tuple(errors)
+    outcome = rate_card.get("rate_card_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_rate_card_fields(rate_card, str(outcome)))
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in rate_card:
+            errors.append("$: rejected rate cards must include rejection_reason_code")
+    return tuple(errors)
+
+
+def _missing_success_rate_card_fields(
+    rate_card: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay card lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "rate_card_id",
+        "rate_card_version_id",
+        "rate_card_name",
+        "rate_card_version",
+        "currency_code",
+        "source_payload_hash",
+        "lines",
+    ):
+        if field_name not in rate_card:
+            missing.append(f"$: {outcome} rate cards must include {field_name}")
     return tuple(missing)
 
 

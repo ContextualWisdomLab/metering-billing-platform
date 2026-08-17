@@ -624,6 +624,62 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_rate_card_accepts_published_version_and_closed_reasons(self) -> None:
+        """A rate-card contract records exact unit amounts and closed outcomes."""
+        schema = self._schema("rate-card.schema.json")
+        instance = {
+            "rate_card_contract_version": 1,
+            "rate_card_outcome_code": "accepted",
+            "rate_card_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "rate_card_version_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf681",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "rate_card_name": "cwl_standard",
+            "rate_card_version": 1,
+            "currency_code": "USD",
+            "source_payload_hash": "sha256:" + "3" * 64,
+            "published_at": "2026-08-17T20:30:00Z",
+            "next_operator_action": "Publish a rate card, then rate a window against that version.",
+            "lines": [
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        floated = dict(instance, lines=[{"metric_code": "gen_ai_output_token", "unit_amount": 0.000002, "currency_code": "USD"}])
+        self.assertTrue(validate_schema_instance(schema, floated))
+        unknown_reason = {
+            "rate_card_contract_version": 1,
+            "rate_card_outcome_code": "rejected",
+            "rejection_reason_code": "tax_exempt",
+        }
+        self.assertIn(
+            "$.rejection_reason_code: value is not in the allowed enumeration",
+            validate_schema_instance(schema, unknown_reason),
+        )
+
+    def test_rate_card_catalog_migration_is_tenant_scoped_and_append_only(self) -> None:
+        """Catalog versions stay tenant-scoped and never reuse a single-word table."""
+        sql = (ROOT / "database/migrations/0012_rate_card_catalog.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ADD COLUMN tenant_account_id uuid",
+            "ADD COLUMN rate_card_name text",
+            "CREATE TABLE billing_core.rate_card_version",
+            "CREATE TABLE billing_core.rate_card_line",
+            "UNIQUE (tenant_account_id, rate_card_id, version_number)",
+            "UNIQUE (tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version)",
+            "UNIQUE (tenant_account_id, rate_card_version_id)",
+            "UNIQUE (tenant_account_id, rate_card_version_id, metric_code)",
+            "unit_amount numeric(38, 12) NOT NULL CHECK (unit_amount > 0)",
+            "FOREIGN KEY (tenant_account_id, rate_card_id)",
+            "FOREIGN KEY (tenant_account_id, rate_card_version_id)",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_posting_receipt_observation_migration_is_tenant_scoped_and_append_only(self) -> None:
         """The observation table must not use AIS receipt_id as the primary key."""
         sql = (ROOT / "database/migrations/0010_posting_receipt_observation.sql").read_text(

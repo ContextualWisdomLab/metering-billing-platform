@@ -35,10 +35,21 @@ contextual-orchestrator usage
 -> accounting journal proposal
 ```
 
+## Rate-card catalog acceptance
+
+- A known tenant publishes one `rate_card` and one immutable `rate_card_version` whose lines carry exact `unit_amount` values greater than zero.
+- A second publish of the same tenant, card name, canonical line hash, and contract version returns the same `rate_card_version` as `duplicate_replay`.
+- A later distinct line set increments the version. A published version is never edited.
+- Another tenant cannot list, fetch, or rate the first tenant's card or version.
+- Missing tenant, empty lines, zero or negative `unit_amount`, float money, currency mismatch, and single-word metric or card names fail closed.
+- Operators publish a rate card, then rate a window against that version. This slice does not apply tax, discounts, or tiered prices.
+
 ## Windowed-rating acceptance
 
-- A known stored-usage set in a half-open ISO 8601 window produces one exact invoice-intent money total.
+- A known stored-usage set in a half-open ISO 8601 window produces one exact invoice-intent money total equal to quantity times the published `unit_amount`.
 - Equivalent decimal and UTC spellings (`1` vs `1.0`, `Z` vs `+00:00`) remain one stored fact and therefore one rated quantity.
+- Rating requires a persisted same-tenant `rate_card_version`. An unknown or cross-tenant version rejects.
+- A billable meter missing from the published card fails closed and does not invent a price.
 - A second rate of the same tenant, window, rate-card version, and usage snapshot returns the same `rating_run_id` and totals.
 - Another tenant's usage is invisible to the rated total.
 - Estimated, reconstructed, and other non-billable qualities stay stored and stay out of invoice-intent money when `meter_quality_rule` says so.
@@ -144,4 +155,4 @@ contextual-orchestrator usage
 - Attribution and usage references are tenant-scoped by composite foreign keys.
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
-- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, and credit adjustment reach 100% statement and branch coverage.
+- Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, and the versioned rate-card catalog reach 100% statement and branch coverage.

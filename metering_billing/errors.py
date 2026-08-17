@@ -60,6 +60,35 @@ class RatingRejectionReasonCode(StrEnum):
     BILLING_DISPOSITION_UNKNOWN = "billing_disposition_unknown"
 
 
+class RateCardOutcomeCode(StrEnum):
+    """Terminal result of publishing one tenant-scoped rate-card version."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class RateCardRejectionReasonCode(StrEnum):
+    """Why a rate-card publish or read was refused without writing prices."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    RATE_CARD_NOT_FOUND = "rate_card_not_found"
+    RATE_CARD_LINES_INVALID = "rate_card_lines_invalid"
+    UNIT_AMOUNT_INVALID = "unit_amount_invalid"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    METRIC_CODE_INVALID = "metric_code_invalid"
+    RATE_CARD_NAME_INVALID = "rate_card_name_invalid"
+    CURRENCY_CODE_INVALID = "currency_code_invalid"
+
+
+class RateCardQueryError(ValueError):
+    """Raised when a stored rate card or version cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class InvoiceDraftOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one invoice-intent draft."""
 

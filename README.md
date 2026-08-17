@@ -20,9 +20,9 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, and credit-adjustment migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, rates tenant-scoped half-open windows, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
+- closed JSON Schema contracts for usage events, provider capabilities, usage-ingestion receipts, rating runs, invoice drafts, collection cases, payment intents, payment receipts, credit adjustments, rate cards, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, and rate-card-catalog migrations with tenant-scoped attribution constraints;
+- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, and accepts those writes over a stdlib HTTP adapter;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -45,13 +45,21 @@ python3 -c "from metering_billing import UsageIngestionService, MemoryUsageLedge
 
 Register the tenant, billing account, principal, meter, and quality rules on a `MemoryUsageLedger`, then call `UsageIngestionService.ingest_usage_batch`. Identical retries return `duplicate_replay` and leave the stored usage set unchanged. A changed hash or contract version for the same source key is rejected.
 
+## Publish a rate card
+
+```bash
+python3 -c "from metering_billing import RateCardService"
+```
+
+Call `RateCardService.publish_rate_card` with a tenant, a two-or-more-word `snake_case` card name, an ISO currency, and one or more flat metric lines. Each `unit_amount` is an exact decimal greater than zero. The same tenant, name, canonical line hash, and contract version return `duplicate_replay`. A later distinct line set increments the version. A published version is never edited.
+
 ## Rate a usage window
 
 ```bash
 python3 -c "from metering_billing import TimeWindow, UsageRatingService"
 ```
 
-Register a versioned rate card and exact unit prices on the same ledger, then call `UsageRatingService.rate_usage_window` with a tenant, a half-open ISO 8601 window, and a rate-card version. Only `meter_quality_rule` billable quality enters the invoice-intent total. An identical replay returns the same `rating_run_id` and exact totals. Rating does not draft an invoice, call a payment provider, or post a journal.
+Publish a rate card, then call `UsageRatingService.rate_usage_window` with a tenant, a half-open ISO 8601 window, and that persisted rate-card version. Only `meter_quality_rule` billable quality enters the invoice-intent total. Rating uses the stored `unit_amount` for the matching `metric_code`. An unknown version, a cross-tenant version, or a missing metric fails closed. An identical replay returns the same `rating_run_id` and exact totals. Rating does not draft an invoice, call a payment provider, or post a journal.
 
 ## Draft an invoice
 
@@ -100,7 +108,7 @@ python3 -c "from metering_billing.http_app import create_http_app"
 python3 -m metering_billing.http_app
 ```
 
-`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal. The adapter does not post journals or call a named payment provider.
+`create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, or rate-card version. The adapter does not post journals or call a named payment provider.
 
 ## Pull journal proposals
 
@@ -133,4 +141,4 @@ After an `invoice_draft` exists, call `CreditAdjustmentService.record_credit_adj
 
 ## Next action
 
-Operators record the credit, then let AIS pull the validated proposal. Do not flip `proposal_status`, do not open a fiscal period, and do not start tax or rate-card CRUD in this slice.
+Publish a rate card, then rate a window against that version. Do not invent a hidden default price, do not edit a published version, and do not start tax in this slice.

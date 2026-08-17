@@ -19,7 +19,7 @@ from types import ModuleType
 from typing import Callable
 from uuid import UUID
 
-from metering_billing.errors import RatingRejectionReasonCode, RejectionReasonCode
+from metering_billing.errors import RejectionReasonCode
 from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
@@ -156,25 +156,50 @@ class StoredUsageEvent:
 
 
 @dataclass(frozen=True)
-class RateCard:
-    """Versioned commercial price book used to rate a usage window."""
+class StoredRateCard:
+    """Tenant-scoped commercial price-book header.
+
+    Versions live in ``rate_card_version``.  The header is identified by
+    ``(tenant_account_id, rate_card_name)`` and is never a provider object ID.
+    """
 
     rate_card_id: UUID
-    rate_card_code: str
-    rate_card_version: int
+    tenant_account_id: UUID
+    rate_card_name: str
     currency_code: str
-    valid_from: datetime
-    valid_to: datetime | None
+    created_at: datetime
 
 
 @dataclass(frozen=True)
-class RateCardPrice:
-    """Exact unit price for one meter on one rate-card version."""
+class StoredRateCardLine:
+    """Immutable flat unit price for one metric on one rate-card version."""
 
-    rate_card_price_id: UUID
+    rate_card_line_id: UUID
+    tenant_account_id: UUID
+    rate_card_version_id: UUID
+    metric_code: str
+    unit_amount: Decimal
+    currency_code: str
+
+
+@dataclass(frozen=True)
+class StoredRateCardVersion:
+    """Append-only published price list for one tenant rate card.
+
+    Identity is tenant-scoped
+    ``(rate_card_id, source_payload_hash, rate_card_contract_version)``.
+    ``version_number`` increments on each distinct publish of the same card.
+    """
+
+    rate_card_version_id: UUID
+    tenant_account_id: UUID
     rate_card_id: UUID
-    meter_definition_id: UUID
-    unit_price_amount: Decimal
+    version_number: int
+    rate_card_contract_version: int
+    currency_code: str
+    source_payload_hash: str
+    published_at: datetime
+    rate_card_lines: tuple[StoredRateCardLine, ...]
 
 
 @dataclass(frozen=True)
@@ -433,8 +458,16 @@ class MemoryUsageLedger:
     producer_event_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     usage_ingestion_receipts: list[StoredIngestionReceipt] = field(default_factory=list)
     accounting_export_records: list[dict[str, str]] = field(default_factory=list)
-    rate_cards: dict[tuple[str, int], RateCard] = field(default_factory=dict)
-    rate_card_prices: dict[tuple[UUID, UUID], RateCardPrice] = field(default_factory=dict)
+    rate_cards: dict[UUID, StoredRateCard] = field(default_factory=dict)
+    rate_card_name_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
+    rate_card_versions: dict[UUID, StoredRateCardVersion] = field(default_factory=dict)
+    rate_card_version_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
+        default_factory=dict
+    )
+    rate_card_version_number_index: dict[tuple[UUID, UUID, int], UUID] = field(
+        default_factory=dict
+    )
+    rate_card_lines: list[StoredRateCardLine] = field(default_factory=list)
     rating_runs: dict[UUID, StoredRatingRun] = field(default_factory=dict)
     rating_run_index: dict[tuple[UUID, datetime, datetime, UUID, str], UUID] = field(
         default_factory=dict
@@ -640,67 +673,189 @@ class MemoryUsageLedger:
         self.meter_quality_rules[key] = rule
         return rule
 
-    def register_rate_card(
-        self,
-        rate_card_code: str,
-        rate_card_version: int,
-        currency_code: str,
-        valid_from: datetime,
-        valid_to: datetime | None = None,
-    ) -> RateCard:
-        """Register a versioned rate card.  The same code and version is idempotent."""
-        key = (rate_card_code, rate_card_version)
-        existing = self.rate_cards.get(key)
-        if existing is not None:
-            return existing
-        rate_card = RateCard(
-            rate_card_id=generate_record_id(),
-            rate_card_code=rate_card_code,
-            rate_card_version=rate_card_version,
-            currency_code=currency_code,
-            valid_from=valid_from,
-            valid_to=valid_to,
+    def find_rate_card(self, tenant_account_id: UUID, rate_card_name: str) -> StoredRateCard | None:
+        """Return the tenant-scoped rate-card header for one name, if present."""
+        rate_card_id = self.rate_card_name_index.get((tenant_account_id, rate_card_name))
+        if rate_card_id is None:
+            return None
+        return self.rate_cards[rate_card_id]
+
+    def get_rate_card(self, rate_card_id: UUID) -> StoredRateCard | None:
+        """Return one rate-card header by internal identifier, if present."""
+        return self.rate_cards.get(rate_card_id)
+
+    def insert_rate_card(self, rate_card: StoredRateCard) -> StoredRateCard:
+        """Persist one tenant-scoped rate-card header or return the existing name."""
+        existing_id = self.rate_card_name_index.get(
+            (rate_card.tenant_account_id, rate_card.rate_card_name)
         )
-        self.rate_cards[key] = rate_card
+        if existing_id is not None:
+            existing = self.rate_cards[existing_id]
+            if existing.currency_code != rate_card.currency_code:
+                raise ValueError("rate_card currency cannot change after publish")
+            return existing
+        if rate_card.rate_card_id in self.rate_cards:
+            raise ValueError("rate_card_id already stored for a different name")
+        self.rate_cards[rate_card.rate_card_id] = rate_card
+        self.rate_card_name_index[(rate_card.tenant_account_id, rate_card.rate_card_name)] = (
+            rate_card.rate_card_id
+        )
         return rate_card
 
-    def register_rate_card_price(
-        self,
-        rate_card_id: UUID,
-        meter_definition_id: UUID,
-        unit_price_amount: str,
-    ) -> RateCardPrice:
-        """Register an exact unit price.  Binary floating-point values are rejected."""
-        parsed_amount = parse_exact_decimal(unit_price_amount)
-        key = (rate_card_id, meter_definition_id)
-        existing = self.rate_card_prices.get(key)
-        if existing is not None:
-            return existing
-        price = RateCardPrice(
-            rate_card_price_id=generate_record_id(),
-            rate_card_id=rate_card_id,
-            meter_definition_id=meter_definition_id,
-            unit_price_amount=parsed_amount,
+    def list_rate_cards(self, tenant_account_id: UUID) -> tuple[StoredRateCard, ...]:
+        """Return rate-card headers limited to one tenant."""
+        return tuple(
+            card
+            for card in self.rate_cards.values()
+            if card.tenant_account_id == tenant_account_id
         )
-        self.rate_card_prices[key] = price
-        return price
 
-    def resolve_rate_card(
-        self, rate_card_code: str, rate_card_version: int, occurred_at: datetime
-    ) -> tuple[RateCard | None, RatingRejectionReasonCode | None]:
-        """Resolve one rate-card version and require it to be effective at *occurred_at*."""
-        rate_card = self.rate_cards.get((rate_card_code, rate_card_version))
-        if rate_card is None:
-            return None, RatingRejectionReasonCode.RATE_CARD_NOT_FOUND
-        if not _is_effective(rate_card.valid_from, rate_card.valid_to, occurred_at):
-            return None, RatingRejectionReasonCode.RATE_CARD_NOT_EFFECTIVE
-        return rate_card, None
+    def find_rate_card_version_by_identity(
+        self,
+        tenant_account_id: UUID,
+        rate_card_id: UUID,
+        source_payload_hash: str,
+        rate_card_contract_version: int,
+    ) -> StoredRateCardVersion | None:
+        """Return the published version for one tenant-scoped line hash, if any."""
+        version_id = self.rate_card_version_index.get(
+            (
+                tenant_account_id,
+                rate_card_id,
+                source_payload_hash,
+                rate_card_contract_version,
+            )
+        )
+        if version_id is None:
+            return None
+        return self.rate_card_versions[version_id]
 
-    def find_rate_card_price(
-        self, rate_card_id: UUID, meter_definition_id: UUID
-    ) -> RateCardPrice | None:
-        """Return the unit price for one meter on one rate-card version."""
-        return self.rate_card_prices.get((rate_card_id, meter_definition_id))
+    def get_rate_card_version(
+        self, rate_card_version_id: UUID
+    ) -> StoredRateCardVersion | None:
+        """Return one published version by internal identifier, if present."""
+        return self.rate_card_versions.get(rate_card_version_id)
+
+    def find_rate_card_version(
+        self,
+        tenant_account_id: UUID,
+        version_number: int,
+        rate_card_name: str | None = None,
+    ) -> StoredRateCardVersion | None:
+        """Return one tenant-scoped published version number, if uniquely present."""
+        if rate_card_name is not None:
+            card = self.find_rate_card(tenant_account_id, rate_card_name)
+            if card is None:
+                return None
+            version_id = self.rate_card_version_number_index.get(
+                (tenant_account_id, card.rate_card_id, version_number)
+            )
+            if version_id is None:
+                return None
+            return self.rate_card_versions[version_id]
+        matches = tuple(
+            version
+            for version in self.rate_card_versions.values()
+            if version.tenant_account_id == tenant_account_id
+            and version.version_number == version_number
+        )
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    def next_rate_card_version_number(
+        self, tenant_account_id: UUID, rate_card_id: UUID
+    ) -> int:
+        """Return the next append-only version number for one tenant card."""
+        current = [
+            version.version_number
+            for version in self.rate_card_versions.values()
+            if version.tenant_account_id == tenant_account_id
+            and version.rate_card_id == rate_card_id
+        ]
+        if not current:
+            return 1
+        return max(current) + 1
+
+    def insert_rate_card_version(
+        self, version: StoredRateCardVersion
+    ) -> StoredRateCardVersion:
+        """Persist one immutable published version or return the existing identity."""
+        if version.version_number < 1:
+            raise ValueError("version_number must be greater than zero")
+        metric_codes = [line.metric_code for line in version.rate_card_lines]
+        if not metric_codes or len(set(metric_codes)) != len(metric_codes):
+            raise ValueError("rate_card_lines must be a unique non-empty metric set")
+        for line in version.rate_card_lines:
+            if line.unit_amount <= 0:
+                raise ValueError("unit_amount must be greater than zero")
+            if line.currency_code != version.currency_code:
+                raise ValueError("rate_card_line currency must match the version")
+        identity = (
+            version.tenant_account_id,
+            version.rate_card_id,
+            version.source_payload_hash,
+            version.rate_card_contract_version,
+        )
+        existing_id = self.rate_card_version_index.get(identity)
+        if existing_id is not None:
+            return self.rate_card_versions[existing_id]
+        if version.rate_card_version_id in self.rate_card_versions:
+            raise ValueError("rate_card_version_id already stored for a different identity")
+        persisted_lines = tuple(
+            StoredRateCardLine(
+                rate_card_line_id=line.rate_card_line_id,
+                tenant_account_id=line.tenant_account_id,
+                rate_card_version_id=version.rate_card_version_id,
+                metric_code=line.metric_code,
+                unit_amount=parse_exact_decimal(format_exact_decimal(line.unit_amount)),
+                currency_code=line.currency_code,
+            )
+            for line in version.rate_card_lines
+        )
+        persisted = StoredRateCardVersion(
+            rate_card_version_id=version.rate_card_version_id,
+            tenant_account_id=version.tenant_account_id,
+            rate_card_id=version.rate_card_id,
+            version_number=version.version_number,
+            rate_card_contract_version=version.rate_card_contract_version,
+            currency_code=version.currency_code,
+            source_payload_hash=version.source_payload_hash,
+            published_at=version.published_at,
+            rate_card_lines=persisted_lines,
+        )
+        self.rate_card_versions[persisted.rate_card_version_id] = persisted
+        self.rate_card_version_index[identity] = persisted.rate_card_version_id
+        self.rate_card_version_number_index[
+            (persisted.tenant_account_id, persisted.rate_card_id, persisted.version_number)
+        ] = persisted.rate_card_version_id
+        self.rate_card_lines.extend(persisted_lines)
+        return persisted
+
+    def list_rate_card_versions(
+        self, tenant_account_id: UUID, rate_card_id: UUID | None = None
+    ) -> tuple[StoredRateCardVersion, ...]:
+        """Return published versions, optionally limited to one tenant card."""
+        versions = tuple(
+            version
+            for version in self.rate_card_versions.values()
+            if version.tenant_account_id == tenant_account_id
+        )
+        if rate_card_id is None:
+            return versions
+        return tuple(version for version in versions if version.rate_card_id == rate_card_id)
+
+    def find_rate_card_line(
+        self, rate_card_version_id: UUID, metric_code: str
+    ) -> StoredRateCardLine | None:
+        """Return the stored unit amount for one metric on one published version."""
+        version = self.rate_card_versions.get(rate_card_version_id)
+        if version is None:
+            return None
+        for line in version.rate_card_lines:
+            if line.metric_code == metric_code:
+                return line
+        return None
 
     def billing_account_reference_for(self, billing_account_id: UUID) -> str:
         """Return the catalog URN for a stored billing account identifier."""

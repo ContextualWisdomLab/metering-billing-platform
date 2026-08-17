@@ -2,12 +2,12 @@
 
 The service is the buyer-facing read-and-rate path:
 
-1. Resolve the tenant and an effective rate-card version.
+1. Resolve the tenant and a persisted same-tenant rate-card version.
 2. Load that tenant's stored usage inside a half-open ISO 8601 window.
 3. Keep only measurements whose ``meter_quality_rule`` disposition is billable.
-4. Multiply exact quantities by exact unit prices into invoice-intent lines.
-5. Persist an append-only ``rating_run`` identified by tenant, window, rate card,
-   and usage-snapshot hash, or acknowledge an identical replay.
+4. Multiply exact quantities by the stored ``unit_amount`` for each metric.
+5. Persist an append-only ``rating_run`` identified by tenant, window, published
+   version, and usage-snapshot hash, or acknowledge an identical replay.
 
 The service does not ingest usage, draft invoices, talk to a payment provider,
 or emit a posted accounting journal.
@@ -28,7 +28,7 @@ from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
-    RateCard,
+    StoredRateCardVersion,
     StoredRatingLine,
     StoredRatingRun,
     StoredUsageEvent,
@@ -141,7 +141,7 @@ class UsageRatingService:
         A replay of the same tenant, normalized window, rate-card version, and
         usage snapshot returns the stored ``rating_run_id`` and exact totals.
         """
-        resolved_code = self._rate_card_code if rate_card_code is None else rate_card_code
+        resolved_name = self._rate_card_code if rate_card_code is None else rate_card_code
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
             return _rejected(RatingRejectionReasonCode.TENANT_NOT_FOUND)
@@ -149,12 +149,20 @@ class UsageRatingService:
 
         window_started_at = time_window.window_started_at.astimezone(UTC)
         window_ended_at = time_window.window_ended_at.astimezone(UTC)
-        rate_card, rate_card_error = self.ledger.resolve_rate_card(
-            resolved_code, rate_card_version, window_started_at
+        if not isinstance(rate_card_version, int) or isinstance(rate_card_version, bool):
+            return _rejected(RatingRejectionReasonCode.RATE_CARD_NOT_FOUND)
+        rate_card_version_row = self.ledger.find_rate_card_version(
+            tenant.tenant_account_id, rate_card_version, resolved_name
         )
-        if rate_card_error is not None:
-            return _rejected(rate_card_error)
-        assert rate_card is not None
+        if rate_card_version_row is None:
+            rate_card_version_row = self.ledger.find_rate_card_version(
+                tenant.tenant_account_id, rate_card_version
+            )
+        if rate_card_version_row is None:
+            return _rejected(RatingRejectionReasonCode.RATE_CARD_NOT_FOUND)
+        rate_card = self.ledger.get_rate_card(rate_card_version_row.rate_card_id)
+        if rate_card is None or rate_card.tenant_account_id != tenant.tenant_account_id:
+            return _rejected(RatingRejectionReasonCode.RATE_CARD_NOT_FOUND)
 
         events = self.ledger.list_usage_events_in_window(
             tenant.tenant_account_id, window_started_at, window_ended_at
@@ -164,7 +172,7 @@ class UsageRatingService:
             tenant.tenant_account_id,
             window_started_at,
             window_ended_at,
-            rate_card.rate_card_id,
+            rate_card_version_row.rate_card_version_id,
             usage_snapshot_hash,
         )
         if existing is not None:
@@ -175,7 +183,7 @@ class UsageRatingService:
             )
 
         try:
-            lines = self._build_rating_lines(rate_card, events)
+            lines = self._build_rating_lines(rate_card_version_row, events)
         except _RatingRejected as error:
             return _rejected(error.reason_code)
 
@@ -202,9 +210,9 @@ class UsageRatingService:
             StoredRatingRun(
                 rating_run_id=rating_run_id,
                 tenant_account_id=tenant.tenant_account_id,
-                rate_card_id=rate_card.rate_card_id,
-                rate_card_code=rate_card.rate_card_code,
-                rate_card_version=rate_card.rate_card_version,
+                rate_card_id=rate_card_version_row.rate_card_version_id,
+                rate_card_code=rate_card.rate_card_name,
+                rate_card_version=rate_card_version_row.version_number,
                 window_started_at=window_started_at,
                 window_ended_at=window_ended_at,
                 usage_snapshot_hash=usage_snapshot_hash,
@@ -219,7 +227,7 @@ class UsageRatingService:
 
     def _build_rating_lines(
         self,
-        rate_card: RateCard,
+        rate_card_version: StoredRateCardVersion,
         events: tuple[StoredUsageEvent, ...],
     ) -> tuple[RatingLineResult, ...]:
         """Aggregate billable measurements into exact invoice-intent lines."""
@@ -237,8 +245,8 @@ class UsageRatingService:
                     raise _RatingRejected(RatingRejectionReasonCode.BILLING_DISPOSITION_UNKNOWN)
                 if not billable:
                     continue
-                price = self.ledger.find_rate_card_price(
-                    rate_card.rate_card_id, measurement.meter_definition_id
+                price = self.ledger.find_rate_card_line(
+                    rate_card_version.rate_card_version_id, measurement.meter_code
                 )
                 if price is None:
                     raise _RatingRejected(RatingRejectionReasonCode.METER_PRICE_MISSING)
@@ -250,9 +258,9 @@ class UsageRatingService:
                     measurement.unit_code,
                 )
                 current_quantity, _current_price = aggregates.get(
-                    key, (Decimal("0"), price.unit_price_amount)
+                    key, (Decimal("0"), price.unit_amount)
                 )
-                aggregates[key] = (current_quantity + measurement.measured_quantity, price.unit_price_amount)
+                aggregates[key] = (current_quantity + measurement.measured_quantity, price.unit_amount)
 
         lines: list[RatingLineResult] = []
         ordered = sorted(aggregates.items(), key=lambda item: (item[0][1], item[0][3]))

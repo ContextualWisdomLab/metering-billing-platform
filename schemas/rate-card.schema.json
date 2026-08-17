@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/rate-card/v1",
+  "title": "Rate Card",
+  "description": "Tenant-scoped published rate-card version with flat unit prices. Replays acknowledge the stored rate_card_version. A published version is never edited.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "rate_card_contract_version",
+    "rate_card_outcome_code"
+  ],
+  "properties": {
+    "rate_card_contract_version": {"type": "integer", "minimum": 1},
+    "rate_card_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "rate_card_id": {"type": "string", "format": "uuid"},
+    "rate_card_version_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "rate_card_name": {"type": "string", "pattern": "^[a-z][a-z0-9]*_[a-z0-9_]+$"},
+    "rate_card_version": {"type": "integer", "minimum": 1},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "published_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "lines": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metric_code", "unit_amount", "currency_code"],
+        "properties": {
+          "metric_code": {"type": "string", "pattern": "^[a-z][a-z0-9]*_[a-z0-9_]+$"},
+          "unit_amount": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "maxLength": 39
+          },
+          "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"}
+        }
+      }
+    },
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "rate_card_not_found",
+        "rate_card_lines_invalid",
+        "unit_amount_invalid",
+        "currency_mismatch",
+        "metric_code_invalid",
+        "rate_card_name_invalid",
+        "currency_code_invalid"
+      ]
+    }
+  }
+}

@@ -30,4 +30,6 @@ International Organization for Standardization. (2026). *ISO 20022-1:2026 financ
 
 PCI Security Standards Council. (2024). *Payment Card Industry Data Security Standard: Requirements and testing procedures* (Version 4.0.1). https://www.pcisecuritystandards.org/document_library/
 
+TM Forum. (2024). *TMF620 Product Catalog Management API (Version 5.0.0).* https://www.tmforum.org/oda/open-apis/directory/product-catalog-management-api-TMF620
+
 PostgreSQL Global Development Group. (2026). *PostgreSQL versioning policy.* https://www.postgresql.org/support/versioning/

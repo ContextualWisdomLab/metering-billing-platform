@@ -12,8 +12,9 @@
 - `usage_event`: idempotent source fact identified by tenant-scoped `source_event_key` and by `(tenant_account_id, event_payload_hash, event_contract_version)`. The producer `event_id` is stored as `producer_event_id`, not as the internal primary key.
 - `usage_measurement`: normalized meter quantity and quality, constrained to an explicit meter-specific quality rule.
 - `usage_ingestion_receipt`: append-only accepted, replay, or rejected outcome for every ingest attempt, including rejected cross-tenant and schema failures.
-- `rate_card`: versioned commercial price book and currency.
-- `rate_card_price`: exact unit price for one meter on one rate-card version.
+- `rate_card`: tenant-scoped commercial price-book header identified by `(tenant_account_id, rate_card_name)`.
+- `rate_card_version`: append-only published price list for one card. Identity is `(tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version)`.
+- `rate_card_line`: exact flat `unit_amount` for one `metric_code` on one published version. Currency must match the version.
 - `rating_run`: append-only invoice-intent total for one tenant, half-open window, rate card, and usage snapshot.
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
 - `invoice_draft`: append-only draft-only commercial document for one tenant and rating run.
@@ -42,7 +43,7 @@ Database numeric values use exact `numeric` types. API amounts use canonical dec
 
 ## Future extensions
 
-Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, or credit-adjustment keys.
+Subsequent migrations add contracts, spend reservations, issued invoices, provider webhooks, refunds, disputes, and reconciliation exceptions without changing the initial identity, usage, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, or rate-card-catalog keys.
 
 ## Usage identity
 
@@ -50,7 +51,11 @@ A stored usage row is identified twice: by `(tenant_account_id, source_event_key
 
 ## Rating identity
 
-A stored rating run is identified by `(tenant_account_id, window_started_at, window_ended_at, rate_card_id, usage_snapshot_hash)`.  Lines reference the run, tenant, billing account, and meter definition.  Money columns use exact `numeric` types.
+A stored rating run is identified by `(tenant_account_id, window_started_at, window_ended_at, rate_card_version_id, usage_snapshot_hash)`.  The run pins the published version so a later catalog publish cannot rewrite earlier invoice-intent money.  Lines reference the run, tenant, billing account, and meter definition.  Money columns use exact `numeric` types.
+
+## Rate-card identity
+
+A stored rate-card header is identified by `(tenant_account_id, rate_card_name)`.  Internal primary key is `rate_card_id`.  A stored version is identified by `(tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version)` and also by `(tenant_account_id, rate_card_id, version_number)`.  Lines reference the version and tenant, carry unique `metric_code` values, and store exact `unit_amount` values greater than zero.  A published version is never updated.
 
 ## Invoice-draft identity
 

@@ -15,6 +15,9 @@ The application is a thin WSGI adapter:
 6. Let a buyer POST a commercial credit adjustment.  The adapter records the
    credit and returns the paired validated proposal.  AIS later pulls that
    proposal.  This path never posts and never calls AIS.
+7. Let a buyer POST a rate card and GET tenant-scoped cards and versions.
+   Rating still accepts ``rate_card_version`` and now requires that persisted
+   version.  Publish a rate card, then rate a window against that version.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -40,8 +43,10 @@ from metering_billing.errors import (
     ExactDecimalError,
     JournalProposalQueryError,
     PostingReceiptObservationQueryError,
+    RateCardQueryError,
     TimeWindowError,
 )
+from metering_billing.rate_card import RateCardService
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -62,6 +67,12 @@ POSTING_RECEIPT_COLLECTION_PATH = "/v1/posting-receipt-observations"
 POSTING_RECEIPT_ITEM_PREFIX = "/v1/posting-receipt-observations/"
 CREDIT_ADJUSTMENT_COLLECTION_PATH = "/v1/credit-adjustments"
 CREDIT_ADJUSTMENT_ITEM_PATH = re.compile(r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})$")
+RATE_CARD_COLLECTION_PATH = "/v1/rate-cards"
+RATE_CARD_ITEM_PATH = re.compile(r"^/v1/rate-cards/([0-9a-fA-F-]{36})$")
+RATE_CARD_VERSIONS_PATH = re.compile(r"^/v1/rate-cards/([0-9a-fA-F-]{36})/versions$")
+RATE_CARD_VERSION_ITEM_PATH = re.compile(
+    r"^/v1/rate-card-versions/([0-9a-fA-F-]{36}|[0-9]+)$"
+)
 KNOWN_POST_PATHS = frozenset(
     {
         "/v1/usage-events",
@@ -109,6 +120,7 @@ def create_http_app(
         resolved_ais_client = None
     pulls = PostingReceiptPullService(shared_ledger, ais_client=resolved_ais_client)
     credits = CreditAdjustmentService(shared_ledger)
+    catalogs = RateCardService(shared_ledger)
 
     def application(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         """Dispatch one HTTP request onto the existing commercial services."""
@@ -222,6 +234,52 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_rate_cards",
+            "get_rate_card",
+            "list_rate_card_versions",
+            "get_rate_card_version",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _resolve_tenant_pin(environ, query)
+                if route_name == "list_rate_cards":
+                    page = catalogs.list_rate_cards(tenant_reference)
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                if route_name == "get_rate_card":
+                    result = catalogs.get_rate_card(
+                        tenant_reference,
+                        _parse_uuid(path_values["rate_card_id"], "rate_card_id"),
+                    )
+                    return _send_json(start_response, 200, result.as_contract_dict())
+                if route_name == "list_rate_card_versions":
+                    page = catalogs.list_rate_card_versions(
+                        tenant_reference,
+                        _parse_uuid(path_values["rate_card_id"], "rate_card_id"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = catalogs.get_rate_card_version(
+                    tenant_reference,
+                    _parse_rate_card_version(path_values["rate_card_version"]),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except RateCardQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "rate_card_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         try:
             payload = _read_json_object(environ)
             tenant_reference = _resolve_tenant_pin(environ, payload)
@@ -238,6 +296,7 @@ def create_http_app(
                 intents,
                 settlements,
                 credits,
+                catalogs,
             )
         except HttpRequestError as error:
             return _send_json(
@@ -288,6 +347,27 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "journal_proposals", {}
         if method == "GET":
             return "list_journal_proposals", {}
+        return "method_not_allowed", {}
+    if path == RATE_CARD_COLLECTION_PATH:
+        if method == "POST":
+            return "rate_cards", {}
+        if method == "GET":
+            return "list_rate_cards", {}
+        return "method_not_allowed", {}
+    versions_match = RATE_CARD_VERSIONS_PATH.fullmatch(path)
+    if versions_match is not None:
+        if method == "GET":
+            return "list_rate_card_versions", {"rate_card_id": versions_match.group(1)}
+        return "method_not_allowed", {}
+    card_match = RATE_CARD_ITEM_PATH.fullmatch(path)
+    if card_match is not None:
+        if method == "GET":
+            return "get_rate_card", {"rate_card_id": card_match.group(1)}
+        return "method_not_allowed", {}
+    version_match = RATE_CARD_VERSION_ITEM_PATH.fullmatch(path)
+    if version_match is not None:
+        if method == "GET":
+            return "get_rate_card_version", {"rate_card_version": version_match.group(1)}
         return "method_not_allowed", {}
     if path == CREDIT_ADJUSTMENT_COLLECTION_PATH:
         if method == "POST":
@@ -392,6 +472,18 @@ def _resolve_tenant_pin(environ: WSGIEnvironment, payload: Mapping[str, Any]) ->
     return _require_tenant(payload)
 
 
+def _parse_rate_card_version(value: object) -> UUID | int:
+    """Parse a published version identifier or tenant-scoped version number."""
+    if not isinstance(value, str) or not value:
+        raise HttpRequestError("request_invalid")
+    if value.isdigit():
+        return int(value)
+    try:
+        return UUID(value)
+    except ValueError as error:
+        raise HttpRequestError("request_invalid") from error
+
+
 def _parse_uuid(value: object, field_name: str) -> UUID:
     """Parse a UUID string from a body field or path segment."""
     del field_name
@@ -416,6 +508,7 @@ def _dispatch_write(
     intents: PaymentIntentService,
     settlements: PaymentSettlementService,
     credits: CreditAdjustmentService | None = None,
+    catalogs: RateCardService | None = None,
 ) -> tuple[dict[str, object], int]:
     """Call one commercial service and map its contract to an HTTP status."""
     if route_name == "usage_events":
@@ -501,6 +594,22 @@ def _dispatch_write(
             _parse_uuid(payload.get("invoice_draft_id"), "invoice_draft_id"),
             payload.get("credit_amount"),
             reason,
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "rate_cards":
+        if catalogs is None:
+            raise HttpRequestError("request_invalid")
+        rate_card_name = payload.get("rate_card_name")
+        currency_code = payload.get("currency_code")
+        lines = payload.get("lines")
+        if (
+            not isinstance(rate_card_name, str)
+            or not isinstance(currency_code, str)
+            or not isinstance(lines, list)
+        ):
+            raise HttpRequestError("request_invalid")
+        result = catalogs.publish_rate_card(
+            tenant_reference, rate_card_name, currency_code, lines
         )
         return result.as_contract_dict(), _status_for_result(result)
     raise HttpRequestError("request_invalid")

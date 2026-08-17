@@ -4,6 +4,10 @@
 
 ### Added
 
+- `RateCardService.publish_rate_card` writes one tenant-scoped `rate_card` and one immutable `rate_card_version` with exact-decimal `rate_card_line` rows.  The same tenant, card name, canonical line hash, and contract version replay the stored version.  A later distinct line set increments the version.  A published version is never edited.
+- `UsageRatingService.rate_usage_window` now resolves a persisted same-tenant `rate_card_version`.  Unknown or cross-tenant versions reject.  Rating uses the stored `unit_amount` for the matching `metric_code`.  A missing metric fails closed and does not invent a price.
+- `POST /v1/rate-cards`, `GET /v1/rate-cards`, `GET /v1/rate-cards/{rate_card_id}`, `GET /v1/rate-cards/{rate_card_id}/versions`, and `GET /v1/rate-card-versions/{rate_card_version}` on the existing WSGI app.  Tenant pin matches credit and journal-proposal query.  Cross-tenant reads are 404.  `POST /v1/rating-runs` still takes `rate_card_version`, and that integer must now exist for the tenant.
+- ADR 0015 for a versioned rate-card catalog without tax, discounts, or tiered prices.
 - `CreditAdjustmentService.record_credit_adjustment` records one commercial `credit_adjustment` against a stored invoice draft.  `credit_amount` is an exact `Decimal` greater than zero and cannot exceed remaining adjustable consideration.  Closed reasons are `rating_correction`, `goodwill`, and `billing_error`.  If a collection case exists, outstanding is reduced by the same amount and remaining zero marks the case `settled`.  The path emits one balanced validated journal proposal that debits `usage_revenue` and credits `accounts_receivable`.
 - Idempotent credit identity on `(tenant, invoice_draft_id, source_payload_hash, credit_adjustment_contract_version)` so a replay returns the same `credit_adjustment_id` and `proposal_id`.
 - AIS-compatible credit idempotency key `{tenant}:credit_adjustment:{credit_adjustment_id}:{source_payload_hash}:v{contract_version}`.

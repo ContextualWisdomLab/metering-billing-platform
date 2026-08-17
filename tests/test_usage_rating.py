@@ -12,6 +12,7 @@ from uuid import UUID
 from metering_billing import (
     IngestionOutcomeCode,
     MemoryUsageLedger,
+    RateCardService,
     RatingOutcomeCode,
     RatingRejectionReasonCode,
     RejectionReasonCode,
@@ -41,6 +42,9 @@ from test_usage_ingestion import (
 
 TOKEN_UNIT_PRICE = Decimal("0.000002")
 RATE_CARD_CODE = "cwl_standard"
+STANDARD_RATE_CARD_LINES = (
+    {"metric_code": "gen_ai_output_token", "unit_amount": TOKEN_UNIT_PRICE},
+)
 MORNING_WINDOW = TimeWindow.from_iso8601("2026-08-16T10:00:00Z", "2026-08-16T11:00:00Z")
 DAY_WINDOW = TimeWindow.from_iso8601("2026-08-16T10:00:00Z", "2026-08-16T12:00:00Z")
 KNOWN_MORNING_QUANTITY = Decimal("1810") + Decimal("42.5")
@@ -49,8 +53,17 @@ KNOWN_DAY_QUANTITY = KNOWN_MORNING_QUANTITY + Decimal("0.000000000001")
 KNOWN_DAY_TOTAL = KNOWN_DAY_QUANTITY * TOKEN_UNIT_PRICE
 
 
+def publish_standard_rate_card(
+    ledger: MemoryUsageLedger, tenant_reference: str = TENANT_ONE
+):
+    """Publish the known token price list for one tenant."""
+    return RateCardService(ledger).publish_rate_card(
+        tenant_reference, RATE_CARD_CODE, "USD", STANDARD_RATE_CARD_LINES
+    )
+
+
 def seed_rated_ledger() -> MemoryUsageLedger:
-    """Register isolated tenants, billable and excluded qualities, and one rate card."""
+    """Register isolated tenants, billable qualities, and persisted rate cards."""
     ledger = seed_ledger()
     meter = ledger.meter_definitions[0]
     ledger.register_meter_quality_rule(
@@ -59,10 +72,8 @@ def seed_rated_ledger() -> MemoryUsageLedger:
     ledger.register_meter_quality_rule(
         meter.meter_definition_id, "corrected", "manual_review"
     )
-    rate_card = ledger.register_rate_card(RATE_CARD_CODE, 1, "USD", CATALOG_START)
-    ledger.register_rate_card_price(
-        rate_card.rate_card_id, meter.meter_definition_id, "0.000002"
-    )
+    publish_standard_rate_card(ledger, TENANT_ONE)
+    publish_standard_rate_card(ledger, TENANT_TWO)
     return ledger
 
 
@@ -403,33 +414,19 @@ class UsageRatingTests(unittest.TestCase):
         )
         self.assertEqual(len(ledger.rating_runs), 0)
 
-    def test_ineffective_rate_card_and_binary_float_prices_are_rejected(self) -> None:
-        """A closed rate card cannot price a window, and float prices never enter the book."""
+    def test_unknown_version_and_binary_float_prices_are_rejected(self) -> None:
+        """Rating cannot invent a version, and float prices never enter the catalog."""
         ledger = seed_rated_ledger()
-        closed = ledger.register_rate_card(
-            RATE_CARD_CODE,
-            2,
-            "USD",
-            datetime(2026, 1, 1, tzinfo=UTC),
-            datetime(2026, 2, 1, tzinfo=UTC),
-        )
-        ledger.register_rate_card_price(
-            closed.rate_card_id,
-            ledger.meter_definitions[0].meter_definition_id,
-            "0.000003",
-        )
         ingest = ingest_known_batch(ledger)
         result = UsageRatingService(ingest.ledger).rate_usage_window(TENANT_ONE, MORNING_WINDOW, 2)
         self.assertEqual(
             result.rejection_reason_code,
-            RatingRejectionReasonCode.RATE_CARD_NOT_EFFECTIVE,
+            RatingRejectionReasonCode.RATE_CARD_NOT_FOUND,
         )
         with self.assertRaises(ExactDecimalError):
-            ledger.register_rate_card_price(
-                closed.rate_card_id,
-                ledger.meter_definitions[0].meter_definition_id,
-                0.000003,  # type: ignore[arg-type]
-            )
+            from metering_billing.rate_card import parse_unit_amount
+
+            parse_unit_amount(0.000003)
 
     def test_default_rating_service_and_zero_line_contract_shape(self) -> None:
         """The zero-argument service constructs a ledger and rejected results stay sparse."""
@@ -446,21 +443,16 @@ class UsageRatingTests(unittest.TestCase):
 class RatingCatalogAndContractTests(unittest.TestCase):
     """Cover rate-card catalog edges and rating-run contract semantics."""
 
-    def test_rate_card_registration_is_idempotent(self) -> None:
-        """The same code and version returns the same rate card and price rows."""
+    def test_rate_card_publish_replay_reuses_the_same_version(self) -> None:
+        """The same tenant, name, line hash, and contract version reuse the version."""
         ledger = seed_rated_ledger()
-        first = ledger.rate_cards[(RATE_CARD_CODE, 1)]
-        again = ledger.register_rate_card(RATE_CARD_CODE, 1, "USD", CATALOG_START)
-        self.assertIs(again, first)
-        meter = ledger.meter_definitions[0]
-        price = ledger.rate_card_prices[(first.rate_card_id, meter.meter_definition_id)]
-        self.assertIs(
-            ledger.register_rate_card_price(
-                first.rate_card_id, meter.meter_definition_id, "0.000002"
-            ),
-            price,
-        )
-        self.assertEqual(price.unit_price_amount, TOKEN_UNIT_PRICE)
+        first = publish_standard_rate_card(ledger, TENANT_ONE)
+        again = publish_standard_rate_card(ledger, TENANT_ONE)
+        self.assertEqual(again.rate_card_outcome_code.value, "duplicate_replay")
+        self.assertEqual(again.rate_card_id, first.rate_card_id)
+        self.assertEqual(again.rate_card_version_id, first.rate_card_version_id)
+        self.assertEqual(again.rate_card_version, 1)
+        self.assertEqual(again.lines[0].unit_amount, TOKEN_UNIT_PRICE)
         self.assertEqual(parse_exact_decimal("0.000002"), TOKEN_UNIT_PRICE)
         self.assertEqual(format_exact_decimal(TOKEN_UNIT_PRICE), "0.000002")
 

@@ -15,7 +15,7 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 
 ## Usage-ingestion plane
 
-The importable `metering_billing` package is the first runtime module.  It can run in-process against the in-memory third-normal-form ledger that mirrors the PostgreSQL constraints.  A later adapter can persist the same rows without changing the hash, tenant, decimal, or rating-identity rules.  Canonical source-payload hashing excludes envelope identifiers (`event_id`, `source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest, usage queries, and rating accept half-open ISO 8601 windows.  Rating identity is tenant, window, rate-card version, and usage-snapshot hash.
+The importable `metering_billing` package is the first runtime module.  It can run in-process against the in-memory third-normal-form ledger that mirrors the PostgreSQL constraints.  A later adapter can persist the same rows without changing the hash, tenant, decimal, or rating-identity rules.  Canonical source-payload hashing excludes envelope identifiers (`event_id`, `source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest, usage queries, and rating accept half-open ISO 8601 windows.  Rating identity is tenant, window, persisted rate-card version, and usage-snapshot hash.
 
 ## Persistence plane
 
@@ -42,6 +42,8 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 `metering_billing.PostingReceiptPullService` GETs that AIS receipt with stdlib `urllib` and stores a commercial observation. The consumed schema stays AIS-owned. `POST /v1/posting-receipt-observations` is the operator trigger; `GET /v1/posting-receipt-observations/{idempotency_key}` is a safe stored read and does not call AIS (Fielding et al., 2022). `posting_status_code` is not mapped onto `proposal_status`. If AIS returns 404, the operator accepts the proposal on AIS and retries.
 
 `metering_billing.CreditAdjustmentService` records a commercial credit against a stored invoice draft and emits one validated journal proposal. IFRS 15 treats the credit as variable consideration, not as proof that revenue has been reversed in the statutory books (IFRS Foundation, 2024). ISO 20022 keeps the commercial credit note separate from a posted `camt` settlement (International Organization for Standardization, 2026). `POST /v1/credit-adjustments` records the credit; AIS later pulls the proposal. `GET /v1/credit-adjustments/{credit_adjustment_id}` is a safe stored read and does not call AIS (Fielding et al., 2022).
+
+`metering_billing.RateCardService` publishes a tenant-scoped catalog version with flat unit prices (TM Forum, 2024). Replay of the same tenant, card name, canonical line hash, and contract version returns the stored `rate_card_version` (Helland, 2012). `UsageRatingService` must resolve that persisted version; a missing metric fails closed and does not invent a price. `POST /v1/rate-cards` publishes a version. `GET /v1/rate-cards`, `GET /v1/rate-cards/{rate_card_id}`, `GET /v1/rate-cards/{rate_card_id}/versions`, and `GET /v1/rate-card-versions/{rate_card_version}` are safe tenant-scoped reads (Fielding et al., 2022). Publish a rate card, then rate a window against that version.
 
 ## Security
 
