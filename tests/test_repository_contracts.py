@@ -15,6 +15,7 @@ from unittest import mock
 
 from metering_billing.contracts import (
     validate_ais_outbox_drain,
+    validate_account_statement_presentment,
     validate_collection_aging_presentment,
     validate_collection_case_presentment,
     validate_payment_intent_presentment,
@@ -678,6 +679,97 @@ class RepositoryContractTests(unittest.TestCase):
             any(
                 "exact decimal" in error
                 for error in validate_collection_aging_presentment(mixed_rows)
+            )
+        )
+
+    def test_account_statement_presentment_accepts_totals_and_rejects_posted(self) -> None:
+        """Statement totals stay exact, unique by currency, and cannot claim posting."""
+        schema = self._schema("account-statement-presentment.schema.json")
+        instance = {
+            "account_statement_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [
+                {
+                    "currency_code": "USD",
+                    "issued_invoice_total": "0.003705",
+                    "open_collection_remaining": "0.003705",
+                    "applied_credit_total": "0",
+                    "write_off_total": "0",
+                    "parked_unapplied_cash": "0",
+                    "refunded_unapplied_cash": "0",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_account_statement_presentment(instance), ())
+        posted = dict(instance)
+        posted["proposal_status"] = "posted"
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        duplicate = {
+            "account_statement_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [instance["currencies"][0], instance["currencies"][0]],
+        }
+        self.assertIn(
+            "$.currencies[1]: currency_code must be unique",
+            validate_account_statement_presentment(duplicate),
+        )
+        negative = {
+            "account_statement_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [
+                {
+                    "currency_code": "USD",
+                    "issued_invoice_total": "-1.00",
+                    "open_collection_remaining": "0",
+                    "applied_credit_total": "0",
+                    "write_off_total": "0",
+                    "parked_unapplied_cash": "0",
+                    "refunded_unapplied_cash": 1,
+                }
+            ],
+        }
+        self.assertIn(
+            "$.currencies[0].issued_invoice_total: amount must not be negative",
+            validate_account_statement_presentment(negative),
+        )
+        self.assertNotEqual(validate_account_statement_presentment([]), ())
+        self.assertNotEqual(validate_account_statement_presentment({"currencies": "USD"}), ())
+        mixed_rows = {
+            "account_statement_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [
+                "USD",
+                {
+                    "currency_code": 1,
+                    "issued_invoice_total": "not-decimal",
+                    "open_collection_remaining": "0",
+                    "applied_credit_total": "0",
+                    "write_off_total": "0",
+                    "parked_unapplied_cash": "0",
+                    "refunded_unapplied_cash": "0",
+                },
+            ],
+        }
+        self.assertTrue(
+            any(
+                "exact decimal" in error
+                for error in validate_account_statement_presentment(mixed_rows)
             )
         )
 

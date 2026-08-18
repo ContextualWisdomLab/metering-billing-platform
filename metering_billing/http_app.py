@@ -75,7 +75,12 @@ The application is a thin WSGI adapter:
     Open the collection case, then collect or credit.  The read does not
     post, call AIS, capture payment, or start a web UI.
     ``GET /v1/collection-aging`` projects open-case remaining into current /
-    1-30 / 31-60 / 61-90 / 90+ buckets grouped by currency.  GET one stored
+    1-30 / 31-60 / 61-90 / 90+ buckets grouped by currency.
+    ``GET /v1/billing-accounts/{billing_account_id}/statement`` projects
+    stored issued-invoice totals, open collection remaining, applied
+    credits, write-offs, parked leftover, and refunded leftover for one
+    billing account, grouped by currency.  Missing account is HTTP 404.
+    Cross-tenant account is HTTP 403.  GET one stored
     ``collection_dunning_event`` or list ``{dunning_events, next_cursor}``.
     ``POST /v1/collection-cases/{collection_case_id}/dunning-events`` stays
     the #10 record.  The read does not send mail or capture payment.
@@ -190,6 +195,7 @@ from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
 from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
+    AccountStatementPresentmentQueryError,
     CollectionAgingPresentmentQueryError,
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
@@ -255,6 +261,9 @@ from metering_billing.unapplied_cash_refund_presentment import (
     UnappliedCashRefundPresentmentService,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
+from metering_billing.account_statement_presentment import (
+    AccountStatementPresentmentService,
+)
 from metering_billing.collection_aging_presentment import (
     Clock,
     CollectionAgingPresentmentService,
@@ -296,6 +305,9 @@ from metering_billing.usage_rating import UsageRatingService
 WSGIApp = Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]
 COLLECTION_CASE_COLLECTION_PATH = "/v1/collection-cases"
 COLLECTION_AGING_PATH = "/v1/collection-aging"
+BILLING_ACCOUNT_STATEMENT_PATH = re.compile(
+    r"^/v1/billing-accounts/([0-9a-fA-F-]{36})/statement$"
+)
 COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36})$")
 COLLECTION_DUNNING_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/dunning-events$"
@@ -506,6 +518,9 @@ def create_http_app(
     presentments = InvoicePresentmentService(shared_ledger)
     case_presentments = CollectionCasePresentmentService(shared_ledger)
     aging_presentments = CollectionAgingPresentmentService(shared_ledger, clock=clock)
+    account_statement_presentments = AccountStatementPresentmentService(
+        shared_ledger, clock=clock
+    )
     dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
@@ -1347,6 +1362,35 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "account_statement":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                result = account_statement_presentments.present_account_statement(
+                    tenant_reference,
+                    _parse_uuid(path_values["billing_account_id"], "billing_account_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except AccountStatementPresentmentQueryError as error:
+                if error.rejection_reason_code == "billing_account_not_found":
+                    status_code = 404
+                elif error.rejection_reason_code == "billing_account_forbidden":
+                    status_code = 403
+                else:
+                    status_code = 422
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "collection_aging":
             try:
                 query = _read_query(environ)
@@ -2066,6 +2110,11 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
                 "dunning_event_id": dunning_event_match.group(1)
             }
         return "method_not_allowed", {}
+    statement_match = BILLING_ACCOUNT_STATEMENT_PATH.fullmatch(path)
+    if statement_match is not None:
+        if method == "GET":
+            return "account_statement", {"billing_account_id": statement_match.group(1)}
+        return "method_not_allowed", {}
     if path == COLLECTION_AGING_PATH:
         if method == "GET":
             return "collection_aging", {}
@@ -2691,6 +2740,7 @@ def _send_json(
     """Write a JSON response and return the encoded body."""
     reason = {
         200: "OK",
+        403: "Forbidden",
         404: "Not Found",
         405: "Method Not Allowed",
         422: "Unprocessable Entity",

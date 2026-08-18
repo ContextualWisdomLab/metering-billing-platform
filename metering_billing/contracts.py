@@ -32,6 +32,7 @@ __all__ = (
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
+    "ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
@@ -128,6 +129,7 @@ INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
 COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
 COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME = "collection-aging-presentment.schema.json"
+ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME = "account-statement-presentment.schema.json"
 PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json"
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
@@ -406,6 +408,51 @@ def _invoice_draft_total_errors(invoice_draft: Mapping[str, Any]) -> tuple[str, 
     if line_total != Decimal(drafted_total_amount):
         return ("$: invoice draft line totals must equal drafted_total_amount",)
     return ()
+
+
+def validate_account_statement_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate statement shape plus exact totals and one-currency-per-row."""
+    schema = load_json_schema(ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    currencies = statement.get("currencies")
+    if not isinstance(currencies, list):
+        return tuple(errors)
+    seen_currencies: set[str] = set()
+    amount_fields = (
+        "issued_invoice_total",
+        "open_collection_remaining",
+        "applied_credit_total",
+        "write_off_total",
+        "parked_unapplied_cash",
+        "refunded_unapplied_cash",
+    )
+    for index, row in enumerate(currencies):
+        if not isinstance(row, Mapping):
+            continue
+        currency_code = row.get("currency_code")
+        if isinstance(currency_code, str):
+            if currency_code in seen_currencies:
+                errors.append(f"$.currencies[{index}]: currency_code must be unique")
+            seen_currencies.add(currency_code)
+        for field_name in amount_fields:
+            amount = row.get(field_name)
+            if not isinstance(amount, str):
+                continue
+            try:
+                parsed = Decimal(amount)
+                if parsed < Decimal("0"):
+                    errors.append(
+                        f"$.currencies[{index}].{field_name}: amount must not be negative"
+                    )
+            except Exception:
+                errors.append(
+                    f"$.currencies[{index}].{field_name}: amount must be an exact decimal"
+                )
+    return tuple(errors)
 
 
 def validate_collection_aging_presentment(

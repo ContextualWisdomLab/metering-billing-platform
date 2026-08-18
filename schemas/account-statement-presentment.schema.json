@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/account-statement-presentment/v1",
+  "title": "Account Statement Presentment",
+  "description": "Billing-account-scoped commercial statement projected from stored issued invoices, open collection remaining, applied credit notes, write-offs, parked leftover, and leftover refunds. Totals are grouped by currency_code and never mixed. Amounts are exact-decimal strings. The document is not a capture, posting, journal, webhook, or statutory ledger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "account_statement_presentment_contract_version",
+    "tenant_reference",
+    "billing_account_id",
+    "billing_account_reference",
+    "as_of",
+    "currencies"
+  ],
+  "properties": {
+    "account_statement_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "billing_account_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "billing_account_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "as_of": {"type": "string", "format": "date-time"},
+    "currencies": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 200,
+      "items": {"$ref": "#/$defs/currency_statement"}
+    }
+  },
+  "$defs": {
+    "exact_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "currency_statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency_code",
+        "issued_invoice_total",
+        "open_collection_remaining",
+        "applied_credit_total",
+        "write_off_total",
+        "parked_unapplied_cash",
+        "refunded_unapplied_cash"
+      ],
+      "properties": {
+        "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "issued_invoice_total": {"$ref": "#/$defs/exact_amount"},
+        "open_collection_remaining": {"$ref": "#/$defs/exact_amount"},
+        "applied_credit_total": {"$ref": "#/$defs/exact_amount"},
+        "write_off_total": {"$ref": "#/$defs/exact_amount"},
+        "parked_unapplied_cash": {"$ref": "#/$defs/exact_amount"},
+        "refunded_unapplied_cash": {"$ref": "#/$defs/exact_amount"}
+      }
+    }
+  }
+}
