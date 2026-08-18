@@ -26,6 +26,7 @@ from metering_billing.contracts import (
     validate_issued_credit_note_presentment,
     validate_credit_note_application_presentment,
     validate_collection_case_settlement_presentment,
+    validate_account_statement_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -100,6 +101,20 @@ ISSUED_CREDIT_NOTE_FIXTURE_NAMES = (
 )
 CREDIT_NOTE_APPLICATION_FIXTURE_NAMES = ("applied_morning_credit_note.json",)
 COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES = ("settled_morning_zero.json",)
+ACCOUNT_STATEMENT_FIXTURE_NAMES = (
+    "settled_account_statement.json",
+    "voided_account_statement.json",
+)
+ACCOUNT_STATEMENT_MONEY_FIELDS = (
+    "issued_invoice_total",
+    "voided_invoice_total",
+    "open_collection_remaining",
+    "applied_credit_total",
+    "voided_credit_total",
+    "write_off_total",
+    "parked_unapplied_cash",
+    "refunded_unapplied_cash",
+)
 MONEY_FIELDS = (
     "tax_exclusive_amount",
     "tax_amount",
@@ -382,6 +397,30 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("settled_morning_zero.json")["next_operator_action"],
             "wait",
         )
+        for fixture_name in ACCOUNT_STATEMENT_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_account_statement_presentment(payload), ())
+            self.assertEqual(len(payload["currencies"]), 1)
+            row = payload["currencies"][0]
+            self.assertEqual(row["currency_code"], "USD")
+            for field_name in ACCOUNT_STATEMENT_MONEY_FIELDS:
+                value = row[field_name]
+                self.assertIsInstance(value, str)
+                self.assertNotIsInstance(value, float)
+                parse_exact_decimal(value)
+            self.assertNotIn("card_pan", payload)
+            self.assertNotIn("statutory_account_id", payload)
+            self.assertNotIn("proposal_status", payload)
+        settled_account = self._fixture("settled_account_statement.json")
+        self.assertEqual(settled_account["currencies"][0]["open_collection_remaining"], "0.00")
+        self.assertEqual(settled_account["currencies"][0]["applied_credit_total"], "110.00")
+        self.assertEqual(settled_account["currencies"][0]["voided_invoice_total"], "0")
+        self.assertEqual(settled_account["currencies"][0]["voided_credit_total"], "0")
+        voided_account = self._fixture("voided_account_statement.json")
+        self.assertEqual(voided_account["currencies"][0]["issued_invoice_total"], "110.00")
+        self.assertEqual(voided_account["currencies"][0]["voided_invoice_total"], "110.00")
+        self.assertEqual(voided_account["currencies"][0]["voided_credit_total"], "11.00")
+        self.assertEqual(voided_account["currencies"][0]["applied_credit_total"], "0")
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -423,6 +462,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "IssuedCreditNote",
             "CreditNoteApplication",
             "CollectionCaseSettlement",
+            "AccountStatement",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -444,6 +484,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + ISSUED_CREDIT_NOTE_FIXTURE_NAMES
             + CREDIT_NOTE_APPLICATION_FIXTURE_NAMES
             + COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES
+            + ACCOUNT_STATEMENT_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -481,6 +522,10 @@ class OperatorConsoleTests(unittest.TestCase):
             inventory,
         )
         self.assertIn("Settle the zero-outstanding case, then wait", inventory)
+        self.assertIn(
+            "Open the account statement, then collect, credit, park, apply, or refund",
+            inventory,
+        )
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

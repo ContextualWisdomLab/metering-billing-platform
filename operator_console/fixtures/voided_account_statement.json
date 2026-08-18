@@ -1,0 +1,20 @@
+{
+  "account_statement_presentment_contract_version": 1,
+  "tenant_reference": "urn:cwl:tenant_001",
+  "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+  "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+  "as_of": "2026-08-18T15:00:00Z",
+  "currencies": [
+    {
+      "currency_code": "USD",
+      "issued_invoice_total": "110.00",
+      "voided_invoice_total": "110.00",
+      "open_collection_remaining": "0",
+      "applied_credit_total": "0",
+      "voided_credit_total": "11.00",
+      "write_off_total": "0",
+      "parked_unapplied_cash": "0",
+      "refunded_unapplied_cash": "0"
+    }
+  ]
+}

@@ -40,6 +40,8 @@ Customer copy on every credit-note application: applied amount, remaining outsta
 
 Customer copy on every collection-case settlement: exact-zero remaining and the next operator action. Settle the zero-outstanding case, then wait.
 
+Customer copy on every account statement: remaining and the next operator action. Open the account statement, then collect, credit, park, apply, or refund.
+
 ## Stories
 
 | Story | Module | Fixtures |
@@ -67,6 +69,7 @@ Customer copy on every collection-case settlement: exact-zero remaining and the 
 | IssuedCreditNote | `src/issued_credit_note.js` | `issued_morning_credit_note.json`, `issued_taxed_credit_note.json` |
 | CreditNoteApplication | `src/credit_note_application.js` | `applied_morning_credit_note.json` |
 | CollectionCaseSettlement | `src/collection_case_settlement.js` | `settled_morning_zero.json` |
+| AccountStatement | `src/account_statement.js` | `settled_account_statement.json`, `voided_account_statement.json` |
 
 The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is not a one-off style.
 
@@ -113,5 +116,7 @@ The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is no
 | `issued_taxed_credit_note.json` | Issued taxed credit note | `tax_inclusive_amount` `11.00`, exclusive `10.00`, tax `1.00`, action `wait` |
 | `applied_morning_credit_note.json` | Applied morning credit note | `applied_amount` `0.003705`, remaining `0`, action `wait` |
 | `settled_morning_zero.json` | Settled morning zero-outstanding case | remaining `0`, action `wait` |
+| `settled_account_statement.json` | Settled billing-account statement | remaining `0.00`, applied `110.00`, voids `0` |
+| `voided_account_statement.json` | Unused invoice and credit voids | issued `110.00`, voided invoice `110.00`, voided credit `11.00` |
 
-Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, `schemas/posting-receipt-observation-presentment.schema.json`, `schemas/webhook-delivery-presentment.schema.json`, `schemas/tenant-api-credential-presentment.schema.json`, `schemas/webhook-subscription-presentment.schema.json`, `schemas/dunning-event-presentment.schema.json`, `schemas/webhook-outbox-event-presentment.schema.json`, `schemas/issued-invoice.schema.json`, `schemas/issued-invoice-presentment.schema.json`, `schemas/issued-credit-note.schema.json`, `schemas/issued-credit-note-presentment.schema.json`, `schemas/credit-note-application.schema.json`, `schemas/credit-note-application-presentment.schema.json`, `schemas/collection-case-settlement.schema.json`, and `schemas/collection-case-settlement-presentment.schema.json`.  They are never IEEE binary floats.
+Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, `schemas/posting-receipt-observation-presentment.schema.json`, `schemas/webhook-delivery-presentment.schema.json`, `schemas/tenant-api-credential-presentment.schema.json`, `schemas/webhook-subscription-presentment.schema.json`, `schemas/dunning-event-presentment.schema.json`, `schemas/webhook-outbox-event-presentment.schema.json`, `schemas/issued-invoice.schema.json`, `schemas/issued-invoice-presentment.schema.json`, `schemas/issued-credit-note.schema.json`, `schemas/issued-credit-note-presentment.schema.json`, `schemas/credit-note-application.schema.json`, `schemas/credit-note-application-presentment.schema.json`, `schemas/collection-case-settlement.schema.json`, `schemas/collection-case-settlement-presentment.schema.json`, and `schemas/account-statement-presentment.schema.json`.  They are never IEEE binary floats.

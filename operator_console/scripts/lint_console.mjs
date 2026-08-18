@@ -22,6 +22,16 @@ const moneyFields = [
   "rated_total_amount",
   "tax_rate",
 ];
+const currencyMoneyFields = [
+  "issued_invoice_total",
+  "voided_invoice_total",
+  "open_collection_remaining",
+  "applied_credit_total",
+  "voided_credit_total",
+  "write_off_total",
+  "parked_unapplied_cash",
+  "refunded_unapplied_cash",
+];
 const lineMoneyFields = ["quantity", "unit_amount", "line_amount"];
 
 function fail(message) {
@@ -46,6 +56,18 @@ for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.ends
     const value = payload[fieldName];
     if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
       fail(`${fileName}: ${fieldName} must be an exact-decimal string`);
+    }
+  }
+  const currencies = Array.isArray(payload.currencies) ? payload.currencies : [];
+  for (const [index, currency] of currencies.entries()) {
+    for (const fieldName of currencyMoneyFields) {
+      if (!(fieldName in currency)) {
+        continue;
+      }
+      const value = currency[fieldName];
+      if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+        fail(`${fileName}: currencies[${index}].${fieldName} must be an exact-decimal string`);
+      }
     }
   }
   const invoiceLines = Array.isArray(payload.invoice_lines) ? payload.invoice_lines : [];

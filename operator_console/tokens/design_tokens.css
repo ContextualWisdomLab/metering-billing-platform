@@ -26,6 +26,7 @@
 }
 
 .oc-invoice-statement,
+.oc-account-statement,
 .oc-amount-due,
 .oc-line-table,
 .oc-status-chip,
@@ -35,7 +36,8 @@
   font-family: var(--oc-type-family);
 }
 
-.oc-invoice-statement {
+.oc-invoice-statement,
+.oc-account-statement {
   background: var(--oc-color-paper);
   border-radius: var(--oc-radius-card);
   padding: var(--oc-spacing-lg);

@@ -102,6 +102,7 @@ REQUIRED_FILES = (
     "docs/adr/0070-credit-note-voided-webhook.md",
     "docs/adr/0071-credit-note-void-journal-from-issued-credit-note-void.md",
     "docs/adr/0072-account-statement-void-totals.md",
+    "docs/adr/0073-operator-account-statement-storybook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

@@ -103,6 +103,10 @@ import {
   renderCollectionAging,
   COLLECTION_AGING_CUSTOMER_COPY,
 } from "../src/collection_aging.js";
+import {
+  renderAccountStatement,
+  ACCOUNT_STATEMENT_CUSTOMER_COPY,
+} from "../src/account_statement.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -581,6 +585,45 @@ test("applied morning credit note shows applied amount and residual wait", () =>
   assert.ok(!("card_pan" in statement));
 });
 
+test("settled account statement shows zero remaining and exact applied credit", () => {
+  const statement = loadFixture("settled_account_statement.json");
+  const html = renderAccountStatement(statement);
+  assert.match(html, /0\.00 USD/);
+  assert.match(html, /110\.00 USD/);
+  assert.match(html, /settled/);
+  assert.match(html, /Open the account statement, then collect, credit, park, apply, or refund/);
+  assert.equal(
+    ACCOUNT_STATEMENT_CUSTOMER_COPY,
+    "Open the account statement, then collect, credit, park, apply, or refund.",
+  );
+  assert.equal(statement.currencies[0].voided_invoice_total, "0");
+  assert.equal(statement.currencies[0].voided_credit_total, "0");
+  assert.equal(typeof statement.currencies[0].open_collection_remaining, "string");
+  assert.equal(typeof statement.currencies[0].applied_credit_total, "string");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("statutory_account_id" in statement));
+  assert.ok(!("proposal_status" in statement));
+});
+
+test("voided account statement keeps inclusive voids unmixed and does not rewrite issued", () => {
+  const statement = loadFixture("voided_account_statement.json");
+  const html = renderAccountStatement(statement);
+  assert.match(html, /110\.00 USD/);
+  assert.match(html, /11\.00 USD/);
+  assert.equal(statement.currencies[0].issued_invoice_total, "110.00");
+  assert.equal(statement.currencies[0].voided_invoice_total, "110.00");
+  assert.equal(statement.currencies[0].voided_credit_total, "11.00");
+  assert.equal(statement.currencies[0].applied_credit_total, "0");
+  assert.equal(statement.currencies[0].currency_code, "USD");
+  assert.equal(statement.currencies.length, 1);
+  assert.equal(typeof statement.currencies[0].voided_invoice_total, "string");
+  assert.equal(typeof statement.currencies[0].voided_credit_total, "string");
+  assert.notEqual(typeof statement.currencies[0].voided_invoice_total, "number");
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("journal_entry_id" in statement));
+});
+
 test("morning aging shows exact USD buckets without mixing currencies", () => {
   const statement = loadFixture("morning_collection_aging.json");
   const html = renderCollectionAging(statement);
@@ -687,6 +730,13 @@ test("float money fails closed", () => {
     () =>
       renderCollectionAging({
         currencies: [{ currency_code: "USD", current: { outstanding_amount: 1.25 } }],
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderAccountStatement({
+        currencies: [{ currency_code: "USD", open_collection_remaining: 0.0, voided_invoice_total: "0" }],
       }),
     TypeError,
   );

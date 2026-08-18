@@ -98,3 +98,7 @@ export {
   renderCollectionAging,
   COLLECTION_AGING_CUSTOMER_COPY,
 } from "./collection_aging.js";
+export {
+  renderAccountStatement,
+  ACCOUNT_STATEMENT_CUSTOMER_COPY,
+} from "./account_statement.js";
