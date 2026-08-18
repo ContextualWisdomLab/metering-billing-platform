@@ -176,6 +176,17 @@ class UnappliedCashApplicationTests(unittest.TestCase):
         self.assertEqual(stored_case.outstanding_amount, Decimal("0"))
         self.assertEqual(stored_case.collection_case_status, "open")
         self.assertEqual(len(ledger.collection_case_settlements), 0)
+        zeroed = UnappliedCashApplicationPresentmentService(
+            ledger
+        ).present_unapplied_cash_application(
+            TENANT_ONE, applied.unapplied_cash_application_id
+        )
+        self.assertEqual(zeroed.next_operator_action, "settle")
+        self.assertEqual(zeroed.collection_case_status, "open")
+        self.assertEqual(
+            validate_unapplied_cash_application_presentment(zeroed.as_contract_dict()),
+            (),
+        )
         settled = CollectionCaseSettlementService(ledger).settle_collection_case(
             TENANT_ONE, collection.collection_case_id
         )
