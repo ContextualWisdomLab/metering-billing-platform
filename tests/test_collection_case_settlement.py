@@ -422,6 +422,8 @@ class CollectionCaseSettlementTests(unittest.TestCase):
             "collection_case_settlement_outcome_code": "posted",
         }
         self.assertTrue(validate_collection_case_settlement(unknown_outcome))
+        missing_outcome = {"collection_case_settlement_contract_version": 1}
+        self.assertTrue(validate_collection_case_settlement(missing_outcome))
         forbidden = json.loads(json.dumps(valid))
         forbidden["write_off_amount"] = "1.00"
         self.assertTrue(validate_collection_case_settlement(forbidden))
@@ -704,6 +706,30 @@ class CollectionCaseSettlementTests(unittest.TestCase):
         )
         self.assertEqual(refused_status, 422)
         self.assertEqual(refused_body["rejection_reason_code"], "outstanding_not_zero")
+        with mock.patch(
+            "metering_billing.http_app.CollectionCaseSettlementService.settle_collection_case",
+            side_effect=ValueError("boom"),
+        ):
+            boom_status, boom_body = invoke_http(
+                open_app,
+                "POST",
+                f"/v1/collection-cases/{open_case.collection_case_id}/settlements",
+                {"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(boom_status, 422)
+        self.assertEqual(boom_body["rejection_reason_code"], "request_invalid")
+        with mock.patch(
+            "metering_billing.http_app.CollectionCaseSettlementPresentmentService.present_collection_case_settlement",
+            side_effect=ValueError("boom"),
+        ):
+            get_boom_status, get_boom = invoke_http(
+                app,
+                "GET",
+                f"/v1/collection-case-settlements/{issued_settled.collection_case_settlement_id}",
+                query={"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(get_boom_status, 422)
+        self.assertEqual(get_boom["rejection_reason_code"], "request_invalid")
 
 
 if __name__ == "__main__":
