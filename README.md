@@ -86,6 +86,8 @@ After an `issued_credit_note` and an open `collection_case` exist for the same i
 
 After an open `collection_case` already shows exact-zero outstanding, call `CollectionCaseSettlementService.settle_collection_case` or `POST /v1/collection-cases/{collection_case_id}/settlements`. Replay of the same tenant and case returns the same `collection_case_settlement_id` and never double-settles. First successful settle enqueues one existing `collection.settled` webhook outbox event. `GET /v1/collection-case-settlements/{collection_case_settlement_id}` and `GET /v1/collection-case-settlements` present the stored settlement. Settle the zero-outstanding case, then wait. The path does not invent a journal, tax unwind, second webhook system, statutory numbering, write-off, payment receipt, or AIS call.
 
+After an open or dunning `collection_case` is disputed, call `CollectionDisputeService.hold_collection_case` or `POST /v1/collection-cases/{collection_case_id}/disputes`. Replay of the same tenant and case returns the same `collection_dispute_id` and never changes remaining outstanding. Case status becomes `disputed`. New dunning, payment receipt, credit apply, leftover apply, write-off, settle-when-zero, and void fail closed while held. `GET /v1/collection-disputes/{collection_dispute_id}` and `GET /v1/collection-disputes` present the stored hold. Hold the disputed case, then wait. The path does not invent a journal, webhook, write-off rewrite, void rewrite, statutory numbering, or AIS call.
+
 After an open `collection_case` still shows leftover remaining, call `CollectionWriteOffService.write_off_collection_case` or `POST /v1/collection-cases/{collection_case_id}/write-offs`. Replay of the same tenant and case returns the same `collection_write_off_id` and never re-zeros outstanding. Remaining becomes exact zero without settling. First successful write-off enqueues one existing `write_off.recorded` webhook outbox event. `GET /v1/collection-write-offs/{collection_write_off_id}` and `GET /v1/collection-write-offs` present the stored write-off. After the write-off exists, `POST /v1/collection-write-offs/{collection_write_off_id}/journal-proposals` composes one validated write-off/AR journal for AIS to pull. Write off leftover remaining, compose the journal, then settle. The path does not invent a tax unwind, second webhook system, statutory numbering, payment receipt, credit note, settlement command, or AIS call.
 
 ## Propose a journal
@@ -271,6 +273,17 @@ python3 -c "from metering_billing import CollectionCaseSettlementService, Collec
 ```
 
 After an open `collection_case` already shows exact-zero outstanding, `POST /v1/collection-cases/{collection_case_id}/settlements` flips status to `settled` without inventing a receipt or write-off. First successful settle enqueues one `collection.settled` outbox event. `GET /v1/collection-case-settlements/{collection_case_settlement_id}` returns the tenant-scoped statement. Settle the zero-outstanding case, then wait.
+
+## Hold a disputed collection case
+
+```bash
+python3 -c "from metering_billing import CollectionDisputeService, CollectionDisputePresentmentService"
+# POST /v1/collection-cases/{collection_case_id}/disputes
+# GET /v1/collection-disputes/{collection_dispute_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/collection-disputes?tenant_reference=urn:cwl:tenant_001
+```
+
+After an open or dunning `collection_case` is disputed, `POST /v1/collection-cases/{collection_case_id}/disputes` flips status to `disputed` without changing remaining outstanding. Replay returns the stored `collection_dispute_id`. New dunning and money-close commands fail closed while held. `GET /v1/collection-disputes/{collection_dispute_id}` returns the tenant-scoped statement. Hold the disputed case, then wait.
 
 ## Write off leftover collection remaining
 

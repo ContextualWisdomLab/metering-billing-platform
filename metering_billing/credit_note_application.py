@@ -24,7 +24,10 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
-from metering_billing.collection_case import COLLECTION_CASE_SETTLED_STATUS
+from metering_billing.collection_case import (
+    COLLECTION_CASE_DISPUTED_STATUS,
+    COLLECTION_CASE_SETTLED_STATUS,
+)
 from metering_billing.errors import (
     CreditNoteApplicationOutcomeCode,
     CreditNoteApplicationRejectionReasonCode,
@@ -233,6 +236,8 @@ class CreditNoteApplicationService:
             return _rejected(CreditNoteApplicationRejectionReasonCode.CURRENCY_MISMATCH)
         if collection_case.collection_case_status == COLLECTION_CASE_SETTLED_STATUS:
             return _rejected(CreditNoteApplicationRejectionReasonCode.COLLECTION_CASE_SETTLED)
+        if collection_case.collection_case_status == COLLECTION_CASE_DISPUTED_STATUS:
+            return _rejected(CreditNoteApplicationRejectionReasonCode.COLLECTION_CASE_DISPUTED)
         applied_amount = issued.tax_inclusive_amount
         if applied_amount > collection_case.outstanding_amount:
             return _rejected(CreditNoteApplicationRejectionReasonCode.CREDIT_EXCEEDS_OUTSTANDING)

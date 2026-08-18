@@ -1,21 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-case-settlement/v1",
-  "title": "Collection Case Settlement",
-  "description": "Append-only settle-when-zero of one same-tenant collection case. remaining_outstanding_amount must be exact zero. Replays acknowledge the stored collection_case_settlement_id and never double-settle. The document is not a payment receipt, write-off, tax unwind, or AIS posting.",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-dispute/v1",
+  "title": "Collection Dispute",
+  "description": "Append-only commercial dispute hold of one same-tenant open or dunning collection case. remaining_outstanding_amount is a snapshot of current remaining and must not change. Case status becomes disputed. Replays acknowledge the stored collection_dispute_id and never re-hold. The document is not a payment receipt, credit note, settlement, write-off, void, journal, webhook event, or AIS posting.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "collection_case_settlement_contract_version",
-    "collection_case_settlement_outcome_code"
+    "collection_dispute_contract_version",
+    "collection_dispute_outcome_code"
   ],
   "properties": {
-    "collection_case_settlement_contract_version": {"type": "integer", "minimum": 1},
-    "collection_case_settlement_outcome_code": {
+    "collection_dispute_contract_version": {"type": "integer", "minimum": 1},
+    "collection_dispute_outcome_code": {
       "type": "string",
       "enum": ["accepted", "duplicate_replay", "rejected"]
     },
-    "collection_case_settlement_id": {"type": "string", "format": "uuid"},
+    "collection_dispute_id": {"type": "string", "format": "uuid"},
     "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
     "collection_case_id": {"type": "string", "format": "uuid"},
     "invoice_draft_id": {"type": "string", "format": "uuid"},
@@ -26,12 +26,12 @@
       "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
       "maxLength": 39
     },
-    "collection_case_settlement_status": {"type": "string", "enum": ["settled"]},
+    "collection_dispute_status": {"type": "string", "enum": ["held"]},
     "collection_case_status": {
       "type": "string",
-      "enum": ["open", "dunning", "settled"]
+      "enum": ["disputed"]
     },
-    "settled_at": {"type": "string", "format": "date-time"},
+    "held_at": {"type": "string", "format": "date-time"},
     "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "next_operator_action": {"type": "string", "minLength": 1},
     "rejection_reason_code": {
@@ -39,10 +39,10 @@
       "enum": [
         "tenant_not_found",
         "collection_case_not_found",
-        "outstanding_not_zero",
+        "collection_case_disputed",
         "collection_case_settled",
         "collection_case_voided",
-        "collection_case_disputed",
+        "currency_mismatch",
         "request_invalid"
       ]
     }

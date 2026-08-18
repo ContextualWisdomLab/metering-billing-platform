@@ -232,6 +232,21 @@ contextual-orchestrator usage
 - Payment-receipt, credit-note-application, collection-open, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. Implicit #12/#17/#45 settle-when-zero on positive apply paths stays. First successful settle enqueues one existing #24 `collection.settled` outbox event. HMAC, SSRF, and delivery contracts stay unchanged. Cases already settled by #12/#45 without a settlement row are not backfilled.
 - Operators settle the zero-outstanding case, then wait. `operator_console` Storybook adds one `CollectionCaseSettlement` story. There is no login wall, Stripe, AIS call, or production SPA.
 
+## Collection-dispute-hold acceptance
+
+- A known stored open or dunning collection case holds once. Remaining outstanding stays the current exact-decimal snapshot. Case status becomes `disputed`. Hold status is `held`.
+- A second hold of the same tenant and `collection_case_id` returns the same `collection_dispute_id` as `duplicate_replay` and never changes remaining outstanding.
+- `collection_dispute_id` is an opaque generated identifier. The path does not invent a journal, webhook, write-off, settlement, void rewrite, statutory numbering, or AIS call.
+- Missing case, already-settled case, already-voided case, already-disputed case without a stored row, currency mismatch, and missing tenant fail closed.
+- New dunning fails closed as `collection_case_disputed`. Replay of a notice that already existed before the hold stays `#10` `duplicate_replay`.
+- Payment receipt, credit apply, leftover apply, write-off, settle-when-zero, and void fail closed while held.
+- `POST /v1/collection-cases/{collection_case_id}/disputes` is the nested hold command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
+- A known stored hold presents one tenant-scoped statement with identity, remaining snapshot, `held_at`, and `next_operator_action` (`wait`).
+- `GET /v1/collection-disputes/{collection_dispute_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/collection-disputes` lists summaries as `{collection_disputes, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{held_at}|{collection_dispute_id}`.
+- Write-off, void, settle, receipt, credit-apply, leftover-apply, journal, and AIS contracts stay unchanged except additive fail-closed `collection_case_disputed` reasons. Release is a later slice.
+- Operators hold the disputed case, then wait. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
+
 ## Collection-write-off acceptance
 
 - A known stored open collection case whose remaining outstanding is strictly positive writes off once and zeros remaining without flipping status.

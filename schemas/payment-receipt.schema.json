@@ -52,7 +52,8 @@
         "payment_intent_not_found",
         "payment_intent_not_projected",
         "payment_amount_invalid",
-        "payment_amount_exceeds_outstanding"
+        "payment_amount_exceeds_outstanding",
+        "collection_case_disputed"
       ]
     }
   }

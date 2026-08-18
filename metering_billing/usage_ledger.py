@@ -470,6 +470,30 @@ class StoredCollectionWriteOff:
 
 
 @dataclass(frozen=True)
+class StoredCollectionDispute:
+    """Append-only commercial dispute hold of one collection case.
+
+    Identity is ``(tenant_account_id, collection_case_id)``.  One case
+    holds at most once through this command.  ``collection_dispute_id``
+    is the opaque generated identifier.  Remaining outstanding is a
+    snapshot and is not changed.  This is not a payment receipt,
+    credit note, settlement, write-off, void, journal, or AIS posting.
+    """
+
+    collection_dispute_id: UUID
+    tenant_account_id: UUID
+    collection_case_id: UUID
+    invoice_draft_id: UUID
+    issued_invoice_id: UUID | None
+    collection_dispute_contract_version: int
+    source_payload_hash: str
+    currency_code: str
+    remaining_outstanding_amount: Decimal
+    collection_dispute_status: str
+    held_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredIssuedInvoiceVoid:
     """Append-only commercial void of one issued invoice.
 
@@ -935,6 +959,8 @@ class MemoryUsageLedger:
     )
     collection_write_offs: dict[UUID, StoredCollectionWriteOff] = field(default_factory=dict)
     collection_write_off_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    collection_disputes: dict[UUID, StoredCollectionDispute] = field(default_factory=dict)
+    collection_dispute_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     issued_invoice_voids: dict[UUID, StoredIssuedInvoiceVoid] = field(default_factory=dict)
     issued_invoice_void_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     unapplied_cash: dict[UUID, StoredUnappliedCash] = field(default_factory=dict)
@@ -2049,6 +2075,71 @@ class MemoryUsageLedger:
         self.collection_write_off_index[identity_key] = persisted.collection_write_off_id
         return persisted
 
+    def find_collection_dispute(
+        self, tenant_account_id: UUID, collection_case_id: UUID
+    ) -> StoredCollectionDispute | None:
+        """Return the dispute-hold row for one tenant collection case, if any."""
+        collection_dispute_id = self.collection_dispute_index.get(
+            (tenant_account_id, collection_case_id)
+        )
+        if collection_dispute_id is None:
+            return None
+        return self.collection_disputes[collection_dispute_id]
+
+    def get_collection_dispute(
+        self, collection_dispute_id: UUID
+    ) -> StoredCollectionDispute | None:
+        """Return one collection dispute by internal identifier, if present."""
+        return self.collection_disputes.get(collection_dispute_id)
+
+    def list_collection_disputes_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionDispute, ...]:
+        """Return collection disputes limited to one tenant."""
+        return tuple(
+            dispute
+            for dispute in self.collection_disputes.values()
+            if dispute.tenant_account_id == tenant_account_id
+        )
+
+    def insert_collection_dispute(
+        self, collection_dispute: StoredCollectionDispute
+    ) -> StoredCollectionDispute:
+        """Append an immutable dispute-hold row.  Existing identity rows stay."""
+        if collection_dispute.collection_dispute_status != "held":
+            raise ValueError("collection_dispute_status must be held")
+        remaining = parse_exact_decimal(
+            format_exact_decimal(collection_dispute.remaining_outstanding_amount)
+        )
+        if remaining < 0:
+            raise ValueError("collection dispute remaining must be a non-negative exact decimal")
+        if collection_dispute.collection_dispute_id in self.collection_disputes:
+            raise ValueError("collection_dispute_id already stored")
+        identity_key = (
+            collection_dispute.tenant_account_id,
+            collection_dispute.collection_case_id,
+        )
+        if identity_key in self.collection_dispute_index:
+            raise ValueError("collection disputes are immutable and cannot be replaced")
+        persisted = StoredCollectionDispute(
+            collection_dispute_id=collection_dispute.collection_dispute_id,
+            tenant_account_id=collection_dispute.tenant_account_id,
+            collection_case_id=collection_dispute.collection_case_id,
+            invoice_draft_id=collection_dispute.invoice_draft_id,
+            issued_invoice_id=collection_dispute.issued_invoice_id,
+            collection_dispute_contract_version=(
+                collection_dispute.collection_dispute_contract_version
+            ),
+            source_payload_hash=collection_dispute.source_payload_hash,
+            currency_code=collection_dispute.currency_code,
+            remaining_outstanding_amount=remaining,
+            collection_dispute_status=collection_dispute.collection_dispute_status,
+            held_at=collection_dispute.held_at,
+        )
+        self.collection_disputes[persisted.collection_dispute_id] = persisted
+        self.collection_dispute_index[identity_key] = persisted.collection_dispute_id
+        return persisted
+
     def find_issued_invoice_void(
         self, tenant_account_id: UUID, issued_invoice_id: UUID
     ) -> StoredIssuedInvoiceVoid | None:
@@ -2344,7 +2435,7 @@ class MemoryUsageLedger:
         amount = parse_exact_decimal(format_exact_decimal(applied_amount))
         if amount <= 0:
             raise ValueError("unapplied cash apply amount must be a positive exact decimal")
-        if stored.collection_case_status in {"settled", "voided"}:
+        if stored.collection_case_status in {"settled", "voided", "disputed"}:
             raise ValueError("settled collection cases cannot accept unapplied cash")
         remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
         if amount > remaining:
@@ -2376,7 +2467,7 @@ class MemoryUsageLedger:
         amount = parse_exact_decimal(format_exact_decimal(write_off_amount))
         if amount <= 0:
             raise ValueError("collection write-off amount must be a positive exact decimal")
-        if stored.collection_case_status in {"settled", "voided"}:
+        if stored.collection_case_status in {"settled", "voided", "disputed"}:
             raise ValueError("settled collection cases cannot accept a write-off")
         remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
         if remaining != amount:
@@ -2409,6 +2500,8 @@ class MemoryUsageLedger:
             return stored
         if stored.collection_case_status == "voided":
             raise ValueError("voided collection cases cannot settle")
+        if stored.collection_case_status == "disputed":
+            raise ValueError("disputed collection cases cannot settle")
         updated = StoredCollectionCase(
             collection_case_id=stored.collection_case_id,
             tenant_account_id=stored.tenant_account_id,
@@ -2416,6 +2509,32 @@ class MemoryUsageLedger:
             currency_code=stored.currency_code,
             collection_case_status="settled",
             outstanding_amount=Decimal("0"),
+            opened_at=stored.opened_at,
+        )
+        self.collection_cases[updated.collection_case_id] = updated
+        return updated
+
+    def mark_collection_case_disputed(self, collection_case_id: UUID) -> StoredCollectionCase:
+        """Flip an open or dunning case to ``disputed`` without changing outstanding.
+
+        Replay of an already-disputed case returns the stored row.  Settled
+        or voided cases fail closed.  Remaining outstanding stays unchanged.
+        """
+        stored = self.collection_cases.get(collection_case_id)
+        if stored is None:
+            raise ValueError("collection dispute requires a stored collection case")
+        if stored.collection_case_status == "disputed":
+            return stored
+        if stored.collection_case_status not in {"open", "dunning"}:
+            raise ValueError("only open or dunning collection cases can hold as disputed")
+        remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+        updated = StoredCollectionCase(
+            collection_case_id=stored.collection_case_id,
+            tenant_account_id=stored.tenant_account_id,
+            invoice_draft_id=stored.invoice_draft_id,
+            currency_code=stored.currency_code,
+            collection_case_status="disputed",
+            outstanding_amount=remaining,
             opened_at=stored.opened_at,
         )
         self.collection_cases[updated.collection_case_id] = updated
@@ -3109,6 +3228,8 @@ class MemoryUsageLedger:
             raise ValueError("collection settlement amount must be a positive exact decimal")
         if stored.collection_case_status == "voided":
             raise ValueError("voided collection cases cannot accept a settlement apply")
+        if stored.collection_case_status == "disputed":
+            raise ValueError("disputed collection cases cannot accept a settlement apply")
         if applied > stored.outstanding_amount:
             raise ValueError("collection settlement amount cannot exceed outstanding")
         remaining_amount = stored.outstanding_amount - applied

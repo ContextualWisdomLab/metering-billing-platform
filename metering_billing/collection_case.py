@@ -9,8 +9,9 @@ The service is the buyer-facing collections path:
 4. Append commercial dunning reminders without capturing payment.
 
 The case is a commercial collection record, not a statutory invoice and not a
-posted journal (IFRS Foundation, 2024).  Payment intents and provider adapters
-remain a later increment.
+posted journal (IFRS Foundation, 2024).  A later dispute hold may pause
+dunning without changing remaining outstanding.  Payment intents and provider
+adapters remain a later increment.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ COLLECTION_CASE_OPEN_STATUS = "open"
 COLLECTION_CASE_DUNNING_STATUS = "dunning"
 COLLECTION_CASE_SETTLED_STATUS = "settled"
 COLLECTION_CASE_VOIDED_STATUS = "voided"
+COLLECTION_CASE_DISPUTED_STATUS = "disputed"
 DUNNING_NOTICE_CODES = frozenset({"first_notice", "overdue_notice"})
 
 
@@ -221,6 +223,8 @@ class CollectionCaseService:
                 CollectionCaseOutcomeCode.DUPLICATE_REPLAY,
                 self.ledger.list_collection_dunning_events(collection_case.collection_case_id),
             )
+        if collection_case.collection_case_status == COLLECTION_CASE_DISPUTED_STATUS:
+            return _rejected(CollectionCaseRejectionReasonCode.COLLECTION_CASE_DISPUTED)
 
         existing_events = self.ledger.list_collection_dunning_events(
             collection_case.collection_case_id
@@ -292,11 +296,13 @@ def _derived_collection_case_status(
     stored: StoredCollectionCase,
     dunning_events: tuple[StoredCollectionDunningEvent, ...],
 ) -> str:
-    """Prefer ``settled`` or ``voided`` over dunning so a closed case does not reopen."""
+    """Prefer closed or held status over dunning so a paused case does not reopen."""
     if stored.collection_case_status == COLLECTION_CASE_SETTLED_STATUS:
         return COLLECTION_CASE_SETTLED_STATUS
     if stored.collection_case_status == COLLECTION_CASE_VOIDED_STATUS:
         return COLLECTION_CASE_VOIDED_STATUS
+    if stored.collection_case_status == COLLECTION_CASE_DISPUTED_STATUS:
+        return COLLECTION_CASE_DISPUTED_STATUS
     if dunning_events:
         return COLLECTION_CASE_DUNNING_STATUS
     return stored.collection_case_status

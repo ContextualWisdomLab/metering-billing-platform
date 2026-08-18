@@ -20,8 +20,8 @@ payment-provider dependency.
 
 The package never posts statutory journals.  Accounting exports remain
 ``accounting_journal_proposal`` documents with proposal-only statuses.
-Collection cases stay in commercial ``open``, ``dunning``, ``settled``, or
-``voided`` status.  Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
+Collection cases stay in commercial ``open``, ``dunning``, ``settled``,
+``voided``, or ``disputed`` status.  Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
 Payment receipts stay ``applied`` and do not post to AIS.  AIS posting
 receipts are stored as observations and never flip ``proposal_status``.
 Commercial credits stay ``recorded`` and emit a validated journal proposal
@@ -116,6 +116,8 @@ from metering_billing.contracts import (
     validate_collection_case_settlement_presentment,
     validate_collection_write_off,
     validate_collection_write_off_presentment,
+    validate_collection_dispute,
+    validate_collection_dispute_presentment,
     validate_unapplied_cash,
     validate_unapplied_cash_presentment,
     validate_unapplied_cash_application,
@@ -172,6 +174,9 @@ from metering_billing.errors import (
     CollectionCaseSettlementPresentmentQueryError,
     CollectionCaseSettlementRejectionReasonCode,
     CollectionWriteOffOutcomeCode,
+    CollectionDisputeOutcomeCode,
+    CollectionDisputePresentmentQueryError,
+    CollectionDisputeRejectionReasonCode,
     CollectionWriteOffPresentmentQueryError,
     CollectionWriteOffRejectionReasonCode,
     UnappliedCashOutcomeCode,
@@ -244,6 +249,10 @@ from metering_billing.collection_case_settlement_presentment import (
 from metering_billing.collection_write_off import CollectionWriteOffService
 from metering_billing.collection_write_off_presentment import (
     CollectionWriteOffPresentmentService,
+)
+from metering_billing.collection_dispute import CollectionDisputeService
+from metering_billing.collection_dispute_presentment import (
+    CollectionDisputePresentmentService,
 )
 from metering_billing.unapplied_cash import UnappliedCashService
 from metering_billing.unapplied_cash_presentment import UnappliedCashPresentmentService
@@ -411,6 +420,11 @@ __all__ = (
     "CollectionWriteOffPresentmentService",
     "CollectionWriteOffRejectionReasonCode",
     "CollectionWriteOffService",
+    "CollectionDisputeOutcomeCode",
+    "CollectionDisputePresentmentQueryError",
+    "CollectionDisputePresentmentService",
+    "CollectionDisputeRejectionReasonCode",
+    "CollectionDisputeService",
     "UnappliedCashOutcomeCode",
     "UnappliedCashPresentmentQueryError",
     "UnappliedCashPresentmentService",
@@ -512,6 +526,8 @@ __all__ = (
     "validate_collection_case_settlement_presentment",
     "validate_collection_write_off",
     "validate_collection_write_off_presentment",
+    "validate_collection_dispute",
+    "validate_collection_dispute_presentment",
     "validate_unapplied_cash",
     "validate_unapplied_cash_presentment",
     "validate_unapplied_cash_application",

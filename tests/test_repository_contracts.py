@@ -2678,6 +2678,8 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(validate_schema_instance(schema, settled), ())
         voided = dict(instance, collection_case_status="voided", outstanding_amount="0")
         self.assertEqual(validate_schema_instance(schema, voided), ())
+        disputed = dict(instance, collection_case_status="disputed")
+        self.assertEqual(validate_schema_instance(schema, disputed), ())
 
     def test_collection_case_migration_persists_append_only_cases_and_notices(self) -> None:
         """The collection-case migration must stay tenant-scoped and commercial-only."""
@@ -2783,6 +2785,48 @@ class RepositoryContractTests(unittest.TestCase):
             "REFERENCES billing_core.payment_receipt (tenant_account_id, payment_receipt_id)",
             "CREATE UNIQUE INDEX journal_proposal_receipt_identity",
             "payment_receipt_id IS NOT NULL",
+        ):
+            self.assertIn(expected_fragment, sql)
+
+    def test_collection_dispute_accepts_held_status_and_closed_reasons(self) -> None:
+        """A collection-dispute contract records exact remaining and held-only status."""
+        schema = self._schema("collection-dispute.schema.json")
+        instance = {
+            "collection_dispute_contract_version": 1,
+            "collection_dispute_outcome_code": "accepted",
+            "collection_dispute_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd70",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd21",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "currency_code": "USD",
+            "remaining_outstanding_amount": "0.003705",
+            "collection_dispute_status": "held",
+            "collection_case_status": "disputed",
+            "held_at": "2026-08-18T13:00:00Z",
+            "source_payload_hash": "sha256:" + "d" * 64,
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        released = dict(instance, collection_dispute_status="released")
+        self.assertIn(
+            "$.collection_dispute_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, released),
+        )
+
+    def test_collection_dispute_migration_persists_append_only_holds(self) -> None:
+        """The dispute-hold migration stays tenant-scoped and money-neutral."""
+        sql = (ROOT / "database/migrations/0031_collection_dispute.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.collection_dispute",
+            "UNIQUE (tenant_account_id, collection_case_id)",
+            "UNIQUE (tenant_account_id, collection_dispute_id)",
+            "FOREIGN KEY (tenant_account_id, collection_case_id)",
+            "collection_dispute_status text NOT NULL CHECK (",
+            "collection_dispute_status IN ('held')",
+            "collection_case_status IN ('open', 'dunning', 'settled', 'voided', 'disputed')",
+            "OR collection_case_status IN ('open', 'dunning', 'disputed')",
         ):
             self.assertIn(expected_fragment, sql)
 

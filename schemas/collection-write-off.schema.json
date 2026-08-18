@@ -45,6 +45,7 @@
         "tenant_not_found",
         "collection_case_not_found",
         "collection_case_settled",
+        "collection_case_disputed",
         "outstanding_already_zero",
         "outstanding_negative",
         "currency_mismatch",

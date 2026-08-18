@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-case-presentment/v1",
   "title": "Collection Case Presentment",
-  "description": "Tenant-scoped commercial collection statement projected from a stored collection_case and dunning rows. Outstanding is an exact-decimal string. Status stays open, dunning, settled, or voided. Next operator action is collect, credit, or wait. The document is not a capture, posting, or statutory invoice.",
+  "description": "Tenant-scoped commercial collection statement projected from a stored collection_case and dunning rows. Outstanding is an exact-decimal string. Status stays open, dunning, settled, voided, or disputed. Next operator action is collect, credit, or wait. The document is not a capture, posting, or statutory invoice.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -30,7 +30,7 @@
     },
     "collection_case_status": {
       "type": "string",
-      "enum": ["open", "dunning", "settled", "voided"]
+      "enum": ["open", "dunning", "settled", "voided", "disputed"]
     },
     "opened_at": {"type": "string", "format": "date-time"},
     "next_operator_action": {

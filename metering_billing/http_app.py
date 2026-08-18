@@ -123,6 +123,13 @@ The application is a thin WSGI adapter:
     existing GET journal-proposal routes.  Do not invent a tax unwind,
     settlement, statutory numbering, payment capture, or AIS call.
     After write-off, compose the journal, then settle at exact zero.
+    ``POST /v1/collection-cases/{collection_case_id}/disputes``
+    holds one same-tenant open or dunning case as ``disputed``.
+    Replay of the same tenant and case returns the stored
+    ``collection_dispute_id`` and never changes remaining outstanding.
+    GET item and list present the stored hold.  New dunning fails closed
+    while held.  Do not invent a journal, webhook, write-off, settlement,
+    void rewrite, statutory numbering, payment capture, or AIS call.
     ``POST /v1/credit-adjustments/{credit_adjustment_id}/journal-proposals``
     composes or replays the existing credit ``accounting_journal_proposal``.
     Credit accept already writes that journal.  Replay of the same tenant
@@ -230,6 +237,7 @@ from metering_billing.errors import (
     CreditNoteApplicationPresentmentQueryError,
     CollectionCaseSettlementPresentmentQueryError,
     CollectionWriteOffPresentmentQueryError,
+    CollectionDisputePresentmentQueryError,
     UnappliedCashPresentmentQueryError,
     UnappliedCashApplicationPresentmentQueryError,
     UnappliedCashRefundPresentmentQueryError,
@@ -266,6 +274,10 @@ from metering_billing.collection_case_settlement_presentment import (
 from metering_billing.collection_write_off import CollectionWriteOffService
 from metering_billing.collection_write_off_presentment import (
     CollectionWriteOffPresentmentService,
+)
+from metering_billing.collection_dispute import CollectionDisputeService
+from metering_billing.collection_dispute_presentment import (
+    CollectionDisputePresentmentService,
 )
 from metering_billing.unapplied_cash import UnappliedCashService
 from metering_billing.unapplied_cash_presentment import UnappliedCashPresentmentService
@@ -445,6 +457,13 @@ COLLECTION_WRITE_OFF_COLLECTION_PATH = "/v1/collection-write-offs"
 COLLECTION_WRITE_OFF_ITEM_PATH = re.compile(
     r"^/v1/collection-write-offs/([0-9a-fA-F-]{36})$"
 )
+COLLECTION_DISPUTE_NESTED_PATH = re.compile(
+    r"^/v1/collection-cases/([0-9a-fA-F-]{36})/disputes$"
+)
+COLLECTION_DISPUTE_COLLECTION_PATH = "/v1/collection-disputes"
+COLLECTION_DISPUTE_ITEM_PATH = re.compile(
+    r"^/v1/collection-disputes/([0-9a-fA-F-]{36})$"
+)
 WRITE_OFF_JOURNAL_NESTED_PATH = re.compile(
     r"^/v1/collection-write-offs/([0-9a-fA-F-]{36})/journal-proposals$"
 )
@@ -519,6 +538,10 @@ def create_http_app(
     )
     collection_write_offs = CollectionWriteOffService(shared_ledger)
     collection_write_off_presentments = CollectionWriteOffPresentmentService(
+        shared_ledger
+    )
+    collection_disputes = CollectionDisputeService(shared_ledger)
+    collection_dispute_presentments = CollectionDisputePresentmentService(
         shared_ledger
     )
     unapplied_cash = UnappliedCashService(shared_ledger)
@@ -1874,6 +1897,72 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_collection_disputes",
+            "get_collection_dispute",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_collection_disputes":
+                    page = collection_dispute_presentments.list_collection_disputes(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = collection_dispute_presentments.present_collection_dispute(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["collection_dispute_id"],
+                        "collection_dispute_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except CollectionDisputePresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "collection_dispute_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "collection_disputes":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                currency_code = payload.get("currency_code")
+                if currency_code is not None and not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                result = collection_disputes.hold_collection_case(
+                    tenant_reference,
+                    _parse_uuid(path_values["collection_case_id"], "collection_case_id"),
+                    currency_code=currency_code,
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_credit_notes":
             try:
                 payload = _read_json_object(environ)
@@ -2136,6 +2225,24 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "POST":
             return "collection_write_offs", {
                 "collection_case_id": write_off_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    dispute_nested = COLLECTION_DISPUTE_NESTED_PATH.fullmatch(path)
+    if dispute_nested is not None:
+        if method == "POST":
+            return "collection_disputes", {
+                "collection_case_id": dispute_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    if path == COLLECTION_DISPUTE_COLLECTION_PATH:
+        if method == "GET":
+            return "list_collection_disputes", {}
+        return "http_method_not_allowed", {}
+    dispute_match = COLLECTION_DISPUTE_ITEM_PATH.fullmatch(path)
+    if dispute_match is not None:
+        if method == "GET":
+            return "get_collection_dispute", {
+                "collection_dispute_id": dispute_match.group(1)
             }
         return "http_method_not_allowed", {}
     if path == COLLECTION_WRITE_OFF_COLLECTION_PATH:

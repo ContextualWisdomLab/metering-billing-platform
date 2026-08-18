@@ -20,6 +20,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from metering_billing.collection_case import (
+    COLLECTION_CASE_DISPUTED_STATUS,
     COLLECTION_CASE_SETTLED_STATUS,
     COLLECTION_CASE_VOIDED_STATUS,
     CollectionDunningEventResult,
@@ -55,6 +56,7 @@ def next_operator_action(
     if collection_case_status in {
         COLLECTION_CASE_SETTLED_STATUS,
         COLLECTION_CASE_VOIDED_STATUS,
+        COLLECTION_CASE_DISPUTED_STATUS,
     } or outstanding <= ZERO:
         return OPERATOR_ACTION_WAIT
     if collection_case_status == "open" and credited_amount > ZERO:
@@ -248,6 +250,7 @@ def _next_dunning_notice_code(collection_case_status: str, last_notice: str | No
     if collection_case_status in {
         COLLECTION_CASE_SETTLED_STATUS,
         COLLECTION_CASE_VOIDED_STATUS,
+        COLLECTION_CASE_DISPUTED_STATUS,
     }:
         return None
     if last_notice is None:

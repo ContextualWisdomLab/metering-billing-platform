@@ -49,6 +49,7 @@
         "collection_write_off_exists",
         "unapplied_cash_already_applied",
         "collection_case_settled",
+        "collection_case_disputed",
         "outstanding_mismatch",
         "currency_mismatch",
         "request_invalid"

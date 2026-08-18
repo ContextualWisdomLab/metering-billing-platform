@@ -54,6 +54,8 @@ __all__ = (
     "COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_WRITE_OFF_SCHEMA_NAME",
     "COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_DISPUTE_SCHEMA_NAME",
+    "COLLECTION_DISPUTE_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_INVOICE_VOID_SCHEMA_NAME",
     "ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME",
     "UNAPPLIED_CASH_SCHEMA_NAME",
@@ -101,6 +103,8 @@ __all__ = (
     "validate_collection_case_settlement_presentment",
     "validate_collection_write_off",
     "validate_collection_write_off_presentment",
+    "validate_collection_dispute",
+    "validate_collection_dispute_presentment",
     "validate_issued_invoice_void",
     "validate_issued_invoice_void_presentment",
     "validate_unapplied_cash",
@@ -173,6 +177,10 @@ COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME = (
 COLLECTION_WRITE_OFF_SCHEMA_NAME = "collection-write-off.schema.json"
 COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME = (
     "collection-write-off-presentment.schema.json"
+)
+COLLECTION_DISPUTE_SCHEMA_NAME = "collection-dispute.schema.json"
+COLLECTION_DISPUTE_PRESENTMENT_SCHEMA_NAME = (
+    "collection-dispute-presentment.schema.json"
 )
 ISSUED_INVOICE_VOID_SCHEMA_NAME = "issued-invoice-void.schema.json"
 ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME = (
@@ -1828,6 +1836,98 @@ def validate_collection_write_off_presentment(
         if forbidden_name in statement:
             errors.append(
                 f"$: collection write-off presentment must not include {forbidden_name}"
+            )
+    return tuple(errors)
+
+
+def validate_collection_dispute(
+    dispute: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate hold shape plus exact remaining snapshot invariants.
+
+    Accepted and replayed holds must carry the case, invoice draft,
+    currency, non-negative remaining snapshot, and held timestamp.
+    Rejections must carry a closed reason and must not invent a legal
+    number, journal, or webhook.
+    """
+    schema = load_json_schema(COLLECTION_DISPUTE_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, dispute))
+    if not isinstance(dispute, Mapping):
+        return tuple(errors)
+    outcome = dispute.get("collection_dispute_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        for field_name in (
+            "collection_dispute_id",
+            "collection_case_id",
+            "invoice_draft_id",
+            "currency_code",
+            "remaining_outstanding_amount",
+            "held_at",
+        ):
+            if field_name not in dispute:
+                errors.append(f"$: {outcome} disputes must include {field_name}")
+        remaining = dispute.get("remaining_outstanding_amount")
+        if isinstance(remaining, str):
+            try:
+                if Decimal(remaining) < Decimal("0"):
+                    errors.append("$: remaining_outstanding_amount must be a non-negative exact decimal")
+            except Exception:
+                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+        elif remaining is not None:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+        for forbidden_name in (
+            "legal_credit_note_number",
+            "legal_invoice_number",
+            "card_pan",
+        ):
+            if forbidden_name in dispute:
+                errors.append(f"$: disputes must not include {forbidden_name}")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in dispute:
+            errors.append("$: rejected disputes must include rejection_reason_code")
+        if "legal_invoice_number" in dispute:
+            errors.append("$: rejected disputes must not invent legal numbers")
+        if "legal_credit_note_number" in dispute:
+            errors.append("$: rejected disputes must not invent legal numbers")
+    else:
+        if outcome is not None:
+            errors.append("$: unknown collection_dispute_outcome_code")
+    return tuple(errors)
+
+
+def validate_collection_dispute_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate hold presentment plus exact remaining snapshot invariants."""
+    schema = load_json_schema(
+        COLLECTION_DISPUTE_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    remaining = statement.get("remaining_outstanding_amount")
+    action = statement.get("next_operator_action")
+    if remaining is None:
+        errors.append("$: remaining_outstanding_amount is required")
+    elif isinstance(remaining, str):
+        try:
+            if Decimal(remaining) < Decimal("0"):
+                errors.append("$: remaining_outstanding_amount must be a non-negative exact decimal")
+            if action != "wait":
+                errors.append("$: dispute presentment must wait")
+        except Exception:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    else:
+        errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    for forbidden_name in (
+        "legal_credit_note_number",
+        "legal_invoice_number",
+        "collection_dispute_outcome_code",
+        "card_pan",
+    ):
+        if forbidden_name in statement:
+            errors.append(
+                f"$: collection dispute presentment must not include {forbidden_name}"
             )
     return tuple(errors)
 

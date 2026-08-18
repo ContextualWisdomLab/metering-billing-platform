@@ -235,6 +235,8 @@ class PaymentSettlementService:
         collection_case = self.ledger.get_collection_case(payment_intent.collection_case_id)
         if collection_case is None:
             return _rejected(PaymentSettlementRejectionReasonCode.PAYMENT_INTENT_NOT_FOUND)
+        if collection_case.collection_case_status == "disputed":
+            return _rejected(PaymentSettlementRejectionReasonCode.COLLECTION_CASE_DISPUTED)
         if parsed_amount > collection_case.outstanding_amount:
             return _rejected(
                 PaymentSettlementRejectionReasonCode.PAYMENT_AMOUNT_EXCEEDS_OUTSTANDING

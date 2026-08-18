@@ -53,6 +53,7 @@
         "collection_case_not_found",
         "currency_mismatch",
         "collection_case_settled",
+        "collection_case_disputed",
         "credit_exceeds_outstanding",
         "invoice_mismatch",
         "request_invalid"

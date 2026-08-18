@@ -242,6 +242,7 @@ class IssuedInvoiceVoidRejectionReasonCode(StrEnum):
     COLLECTION_WRITE_OFF_EXISTS = "collection_write_off_exists"
     UNAPPLIED_CASH_ALREADY_APPLIED = "unapplied_cash_already_applied"
     COLLECTION_CASE_SETTLED = "collection_case_settled"
+    COLLECTION_CASE_DISPUTED = "collection_case_disputed"
     OUTSTANDING_MISMATCH = "outstanding_mismatch"
     CURRENCY_MISMATCH = "currency_mismatch"
     REQUEST_INVALID = "request_invalid"
@@ -295,6 +296,7 @@ class CreditNoteApplicationRejectionReasonCode(StrEnum):
     COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
     CURRENCY_MISMATCH = "currency_mismatch"
     COLLECTION_CASE_SETTLED = "collection_case_settled"
+    COLLECTION_CASE_DISPUTED = "collection_case_disputed"
     CREDIT_EXCEEDS_OUTSTANDING = "credit_exceeds_outstanding"
     INVOICE_MISMATCH = "invoice_mismatch"
     REQUEST_INVALID = "request_invalid"
@@ -316,6 +318,7 @@ class CollectionCaseSettlementRejectionReasonCode(StrEnum):
     OUTSTANDING_NOT_ZERO = "outstanding_not_zero"
     COLLECTION_CASE_SETTLED = "collection_case_settled"
     COLLECTION_CASE_VOIDED = "collection_case_voided"
+    COLLECTION_CASE_DISPUTED = "collection_case_disputed"
     REQUEST_INVALID = "request_invalid"
 
 
@@ -341,6 +344,7 @@ class CollectionWriteOffRejectionReasonCode(StrEnum):
     TENANT_NOT_FOUND = "tenant_not_found"
     COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
     COLLECTION_CASE_SETTLED = "collection_case_settled"
+    COLLECTION_CASE_DISPUTED = "collection_case_disputed"
     OUTSTANDING_ALREADY_ZERO = "outstanding_already_zero"
     OUTSTANDING_NEGATIVE = "outstanding_negative"
     CURRENCY_MISMATCH = "currency_mismatch"
@@ -350,6 +354,34 @@ class CollectionWriteOffRejectionReasonCode(StrEnum):
 
 class CollectionWriteOffPresentmentQueryError(ValueError):
     """Raised when a stored collection write-off cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
+class CollectionDisputeOutcomeCode(StrEnum):
+    """Terminal result of holding one collection case as disputed."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class CollectionDisputeRejectionReasonCode(StrEnum):
+    """Why a dispute hold was refused without changing case status."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
+    COLLECTION_CASE_DISPUTED = "collection_case_disputed"
+    COLLECTION_CASE_SETTLED = "collection_case_settled"
+    COLLECTION_CASE_VOIDED = "collection_case_voided"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    REQUEST_INVALID = "request_invalid"
+
+
+class CollectionDisputePresentmentQueryError(ValueError):
+    """Raised when a stored collection dispute cannot be authorized or presented."""
 
     def __init__(self, rejection_reason_code: str) -> None:
         super().__init__(rejection_reason_code)
@@ -400,6 +432,7 @@ class UnappliedCashApplicationRejectionReasonCode(StrEnum):
     UNAPPLIED_CASH_NOT_FOUND = "unapplied_cash_not_found"
     COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
     COLLECTION_CASE_SETTLED = "collection_case_settled"
+    COLLECTION_CASE_DISPUTED = "collection_case_disputed"
     UNAPPLIED_CASH_ALREADY_REFUNDED = "unapplied_cash_already_refunded"
     CURRENCY_MISMATCH = "currency_mismatch"
     APPLIED_AMOUNT_ZERO = "applied_amount_zero"
@@ -732,6 +765,7 @@ class CollectionCaseRejectionReasonCode(StrEnum):
     COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
     OUTSTANDING_AMOUNT_INVALID = "outstanding_amount_invalid"
     DUNNING_NOTICE_INVALID = "dunning_notice_invalid"
+    COLLECTION_CASE_DISPUTED = "collection_case_disputed"
 
 
 class PaymentIntentOutcomeCode(StrEnum):
@@ -794,6 +828,7 @@ class PaymentSettlementRejectionReasonCode(StrEnum):
     PAYMENT_INTENT_NOT_PROJECTED = "payment_intent_not_projected"
     PAYMENT_AMOUNT_INVALID = "payment_amount_invalid"
     PAYMENT_AMOUNT_EXCEEDS_OUTSTANDING = "payment_amount_exceeds_outstanding"
+    COLLECTION_CASE_DISPUTED = "collection_case_disputed"
 
 
 class ExactDecimalError(ValueError):

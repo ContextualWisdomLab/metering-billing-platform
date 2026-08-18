@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping
 from uuid import UUID
 
 from metering_billing.collection_case import (
+    COLLECTION_CASE_DISPUTED_STATUS,
     COLLECTION_CASE_SETTLED_STATUS,
     COLLECTION_CASE_VOIDED_STATUS,
 )
@@ -217,6 +218,10 @@ class CollectionCaseSettlementService:
         if collection_case.collection_case_status == COLLECTION_CASE_VOIDED_STATUS:
             return _rejected(
                 CollectionCaseSettlementRejectionReasonCode.COLLECTION_CASE_VOIDED
+            )
+        if collection_case.collection_case_status == COLLECTION_CASE_DISPUTED_STATUS:
+            return _rejected(
+                CollectionCaseSettlementRejectionReasonCode.COLLECTION_CASE_DISPUTED
             )
         remaining = collection_case.outstanding_amount
         if remaining == 0:

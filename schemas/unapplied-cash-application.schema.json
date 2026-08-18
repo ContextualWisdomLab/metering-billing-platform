@@ -47,6 +47,7 @@
         "unapplied_cash_not_found",
         "collection_case_not_found",
         "collection_case_settled",
+        "collection_case_disputed",
         "unapplied_cash_already_refunded",
         "currency_mismatch",
         "applied_amount_zero",
