@@ -137,9 +137,11 @@ The application is a thin WSGI adapter:
     call, settlement command, or second webhook system.
     ``POST /v1/unapplied-cash/{unapplied_cash_id}/refunds`` records one
     commercial refund of the parked leftover.  Replay of the same tenant
-    and leftover returns the stored ``unapplied_cash_refund_id``.  GET
-    item and list present the stored refund.  Do not invent a journal,
-    webhook, write-off, settlement, credit note, PSP capture, or AIS call.
+    and leftover returns the stored ``unapplied_cash_refund_id``.  First
+    successful refund enqueues one existing ``refund.recorded`` outbox
+    event.  GET item and list present the stored refund.  Do not invent
+    a journal, write-off, settlement, credit note, PSP capture, AIS
+    call, or second webhook system.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls

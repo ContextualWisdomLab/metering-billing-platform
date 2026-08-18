@@ -8,9 +8,11 @@ The service is the buyer-facing leftover-refund path:
 4. Leave the parked leftover row, receipt, journals, and outbox unchanged.
 
 Replay of the same tenant and ``unapplied_cash_id`` returns the stored
-refund and never writes a second row.  The path does not capture cards,
-call a PSP, emit a journal, webhook, write-off, settlement, credit note,
-or AIS call.  ``refund.recorded`` is a later slice.
+refund and never writes a second row.  First successful refund enqueues
+one existing ``refund.recorded`` outbox event; replay of the same
+refund does not enqueue a second row.  The path does not capture cards,
+call a PSP, emit a journal, write-off, settlement, credit note, or AIS
+call.
 """
 
 from __future__ import annotations
@@ -36,6 +38,10 @@ from metering_billing.usage_ledger import (
     StoredUnappliedCash,
     StoredUnappliedCashRefund,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_REFUND_RECORDED,
+    enqueue_accepted_fact,
 )
 
 
@@ -126,6 +132,33 @@ class UnappliedCashRefundResult:
             "next_operator_action": self.next_operator_action,
         }
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``refund.recorded`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not a PSP capture or cash
+        movement.  PII, PAN, secrets, and statutory identifiers are omitted.
+        Payment-intent, collection-case, parked leftover snapshot, and
+        leftover status are omitted because they are not required to
+        identify the commercial refund fact.
+        """
+        if self.unapplied_cash_refund_id is None or self.unapplied_cash_id is None:
+            raise ValueError("rejected unapplied cash refund has no webhook event data")
+        if self.refunded_at is None:
+            raise ValueError("accepted unapplied cash refunds must include refunded_at")
+        return {
+            "unapplied_cash_refund_id": str(self.unapplied_cash_refund_id),
+            "unapplied_cash_id": str(self.unapplied_cash_id),
+            "payment_receipt_id": str(self.payment_receipt_id),
+            "source_payload_hash": self.source_payload_hash,
+            "unapplied_cash_refund_contract_version": (
+                self.unapplied_cash_refund_contract_version
+            ),
+            "currency_code": self.currency_code,
+            "refund_amount": format_exact_decimal(self.refund_amount),
+            "unapplied_cash_refund_status": self.unapplied_cash_refund_status,
+            "refunded_at": _format_refunded_at(self.refunded_at),
+        }
+
 
 class UnappliedCashRefundService:
     """Append-only writer of commercial leftover refunds."""
@@ -150,7 +183,9 @@ class UnappliedCashRefundService:
         Replay of the same tenant and ``unapplied_cash_id`` returns the
         stored ``unapplied_cash_refund_id`` and does not write a second
         row.  The refund uses the full parked amount.  The parked leftover
-        row stays ``parked``; refund uniqueness consumes it.
+        row stays ``parked``; refund uniqueness consumes it.  First
+        successful refund enqueues one ``refund.recorded`` outbox event.
+        Replay of that refund does not enqueue a second row.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -165,12 +200,14 @@ class UnappliedCashRefundService:
                 return _rejected(
                     UnappliedCashRefundRejectionReasonCode.UNAPPLIED_CASH_NOT_FOUND
                 )
-            return _from_stored(
+            result = _from_stored(
                 existing,
                 leftover,
                 tenant.tenant_reference,
                 UnappliedCashRefundOutcomeCode.DUPLICATE_REPLAY,
             )
+            _enqueue_refund_recorded(self.ledger, tenant.tenant_reference, result)
+            return result
         leftover = self.ledger.get_unapplied_cash(unapplied_cash_id)
         if leftover is None or leftover.tenant_account_id != tenant.tenant_account_id:
             return _rejected(UnappliedCashRefundRejectionReasonCode.UNAPPLIED_CASH_NOT_FOUND)
@@ -218,12 +255,39 @@ class UnappliedCashRefundService:
                 refunded_at=self._clock(),
             )
         )
-        return _from_stored(
+        result = _from_stored(
             stored,
             leftover,
             tenant.tenant_reference,
             UnappliedCashRefundOutcomeCode.ACCEPTED,
         )
+        _enqueue_refund_recorded(self.ledger, tenant.tenant_reference, result)
+        return result
+
+
+def _enqueue_refund_recorded(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: UnappliedCashRefundResult,
+) -> None:
+    """Append one ``refund.recorded`` outbox row for a stored refund.
+
+    Replay of the same tenant, event type, ``unapplied_cash_refund_id``,
+    and payload hash returns the stored row.  A crash after insert and
+    before enqueue is healed by the next refund replay.
+    """
+    if result.unapplied_cash_refund_id is None or result.refunded_at is None:
+        raise ValueError(
+            "accepted unapplied cash refunds must include identity and refunded_at"
+        )
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_REFUND_RECORDED,
+        result.unapplied_cash_refund_id,
+        result.as_webhook_event_data(),
+        result.refunded_at,
+    )
 
 
 def _parse_refund_amount(value: object) -> Decimal:

@@ -30,9 +30,11 @@ from metering_billing.errors import (
 from metering_billing.unapplied_cash_refund import (
     UNAPPLIED_CASH_REFUND_CONTRACT_VERSION,
     UnappliedCashRefundResult,
+    _enqueue_refund_recorded,
     _format_refunded_at,
     _rejected,
 )
+from metering_billing.webhook_outbox import EVENT_TYPE_REFUND_RECORDED
 from metering_billing.usage_ledger import (
     StoredUnappliedCash,
     StoredUnappliedCashRefund,
@@ -59,7 +61,7 @@ def _park_leftover():
 class UnappliedCashRefundTests(unittest.TestCase):
     """Verify parked leftover refunds once as a commercial fact only."""
 
-    def test_refund_full_parked_amount_once_without_psp_or_webhook(self) -> None:
+    def test_refund_full_parked_amount_once_without_psp(self) -> None:
         """Full leftover refunds once; replay returns the stored id."""
         ledger, parked, payment_receipt_id = _park_leftover()
         prior_journals = len(ledger.journal_proposals)
@@ -106,7 +108,14 @@ class UnappliedCashRefundTests(unittest.TestCase):
         self.assertEqual(stored_leftover.unapplied_amount, LEFTOVER)
         self.assertEqual(len(ledger.unapplied_cash_refunds), 1)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        refund_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_REFUND_RECORDED
+        ]
+        self.assertEqual(len(refund_events), 1)
+        self.assertEqual(refund_events[0].source_id, first.unapplied_cash_refund_id)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
         self.assertEqual(len(ledger.payment_receipts), prior_receipts)
         self.assertEqual(len(ledger.collection_write_offs), prior_write_offs)
         self.assertEqual(len(ledger.collection_case_settlements), prior_settlements)
@@ -368,7 +377,14 @@ class UnappliedCashRefundTests(unittest.TestCase):
         self.assertEqual(currency_status, 422)
         self.assertEqual(currency_body["rejection_reason_code"], "request_invalid")
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        refund_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_REFUND_RECORDED
+        ]
+        self.assertEqual(len(refund_events), 1)
+        self.assertEqual(str(refund_events[0].source_id), refund_id)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
         cursor_status, cursor_body = invoke_http(
             app,
             "GET",
@@ -622,6 +638,103 @@ class UnappliedCashRefundTests(unittest.TestCase):
         self.assertTrue(_format_refunded_at(REFUNDED_MORNING).endswith("Z"))
         with self.assertRaisesRegex(ValueError, "accepted unapplied cash refund must include refunded_at"):
             _format_refunded_at(None)
+        webhook_data = accepted.as_webhook_event_data()
+        self.assertEqual(
+            webhook_data["unapplied_cash_refund_id"],
+            str(accepted.unapplied_cash_refund_id),
+        )
+        self.assertEqual(webhook_data["unapplied_cash_id"], str(accepted.unapplied_cash_id))
+        self.assertEqual(webhook_data["refund_amount"], format_exact_decimal(LEFTOVER))
+        self.assertNotIn("payment_intent_id", webhook_data)
+        self.assertNotIn("collection_case_id", webhook_data)
+        self.assertNotIn("unapplied_amount", webhook_data)
+        self.assertNotIn("unapplied_cash_status", webhook_data)
+        with self.assertRaisesRegex(ValueError, "rejected unapplied cash refund has no webhook event data"):
+            rejected.as_webhook_event_data()
+        missing_cash = UnappliedCashRefundResult(
+            unapplied_cash_refund_outcome_code=UnappliedCashRefundOutcomeCode.ACCEPTED,
+            unapplied_cash_refund_contract_version=1,
+            unapplied_cash_refund_id=generate_record_id(),
+            unapplied_cash_id=None,
+            payment_receipt_id=accepted.payment_receipt_id,
+            payment_intent_id=accepted.payment_intent_id,
+            collection_case_id=accepted.collection_case_id,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            refund_amount=LEFTOVER,
+            unapplied_amount=LEFTOVER,
+            unapplied_cash_refund_status="recorded",
+            unapplied_cash_status="parked",
+            refunded_at=REFUNDED_MORNING,
+            source_payload_hash="sha256:" + ("44" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "rejected unapplied cash refund has no webhook event data"):
+            missing_cash.as_webhook_event_data()
+        accepted_without_time = UnappliedCashRefundResult(
+            unapplied_cash_refund_outcome_code=UnappliedCashRefundOutcomeCode.ACCEPTED,
+            unapplied_cash_refund_contract_version=1,
+            unapplied_cash_refund_id=generate_record_id(),
+            unapplied_cash_id=generate_record_id(),
+            payment_receipt_id=generate_record_id(),
+            payment_intent_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            refund_amount=LEFTOVER,
+            unapplied_amount=LEFTOVER,
+            unapplied_cash_refund_status="recorded",
+            unapplied_cash_status="parked",
+            refunded_at=None,
+            source_payload_hash="sha256:" + ("ab" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "accepted unapplied cash refunds must include refunded_at"):
+            accepted_without_time.as_webhook_event_data()
+        incomplete = UnappliedCashRefundResult(
+            unapplied_cash_refund_outcome_code=UnappliedCashRefundOutcomeCode.ACCEPTED,
+            unapplied_cash_refund_contract_version=1,
+            unapplied_cash_refund_id=None,
+            unapplied_cash_id=generate_record_id(),
+            payment_receipt_id=accepted.payment_receipt_id,
+            payment_intent_id=accepted.payment_intent_id,
+            collection_case_id=accepted.collection_case_id,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            refund_amount=LEFTOVER,
+            unapplied_amount=LEFTOVER,
+            unapplied_cash_refund_status="recorded",
+            unapplied_cash_status="parked",
+            refunded_at=None,
+            source_payload_hash="sha256:" + ("cd" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "accepted unapplied cash refunds must include identity"):
+            _enqueue_refund_recorded(ledger, TENANT_ONE, incomplete)
+        missing_time = UnappliedCashRefundResult(
+            unapplied_cash_refund_outcome_code=UnappliedCashRefundOutcomeCode.ACCEPTED,
+            unapplied_cash_refund_contract_version=1,
+            unapplied_cash_refund_id=generate_record_id(),
+            unapplied_cash_id=accepted.unapplied_cash_id,
+            payment_receipt_id=accepted.payment_receipt_id,
+            payment_intent_id=accepted.payment_intent_id,
+            collection_case_id=accepted.collection_case_id,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            refund_amount=LEFTOVER,
+            unapplied_amount=LEFTOVER,
+            unapplied_cash_refund_status="recorded",
+            unapplied_cash_status="parked",
+            refunded_at=None,
+            source_payload_hash="sha256:" + ("ef" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "accepted unapplied cash refunds must include identity"):
+            _enqueue_refund_recorded(ledger, TENANT_ONE, missing_time)
 
     def test_ledger_insert_fail_closed_branches(self) -> None:
         """Ledger insert refuses invalid status, leftover, and duplicate identity."""

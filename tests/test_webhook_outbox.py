@@ -17,11 +17,13 @@ from uuid import uuid4
 
 from metering_billing import (
     AccountingExportService,
+    format_exact_decimal,
     CollectionCaseSettlementService,
     CollectionWriteOffService,
     CreditAdjustmentService,
     CreditNoteApplicationService,
     UnappliedCashApplicationService,
+    UnappliedCashRefundService,
     IssuedCreditNoteService,
     IssuedInvoiceService,
     MemoryUsageLedger,
@@ -53,6 +55,7 @@ from metering_billing.webhook_outbox import (
     EVENT_TYPE_INVOICE_ISSUED,
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
     EVENT_TYPE_PAYMENT_RECEIPT_APPLIED,
+    EVENT_TYPE_REFUND_RECORDED,
     EVENT_TYPE_UNAPPLIED_CASH_APPLIED,
     EVENT_TYPE_WRITE_OFF_RECORDED,
     WEBHOOK_SIGNATURE_HEADER,
@@ -70,6 +73,7 @@ from metering_billing.webhook_outbox import (
 from test_collection_case_settlement import open_morning_case_at_zero
 from test_collection_write_off import open_morning_case_with_outstanding
 from test_credit_note_application import issue_morning_credit_then_open_case
+from test_unapplied_cash import LEFTOVER
 from test_unapplied_cash_application import park_leftover_and_open_second_case
 from test_http_app import invoke_http
 from test_journal_proposal import draft_known_morning
@@ -854,6 +858,111 @@ class WebhookOutboxTests(unittest.TestCase):
                         event
                         for event in ledger.webhook_outbox_events.values()
                         if event.event_type_code == EVENT_TYPE_UNAPPLIED_CASH_APPLIED
+                    ]
+                ),
+                1,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_refund_recorded_enqueues_once_and_delivers_signed(self) -> None:
+        """First leftover refund enqueues refund.recorded once; replay heals."""
+        ledger, parked, _collection, _source_case_id, payment_receipt_id = (
+            park_leftover_and_open_second_case()
+        )
+        server, callback_url, received = _start_recorder()
+        try:
+            subscriptions = WebhookSubscriptionService(ledger, clock=lambda: ISSUED_AT)
+            registered = subscriptions.register_subscription(
+                TENANT_ONE, callback_url, (EVENT_TYPE_REFUND_RECORDED,)
+            )
+            self.assertEqual(
+                registered.webhook_subscription_outcome_code,
+                WebhookSubscriptionOutcomeCode.ACCEPTED,
+            )
+            self.assertEqual(registered.event_type_codes, (EVENT_TYPE_REFUND_RECORDED,))
+            self.assertEqual(validate_webhook_subscription(registered.as_contract_dict()), ())
+            first = UnappliedCashRefundService(
+                ledger, clock=lambda: ISSUED_AT
+            ).refund_unapplied_cash(TENANT_ONE, parked.unapplied_cash_id)
+            second = UnappliedCashRefundService(
+                ledger, clock=lambda: ISSUED_AT
+            ).refund_unapplied_cash(TENANT_ONE, parked.unapplied_cash_id)
+            refund_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_REFUND_RECORDED
+            ]
+            self.assertEqual(first.unapplied_cash_refund_outcome_code.value, "accepted")
+            self.assertEqual(second.unapplied_cash_refund_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(refund_events), 1)
+            self.assertEqual(refund_events[0].source_id, first.unapplied_cash_refund_id)
+            envelope = json.loads(refund_events[0].payload_json)
+            self.assertEqual(envelope["event_type_code"], EVENT_TYPE_REFUND_RECORDED)
+            data = envelope["data"]
+            self.assertEqual(
+                data["unapplied_cash_refund_id"],
+                str(first.unapplied_cash_refund_id),
+            )
+            self.assertEqual(data["unapplied_cash_id"], str(parked.unapplied_cash_id))
+            self.assertEqual(data["payment_receipt_id"], str(payment_receipt_id))
+            self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+            self.assertEqual(data["unapplied_cash_refund_contract_version"], 1)
+            self.assertEqual(data["currency_code"], "USD")
+            self.assertEqual(data["refund_amount"], first.as_contract_dict()["refund_amount"])
+            self.assertEqual(data["refund_amount"], format_exact_decimal(LEFTOVER))
+            self.assertEqual(data["unapplied_cash_refund_status"], "recorded")
+            self.assertEqual(data["refunded_at"], first.as_contract_dict()["refunded_at"])
+            self.assertNotIn("payment_intent_id", data)
+            self.assertNotIn("collection_case_id", data)
+            self.assertNotIn("unapplied_amount", data)
+            self.assertNotIn("unapplied_cash_status", data)
+            self.assertNotIn("card_pan", json.dumps(envelope))
+            self.assertNotIn("legal_invoice_number", json.dumps(envelope))
+            self.assertNotIn("webhook_secret", json.dumps(envelope))
+            delivered = WebhookDeliveryService(ledger).deliver_due_events(TENANT_ONE)
+            self.assertEqual(delivered.delivered_event_count, 1)
+            self.assertEqual(len(received), 1)
+            headers, raw_body = received[0]
+            posted = json.loads(raw_body.decode("utf-8"))
+            self.assertEqual(posted["event_type_code"], EVENT_TYPE_REFUND_RECORDED)
+            expected = sign_webhook_body(registered.webhook_secret or "", raw_body)
+            signature = next(
+                value
+                for key, value in headers.items()
+                if key.lower() == WEBHOOK_SIGNATURE_HEADER.lower()
+            )
+            self.assertEqual(signature, expected)
+            orphan_id = refund_events[0].outbox_event_id
+            identity = next(
+                key
+                for key, stored_id in ledger.webhook_outbox_identity_index.items()
+                if stored_id == orphan_id
+            )
+            del ledger.webhook_outbox_events[orphan_id]
+            del ledger.webhook_outbox_identity_index[identity]
+            healed = UnappliedCashRefundService(
+                ledger, clock=lambda: ISSUED_AT
+            ).refund_unapplied_cash(TENANT_ONE, parked.unapplied_cash_id)
+            healed_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_REFUND_RECORDED
+            ]
+            self.assertEqual(healed.unapplied_cash_refund_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(healed_events), 1)
+            self.assertEqual(healed_events[0].source_id, first.unapplied_cash_refund_id)
+            rejected = UnappliedCashRefundService(ledger).refund_unapplied_cash(
+                TENANT_TWO, parked.unapplied_cash_id
+            )
+            self.assertEqual(rejected.unapplied_cash_refund_outcome_code.value, "rejected")
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in ledger.webhook_outbox_events.values()
+                        if event.event_type_code == EVENT_TYPE_REFUND_RECORDED
                     ]
                 ),
                 1,

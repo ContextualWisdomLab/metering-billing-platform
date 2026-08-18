@@ -84,6 +84,7 @@ REQUIRED_FILES = (
     "docs/adr/0052-unapplied-cash-application-to-collection-case.md",
     "docs/adr/0053-unapplied-cash-applied-webhook.md",
     "docs/adr/0054-unapplied-cash-refund.md",
+    "docs/adr/0055-refund-recorded-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
