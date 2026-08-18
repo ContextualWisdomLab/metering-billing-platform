@@ -88,8 +88,9 @@ The application is a thin WSGI adapter:
     ``GET /v1/collection-aging`` projects open-case remaining into current /
     1-30 / 31-60 / 61-90 / 90+ buckets grouped by currency.
     ``GET /v1/billing-accounts/{billing_account_id}/statement`` projects
-    stored issued-invoice totals, open collection remaining, applied
-    credits, write-offs, parked leftover, and refunded leftover for one
+    stored issued-invoice totals, unused issued-invoice voids, open
+    collection remaining, applied credits, unused issued-credit-note
+    voids, write-offs, parked leftover, and refunded leftover for one
     billing account, grouped by currency.  Missing account is HTTP 404.
     ``POST /v1/issued-invoices/{issued_invoice_id}/voids`` records one
     commercial void of an unused issued invoice.  Replay of the same

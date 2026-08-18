@@ -699,8 +699,10 @@ class RepositoryContractTests(unittest.TestCase):
                 {
                     "currency_code": "USD",
                     "issued_invoice_total": "0.003705",
+                    "voided_invoice_total": "0",
                     "open_collection_remaining": "0.003705",
                     "applied_credit_total": "0",
+                    "voided_credit_total": "0",
                     "write_off_total": "0",
                     "parked_unapplied_cash": "0",
                     "refunded_unapplied_cash": "0",
@@ -737,8 +739,10 @@ class RepositoryContractTests(unittest.TestCase):
                 {
                     "currency_code": "USD",
                     "issued_invoice_total": "-1.00",
+                    "voided_invoice_total": "0",
                     "open_collection_remaining": "0",
                     "applied_credit_total": "0",
+                    "voided_credit_total": "0",
                     "write_off_total": "0",
                     "parked_unapplied_cash": "0",
                     "refunded_unapplied_cash": 1,
@@ -762,8 +766,10 @@ class RepositoryContractTests(unittest.TestCase):
                 {
                     "currency_code": 1,
                     "issued_invoice_total": "not-decimal",
+                    "voided_invoice_total": "0",
                     "open_collection_remaining": "0",
                     "applied_credit_total": "0",
+                    "voided_credit_total": "0",
                     "write_off_total": "0",
                     "parked_unapplied_cash": "0",
                     "refunded_unapplied_cash": "0",

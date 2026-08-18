@@ -6,9 +6,10 @@ The service is a read path:
 2. Resolve the billing account by internal identifier.
 3. Attribute money only through invoice-draft lines that belong exclusively
    to that account.
-4. Roll stored issued-invoice totals, open collection remaining, applied
-   credit-note amounts, write-offs, currently parked leftover, and refunded
-   leftover by ``currency_code``.
+4. Roll stored issued-invoice totals, unused issued-invoice voids, open
+   collection remaining, applied credit-note amounts, unused issued-credit-note
+   voids, write-offs, currently parked leftover, and refunded leftover by
+   ``currency_code``.
 5. Return one statement document.  Do not capture, credit, post, or call AIS.
 
 A draft with no lines, or lines for more than one billing account, is omitted
@@ -42,15 +43,19 @@ Clock = Callable[[], datetime]
 ACCOUNT_STATEMENT_PRESENTMENT_CONTRACT_VERSION = 1
 ZERO = Decimal("0")
 ISSUED_INVOICE_TOTAL = "issued_invoice_total"
+VOIDED_INVOICE_TOTAL = "voided_invoice_total"
 OPEN_COLLECTION_REMAINING = "open_collection_remaining"
 APPLIED_CREDIT_TOTAL = "applied_credit_total"
+VOIDED_CREDIT_TOTAL = "voided_credit_total"
 WRITE_OFF_TOTAL = "write_off_total"
 PARKED_UNAPPLIED_CASH = "parked_unapplied_cash"
 REFUNDED_UNAPPLIED_CASH = "refunded_unapplied_cash"
 CURRENCY_AMOUNT_FIELDS = (
     ISSUED_INVOICE_TOTAL,
+    VOIDED_INVOICE_TOTAL,
     OPEN_COLLECTION_REMAINING,
     APPLIED_CREDIT_TOTAL,
+    VOIDED_CREDIT_TOTAL,
     WRITE_OFF_TOTAL,
     PARKED_UNAPPLIED_CASH,
     REFUNDED_UNAPPLIED_CASH,
@@ -62,8 +67,10 @@ class _CurrencyTotals:
     """Mutable exact totals for one currency while the statement is folded."""
 
     issued_invoice_total: Decimal = field(default_factory=lambda: ZERO)
+    voided_invoice_total: Decimal = field(default_factory=lambda: ZERO)
     open_collection_remaining: Decimal = field(default_factory=lambda: ZERO)
     applied_credit_total: Decimal = field(default_factory=lambda: ZERO)
+    voided_credit_total: Decimal = field(default_factory=lambda: ZERO)
     write_off_total: Decimal = field(default_factory=lambda: ZERO)
     parked_unapplied_cash: Decimal = field(default_factory=lambda: ZERO)
     refunded_unapplied_cash: Decimal = field(default_factory=lambda: ZERO)
@@ -74,8 +81,10 @@ class _CurrencyTotals:
             amount > ZERO
             for amount in (
                 self.issued_invoice_total,
+                self.voided_invoice_total,
                 self.open_collection_remaining,
                 self.applied_credit_total,
+                self.voided_credit_total,
                 self.write_off_total,
                 self.parked_unapplied_cash,
                 self.refunded_unapplied_cash,
@@ -89,8 +98,10 @@ class AccountStatementCurrencyResult:
 
     currency_code: str
     issued_invoice_total: Decimal
+    voided_invoice_total: Decimal
     open_collection_remaining: Decimal
     applied_credit_total: Decimal
+    voided_credit_total: Decimal
     write_off_total: Decimal
     parked_unapplied_cash: Decimal
     refunded_unapplied_cash: Decimal
@@ -100,8 +111,10 @@ class AccountStatementCurrencyResult:
         return {
             "currency_code": self.currency_code,
             ISSUED_INVOICE_TOTAL: format_exact_decimal(self.issued_invoice_total),
+            VOIDED_INVOICE_TOTAL: format_exact_decimal(self.voided_invoice_total),
             OPEN_COLLECTION_REMAINING: format_exact_decimal(self.open_collection_remaining),
             APPLIED_CREDIT_TOTAL: format_exact_decimal(self.applied_credit_total),
+            VOIDED_CREDIT_TOTAL: format_exact_decimal(self.voided_credit_total),
             WRITE_OFF_TOTAL: format_exact_decimal(self.write_off_total),
             PARKED_UNAPPLIED_CASH: format_exact_decimal(self.parked_unapplied_cash),
             REFUNDED_UNAPPLIED_CASH: format_exact_decimal(self.refunded_unapplied_cash),
@@ -191,6 +204,15 @@ class AccountStatementPresentmentService:
             currency_totals.issued_invoice_total += parse_collection_amount(
                 invoice.tax_inclusive_amount
             )
+        for void_row in self.ledger.list_issued_invoice_voids_for_tenant(
+            tenant.tenant_account_id
+        ):
+            if void_row.invoice_draft_id not in draft_ids:
+                continue
+            currency_totals = totals.setdefault(void_row.currency_code, _CurrencyTotals())
+            currency_totals.voided_invoice_total += parse_collection_amount(
+                void_row.voided_amount
+            )
         for stored in self.ledger.list_collection_cases(tenant.tenant_account_id):
             if stored.invoice_draft_id not in draft_ids:
                 continue
@@ -209,6 +231,15 @@ class AccountStatementPresentmentService:
             currency_totals = totals.setdefault(application.currency_code, _CurrencyTotals())
             currency_totals.applied_credit_total += parse_collection_amount(
                 application.applied_amount
+            )
+        for void_row in self.ledger.list_issued_credit_note_voids_for_tenant(
+            tenant.tenant_account_id
+        ):
+            if void_row.invoice_draft_id not in draft_ids:
+                continue
+            currency_totals = totals.setdefault(void_row.currency_code, _CurrencyTotals())
+            currency_totals.voided_credit_total += parse_collection_amount(
+                void_row.voided_amount
             )
         for write_off in self.ledger.list_collection_write_offs_for_tenant(
             tenant.tenant_account_id
@@ -241,8 +272,10 @@ class AccountStatementPresentmentService:
             AccountStatementCurrencyResult(
                 currency_code=currency_code,
                 issued_invoice_total=buckets.issued_invoice_total,
+                voided_invoice_total=buckets.voided_invoice_total,
                 open_collection_remaining=buckets.open_collection_remaining,
                 applied_credit_total=buckets.applied_credit_total,
+                voided_credit_total=buckets.voided_credit_total,
                 write_off_total=buckets.write_off_total,
                 parked_unapplied_cash=buckets.parked_unapplied_cash,
                 refunded_unapplied_cash=buckets.refunded_unapplied_cash,

@@ -121,7 +121,9 @@ class AccountStatementPresentmentTests(unittest.TestCase):
         self.assertEqual(usd.issued_invoice_total, issued.tax_inclusive_amount)
         self.assertEqual(usd.issued_invoice_total, KNOWN_MORNING_TOTAL)
         self.assertEqual(usd.open_collection_remaining, KNOWN_MORNING_TOTAL)
+        self.assertEqual(usd.voided_invoice_total, Decimal("0"))
         self.assertEqual(usd.applied_credit_total, Decimal("0"))
+        self.assertEqual(usd.voided_credit_total, Decimal("0"))
         self.assertEqual(usd.write_off_total, Decimal("0"))
         self.assertEqual(usd.parked_unapplied_cash, Decimal("0"))
         self.assertEqual(usd.refunded_unapplied_cash, Decimal("0"))
@@ -166,6 +168,7 @@ class AccountStatementPresentmentTests(unittest.TestCase):
             credit_ledger, clock=lambda: AS_OF
         ).present_account_statement(TENANT_ONE, _account_id(credit_ledger))
         self.assertEqual(credited.currencies[0].applied_credit_total, KNOWN_MORNING_TOTAL)
+        self.assertEqual(credited.currencies[0].voided_credit_total, Decimal("0"))
         self.assertEqual(credited.currencies[0].open_collection_remaining, Decimal("0"))
         write_off_ledger, write_off_case_id = open_known_morning_case()
         written = CollectionWriteOffService(write_off_ledger).write_off_collection_case(

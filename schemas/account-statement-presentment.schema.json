@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.contextualwisdomlab.org/metering-billing/account-statement-presentment/v1",
   "title": "Account Statement Presentment",
-  "description": "Billing-account-scoped commercial statement projected from stored issued invoices, open collection remaining, applied credit notes, write-offs, parked leftover, and leftover refunds. Totals are grouped by currency_code and never mixed. Amounts are exact-decimal strings. The document is not a capture, posting, journal, webhook, or statutory ledger.",
+  "description": "Billing-account-scoped commercial statement projected from stored issued invoices, unused issued-invoice voids, open collection remaining, applied credit notes, unused issued-credit-note voids, write-offs, parked leftover, and leftover refunds. Totals are grouped by currency_code and never mixed. Amounts are exact-decimal strings. The document is not a capture, posting, journal, webhook, or statutory ledger.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -41,8 +41,10 @@
       "required": [
         "currency_code",
         "issued_invoice_total",
+        "voided_invoice_total",
         "open_collection_remaining",
         "applied_credit_total",
+        "voided_credit_total",
         "write_off_total",
         "parked_unapplied_cash",
         "refunded_unapplied_cash"
@@ -50,8 +52,10 @@
       "properties": {
         "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
         "issued_invoice_total": {"$ref": "#/$defs/exact_amount"},
+        "voided_invoice_total": {"$ref": "#/$defs/exact_amount"},
         "open_collection_remaining": {"$ref": "#/$defs/exact_amount"},
         "applied_credit_total": {"$ref": "#/$defs/exact_amount"},
+        "voided_credit_total": {"$ref": "#/$defs/exact_amount"},
         "write_off_total": {"$ref": "#/$defs/exact_amount"},
         "parked_unapplied_cash": {"$ref": "#/$defs/exact_amount"},
         "refunded_unapplied_cash": {"$ref": "#/$defs/exact_amount"}

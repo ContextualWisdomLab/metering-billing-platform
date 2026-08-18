@@ -456,8 +456,10 @@ def validate_account_statement_presentment(
     seen_currencies: set[str] = set()
     amount_fields = (
         "issued_invoice_total",
+        "voided_invoice_total",
         "open_collection_remaining",
         "applied_credit_total",
+        "voided_credit_total",
         "write_off_total",
         "parked_unapplied_cash",
         "refunded_unapplied_cash",

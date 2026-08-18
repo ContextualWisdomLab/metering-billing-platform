@@ -346,7 +346,7 @@ python3 -c "from metering_billing import AccountStatementPresentmentService"
 # Header: X-CWL-Tenant-Reference: urn:cwl:tenant_001
 ```
 
-After issued invoices, collection cases, credit-note applications, write-offs, parked leftover, or leftover refunds exist, `GET /v1/billing-accounts/{billing_account_id}/statement` returns those stored totals grouped by `currency_code`. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Open the account statement, then collect, credit, park, apply, or refund. This path does not invent a journal, webhook, AIS call, or statutory identifier.
+After issued invoices, unused issued-invoice voids, collection cases, credit-note applications, unused issued-credit-note voids, write-offs, parked leftover, or leftover refunds exist, `GET /v1/billing-accounts/{billing_account_id}/statement` returns those stored totals grouped by `currency_code`. `issued_invoice_total` stays the issued snapshot. `applied_credit_total` stays applied credits only. Unused voids are `voided_invoice_total` and `voided_credit_total`. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Open the account statement, then collect, credit, park, apply, or refund. This path does not invent a journal, webhook, AIS call, or statutory identifier.
 
 ## Present a dunning notice
 

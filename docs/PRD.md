@@ -473,7 +473,7 @@ contextual-orchestrator usage
 
 ## Account-statement-presentment acceptance
 
-- A known tenant and `billing_account_id` present one statement grouped by `currency_code` with exact inclusive `issued_invoice_total`, `open_collection_remaining`, `applied_credit_total`, `write_off_total`, `parked_unapplied_cash`, and `refunded_unapplied_cash`. Currencies are never mixed in one sum.
+- A known tenant and `billing_account_id` present one statement grouped by `currency_code` with exact inclusive `issued_invoice_total`, `voided_invoice_total`, `open_collection_remaining`, `applied_credit_total`, `voided_credit_total`, `write_off_total`, `parked_unapplied_cash`, and `refunded_unapplied_cash`. Currencies are never mixed in one sum. `issued_invoice_total` stays the issued snapshot. `applied_credit_total` stays applied credits only. Unused issued-invoice voids and unused issued-credit-note voids are separate buckets.
 - Money is attributed only through invoice-draft lines exclusive to that billing account. Mixed-account and lineless drafts are omitted.
 - `GET /v1/billing-accounts/{billing_account_id}/statement` is HTTP 200 for the same tenant. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Missing tenant is HTTP 422.
 - Operators open the account statement, then collect, credit, park, apply, or refund. HTTP presentment does not capture cards, write money, or call AIS.
