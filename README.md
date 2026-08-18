@@ -355,10 +355,11 @@ python3 -c "from metering_billing import RatedSpendPresentmentService"
 # GET /v1/billing-accounts/{billing_account_id}/rated-spend?window_started_at=2026-08-16T10:00:00Z&window_ended_at=2026-08-16T11:00:00Z
 # GET /v1/billing-accounts/{billing_account_id}/rated-spend?window_started_at=2026-08-16T10:00:00Z&window_ended_at=2026-08-16T11:00:00Z&group_by=project
 # GET /v1/billing-accounts/{billing_account_id}/rated-spend?window_started_at=2026-08-16T10:00:00Z&window_ended_at=2026-08-16T11:00:00Z&group_by=credential
+# GET /v1/billing-accounts/{billing_account_id}/rated-spend?window_started_at=2026-08-16T10:00:00Z&window_ended_at=2026-08-16T11:00:00Z&group_by=principal
 # Header: X-CWL-Tenant-Reference: urn:cwl:tenant_001
 ```
 
-After a `rating_run` exists for that half-open window, `GET /v1/billing-accounts/{billing_account_id}/rated-spend` returns stored rated or exclusive draft-line amounts grouped by `product_code`. Optional `group_by=project` adds stored exclusive-account `project_reference` and omits usage without that URN. Optional `group_by=credential` adds stored exclusive-account `credential_reference` and omits usage without that URN. `rated_amount` is the stored line amount as an exact Decimal string. Unrated usage is omitted. Mixed-account and lineless drafts are omitted. The read does not re-rate or write money. Missing account is HTTP 404. Cross-tenant account is HTTP 403. An illegal window or unknown `group_by` is HTTP 422. Inspect rated product, project, or credential spend, then draft an invoice.
+After a `rating_run` exists for that half-open window, `GET /v1/billing-accounts/{billing_account_id}/rated-spend` returns stored rated or exclusive draft-line amounts grouped by `product_code`. Optional `group_by=project` adds stored exclusive-account `project_reference` and omits usage without that URN. Optional `group_by=credential` adds stored exclusive-account `credential_reference` and omits usage without that URN. Optional `group_by=principal` adds stored exclusive-account `billing_principal_reference`. Mixed or unresolved principals omit the run. `rated_amount` is the stored line amount as an exact Decimal string. Unrated usage is omitted. Mixed-account and lineless drafts are omitted. The read does not re-rate or write money. Missing account is HTTP 404. Cross-tenant account is HTTP 403. An illegal window or unknown `group_by` is HTTP 422. Inspect rated product, project, credential, or principal spend, then draft an invoice.
 
 ## Present a dunning notice
 
