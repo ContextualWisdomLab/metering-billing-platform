@@ -53,6 +53,8 @@ PROJECT_ONE = "urn:cwl:tenant_001:project:metering"
 PROJECT_TWO = "urn:cwl:tenant_001:project:memory"
 CREDENTIAL_ALT = "urn:cwl:tenant_001:credential_record:019d7004"
 PRINCIPAL_ALT = "urn:cwl:tenant_001:billing_principal:019d7005"
+COST_CENTER_ONE = "urn:cwl:tenant_001:cost_center:platform"
+COST_CENTER_TWO = "urn:cwl:tenant_001:cost_center:memory"
 
 
 def _rate_known_morning():
@@ -188,6 +190,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertNotIn("project_reference", payload["products"][0])
         self.assertNotIn("credential_reference", payload["products"][0])
         self.assertNotIn("billing_principal_reference", payload["products"][0])
+        self.assertNotIn("cost_center_reference", payload["products"][0])
         self.assertNotIn("card_pan", payload)
         self.assertNotIn("statutory_account_id", payload)
         by_product = RatedSpendPresentmentService(ledger).present_rated_spend(
@@ -199,6 +202,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertNotIn(
             "billing_principal_reference", by_product.as_contract_dict()["products"][0]
         )
+        self.assertNotIn("cost_center_reference", by_product.as_contract_dict()["products"][0])
         self.assertEqual(len(ledger.rating_runs), prior_runs)
         self.assertEqual(len(ledger.invoice_drafts), prior_drafts)
         self.assertEqual(len(ledger.journal_proposals), 0)
@@ -372,6 +376,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertNotIn("group_by", payload)
         self.assertNotIn("credential_reference", payload["products"][0])
         self.assertNotIn("billing_principal_reference", payload["products"][0])
+        self.assertNotIn("cost_center_reference", payload["products"][0])
         mixed_ledger, mixed = _rate_morning_events(
             _known_morning_event(
                 event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf712",
@@ -423,7 +428,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(len(attributed_ledger.journal_proposals), 0)
         with self.assertRaises(RatedSpendPresentmentQueryError) as unknown_group:
             RatedSpendPresentmentService(ledger).present_rated_spend(
-                TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="cost_center"
+                TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="spend_budget"
             )
         self.assertEqual(unknown_group.exception.rejection_reason_code, "request_invalid")
 
@@ -460,6 +465,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(payload["products"][0]["credential_reference"], CREDENTIAL_ONE)
         self.assertNotIn("project_reference", payload["products"][0])
         self.assertNotIn("billing_principal_reference", payload["products"][0])
+        self.assertNotIn("cost_center_reference", payload["products"][0])
         self.assertNotIn("group_by", payload)
         unattributed_ledger, _unattributed = _rate_morning_events(
             _event_without_credential(
@@ -573,6 +579,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(payload["products"][0]["billing_principal_reference"], PRINCIPAL_ONE)
         self.assertNotIn("project_reference", payload["products"][0])
         self.assertNotIn("credential_reference", payload["products"][0])
+        self.assertNotIn("cost_center_reference", payload["products"][0])
         self.assertNotIn("group_by", payload)
         ledger.register_billing_account(TENANT_ONE, ACCOUNT_THREE)
         other = ledger.billing_accounts[ACCOUNT_THREE]
@@ -638,6 +645,125 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(len(ledger.rating_runs), 1)
         self.assertEqual(len(ledger.invoice_drafts), 0)
         self.assertEqual(len(ledger.journal_proposals), 0)
+
+    def test_group_by_cost_center_uses_usage_cost_center_and_omits_unattributed(self) -> None:
+        """Cost-center grouping reads usage URNs and never invents a cost center or split."""
+        ledger, _rated = _rate_known_morning()
+        unattributed = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="cost_center"
+        )
+        self.assertEqual(unattributed.products, ())
+        self.assertEqual(validate_rated_spend_presentment(unattributed.as_contract_dict()), ())
+        self.assertNotIn("group_by", unattributed.as_contract_dict())
+        attributed_ledger, attributed = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf728",
+                source_event_key="cost_center_morning_output",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+                cost_center_reference=COST_CENTER_ONE,
+            ),
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf729",
+                source_event_key="cost_center_morning_followup",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+                cost_center_reference=COST_CENTER_ONE,
+            ),
+        )
+        by_product = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW, group_by="product"
+        )
+        by_project = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW, group_by="project"
+        )
+        by_credential = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW, group_by="credential"
+        )
+        by_principal = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW, group_by="principal"
+        )
+        by_cost_center = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW, group_by="cost_center"
+        )
+        replay = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW, group_by="cost_center"
+        )
+        self.assertEqual(by_cost_center.as_contract_dict(), replay.as_contract_dict())
+        self.assertEqual(len(by_product.products), 1)
+        self.assertNotIn("cost_center_reference", by_product.as_contract_dict()["products"][0])
+        self.assertNotIn("project_reference", by_product.as_contract_dict()["products"][0])
+        self.assertEqual(by_project.products, ())
+        self.assertEqual(by_credential.products[0].credential_reference, CREDENTIAL_ONE)
+        self.assertIsNone(by_credential.products[0].cost_center_reference)
+        self.assertEqual(by_principal.products[0].billing_principal_reference, PRINCIPAL_ONE)
+        self.assertIsNone(by_principal.products[0].cost_center_reference)
+        self.assertEqual(len(by_cost_center.products), 1)
+        row = by_cost_center.products[0]
+        self.assertEqual(row.currency_code, "USD")
+        self.assertEqual(row.product_code, PRODUCT_ONE)
+        self.assertEqual(row.cost_center_reference, COST_CENTER_ONE)
+        self.assertIsNone(row.project_reference)
+        self.assertIsNone(row.credential_reference)
+        self.assertIsNone(row.billing_principal_reference)
+        self.assertEqual(row.rated_amount, attributed.rated_total_amount)
+        self.assertEqual(row.rated_amount, KNOWN_MORNING_TOTAL)
+        payload = by_cost_center.as_contract_dict()
+        self.assertEqual(validate_rated_spend_presentment(payload), ())
+        self.assertEqual(payload["products"][0]["cost_center_reference"], COST_CENTER_ONE)
+        self.assertNotIn("project_reference", payload["products"][0])
+        self.assertNotIn("credential_reference", payload["products"][0])
+        self.assertNotIn("billing_principal_reference", payload["products"][0])
+        self.assertNotIn("group_by", payload)
+        mixed_ledger, mixed = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf72a",
+                source_event_key="cost_center_mixed_platform",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+                cost_center_reference=COST_CENTER_ONE,
+            ),
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf72b",
+                source_event_key="cost_center_mixed_memory",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+                cost_center_reference=COST_CENTER_TWO,
+            ),
+        )
+        mixed_product = RatedSpendPresentmentService(mixed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(mixed_ledger), MORNING_WINDOW, group_by="product"
+        )
+        mixed_cost_center = RatedSpendPresentmentService(mixed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(mixed_ledger), MORNING_WINDOW, group_by="cost_center"
+        )
+        self.assertEqual(mixed_product.products[0].rated_amount, mixed.rated_total_amount)
+        self.assertNotIn("cost_center_reference", mixed_product.as_contract_dict()["products"][0])
+        self.assertEqual(mixed_cost_center.products, ())
+        partial_ledger, partial = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf72c",
+                source_event_key="cost_center_partial_attributed",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+                cost_center_reference=COST_CENTER_ONE,
+            ),
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf72d",
+                source_event_key="cost_center_partial_plain",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+            ),
+        )
+        partial_cost_center = RatedSpendPresentmentService(partial_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(partial_ledger), MORNING_WINDOW, group_by="cost_center"
+        )
+        self.assertEqual(len(partial_cost_center.products), 1)
+        self.assertEqual(partial_cost_center.products[0].cost_center_reference, COST_CENTER_ONE)
+        self.assertEqual(partial_cost_center.products[0].rated_amount, partial.rated_total_amount)
+        self.assertEqual(len(attributed_ledger.rating_runs), 1)
+        self.assertEqual(len(attributed_ledger.invoice_drafts), 0)
+        self.assertEqual(len(attributed_ledger.journal_proposals), 0)
 
     def test_http_reads_rated_spend_without_writing_money(self) -> None:
         """GET /v1/billing-accounts/{id}/rated-spend is a tenant-scoped read."""
@@ -775,6 +901,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertNotIn("project_reference", product_body["products"][0])
         self.assertNotIn("credential_reference", product_body["products"][0])
         self.assertNotIn("billing_principal_reference", product_body["products"][0])
+        self.assertNotIn("cost_center_reference", product_body["products"][0])
         project_status, project_body = invoke_http(
             app,
             "GET",
@@ -827,11 +954,24 @@ class RatedSpendPresentmentTests(unittest.TestCase):
             principal_body["products"][0]["rated_amount"],
             format_exact_decimal(KNOWN_MORNING_TOTAL),
         )
-        unknown_group_status, unknown_group_body = invoke_http(
+        cost_center_status, cost_center_body = invoke_http(
             app,
             "GET",
             _spend_path(billing_account_id),
             query=_morning_query(group_by="cost_center"),
+            headers={
+                "X-CWL-Tenant-Reference": TENANT_ONE,
+                "Authorization": f"Bearer {issue_body['api_credential_secret']}",
+            },
+        )
+        self.assertEqual(cost_center_status, 200)
+        self.assertEqual(validate_rated_spend_presentment(cost_center_body), ())
+        self.assertEqual(cost_center_body["products"], [])
+        unknown_group_status, unknown_group_body = invoke_http(
+            app,
+            "GET",
+            _spend_path(billing_account_id),
+            query=_morning_query(group_by="spend_budget"),
             headers={
                 "X-CWL-Tenant-Reference": TENANT_ONE,
                 "Authorization": f"Bearer {issue_body['api_credential_secret']}",
@@ -868,6 +1008,39 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(attributed_body["products"][0]["project_reference"], PROJECT_ONE)
         self.assertEqual(
             attributed_body["products"][0]["rated_amount"],
+            format_exact_decimal(KNOWN_MORNING_TOTAL),
+        )
+        cost_center_ledger, _cost_center = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf72e",
+                source_event_key="http_cost_center_morning",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+                cost_center_reference=COST_CENTER_ONE,
+            ),
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf72f",
+                source_event_key="http_cost_center_followup",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+                cost_center_reference=COST_CENTER_ONE,
+            ),
+        )
+        cost_center_app = create_http_app(cost_center_ledger)
+        attributed_cost_status, attributed_cost_body = invoke_http(
+            cost_center_app,
+            "GET",
+            _spend_path(_account_id(cost_center_ledger)),
+            query=_morning_query(group_by="cost_center"),
+            headers={"X-CWL-Tenant-Reference": TENANT_ONE},
+        )
+        self.assertEqual(attributed_cost_status, 200)
+        self.assertEqual(validate_rated_spend_presentment(attributed_cost_body), ())
+        self.assertEqual(
+            attributed_cost_body["products"][0]["cost_center_reference"], COST_CENTER_ONE
+        )
+        self.assertEqual(
+            attributed_cost_body["products"][0]["rated_amount"],
             format_exact_decimal(KNOWN_MORNING_TOTAL),
         )
         self.assertEqual(len(ledger.rating_runs), 1)

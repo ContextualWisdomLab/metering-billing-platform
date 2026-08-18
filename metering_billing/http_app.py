@@ -98,9 +98,11 @@ The application is a thin WSGI adapter:
     ``product_code``.  Optional ``group_by=project`` adds
     ``project_reference`` from stored exclusive-account usage.
     Optional ``group_by=credential`` adds ``credential_reference`` from
-    stored exclusive-account usage.  Optional ``group_by=principal``
+    stored exclusive-account usage.      Optional ``group_by=principal``
     adds ``billing_principal_reference`` from stored exclusive-account
-    usage.  The read does not re-rate or write money.
+    usage.  Optional ``group_by=cost_center`` adds
+    ``cost_center_reference`` from stored exclusive-account usage.  The
+    read does not re-rate or write money.
     ``POST /v1/issued-invoices/{issued_invoice_id}/voids`` records one
     commercial void of an unused issued invoice.  Replay of the same
     tenant and issued invoice returns the stored

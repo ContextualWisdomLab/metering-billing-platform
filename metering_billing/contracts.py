@@ -504,7 +504,7 @@ def validate_rated_spend_presentment(
     products = statement.get("products")
     if not isinstance(products, list):
         return tuple(errors)
-    seen_keys: set[tuple[str, str, str | None, str | None, str | None]] = set()
+    seen_keys: set[tuple[str, str, str | None, str | None, str | None, str | None]] = set()
     for index, row in enumerate(products):
         if not isinstance(row, Mapping):
             continue
@@ -513,6 +513,7 @@ def validate_rated_spend_presentment(
         project_reference = row.get("project_reference")
         credential_reference = row.get("credential_reference")
         billing_principal_reference = row.get("billing_principal_reference")
+        cost_center_reference = row.get("cost_center_reference")
         if isinstance(currency_code, str) and isinstance(product_code, str):
             project_key = project_reference if isinstance(project_reference, str) else None
             credential_key = (
@@ -523,15 +524,25 @@ def validate_rated_spend_presentment(
                 if isinstance(billing_principal_reference, str)
                 else None
             )
+            cost_center_key = (
+                cost_center_reference if isinstance(cost_center_reference, str) else None
+            )
             key = (
                 currency_code,
                 product_code,
                 project_key,
                 credential_key,
                 principal_key,
+                cost_center_key,
             )
             if key in seen_keys:
-                if principal_key is not None:
+                if cost_center_key is not None:
+                    errors.append(
+                        "$."
+                        f"products[{index}]: currency_code, product_code, and "
+                        "cost_center_reference must be unique"
+                    )
+                elif principal_key is not None:
                     errors.append(
                         "$."
                         f"products[{index}]: currency_code, product_code, and "

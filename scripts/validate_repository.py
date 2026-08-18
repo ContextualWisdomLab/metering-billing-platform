@@ -107,6 +107,7 @@ REQUIRED_FILES = (
     "docs/adr/0075-rated-spend-group-by-project.md",
     "docs/adr/0076-rated-spend-group-by-credential.md",
     "docs/adr/0077-rated-spend-group-by-principal.md",
+    "docs/adr/0078-rated-spend-group-by-cost-center.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

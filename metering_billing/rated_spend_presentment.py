@@ -24,7 +24,12 @@ The service is a read path:
    sentinel credential.  Optional ``group_by=principal`` further keys
    rows by the one stored exclusive-account billing-principal URN.
    Mixed or unresolved principals omit the run so the read cannot invent
-   a split or a sentinel principal.
+   a split or a sentinel principal.  Optional ``group_by=cost_center``
+   further keys rows by the one ``cost_center_reference`` on
+   exclusive-account usage that already has a cost-center URN.  Usage
+   without ``cost_center_reference`` is omitted from that grouping.
+   Mixed cost centers omit the run so the read cannot invent a split or
+   a sentinel cost center.
 6. Return one presentment document.  Do not re-rate, invent a unit price,
    include unrated usage, capture, post, or call AIS.
 
@@ -59,8 +64,15 @@ GROUP_BY_PRODUCT = "product"
 GROUP_BY_PROJECT = "project"
 GROUP_BY_CREDENTIAL = "credential"
 GROUP_BY_PRINCIPAL = "principal"
+GROUP_BY_COST_CENTER = "cost_center"
 ALLOWED_GROUP_BY = frozenset(
-    {GROUP_BY_PRODUCT, GROUP_BY_PROJECT, GROUP_BY_CREDENTIAL, GROUP_BY_PRINCIPAL}
+    {
+        GROUP_BY_PRODUCT,
+        GROUP_BY_PROJECT,
+        GROUP_BY_CREDENTIAL,
+        GROUP_BY_PRINCIPAL,
+        GROUP_BY_COST_CENTER,
+    }
 )
 
 
@@ -74,6 +86,7 @@ class RatedSpendProductResult:
     project_reference: str | None = None
     credential_reference: str | None = None
     billing_principal_reference: str | None = None
+    cost_center_reference: str | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the closed JSON object published for one product row."""
@@ -88,6 +101,8 @@ class RatedSpendProductResult:
             payload["credential_reference"] = self.credential_reference
         if self.billing_principal_reference is not None:
             payload["billing_principal_reference"] = self.billing_principal_reference
+        if self.cost_center_reference is not None:
+            payload["cost_center_reference"] = self.cost_center_reference
         return payload
 
 
@@ -158,7 +173,9 @@ class RatedSpendPresentmentService:
         events = self.ledger.list_usage_events_in_window(
             tenant.tenant_account_id, started, ended
         )
-        totals: dict[tuple[str, str, str | None, str | None, str | None], Decimal] = {}
+        totals: dict[
+            tuple[str, str, str | None, str | None, str | None, str | None], Decimal
+        ] = {}
         for rating_run in self.ledger.list_rating_runs(tenant.tenant_account_id):
             if rating_run.window_started_at.astimezone(UTC) != started:
                 continue
@@ -177,6 +194,7 @@ class RatedSpendPresentmentService:
             project_reference = None
             credential_reference = None
             billing_principal_reference = None
+            cost_center_reference = None
             if group_by == GROUP_BY_PROJECT:
                 project_reference = _exclusive_project_reference(
                     events, account.billing_account_id
@@ -195,12 +213,19 @@ class RatedSpendPresentmentService:
                 )
                 if billing_principal_reference is None:
                     continue
+            elif group_by == GROUP_BY_COST_CENTER:
+                cost_center_reference = _exclusive_cost_center_reference(
+                    events, account.billing_account_id
+                )
+                if cost_center_reference is None:
+                    continue
             key = (
                 rating_run.currency_code,
                 product_code,
                 project_reference,
                 credential_reference,
                 billing_principal_reference,
+                cost_center_reference,
             )
             totals[key] = totals.get(key, ZERO) + amount
         products = tuple(
@@ -211,6 +236,7 @@ class RatedSpendPresentmentService:
                 project_reference=project_reference,
                 credential_reference=credential_reference,
                 billing_principal_reference=billing_principal_reference,
+                cost_center_reference=cost_center_reference,
             )
             for (
                 currency_code,
@@ -218,6 +244,7 @@ class RatedSpendPresentmentService:
                 project_reference,
                 credential_reference,
                 billing_principal_reference,
+                cost_center_reference,
             ), rated_amount in sorted(totals.items())
         )
         return RatedSpendPresentmentResult(
@@ -289,6 +316,20 @@ def _exclusive_project_reference(
     if len(project_references) != 1:
         return None
     return next(iter(project_references))
+
+
+def _exclusive_cost_center_reference(
+    events: tuple[StoredUsageEvent, ...], billing_account_id: UUID
+) -> str | None:
+    """Return the one stored cost-center URN on exclusive-account usage, or None."""
+    cost_center_references = {
+        event.cost_center_reference
+        for event in events
+        if event.billing_account_id == billing_account_id and event.cost_center_reference
+    }
+    if len(cost_center_references) != 1:
+        return None
+    return next(iter(cost_center_references))
 
 
 def _exclusive_credential_reference(

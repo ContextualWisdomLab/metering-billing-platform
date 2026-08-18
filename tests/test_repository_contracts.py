@@ -986,6 +986,46 @@ class RepositoryContractTests(unittest.TestCase):
             "billing_principal_reference must be unique",
             validate_rated_spend_presentment(duplicate_principal),
         )
+        cost_center_row = {
+            "currency_code": "USD",
+            "product_code": "contextual_orchestrator",
+            "cost_center_reference": "urn:cwl:tenant_001:cost_center:platform",
+            "rated_amount": "0.003705",
+        }
+        cost_center_instance = {
+            "rated_spend_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "products": [cost_center_row],
+        }
+        self.assertEqual(validate_schema_instance(schema, cost_center_instance), ())
+        self.assertEqual(validate_rated_spend_presentment(cost_center_instance), ())
+        split_cost_centers = {
+            **cost_center_instance,
+            "products": [
+                cost_center_row,
+                {
+                    "currency_code": "USD",
+                    "product_code": "contextual_orchestrator",
+                    "cost_center_reference": "urn:cwl:tenant_001:cost_center:memory",
+                    "rated_amount": "0.000085",
+                },
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, split_cost_centers), ())
+        self.assertEqual(validate_rated_spend_presentment(split_cost_centers), ())
+        duplicate_cost_center = {
+            **cost_center_instance,
+            "products": [cost_center_row, cost_center_row],
+        }
+        self.assertIn(
+            "$.products[1]: currency_code, product_code, and "
+            "cost_center_reference must be unique",
+            validate_rated_spend_presentment(duplicate_cost_center),
+        )
 
     def test_payment_intent_presentment_accepts_amount_and_rejects_captured(self) -> None:
         """A payment-intent statement records exact amount and cannot claim capture."""
