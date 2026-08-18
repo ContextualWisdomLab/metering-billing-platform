@@ -23,6 +23,7 @@ from metering_billing.contracts import (
     validate_webhook_subscription_presentment,
     validate_dunning_event_presentment,
     validate_webhook_outbox_event_presentment,
+    validate_issued_credit_note_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -90,6 +91,10 @@ DUNNING_NOTICE_FIXTURE_NAMES = (
 WEBHOOK_OUTBOX_EVENT_FIXTURE_NAMES = (
     "pending_journal_validated.json",
     "delivered_receipt_applied.json",
+)
+ISSUED_CREDIT_NOTE_FIXTURE_NAMES = (
+    "issued_morning_credit_note.json",
+    "issued_taxed_credit_note.json",
 )
 MONEY_FIELDS = (
     "tax_exclusive_amount",
@@ -327,6 +332,23 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("delivered_receipt_applied.json")["delivery_status"],
             "delivered",
         )
+        for fixture_name in ISSUED_CREDIT_NOTE_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_issued_credit_note_presentment(payload), ())
+            for field_name in ("tax_exclusive_amount", "tax_amount", "tax_inclusive_amount"):
+                value = payload[field_name]
+                self.assertIsInstance(value, str)
+                self.assertNotIsInstance(value, float)
+                parse_exact_decimal(value)
+            self.assertEqual(payload["issued_credit_note_status"], "issued")
+            self.assertNotIn("credit_note_number", payload)
+            self.assertNotIn("legal_credit_note_number", payload)
+            self.assertNotIn("issued_credit_note_lines", payload)
+        self.assertEqual(
+            self._fixture("issued_morning_credit_note.json")["next_operator_action"],
+            "wait",
+        )
+        self.assertEqual(self._fixture("issued_taxed_credit_note.json")["tax_inclusive_amount"], "11.00")
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -364,6 +386,8 @@ class OperatorConsoleTests(unittest.TestCase):
             "WebhookSubscription",
             "DunningNotice",
             "WebhookOutboxEvent",
+            "IssuedInvoice",
+            "IssuedCreditNote",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -382,6 +406,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + WEBHOOK_SUBSCRIPTION_FIXTURE_NAMES
             + DUNNING_NOTICE_FIXTURE_NAMES
             + WEBHOOK_OUTBOX_EVENT_FIXTURE_NAMES
+            + ISSUED_CREDIT_NOTE_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -409,6 +434,11 @@ class OperatorConsoleTests(unittest.TestCase):
         )
         self.assertIn("Issue a key, then send it on every /v1 call; revoke when leaked", inventory)
         self.assertIn("Record the commercial reminder, then collect or credit", inventory)
+        self.assertIn("Issue invoice, then collect or credit", inventory)
+        self.assertIn(
+            "Issue the credit note; the validated journal remains available for AIS",
+            inventory,
+        )
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

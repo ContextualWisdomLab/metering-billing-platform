@@ -371,6 +371,33 @@ class StoredIssuedInvoice:
 
 
 @dataclass(frozen=True)
+class StoredIssuedCreditNote:
+    """Append-only commercial credit-note snapshot issued from one credit.
+
+    Identity is ``(tenant_account_id, credit_adjustment_id)``.  One credit
+    holds at most one issued snapshot.  ``issued_credit_note_id`` is the
+    opaque generated identifier, not a statutory number.
+    """
+
+    issued_credit_note_id: UUID
+    tenant_account_id: UUID
+    credit_adjustment_id: UUID
+    invoice_draft_id: UUID
+    issued_invoice_id: UUID | None
+    issued_credit_note_contract_version: int
+    credit_adjustment_contract_version: int
+    credit_reason_code: str
+    credit_adjustment_source_payload_hash: str
+    source_payload_hash: str
+    currency_code: str
+    tax_exclusive_amount: Decimal
+    tax_amount: Decimal
+    tax_inclusive_amount: Decimal
+    issued_credit_note_status: str
+    issued_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredJournalProposalLine:
     """Append-only proposal line using a semantic account role, not a chart ID."""
 
@@ -700,6 +727,8 @@ class MemoryUsageLedger:
     issued_invoices: dict[UUID, StoredIssuedInvoice] = field(default_factory=dict)
     issued_invoice_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     issued_invoice_lines: list[StoredIssuedInvoiceLine] = field(default_factory=list)
+    issued_credit_notes: dict[UUID, StoredIssuedCreditNote] = field(default_factory=dict)
+    issued_credit_note_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -1507,6 +1536,80 @@ class MemoryUsageLedger:
         self.issued_invoices[persisted.issued_invoice_id] = persisted
         self.issued_invoice_index[identity_key] = persisted.issued_invoice_id
         self.issued_invoice_lines.extend(issued_invoice_lines)
+        return persisted
+
+    def find_issued_credit_note(
+        self, tenant_account_id: UUID, credit_adjustment_id: UUID
+    ) -> StoredIssuedCreditNote | None:
+        """Return the issued credit note for one tenant credit, if any."""
+        issued_credit_note_id = self.issued_credit_note_index.get(
+            (tenant_account_id, credit_adjustment_id)
+        )
+        if issued_credit_note_id is None:
+            return None
+        return self.issued_credit_notes[issued_credit_note_id]
+
+    def get_issued_credit_note(
+        self, issued_credit_note_id: UUID
+    ) -> StoredIssuedCreditNote | None:
+        """Return one issued credit note by internal identifier, if present."""
+        return self.issued_credit_notes.get(issued_credit_note_id)
+
+    def list_issued_credit_notes_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredIssuedCreditNote, ...]:
+        """Return issued credit notes limited to one tenant."""
+        return tuple(
+            note
+            for note in self.issued_credit_notes.values()
+            if note.tenant_account_id == tenant_account_id
+        )
+
+    def insert_issued_credit_note(
+        self, issued_credit_note: StoredIssuedCreditNote
+    ) -> StoredIssuedCreditNote:
+        """Persist one commercial credit-note snapshot.  Identity collisions fail closed."""
+        if issued_credit_note.issued_credit_note_status != "issued":
+            raise ValueError("issued_credit_note_status must be issued")
+        exclusive = parse_exact_decimal(
+            format_exact_decimal(issued_credit_note.tax_exclusive_amount)
+        )
+        tax_amount = parse_exact_decimal(format_exact_decimal(issued_credit_note.tax_amount))
+        inclusive = parse_exact_decimal(
+            format_exact_decimal(issued_credit_note.tax_inclusive_amount)
+        )
+        if exclusive + tax_amount != inclusive:
+            raise ValueError("issued credit note totals must sum")
+        if issued_credit_note.issued_credit_note_id in self.issued_credit_notes:
+            raise ValueError("issued_credit_note_id already stored")
+        identity_key = (
+            issued_credit_note.tenant_account_id,
+            issued_credit_note.credit_adjustment_id,
+        )
+        if identity_key in self.issued_credit_note_index:
+            raise ValueError("issued credit note identity already stored")
+        persisted = StoredIssuedCreditNote(
+            issued_credit_note_id=issued_credit_note.issued_credit_note_id,
+            tenant_account_id=issued_credit_note.tenant_account_id,
+            credit_adjustment_id=issued_credit_note.credit_adjustment_id,
+            invoice_draft_id=issued_credit_note.invoice_draft_id,
+            issued_invoice_id=issued_credit_note.issued_invoice_id,
+            issued_credit_note_contract_version=issued_credit_note.issued_credit_note_contract_version,
+            credit_adjustment_contract_version=issued_credit_note.credit_adjustment_contract_version,
+            credit_reason_code=issued_credit_note.credit_reason_code,
+            credit_adjustment_source_payload_hash=(
+                issued_credit_note.credit_adjustment_source_payload_hash
+            ),
+            source_payload_hash=issued_credit_note.source_payload_hash,
+            currency_code=issued_credit_note.currency_code,
+            tax_exclusive_amount=exclusive,
+            tax_amount=tax_amount,
+            tax_inclusive_amount=inclusive,
+            issued_credit_note_status=issued_credit_note.issued_credit_note_status,
+            issued_at=issued_credit_note.issued_at,
+        )
+        self.issued_credit_notes[persisted.issued_credit_note_id] = persisted
+        self.issued_credit_note_index[identity_key] = persisted.issued_credit_note_id
         return persisted
 
     def find_credit_adjustment(

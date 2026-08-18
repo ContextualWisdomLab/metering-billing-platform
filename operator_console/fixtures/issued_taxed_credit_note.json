@@ -1,0 +1,20 @@
+{
+  "issued_credit_note_presentment_contract_version": 1,
+  "issued_credit_note_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd21",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf661",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf621",
+  "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd11",
+  "currency_code": "USD",
+  "tax_exclusive_amount": "10.00",
+  "tax_amount": "1.00",
+  "tax_inclusive_amount": "11.00",
+  "issued_credit_note_status": "issued",
+  "issued_at": "2026-08-17T22:00:00Z",
+  "source_payload_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "credit_adjustment_source_payload_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "credit_adjustment_contract_version": 1,
+  "credit_reason_code": "goodwill",
+  "issued_credit_note_contract_version": 1,
+  "next_operator_action": "wait"
+}

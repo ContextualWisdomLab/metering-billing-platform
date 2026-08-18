@@ -32,6 +32,8 @@ from metering_billing.contracts import (
     validate_webhook_outbox_event_presentment,
     validate_issued_invoice,
     validate_issued_invoice_presentment,
+    validate_issued_credit_note,
+    validate_issued_credit_note_presentment,
     validate_webhook_delivery,
     validate_webhook_subscription,
 )
@@ -1934,6 +1936,174 @@ class RepositoryContractTests(unittest.TestCase):
             validate_issued_invoice_presentment(unbalanced),
         )
         self.assertNotEqual(validate_issued_invoice_presentment([]), ())
+
+    def test_issued_credit_note_accepts_snapshot_and_rejects_numbering(self) -> None:
+        """An issued credit note freezes credit totals and cannot invent a legal number."""
+        schema = self._schema("issued-credit-note.schema.json")
+        instance = {
+            "issued_credit_note_contract_version": 1,
+            "issued_credit_note_outcome_code": "accepted",
+            "issued_credit_note_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd20",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf660",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "currency_code": "USD",
+            "tax_exclusive_amount": "0.003705",
+            "tax_amount": "0",
+            "tax_inclusive_amount": "0.003705",
+            "issued_credit_note_status": "issued",
+            "issued_at": "2026-08-17T21:00:00Z",
+            "source_payload_hash": "sha256:" + ("b" * 64),
+            "credit_adjustment_source_payload_hash": "sha256:" + ("c" * 64),
+            "credit_adjustment_contract_version": 1,
+            "credit_reason_code": "rating_correction",
+            "idempotency_key": "urn:cwl:tenant_001:issued_credit_note:id:hash:v1",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_issued_credit_note(instance), ())
+        numbered = dict(instance)
+        numbered["credit_note_number"] = "CN-0001"
+        self.assertIn(
+            "$: additional property is not allowed: credit_note_number",
+            validate_schema_instance(schema, numbered),
+        )
+        self.assertIn(
+            "$: issued credit note must not include credit_note_number",
+            validate_issued_credit_note(numbered),
+        )
+        legal = dict(instance)
+        legal["legal_credit_note_number"] = "2026/0001"
+        self.assertIn(
+            "$: issued credit note must not include legal_credit_note_number",
+            validate_issued_credit_note(legal),
+        )
+        pan = dict(instance)
+        pan["card_pan"] = "4111111111111111"
+        self.assertIn(
+            "$: issued credit note must not include card_pan",
+            validate_issued_credit_note(pan),
+        )
+        collect_action = dict(instance)
+        collect_action["next_operator_action"] = "collect"
+        self.assertIn("$: issued credit note must wait", validate_issued_credit_note(collect_action))
+        unbalanced = dict(instance)
+        unbalanced["tax_inclusive_amount"] = "1.00"
+        self.assertIn(
+            "$: tax_inclusive_amount must equal exclusive plus tax",
+            validate_issued_credit_note(unbalanced),
+        )
+        negative = dict(instance)
+        negative["tax_exclusive_amount"] = "-1"
+        self.assertIn(
+            "$: tax_exclusive_amount must not be negative",
+            validate_issued_credit_note(negative),
+        )
+        bad_decimal = dict(instance)
+        bad_decimal["tax_amount"] = "not-decimal"
+        self.assertTrue(
+            any(
+                "must be an exact decimal" in error
+                for error in validate_issued_credit_note(bad_decimal)
+            )
+        )
+        numeric = dict(instance)
+        numeric["tax_amount"] = 0
+        self.assertTrue(
+            any("must be an exact decimal" in error for error in validate_issued_credit_note(numeric))
+        )
+        rejected = {
+            "issued_credit_note_contract_version": 1,
+            "issued_credit_note_outcome_code": "rejected",
+            "rejection_reason_code": "credit_adjustment_not_found",
+        }
+        self.assertEqual(validate_issued_credit_note(rejected), ())
+        missing_reason = {
+            "issued_credit_note_contract_version": 1,
+            "issued_credit_note_outcome_code": "rejected",
+        }
+        self.assertIn(
+            "$: rejected issued credit notes must include rejection_reason_code",
+            validate_issued_credit_note(missing_reason),
+        )
+        missing_id = {
+            "issued_credit_note_contract_version": 1,
+            "issued_credit_note_outcome_code": "accepted",
+        }
+        self.assertIn(
+            "$: accepted issued credit notes must include issued_credit_note_id",
+            validate_issued_credit_note(missing_id),
+        )
+        self.assertNotEqual(validate_issued_credit_note([]), ())
+        self.assertNotEqual(
+            validate_issued_credit_note({"issued_credit_note_contract_version": 1}),
+            (),
+        )
+
+    def test_issued_credit_note_presentment_accepts_snapshot_and_rejects_numbering(self) -> None:
+        """An issued-credit-note statement records frozen totals and cannot claim a write outcome."""
+        schema = self._schema("issued-credit-note-presentment.schema.json")
+        instance = {
+            "issued_credit_note_presentment_contract_version": 1,
+            "issued_credit_note_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd20",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf660",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
+            "currency_code": "USD",
+            "tax_exclusive_amount": "10.00",
+            "tax_amount": "1.00",
+            "tax_inclusive_amount": "11.00",
+            "issued_credit_note_status": "issued",
+            "issued_at": "2026-08-17T21:00:00Z",
+            "source_payload_hash": "sha256:" + ("b" * 64),
+            "credit_adjustment_source_payload_hash": "sha256:" + ("c" * 64),
+            "credit_adjustment_contract_version": 1,
+            "credit_reason_code": "goodwill",
+            "issued_credit_note_contract_version": 1,
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_issued_credit_note_presentment(instance), ())
+        posted = dict(instance)
+        posted["issued_credit_note_outcome_code"] = "accepted"
+        self.assertIn(
+            "$: additional property is not allowed: issued_credit_note_outcome_code",
+            validate_schema_instance(schema, posted),
+        )
+        numbered = dict(instance)
+        numbered["credit_note_number"] = "CN-0001"
+        self.assertIn(
+            "$: issued credit note must not include credit_note_number",
+            validate_issued_credit_note_presentment(numbered),
+        )
+        collect_action = dict(instance)
+        collect_action["next_operator_action"] = "collect"
+        self.assertIn(
+            "$: stored issued credit note must wait",
+            validate_issued_credit_note_presentment(collect_action),
+        )
+        negative = dict(instance)
+        negative["tax_amount"] = "-1"
+        self.assertIn(
+            "$: tax_amount must not be negative",
+            validate_issued_credit_note_presentment(negative),
+        )
+        numeric = dict(instance)
+        numeric["tax_inclusive_amount"] = 11.0
+        self.assertTrue(
+            any(
+                "must be an exact decimal" in error
+                for error in validate_issued_credit_note_presentment(numeric)
+            )
+        )
+        unbalanced = dict(instance)
+        unbalanced["tax_inclusive_amount"] = "999.00"
+        self.assertIn(
+            "$: tax_inclusive_amount must equal exclusive plus tax",
+            validate_issued_credit_note_presentment(unbalanced),
+        )
+        self.assertNotEqual(validate_issued_credit_note_presentment([]), ())
 
     def test_tenant_api_credential_accepts_issue_secret_and_rejects_hash(self) -> None:
         """Issue may return the secret once; hashes and rejected secrets are forbidden."""

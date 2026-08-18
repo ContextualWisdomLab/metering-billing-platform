@@ -84,6 +84,11 @@ import {
   ISSUED_INVOICE_CUSTOMER_COPY,
   nextOperatorActionCopy as nextIssuedInvoiceActionCopy,
 } from "../src/issued_invoice.js";
+import {
+  renderIssuedCreditNote,
+  ISSUED_CREDIT_NOTE_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedCreditNoteActionCopy,
+} from "../src/issued_credit_note.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -522,6 +527,38 @@ test("issued taxed hundred freezes inclusive 110.00", () => {
   assert.equal(statement.next_operator_action, "collect");
 });
 
+test("issued morning credit note shows wait and known exact product", () => {
+  const statement = loadFixture("issued_morning_credit_note.json");
+  const html = renderIssuedCreditNote(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /Wait for AIS/);
+  assert.match(html, /Issue the credit note; the validated journal remains available for AIS/);
+  assert.equal(
+    ISSUED_CREDIT_NOTE_CUSTOMER_COPY,
+    "Issue the credit note; the validated journal remains available for AIS.",
+  );
+  assert.equal(nextIssuedCreditNoteActionCopy("wait"), "Wait for AIS");
+  assert.equal(nextIssuedCreditNoteActionCopy("issue"), "Issue the credit note");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(typeof statement.tax_inclusive_amount, "string");
+  assert.ok(!("credit_note_number" in statement));
+  assert.ok(!("legal_credit_note_number" in statement));
+  assert.ok(!("issued_credit_note_lines" in statement));
+  assert.ok(!("card_pan" in statement));
+});
+
+test("issued taxed credit note freezes inclusive 11.00", () => {
+  const statement = loadFixture("issued_taxed_credit_note.json");
+  const html = renderIssuedCreditNote(statement);
+  assert.match(html, /11\.00 USD/);
+  assert.match(html, /issued/);
+  assert.equal(statement.tax_exclusive_amount, "10.00");
+  assert.equal(statement.tax_amount, "1.00");
+  assert.equal(statement.tax_inclusive_amount, "11.00");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.issued_invoice_id, "019d7b92-1aa0-7a7f-b61c-962c0f4bfd11");
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -558,6 +595,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderIssuedInvoice({ tax_inclusive_amount: 110.0, currency_code: "USD" }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderIssuedCreditNote({ tax_inclusive_amount: 11.0, currency_code: "USD" }),
     TypeError,
   );
   assert.throws(

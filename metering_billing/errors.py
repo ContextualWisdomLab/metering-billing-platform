@@ -221,6 +221,30 @@ class IssuedInvoicePresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class IssuedCreditNoteOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one commercial issued credit note."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class IssuedCreditNoteRejectionReasonCode(StrEnum):
+    """Why an issue request was refused without writing a commercial snapshot."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    CREDIT_ADJUSTMENT_NOT_FOUND = "credit_adjustment_not_found"
+    REQUEST_INVALID = "request_invalid"
+
+
+class IssuedCreditNotePresentmentQueryError(ValueError):
+    """Raised when a stored issued credit note cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class DunningEventPresentmentQueryError(ValueError):
     """Raised when a stored collection dunning event cannot be authorized or presented."""
 

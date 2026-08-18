@@ -79,3 +79,8 @@ export {
   ISSUED_INVOICE_CUSTOMER_COPY,
   nextOperatorActionCopy as nextIssuedInvoiceActionCopy,
 } from "./issued_invoice.js";
+export {
+  renderIssuedCreditNote,
+  ISSUED_CREDIT_NOTE_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedCreditNoteActionCopy,
+} from "./issued_credit_note.js";

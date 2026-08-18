@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/issued-credit-note-presentment/v1",
+  "title": "Issued Credit Note Presentment",
+  "description": "Tenant-scoped commercial issued-credit-note statement projected from a stored issued_credit_note. Amounts are exact-decimal strings. Next operator action is wait. The document is not a statutory credit note, tax credit certificate, or AIS posting and does not invent sequential legal numbering.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issued_credit_note_presentment_contract_version",
+    "issued_credit_note_id",
+    "tenant_reference",
+    "credit_adjustment_id",
+    "invoice_draft_id",
+    "currency_code",
+    "tax_exclusive_amount",
+    "tax_amount",
+    "tax_inclusive_amount",
+    "issued_credit_note_status",
+    "issued_at",
+    "source_payload_hash",
+    "credit_adjustment_source_payload_hash",
+    "credit_adjustment_contract_version",
+    "credit_reason_code",
+    "issued_credit_note_contract_version",
+    "next_operator_action"
+  ],
+  "properties": {
+    "issued_credit_note_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "issued_credit_note_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "credit_adjustment_id": {"type": "string", "format": "uuid"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "issued_invoice_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "tax_exclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_inclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "issued_credit_note_status": {"type": "string", "enum": ["issued"]},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "credit_adjustment_source_payload_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "credit_adjustment_contract_version": {"type": "integer", "minimum": 1},
+    "credit_reason_code": {
+      "type": "string",
+      "enum": ["rating_correction", "goodwill", "billing_error"]
+    },
+    "issued_credit_note_contract_version": {"type": "integer", "minimum": 1},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}

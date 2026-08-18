@@ -47,6 +47,12 @@ The application is a thin WSGI adapter:
     tenant and draft returns the stored ``issued_invoice_id``.  Refuse
     PAN, CVC, and provider secrets.  Do not invent statutory numbering,
     capture payment, enqueue a webhook, or call AIS.
+    9b. Let an operator POST an issued commercial credit-note snapshot from
+    a stored credit adjustment, then GET that snapshot.  Replay of the
+    same tenant and credit returns the stored ``issued_credit_note_id``.
+    Refuse PAN, CVC, and provider secrets.  Issue the credit note; the
+    validated journal remains available for AIS.  Do not invent statutory
+    numbering, capture payment, enqueue a webhook, or call AIS.
     10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
     GET one stored credential or list ``{tenant_api_credentials,
@@ -117,6 +123,7 @@ from metering_billing.errors import (
     RateCardQueryError,
     InvoicePresentmentQueryError,
     IssuedInvoicePresentmentQueryError,
+    IssuedCreditNotePresentmentQueryError,
     TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
@@ -133,6 +140,8 @@ from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.issued_invoice import IssuedInvoiceService
 from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
+from metering_billing.issued_credit_note import IssuedCreditNoteService
+from metering_billing.issued_credit_note_presentment import IssuedCreditNotePresentmentService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
@@ -222,6 +231,11 @@ ISSUED_INVOICE_NESTED_PATH = re.compile(
 )
 ISSUED_INVOICE_COLLECTION_PATH = "/v1/issued-invoices"
 ISSUED_INVOICE_ITEM_PATH = re.compile(r"^/v1/issued-invoices/([0-9a-fA-F-]{36})$")
+ISSUED_CREDIT_NOTE_NESTED_PATH = re.compile(
+    r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})/issued-credit-notes$"
+)
+ISSUED_CREDIT_NOTE_COLLECTION_PATH = "/v1/issued-credit-notes"
+ISSUED_CREDIT_NOTE_ITEM_PATH = re.compile(r"^/v1/issued-credit-notes/([0-9a-fA-F-]{36})$")
 TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
 TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
     r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})/revoke$"
@@ -276,6 +290,8 @@ def create_http_app(
     drafts = InvoiceDraftService(shared_ledger)
     issuers = IssuedInvoiceService(shared_ledger)
     issued_presentments = IssuedInvoicePresentmentService(shared_ledger)
+    credit_note_issuers = IssuedCreditNoteService(shared_ledger)
+    credit_note_presentments = IssuedCreditNotePresentmentService(shared_ledger)
     exports = AccountingExportService(shared_ledger)
     collections = CollectionCaseService(shared_ledger)
     intents = PaymentIntentService(shared_ledger)
@@ -950,6 +966,41 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_issued_credit_notes", "get_issued_credit_note"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_issued_credit_notes":
+                    page = credit_note_presentments.list_issued_credit_notes(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = credit_note_presentments.present_issued_credit_note(
+                    tenant_reference,
+                    _parse_uuid(path_values["issued_credit_note_id"], "issued_credit_note_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except IssuedCreditNotePresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "issued_credit_note_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {"list_issued_invoices", "get_issued_invoice"}:
             try:
                 query = _read_query(environ)
@@ -1106,6 +1157,27 @@ def create_http_app(
                     start_response,
                     status_code,
                     {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "issued_credit_notes":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                result = credit_note_issuers.issue_credit_note(
+                    tenant_reference,
+                    _parse_uuid(path_values["credit_adjustment_id"], "credit_adjustment_id"),
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
                 )
             except HttpRequestError as error:
                 return _send_json(
@@ -1414,6 +1486,22 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "credit_adjustments", {}
         if method == "GET":
             return "list_credit_adjustments", {}
+        return "method_not_allowed", {}
+    credit_note_nested = ISSUED_CREDIT_NOTE_NESTED_PATH.fullmatch(path)
+    if credit_note_nested is not None:
+        if method == "POST":
+            return "issued_credit_notes", {"credit_adjustment_id": credit_note_nested.group(1)}
+        return "method_not_allowed", {}
+    if path == ISSUED_CREDIT_NOTE_COLLECTION_PATH:
+        if method == "GET":
+            return "list_issued_credit_notes", {}
+        return "method_not_allowed", {}
+    credit_note_match = ISSUED_CREDIT_NOTE_ITEM_PATH.fullmatch(path)
+    if credit_note_match is not None:
+        if method == "GET":
+            return "get_issued_credit_note", {
+                "issued_credit_note_id": credit_note_match.group(1)
+            }
         return "method_not_allowed", {}
     credit_match = CREDIT_ADJUSTMENT_ITEM_PATH.fullmatch(path)
     if credit_match is not None:

@@ -5,7 +5,9 @@ Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
 those drafts as statements, issue an immutable commercial invoice snapshot
-from a stored draft, present that issued invoice, publish tax rates, assess tax on a draft, present
+from a stored draft, present that issued invoice, issue an immutable
+commercial credit-note snapshot from a stored credit adjustment, present
+that issued credit note, publish tax rates, assess tax on a draft, present
 those assessments, present stored posting-receipt observations, emit
 journal proposals, open collection cases, present those cases as statements, present stored dunning events, project provider-neutral payment
 intents, present those intents as statements, apply commercial payment receipts, present those receipts as statements, record commercial credits,
@@ -57,6 +59,8 @@ from metering_billing.contracts import (
     WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME,
     DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME,
     WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME,
+    ISSUED_CREDIT_NOTE_SCHEMA_NAME,
+    ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME,
     ISSUED_INVOICE_SCHEMA_NAME,
     ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
@@ -87,6 +91,8 @@ from metering_billing.contracts import (
     validate_webhook_subscription_presentment,
     validate_dunning_event_presentment,
     validate_webhook_outbox_event_presentment,
+    validate_issued_credit_note,
+    validate_issued_credit_note_presentment,
     validate_issued_invoice,
     validate_issued_invoice_presentment,
     validate_invoice_presentment,
@@ -126,6 +132,9 @@ from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
     InvoicePresentmentQueryError,
+    IssuedCreditNoteOutcomeCode,
+    IssuedCreditNotePresentmentQueryError,
+    IssuedCreditNoteRejectionReasonCode,
     IssuedInvoiceOutcomeCode,
     IssuedInvoicePresentmentQueryError,
     IssuedInvoiceRejectionReasonCode,
@@ -168,6 +177,8 @@ from metering_billing.exact_decimal import format_exact_decimal, parse_exact_dec
 from metering_billing.http_app import create_http_app
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
+from metering_billing.issued_credit_note import IssuedCreditNoteService
+from metering_billing.issued_credit_note_presentment import IssuedCreditNotePresentmentService
 from metering_billing.issued_invoice import IssuedInvoiceService
 from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
@@ -227,6 +238,8 @@ __all__ = (
     "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
     "DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_CREDIT_NOTE_SCHEMA_NAME",
+    "ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_INVOICE_SCHEMA_NAME",
     "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
@@ -289,6 +302,11 @@ __all__ = (
     "InvoiceDraftService",
     "InvoicePresentmentQueryError",
     "InvoicePresentmentService",
+    "IssuedCreditNoteOutcomeCode",
+    "IssuedCreditNotePresentmentQueryError",
+    "IssuedCreditNotePresentmentService",
+    "IssuedCreditNoteRejectionReasonCode",
+    "IssuedCreditNoteService",
     "IssuedInvoiceOutcomeCode",
     "IssuedInvoicePresentmentQueryError",
     "IssuedInvoicePresentmentService",
@@ -355,6 +373,8 @@ __all__ = (
     "validate_webhook_subscription_presentment",
     "validate_dunning_event_presentment",
     "validate_webhook_outbox_event_presentment",
+    "validate_issued_credit_note",
+    "validate_issued_credit_note_presentment",
     "validate_issued_invoice",
     "validate_issued_invoice_presentment",
     "validate_invoice_presentment",

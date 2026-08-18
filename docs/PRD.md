@@ -177,6 +177,20 @@ contextual-orchestrator usage
 - Invoice-draft, tax-assessment, journal-proposal, collection, payment, and AIS contracts stay unchanged. `invoice_draft_status` stays `draft`. `proposal_status` stays `validated`. First successful issue enqueues one existing #24 `invoice.issued` outbox event. No payment capture or AIS call is added. HMAC, SSRF, and delivery contracts stay unchanged.
 - Operators issue invoice, then collect or credit. `operator_console` Storybook adds one `IssuedInvoice` story. There is no login wall, Stripe, AIS call, or production SPA.
 
+## Issued-credit-note acceptance
+
+- A known stored credit adjustment issues one append-only commercial `issued_credit_note` whose currency and tax-exclusive/tax/inclusive totals match the stored credit.
+- A second issue of the same tenant and `credit_adjustment_id` returns the same `issued_credit_note_id` as `duplicate_replay`.
+- `issued_credit_note_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, QR/fiscal signatures, Peppol clearance, or jurisdiction-specific compliance claims.
+- `issued_invoice_id` is stored only when an issued invoice already exists for the same draft. The field is omitted when absent.
+- The snapshot copies the closed `credit_reason_code`. It invents no credit-note lines and no PII.
+- `POST /v1/credit-adjustments/{credit_adjustment_id}/issued-credit-notes` is the nested issue command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422. Unknown or cross-tenant credits reject `credit_adjustment_not_found`.
+- A known stored issued credit note presents one tenant-scoped statement with identity, credit source, frozen totals, `issued_at`, and `next_operator_action` (`wait`).
+- `GET /v1/issued-credit-notes/{issued_credit_note_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/issued-credit-notes` lists summaries as `{issued_credit_notes, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{issued_credit_note_id}`.
+- Credit-adjustment, tax-unwind, journal-proposal, invoice, collection, payment, and AIS contracts stay unchanged. `credit_adjustment` stays `recorded`. `proposal_status` stays `validated`. No webhook event, payment capture, or AIS call is added.
+- Operators issue the credit note; the validated journal remains available for AIS. `operator_console` Storybook adds one `IssuedCreditNote` story. There is no login wall, Stripe, AIS call, or production SPA.
+
 ## Tenant-API-credential acceptance
 
 - An operator can issue one append-only `tenant_api_credential` for a known tenant. The secret is returned once (prefix plus secret). The ledger stores only a keyed HMAC.

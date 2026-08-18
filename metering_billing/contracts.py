@@ -44,6 +44,8 @@ __all__ = (
     "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_INVOICE_SCHEMA_NAME",
     "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_CREDIT_NOTE_SCHEMA_NAME",
+    "ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -74,6 +76,8 @@ __all__ = (
     "validate_webhook_outbox_event_presentment",
     "validate_issued_invoice",
     "validate_issued_invoice_presentment",
+    "validate_issued_credit_note",
+    "validate_issued_credit_note_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -121,6 +125,10 @@ WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME = (
 )
 ISSUED_INVOICE_SCHEMA_NAME = "issued-invoice.schema.json"
 ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME = "issued-invoice-presentment.schema.json"
+ISSUED_CREDIT_NOTE_SCHEMA_NAME = "issued-credit-note.schema.json"
+ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME = (
+    "issued-credit-note-presentment.schema.json"
+)
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
 AIS_OUTBOX_DRAIN_SCHEMA_NAME = "ais-outbox-drain.schema.json"
@@ -1294,6 +1302,121 @@ def _missing_success_issued_invoice_fields(
 
 
 def _issued_invoice_total_errors(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return diagnostics when exclusive plus tax does not equal inclusive."""
+    exclusive = payload.get("tax_exclusive_amount")
+    tax_amount = payload.get("tax_amount")
+    inclusive = payload.get("tax_inclusive_amount")
+    errors: list[str] = []
+    for field_name, value in (
+        ("tax_exclusive_amount", exclusive),
+        ("tax_amount", tax_amount),
+        ("tax_inclusive_amount", inclusive),
+    ):
+        if isinstance(value, str):
+            try:
+                parsed = Decimal(value)
+                if parsed < Decimal("0"):
+                    errors.append(f"$: {field_name} must not be negative")
+            except Exception:
+                errors.append(f"$: {field_name} must be an exact decimal")
+        elif value is not None:
+            errors.append(f"$: {field_name} must be an exact decimal")
+    if (
+        isinstance(exclusive, str)
+        and isinstance(tax_amount, str)
+        and isinstance(inclusive, str)
+    ):
+        try:
+            if Decimal(exclusive) + Decimal(tax_amount) != Decimal(inclusive):
+                errors.append("$: tax_inclusive_amount must equal exclusive plus tax")
+        except Exception:
+            errors.append("$: tax amounts must be exact decimals")
+    return tuple(errors)
+
+
+FORBIDDEN_ISSUED_CREDIT_NOTE_FIELDS = (
+    "credit_note_number",
+    "legal_credit_note_number",
+    "card_pan",
+    "issued_credit_note_lines",
+)
+
+
+def validate_issued_credit_note(
+    issued_credit_note: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate issued-credit-note shape plus identity, totals, and numbering bans."""
+    schema = load_json_schema(ISSUED_CREDIT_NOTE_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, issued_credit_note))
+    if not isinstance(issued_credit_note, Mapping):
+        return tuple(errors)
+    errors.extend(_forbidden_issued_credit_note_field_errors(issued_credit_note))
+    outcome = issued_credit_note.get("issued_credit_note_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_issued_credit_note_fields(issued_credit_note, str(outcome)))
+        errors.extend(_issued_credit_note_total_errors(issued_credit_note))
+        action = issued_credit_note.get("next_operator_action")
+        if action is not None and action != "wait":
+            errors.append("$: issued credit note must wait")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in issued_credit_note:
+            errors.append("$: rejected issued credit notes must include rejection_reason_code")
+    return tuple(errors)
+
+
+def validate_issued_credit_note_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate issued-credit-note presentment shape plus exact money invariants."""
+    schema = load_json_schema(ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    errors.extend(_forbidden_issued_credit_note_field_errors(statement))
+    errors.extend(_issued_credit_note_total_errors(statement))
+    action = statement.get("next_operator_action")
+    if action is not None and action != "wait":
+        errors.append("$: stored issued credit note must wait")
+    return tuple(errors)
+
+
+def _forbidden_issued_credit_note_field_errors(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return diagnostics when a commercial snapshot invents numbering or PAN."""
+    errors: list[str] = []
+    for field_name in FORBIDDEN_ISSUED_CREDIT_NOTE_FIELDS:
+        if field_name in payload:
+            errors.append(f"$: issued credit note must not include {field_name}")
+    return tuple(errors)
+
+
+def _missing_success_issued_credit_note_fields(
+    issued_credit_note: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay snapshot lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "issued_credit_note_id",
+        "credit_adjustment_id",
+        "invoice_draft_id",
+        "currency_code",
+        "tax_exclusive_amount",
+        "tax_amount",
+        "tax_inclusive_amount",
+        "issued_credit_note_status",
+        "issued_at",
+        "source_payload_hash",
+        "credit_adjustment_source_payload_hash",
+        "credit_adjustment_contract_version",
+        "credit_reason_code",
+        "idempotency_key",
+        "next_operator_action",
+    ):
+        if field_name not in issued_credit_note:
+            missing.append(f"$: {outcome} issued credit notes must include {field_name}")
+    return tuple(missing)
+
+
+def _issued_credit_note_total_errors(payload: Mapping[str, Any]) -> tuple[str, ...]:
     """Return diagnostics when exclusive plus tax does not equal inclusive."""
     exclusive = payload.get("tax_exclusive_amount")
     tax_amount = payload.get("tax_amount")
