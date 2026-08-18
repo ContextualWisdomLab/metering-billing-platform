@@ -856,6 +856,11 @@ class RepositoryContractTests(unittest.TestCase):
                 {
                     "currency_code": 1,
                     "product_code": "contextual_orchestrator",
+                    "rated_amount": 1,
+                },
+                {
+                    "currency_code": "USD",
+                    "product_code": "contextual_memory",
                     "rated_amount": "not-decimal",
                 },
             ],

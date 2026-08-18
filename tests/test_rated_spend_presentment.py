@@ -135,6 +135,11 @@ class RatedSpendPresentmentTests(unittest.TestCase):
             TENANT_ONE, _account_id(ledger), DAY_WINDOW
         )
         self.assertEqual(day.products, ())
+        later = TimeWindow.from_iso8601("2026-08-16T11:00:00Z", "2026-08-16T12:00:00Z")
+        later_spend = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), later
+        )
+        self.assertEqual(later_spend.products, ())
         ledger.register_billing_account(TENANT_ONE, ACCOUNT_THREE)
         other = ledger.billing_accounts[ACCOUNT_THREE]
         other_spend = RatedSpendPresentmentService(ledger).present_rated_spend(
@@ -266,6 +271,15 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         )
         self.assertEqual(no_tenant_status, 422)
         self.assertEqual(no_tenant_body["rejection_reason_code"], "tenant_not_found")
+        unknown_tenant_status, unknown_tenant_body = invoke_http(
+            app,
+            "GET",
+            _spend_path(billing_account_id),
+            query=_morning_query(),
+            headers={"X-CWL-Tenant-Reference": "urn:cwl:missing_tenant"},
+        )
+        self.assertEqual(unknown_tenant_status, 422)
+        self.assertEqual(unknown_tenant_body["rejection_reason_code"], "tenant_not_found")
         illegal_status, illegal_body = invoke_http(
             app,
             "GET",
