@@ -94,11 +94,12 @@ The application is a thin WSGI adapter:
     ``POST /v1/collection-cases/{collection_case_id}/write-offs``
     writes off leftover remaining outstanding on one same-tenant open
     case.  Replay of the same tenant and case returns the stored
-    ``collection_write_off_id`` and never re-zeros outstanding.  GET
-    item and list present the stored write-off.  Do not invent a
-    journal, tax unwind, settlement, statutory numbering, payment
-    capture, AIS call, or webhook event.  After write-off, #46 can
-    settle at exact zero.
+    ``collection_write_off_id`` and never re-zeros outstanding.  First
+    successful write-off enqueues one existing ``write_off.recorded``
+    outbox event.  GET item and list present the stored write-off.  Do
+    not invent a journal, tax unwind, settlement, statutory numbering,
+    payment capture, or AIS call.  After write-off, #46 can settle at
+    exact zero.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.

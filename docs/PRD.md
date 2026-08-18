@@ -221,13 +221,13 @@ contextual-orchestrator usage
 
 - A known stored open collection case whose remaining outstanding is strictly positive writes off once and zeros remaining without flipping status.
 - A second write-off of the same tenant and `collection_case_id` returns the same `collection_write_off_id` as `duplicate_replay` and never re-zeros outstanding.
-- `collection_write_off_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment receipt, credit note, settlement command, AIS call, or a webhook event.
+- `collection_write_off_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment receipt, credit note, settlement command, or AIS call.
 - Missing case, already-settled case, remaining already zero, negative remaining, currency mismatch, and a supplied amount that does not equal remaining fail closed. Body may omit amount.
 - `POST /v1/collection-cases/{collection_case_id}/write-offs` is the nested write-off command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
 - A known stored write-off presents one tenant-scoped statement with identity, exact write-off amount, exact-zero remaining, `written_off_at`, and `next_operator_action` (`settle`).
 - `GET /v1/collection-write-offs/{collection_write_off_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/collection-write-offs` lists summaries as `{collection_write_offs, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{written_off_at}|{collection_write_off_id}`.
-- Payment-receipt, issued-credit-note, credit-note-application, collection-settlement, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. #46 remains the explicit settle-when-zero command.
+- Payment-receipt, issued-credit-note, credit-note-application, collection-settlement, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. #46 remains the explicit settle-when-zero command. First successful write-off enqueues one existing #24 `write_off.recorded` outbox event. HMAC, SSRF, and delivery contracts stay unchanged.
 - Operators write off leftover remaining, then settle. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Tenant-API-credential acceptance
@@ -254,7 +254,7 @@ contextual-orchestrator usage
 - `GET /v1/webhook-subscriptions` lists summaries as `{webhook_subscriptions, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{webhook_subscription_id}`.
 - Presentment never returns `webhook_secret`, `webhook_secret_hash`, `webhook_secret_prefix`, a signature key, `payload_json`, or a signed body. `POST /v1/webhook-subscriptions/{id}/revoke` stays the #24 revoke. PAN, CVC, and provider secrets are refused on register and revoke.
 - When a journal proposal is validated, a payment receipt is applied, a credit is recorded, an invoice is issued, a credit note is issued, a credit note is applied, or a collection case is settled, one `webhook_outbox_event` is appended. Replay of the commercial fact does not enqueue a second row.
-- Event types in this slice are `journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`, `invoice.issued`, `credit_note.issued`, `credit_note.applied`, and `collection.settled`. Journal, payment, and credit payloads wrap the published contract. `invoice.issued`, `credit_note.issued`, `credit_note.applied`, and `collection.settled` `data` are thin references plus hash and omit lines, PAN, secrets, statutory identifiers, and write-off amounts.
+- Event types in this slice are `journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`, `invoice.issued`, `credit_note.issued`, `credit_note.applied`, `collection.settled`, and `write_off.recorded`. Journal, payment, and credit payloads wrap the published contract. `invoice.issued`, `credit_note.issued`, `credit_note.applied`, `collection.settled`, and `write_off.recorded` `data` are thin references plus hash and omit lines, PAN, secrets, and statutory identifiers.
 - `WebhookDeliveryService.deliver_due_events` and `POST /v1/webhook-deliveries` POST JSON to active same-tenant subscriptions and sign the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`. PAN, CVC, and provider secrets are refused on the write.
 - Delivery attempts are append-only. Success marks the outbox event delivered. Later explicit runs may retry. There is no scheduler.
 - A known stored `webhook_delivery_attempt` presents one tenant-scoped statement with `delivery_attempt_id`, `webhook_subscription_id`, `event_type_code`, `source_id`, `attempt_number`, stored HTTP status or failure, timestamps, and `next_operator_action` (`wait` after stored success, otherwise `run_deliveries`).

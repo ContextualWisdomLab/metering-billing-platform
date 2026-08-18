@@ -76,6 +76,7 @@ REQUIRED_FILES = (
     "docs/adr/0044-collection-settled-webhook.md",
     "docs/adr/0045-credit-note-applied-webhook.md",
     "docs/adr/0046-collection-write-off.md",
+    "docs/adr/0047-write-off-recorded-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

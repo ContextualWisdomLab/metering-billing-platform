@@ -8,9 +8,11 @@ The service is the buyer-facing write-off path:
 4. Zero remaining outstanding without flipping the case to ``settled``.
 
 Replay of the same tenant and ``collection_case_id`` returns the stored
-write-off and never re-zeros outstanding.  The path does not emit a
-journal, unwind tax, capture payment, call AIS, settle the case, or
-enqueue a webhook.  #46 remains the explicit settle-when-zero command.
+write-off and never re-zeros outstanding.  First successful write-off
+enqueues one existing ``write_off.recorded`` outbox event; replay of
+the same write-off does not enqueue a second row.  The path does not
+emit a journal, unwind tax, capture payment, call AIS, or settle the
+case.  #46 remains the explicit settle-when-zero command.
 """
 
 from __future__ import annotations
@@ -35,6 +37,10 @@ from metering_billing.usage_ledger import (
     StoredCollectionCase,
     StoredCollectionWriteOff,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_WRITE_OFF_RECORDED,
+    enqueue_accepted_fact,
 )
 
 
@@ -125,6 +131,34 @@ class CollectionWriteOffResult:
             payload["issued_invoice_id"] = str(self.issued_invoice_id)
         return payload
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``write_off.recorded`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not a payment receipt or
+        settlement.  PII, PAN, secrets, and statutory identifiers are omitted.
+        Remaining outstanding is the stored exact-zero write-off fact, not
+        later-mutated case remaining.
+        """
+        if self.collection_write_off_id is None or self.collection_case_id is None:
+            raise ValueError("rejected collection write-off has no webhook event data")
+        payload: dict[str, object] = {
+            "collection_write_off_id": str(self.collection_write_off_id),
+            "collection_case_id": str(self.collection_case_id),
+            "invoice_draft_id": str(self.invoice_draft_id),
+            "source_payload_hash": self.source_payload_hash,
+            "collection_write_off_contract_version": (
+                self.collection_write_off_contract_version
+            ),
+            "currency_code": self.currency_code,
+            "write_off_amount": format_exact_decimal(self.write_off_amount),
+            "remaining_outstanding_amount": "0",
+            "collection_write_off_status": self.collection_write_off_status,
+            "written_off_at": _format_written_off_at(self.written_off_at),
+        }
+        if self.issued_invoice_id is not None:
+            payload["issued_invoice_id"] = str(self.issued_invoice_id)
+        return payload
+
 
 class CollectionWriteOffService:
     """Append-only writer of leftover collection remaining."""
@@ -148,8 +182,11 @@ class CollectionWriteOffService:
 
         Replay of the same tenant and ``collection_case_id`` returns the
         stored ``collection_write_off_id`` and does not zero outstanding
-        again.  Another tenant cannot see or write off that case.  The
-        case stays ``open`` or ``dunning`` so #46 can settle at exact zero.
+        again.  First successful write-off enqueues one
+        ``write_off.recorded`` outbox event.  Replay of that write-off
+        does not enqueue a second row.  Another tenant cannot see or
+        write off that case.  The case stays ``open`` or ``dunning`` so
+        #46 can settle at exact zero.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -164,12 +201,14 @@ class CollectionWriteOffService:
                 return _rejected(
                     CollectionWriteOffRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
                 )
-            return _from_stored(
+            result = _from_stored(
                 existing,
                 current_case,
                 tenant.tenant_reference,
                 CollectionWriteOffOutcomeCode.DUPLICATE_REPLAY,
             )
+            _enqueue_write_off_recorded(self.ledger, tenant.tenant_reference, result)
+            return result
         collection_case = self.ledger.get_collection_case(collection_case_id)
         if (
             collection_case is None
@@ -218,12 +257,14 @@ class CollectionWriteOffService:
         updated_case = self.ledger.apply_collection_write_off(
             collection_case.collection_case_id, recorded_amount
         )
-        return _from_stored(
+        result = _from_stored(
             stored,
             updated_case,
             tenant.tenant_reference,
             CollectionWriteOffOutcomeCode.ACCEPTED,
         )
+        _enqueue_write_off_recorded(self.ledger, tenant.tenant_reference, result)
+        return result
 
 
 def _canonical_write_off_snapshot(
@@ -243,6 +284,31 @@ def _canonical_write_off_snapshot(
     if issued_invoice_id is not None:
         payload["issued_invoice_id"] = str(issued_invoice_id)
     return payload
+
+
+def _enqueue_write_off_recorded(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: CollectionWriteOffResult,
+) -> None:
+    """Append one ``write_off.recorded`` outbox row for a stored write-off.
+
+    Replay of the same tenant, event type, ``collection_write_off_id``,
+    and payload hash returns the stored row.  A crash after insert and
+    before enqueue is healed by the next write-off replay.
+    """
+    if result.collection_write_off_id is None or result.written_off_at is None:
+        raise ValueError(
+            "accepted collection write-offs must include identity and written_off_at"
+        )
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_WRITE_OFF_RECORDED,
+        result.collection_write_off_id,
+        result.as_webhook_event_data(),
+        result.written_off_at,
+    )
 
 
 def _rejected(

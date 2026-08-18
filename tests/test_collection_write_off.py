@@ -30,10 +30,12 @@ from metering_billing.errors import (
 )
 from metering_billing.collection_write_off import (
     CollectionWriteOffResult,
+    _enqueue_write_off_recorded,
     _format_written_off_at,
     _rejected,
 )
 from metering_billing.usage_ledger import generate_record_id
+from metering_billing.webhook_outbox import EVENT_TYPE_WRITE_OFF_RECORDED
 from test_collection_case import draft_known_morning
 from test_collection_case_settlement import open_morning_case_at_zero
 from test_http_app import invoke_http
@@ -108,9 +110,40 @@ class CollectionWriteOffTests(unittest.TestCase):
         self.assertEqual(stored_case.collection_case_status, "open")
         self.assertEqual(len(ledger.collection_write_offs), 1)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
         self.assertEqual(len(ledger.payment_receipts), prior_receipts)
         self.assertEqual(len(ledger.collection_case_settlements), prior_settlements)
+        recorded_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_WRITE_OFF_RECORDED
+        ]
+        self.assertEqual(len(recorded_events), 1)
+        self.assertEqual(recorded_events[0].source_id, first.collection_write_off_id)
+        envelope = json.loads(recorded_events[0].payload_json)
+        self.assertEqual(envelope["event_type_code"], EVENT_TYPE_WRITE_OFF_RECORDED)
+        data = envelope["data"]
+        self.assertEqual(data["collection_write_off_id"], str(first.collection_write_off_id))
+        self.assertEqual(data["collection_case_id"], str(first.collection_case_id))
+        self.assertEqual(data["invoice_draft_id"], str(first.invoice_draft_id))
+        self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+        self.assertEqual(data["collection_write_off_contract_version"], 1)
+        self.assertEqual(data["currency_code"], "USD")
+        self.assertEqual(data["write_off_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
+        self.assertEqual(data["remaining_outstanding_amount"], "0")
+        self.assertEqual(data["collection_write_off_status"], "recorded")
+        self.assertEqual(data["written_off_at"], first.as_contract_dict()["written_off_at"])
+        self.assertNotIn("issued_invoice_id", data)
+        self.assertNotIn("collection_case_status", data)
+        self.assertNotIn("card_pan", json.dumps(envelope))
+        self.assertNotIn("legal_invoice_number", json.dumps(envelope))
+        self.assertNotIn("webhook_secret", json.dumps(envelope))
+        webhook_data = first.as_webhook_event_data()
+        self.assertEqual(webhook_data["remaining_outstanding_amount"], "0")
+        self.assertEqual(webhook_data["write_off_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
+        self.assertNotIn("collection_write_off_outcome_code", webhook_data)
+        self.assertNotIn("next_operator_action", webhook_data)
+        self.assertNotIn("collection_case_status", webhook_data)
         settled = CollectionCaseSettlementService(ledger).settle_collection_case(
             TENANT_ONE, collection.collection_case_id
         )
@@ -187,6 +220,26 @@ class CollectionWriteOffTests(unittest.TestCase):
         self.assertEqual(len(negative_ledger.collection_write_offs), 0)
         self.assertEqual(len(settled_ledger.collection_write_offs), 0)
         self.assertEqual(len(currency_ledger.collection_write_offs), 0)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in zero_ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_WRITE_OFF_RECORDED
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in settled_ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_WRITE_OFF_RECORDED
+                ]
+            ),
+            0,
+        )
 
     def test_unknown_and_cross_tenant_targets_are_rejected(self) -> None:
         """Missing tenant or case cannot invent a write-off."""
@@ -231,6 +284,20 @@ class CollectionWriteOffTests(unittest.TestCase):
             TENANT_ONE, written.collection_write_off_id
         )
         self.assertIn("issued_invoice_id", presented.as_contract_dict())
+        recorded_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_WRITE_OFF_RECORDED
+        ]
+        self.assertEqual(len(recorded_events), 1)
+        envelope = json.loads(recorded_events[0].payload_json)
+        self.assertEqual(
+            envelope["data"]["issued_invoice_id"], str(issued_invoice.issued_invoice_id)
+        )
+        self.assertEqual(
+            written.as_webhook_event_data()["issued_invoice_id"],
+            str(issued_invoice.issued_invoice_id),
+        )
 
     def test_resolver_hollow_success_raises_value_error(self) -> None:
         """A broken tenant resolve must raise ValueError, not assert."""
@@ -372,7 +439,13 @@ class CollectionWriteOffTests(unittest.TestCase):
             {"tenant_reference": TENANT_ONE},
         )
         self.assertEqual(method_status, 405)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        recorded_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_WRITE_OFF_RECORDED
+        ]
+        self.assertEqual(len(recorded_events), 2)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 2)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
         self.assertEqual(len(ledger.payment_receipts), 0)
         self.assertEqual(len(ledger.collection_case_settlements), 0)
@@ -576,6 +649,19 @@ class CollectionWriteOffTests(unittest.TestCase):
             TENANT_ONE, collection.collection_case_id
         )
         self.assertEqual(mutated_replay.remaining_outstanding_amount, Decimal("1.00"))
+        self.assertEqual(
+            mutated_replay.as_webhook_event_data()["remaining_outstanding_amount"], "0"
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_WRITE_OFF_RECORDED
+                ]
+            ),
+            1,
+        )
         del ledger.collection_cases[collection.collection_case_id]
         missing_replay = CollectionWriteOffService(ledger).write_off_collection_case(
             TENANT_ONE, collection.collection_case_id
@@ -627,6 +713,8 @@ class CollectionWriteOffTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             accepted_without_time.as_contract_dict()
+        with self.assertRaises(ValueError):
+            accepted_without_time.as_webhook_event_data()
         none_reason = CollectionWriteOffResult(
             collection_write_off_outcome_code=CollectionWriteOffOutcomeCode.REJECTED,
             collection_write_off_contract_version=1,
@@ -649,6 +737,8 @@ class CollectionWriteOffTests(unittest.TestCase):
             none_reason.as_contract_dict()["rejection_reason_code"],
             "collection_case_not_found",
         )
+        with self.assertRaises(ValueError):
+            none_reason.as_webhook_event_data()
         string_rejected = CollectionWriteOffResult(
             collection_write_off_outcome_code="rejected",
             collection_write_off_contract_version=1,
@@ -694,6 +784,9 @@ class CollectionWriteOffTests(unittest.TestCase):
             "accepted",
         )
         self.assertIn("issued_invoice_id", string_accepted.as_contract_dict())
+        self.assertIn("issued_invoice_id", string_accepted.as_webhook_event_data())
+        with self.assertRaises(ValueError):
+            _enqueue_write_off_recorded(ledger, TENANT_ONE, accepted_without_time)
         self.assertEqual(validate_collection_write_off_presentment(presentment_payload), ())
         self.assertIn("collection_write_off_id", presented.as_summary_dict())
         missing_presentment_remaining = json.loads(json.dumps(presentment_payload))
