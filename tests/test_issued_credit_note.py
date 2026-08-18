@@ -146,6 +146,15 @@ class IssuedCreditNoteTests(unittest.TestCase):
         self.assertEqual(replay.issued_credit_note_outcome_code, IssuedCreditNoteOutcomeCode.DUPLICATE_REPLAY)
         self.assertEqual(replay.issued_invoice_id, issued_invoice.issued_invoice_id)
         self.assertEqual(len(ledger.issued_credit_notes), 1)
+        presented = IssuedCreditNotePresentmentService(ledger).present_issued_credit_note(
+            TENANT_ONE, issued.issued_credit_note_id
+        )
+        presented_payload = presented.as_contract_dict()
+        self.assertEqual(
+            presented_payload["issued_invoice_id"],
+            str(issued_invoice.issued_invoice_id),
+        )
+        self.assertEqual(validate_issued_credit_note_presentment(presented_payload), ())
 
     def test_http_issue_get_and_paged_list_without_capture(self) -> None:
         """POST issues; GET item and list page metadata and never capture payment."""
