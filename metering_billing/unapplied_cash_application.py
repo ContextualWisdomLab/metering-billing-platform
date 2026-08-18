@@ -8,9 +8,11 @@ The service is the buyer-facing apply path:
 4. Persist one append-only ``unapplied_cash_application`` per leftover.
 
 Replay of the same tenant and ``unapplied_cash_id`` returns the stored
-application and never double-reduces.  The parked leftover row stays
+application and never double-reduces.  First successful apply enqueues
+one existing ``unapplied_cash.applied`` outbox event; replay of the same
+application does not enqueue a second row.  The parked leftover row stays
 ``parked``; the application identity consumes it.  The path does not
-auto-settle, emit a journal, webhook, write-off, credit note, or AIS call.
+auto-settle, emit a journal, write-off, credit note, or AIS call.
 """
 
 from __future__ import annotations
@@ -37,6 +39,10 @@ from metering_billing.usage_ledger import (
     StoredUnappliedCash,
     StoredUnappliedCashApplication,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_UNAPPLIED_CASH_APPLIED,
+    enqueue_accepted_fact,
 )
 
 
@@ -131,6 +137,40 @@ class UnappliedCashApplicationResult:
             "next_operator_action": self.next_operator_action,
         }
 
+    def as_webhook_event_data(
+        self, issued_invoice_id: UUID | None = None
+    ) -> dict[str, object]:
+        """Return the thin ``unapplied_cash.applied`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not a payment receipt or
+        settlement.  PII, PAN, secrets, and statutory identifiers are omitted.
+        Remaining outstanding is not stored on the application row, so it is
+        omitted to keep the outbox payload hash stable across later case
+        mutations.
+        """
+        if self.unapplied_cash_application_id is None or self.unapplied_cash_id is None:
+            raise ValueError("rejected unapplied cash application has no webhook event data")
+        if self.applied_at is None:
+            raise ValueError("accepted unapplied cash applications must include applied_at")
+        payload: dict[str, object] = {
+            "unapplied_cash_application_id": str(self.unapplied_cash_application_id),
+            "unapplied_cash_id": str(self.unapplied_cash_id),
+            "payment_receipt_id": str(self.payment_receipt_id),
+            "collection_case_id": str(self.collection_case_id),
+            "invoice_draft_id": str(self.invoice_draft_id),
+            "source_payload_hash": self.source_payload_hash,
+            "unapplied_cash_application_contract_version": (
+                self.unapplied_cash_application_contract_version
+            ),
+            "currency_code": self.currency_code,
+            "applied_amount": format_exact_decimal(self.applied_amount),
+            "unapplied_cash_application_status": self.unapplied_cash_application_status,
+            "applied_at": _format_applied_at(self.applied_at),
+        }
+        if issued_invoice_id is not None:
+            payload["issued_invoice_id"] = str(issued_invoice_id)
+        return payload
+
 
 class UnappliedCashApplicationService:
     """Append-only applier of parked leftover onto collection cases."""
@@ -156,7 +196,9 @@ class UnappliedCashApplicationService:
         Replay of the same tenant and ``unapplied_cash_id`` returns the
         stored ``unapplied_cash_application_id`` and does not reduce
         outstanding again.  The apply uses the full parked amount.
-        Remaining zero does not settle the case.
+        Remaining zero does not settle the case.  First successful apply
+        enqueues one ``unapplied_cash.applied`` outbox event.  Replay of
+        that application does not enqueue a second row.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -174,12 +216,14 @@ class UnappliedCashApplicationService:
                 return _rejected(
                     UnappliedCashApplicationRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
                 )
-            return _from_stored(
+            result = _from_stored(
                 existing,
                 current_case,
                 tenant.tenant_reference,
                 UnappliedCashApplicationOutcomeCode.DUPLICATE_REPLAY,
             )
+            _enqueue_unapplied_cash_applied(self.ledger, tenant.tenant_reference, result)
+            return result
         collection_case = self.ledger.get_collection_case(collection_case_id)
         if (
             collection_case is None
@@ -248,12 +292,48 @@ class UnappliedCashApplicationService:
         updated_case = self.ledger.apply_unapplied_cash_to_collection_case(
             collection_case.collection_case_id, leftover
         )
-        return _from_stored(
+        result = _from_stored(
             stored,
             updated_case,
             tenant.tenant_reference,
             UnappliedCashApplicationOutcomeCode.ACCEPTED,
         )
+        _enqueue_unapplied_cash_applied(self.ledger, tenant.tenant_reference, result)
+        return result
+
+
+def _enqueue_unapplied_cash_applied(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: UnappliedCashApplicationResult,
+) -> None:
+    """Append one ``unapplied_cash.applied`` outbox row for a stored apply.
+
+    Replay of the same tenant, event type, ``unapplied_cash_application_id``,
+    and payload hash returns the stored row.  A crash after insert and
+    before enqueue is healed by the next apply replay.
+    """
+    if result.unapplied_cash_application_id is None or result.applied_at is None:
+        raise ValueError(
+            "accepted unapplied cash applications must include identity and applied_at"
+        )
+    issued_invoice_id = None
+    if result.collection_case_id is not None and result.invoice_draft_id is not None:
+        collection_case = ledger.get_collection_case(result.collection_case_id)
+        if collection_case is not None:
+            issued = ledger.find_issued_invoice(
+                collection_case.tenant_account_id, result.invoice_draft_id
+            )
+            if issued is not None:
+                issued_invoice_id = issued.issued_invoice_id
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_UNAPPLIED_CASH_APPLIED,
+        result.unapplied_cash_application_id,
+        result.as_webhook_event_data(issued_invoice_id),
+        result.applied_at,
+    )
 
 
 def _parse_applied_amount(value: object) -> Decimal:

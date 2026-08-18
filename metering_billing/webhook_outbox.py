@@ -3,7 +3,7 @@
 The buyer-facing path is:
 
 1. Register an https callback for a closed event-type set.
-2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued credit note, credit-note application, collection-case settlement, or collection write-off).
+2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued credit note, credit-note application, collection-case settlement, collection write-off, or leftover apply).
 3. Run ``deliver_due_events`` so active subscriptions receive a signed POST.
 
 AIS may keep polling ``GET /v1/journal-proposals``.  This slice does not
@@ -65,6 +65,7 @@ EVENT_TYPE_CREDIT_NOTE_ISSUED = "credit_note.issued"
 EVENT_TYPE_CREDIT_NOTE_APPLIED = "credit_note.applied"
 EVENT_TYPE_COLLECTION_SETTLED = "collection.settled"
 EVENT_TYPE_WRITE_OFF_RECORDED = "write_off.recorded"
+EVENT_TYPE_UNAPPLIED_CASH_APPLIED = "unapplied_cash.applied"
 KNOWN_EVENT_TYPE_CODES = frozenset(
     {
         EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
@@ -75,6 +76,7 @@ KNOWN_EVENT_TYPE_CODES = frozenset(
         EVENT_TYPE_CREDIT_NOTE_APPLIED,
         EVENT_TYPE_COLLECTION_SETTLED,
         EVENT_TYPE_WRITE_OFF_RECORDED,
+        EVENT_TYPE_UNAPPLIED_CASH_APPLIED,
     }
 )
 LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})

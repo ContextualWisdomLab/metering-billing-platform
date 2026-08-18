@@ -82,6 +82,7 @@ REQUIRED_FILES = (
     "docs/adr/0050-collection-aging-presentment.md",
     "docs/adr/0051-unapplied-cash-from-payment-receipt.md",
     "docs/adr/0052-unapplied-cash-application-to-collection-case.md",
+    "docs/adr/0053-unapplied-cash-applied-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

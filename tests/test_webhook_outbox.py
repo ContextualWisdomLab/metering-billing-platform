@@ -21,6 +21,7 @@ from metering_billing import (
     CollectionWriteOffService,
     CreditAdjustmentService,
     CreditNoteApplicationService,
+    UnappliedCashApplicationService,
     IssuedCreditNoteService,
     IssuedInvoiceService,
     MemoryUsageLedger,
@@ -52,6 +53,7 @@ from metering_billing.webhook_outbox import (
     EVENT_TYPE_INVOICE_ISSUED,
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
     EVENT_TYPE_PAYMENT_RECEIPT_APPLIED,
+    EVENT_TYPE_UNAPPLIED_CASH_APPLIED,
     EVENT_TYPE_WRITE_OFF_RECORDED,
     WEBHOOK_SIGNATURE_HEADER,
     WebhookDeliveryResult,
@@ -68,6 +70,7 @@ from metering_billing.webhook_outbox import (
 from test_collection_case_settlement import open_morning_case_at_zero
 from test_collection_write_off import open_morning_case_with_outstanding
 from test_credit_note_application import issue_morning_credit_then_open_case
+from test_unapplied_cash_application import park_leftover_and_open_second_case
 from test_http_app import invoke_http
 from test_journal_proposal import draft_known_morning
 from test_payment_settlement import project_known_morning_intent
@@ -738,6 +741,119 @@ class WebhookOutboxTests(unittest.TestCase):
                         event
                         for event in ledger.webhook_outbox_events.values()
                         if event.event_type_code == EVENT_TYPE_WRITE_OFF_RECORDED
+                    ]
+                ),
+                1,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_unapplied_cash_applied_enqueues_once_and_delivers_signed(self) -> None:
+        """First leftover apply enqueues unapplied_cash.applied once; replay heals."""
+        ledger, parked, collection, _source_case_id, payment_receipt_id = (
+            park_leftover_and_open_second_case()
+        )
+        server, callback_url, received = _start_recorder()
+        try:
+            subscriptions = WebhookSubscriptionService(ledger, clock=lambda: ISSUED_AT)
+            registered = subscriptions.register_subscription(
+                TENANT_ONE, callback_url, (EVENT_TYPE_UNAPPLIED_CASH_APPLIED,)
+            )
+            self.assertEqual(
+                registered.webhook_subscription_outcome_code,
+                WebhookSubscriptionOutcomeCode.ACCEPTED,
+            )
+            self.assertEqual(registered.event_type_codes, (EVENT_TYPE_UNAPPLIED_CASH_APPLIED,))
+            self.assertEqual(validate_webhook_subscription(registered.as_contract_dict()), ())
+            first = UnappliedCashApplicationService(
+                ledger, clock=lambda: ISSUED_AT
+            ).apply_unapplied_cash(
+                TENANT_ONE, parked.unapplied_cash_id, collection.collection_case_id
+            )
+            second = UnappliedCashApplicationService(
+                ledger, clock=lambda: ISSUED_AT
+            ).apply_unapplied_cash(
+                TENANT_ONE, parked.unapplied_cash_id, collection.collection_case_id
+            )
+            applied_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_UNAPPLIED_CASH_APPLIED
+            ]
+            self.assertEqual(first.unapplied_cash_application_outcome_code.value, "accepted")
+            self.assertEqual(second.unapplied_cash_application_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(applied_events), 1)
+            self.assertEqual(applied_events[0].source_id, first.unapplied_cash_application_id)
+            envelope = json.loads(applied_events[0].payload_json)
+            self.assertEqual(envelope["event_type_code"], EVENT_TYPE_UNAPPLIED_CASH_APPLIED)
+            data = envelope["data"]
+            self.assertEqual(
+                data["unapplied_cash_application_id"],
+                str(first.unapplied_cash_application_id),
+            )
+            self.assertEqual(data["unapplied_cash_id"], str(parked.unapplied_cash_id))
+            self.assertEqual(data["payment_receipt_id"], str(payment_receipt_id))
+            self.assertEqual(data["collection_case_id"], str(collection.collection_case_id))
+            self.assertEqual(data["invoice_draft_id"], str(collection.invoice_draft_id))
+            self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+            self.assertEqual(data["unapplied_cash_application_contract_version"], 1)
+            self.assertEqual(data["currency_code"], "USD")
+            self.assertEqual(data["applied_amount"], first.as_contract_dict()["applied_amount"])
+            self.assertEqual(data["unapplied_cash_application_status"], "applied")
+            self.assertEqual(data["applied_at"], first.as_contract_dict()["applied_at"])
+            self.assertNotIn("issued_invoice_id", data)
+            self.assertNotIn("remaining_outstanding_amount", data)
+            self.assertNotIn("collection_case_status", data)
+            self.assertNotIn("card_pan", json.dumps(envelope))
+            self.assertNotIn("legal_invoice_number", json.dumps(envelope))
+            self.assertNotIn("webhook_secret", json.dumps(envelope))
+            delivered = WebhookDeliveryService(ledger).deliver_due_events(TENANT_ONE)
+            self.assertEqual(delivered.delivered_event_count, 1)
+            self.assertEqual(len(received), 1)
+            headers, raw_body = received[0]
+            posted = json.loads(raw_body.decode("utf-8"))
+            self.assertEqual(posted["event_type_code"], EVENT_TYPE_UNAPPLIED_CASH_APPLIED)
+            expected = sign_webhook_body(registered.webhook_secret or "", raw_body)
+            signature = next(
+                value
+                for key, value in headers.items()
+                if key.lower() == WEBHOOK_SIGNATURE_HEADER.lower()
+            )
+            self.assertEqual(signature, expected)
+            orphan_id = applied_events[0].outbox_event_id
+            identity = next(
+                key
+                for key, stored_id in ledger.webhook_outbox_identity_index.items()
+                if stored_id == orphan_id
+            )
+            del ledger.webhook_outbox_events[orphan_id]
+            del ledger.webhook_outbox_identity_index[identity]
+            healed = UnappliedCashApplicationService(
+                ledger, clock=lambda: ISSUED_AT
+            ).apply_unapplied_cash(
+                TENANT_ONE, parked.unapplied_cash_id, collection.collection_case_id
+            )
+            healed_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_UNAPPLIED_CASH_APPLIED
+            ]
+            self.assertEqual(
+                healed.unapplied_cash_application_outcome_code.value, "duplicate_replay"
+            )
+            self.assertEqual(len(healed_events), 1)
+            self.assertEqual(healed_events[0].source_id, first.unapplied_cash_application_id)
+            rejected = UnappliedCashApplicationService(ledger).apply_unapplied_cash(
+                TENANT_TWO, parked.unapplied_cash_id, collection.collection_case_id
+            )
+            self.assertEqual(rejected.unapplied_cash_application_outcome_code.value, "rejected")
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in ledger.webhook_outbox_events.values()
+                        if event.event_type_code == EVENT_TYPE_UNAPPLIED_CASH_APPLIED
                     ]
                 ),
                 1,

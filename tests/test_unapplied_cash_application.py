@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -11,6 +12,7 @@ from uuid import uuid4
 from metering_billing import (
     CollectionCaseService,
     CollectionCaseSettlementService,
+    IssuedInvoiceService,
     PaymentIntentService,
     PaymentSettlementService,
     UnappliedCashApplicationPresentmentService,
@@ -31,9 +33,11 @@ from metering_billing.errors import (
 from metering_billing.unapplied_cash_application import (
     UNAPPLIED_CASH_APPLICATION_CONTRACT_VERSION,
     UnappliedCashApplicationResult,
+    _enqueue_unapplied_cash_applied,
     _format_applied_at,
     _rejected,
 )
+from metering_billing.webhook_outbox import EVENT_TYPE_UNAPPLIED_CASH_APPLIED
 from metering_billing.usage_ledger import StoredUnappliedCashApplication, generate_record_id
 from test_http_app import invoke_http
 from test_payment_receipt_presentment import apply_known_morning_receipt
@@ -137,7 +141,14 @@ class UnappliedCashApplicationTests(unittest.TestCase):
         self.assertEqual(len(ledger.unapplied_cash_applications), 1)
         self.assertEqual(len(ledger.unapplied_cash), prior_parked)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
+        applied_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_UNAPPLIED_CASH_APPLIED
+        ]
+        self.assertEqual(len(applied_events), 1)
+        self.assertEqual(applied_events[0].source_id, first.unapplied_cash_application_id)
         self.assertEqual(len(ledger.payment_receipts), prior_receipts)
         self.assertEqual(len(ledger.collection_write_offs), prior_write_offs)
         self.assertEqual(len(ledger.collection_case_settlements), prior_settlements)
@@ -595,7 +606,13 @@ class UnappliedCashApplicationTests(unittest.TestCase):
         self.assertEqual(get_boom_status, 422)
         self.assertEqual(get_boom["rejection_reason_code"], "request_invalid")
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 2)
+        applied_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_UNAPPLIED_CASH_APPLIED
+        ]
+        self.assertEqual(len(applied_events), 2)
         _, issue_body = invoke_http(
             app,
             "POST",
@@ -844,6 +861,162 @@ class UnappliedCashApplicationTests(unittest.TestCase):
         self.assertTrue(_format_applied_at(APPLIED_MORNING).endswith("Z"))
         with self.assertRaisesRegex(ValueError, "accepted unapplied cash application must include applied_at"):
             _format_applied_at(None)
+        webhook_data = accepted.as_webhook_event_data()
+        self.assertEqual(
+            webhook_data["unapplied_cash_application_id"],
+            str(accepted.unapplied_cash_application_id),
+        )
+        self.assertNotIn("remaining_outstanding_amount", webhook_data)
+        self.assertNotIn("issued_invoice_id", webhook_data)
+        with self.assertRaisesRegex(ValueError, "rejected unapplied cash application has no webhook event data"):
+            rejected.as_webhook_event_data()
+        missing_cash = UnappliedCashApplicationResult(
+            unapplied_cash_application_outcome_code=UnappliedCashApplicationOutcomeCode.ACCEPTED,
+            unapplied_cash_application_contract_version=1,
+            unapplied_cash_application_id=generate_record_id(),
+            unapplied_cash_id=None,
+            collection_case_id=collection.collection_case_id,
+            payment_receipt_id=accepted.payment_receipt_id,
+            invoice_draft_id=accepted.invoice_draft_id,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=LEFTOVER,
+            remaining_outstanding_amount=Decimal("19.999"),
+            unapplied_cash_application_status="applied",
+            collection_case_status="open",
+            applied_at=APPLIED_MORNING,
+            source_payload_hash="sha256:" + ("44" * 32),
+            next_operator_action="collect",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "rejected unapplied cash application has no webhook event data"):
+            missing_cash.as_webhook_event_data()
+        accepted_without_time = UnappliedCashApplicationResult(
+            unapplied_cash_application_outcome_code=UnappliedCashApplicationOutcomeCode.ACCEPTED,
+            unapplied_cash_application_contract_version=1,
+            unapplied_cash_application_id=generate_record_id(),
+            unapplied_cash_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            payment_receipt_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=LEFTOVER,
+            remaining_outstanding_amount=Decimal("0"),
+            unapplied_cash_application_status="applied",
+            collection_case_status="open",
+            applied_at=None,
+            source_payload_hash="sha256:" + ("ab" * 32),
+            next_operator_action="settle",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "accepted unapplied cash applications must include applied_at"):
+            accepted_without_time.as_webhook_event_data()
+        incomplete = UnappliedCashApplicationResult(
+            unapplied_cash_application_outcome_code=UnappliedCashApplicationOutcomeCode.ACCEPTED,
+            unapplied_cash_application_contract_version=1,
+            unapplied_cash_application_id=None,
+            unapplied_cash_id=generate_record_id(),
+            collection_case_id=collection.collection_case_id,
+            payment_receipt_id=accepted.payment_receipt_id,
+            invoice_draft_id=accepted.invoice_draft_id,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=LEFTOVER,
+            remaining_outstanding_amount=Decimal("19.999"),
+            unapplied_cash_application_status="applied",
+            collection_case_status="open",
+            applied_at=None,
+            source_payload_hash="sha256:" + ("cd" * 32),
+            next_operator_action="collect",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "accepted unapplied cash applications must include identity"):
+            _enqueue_unapplied_cash_applied(ledger, TENANT_ONE, incomplete)
+        missing_time = UnappliedCashApplicationResult(
+            unapplied_cash_application_outcome_code=UnappliedCashApplicationOutcomeCode.ACCEPTED,
+            unapplied_cash_application_contract_version=1,
+            unapplied_cash_application_id=generate_record_id(),
+            unapplied_cash_id=accepted.unapplied_cash_id,
+            collection_case_id=collection.collection_case_id,
+            payment_receipt_id=accepted.payment_receipt_id,
+            invoice_draft_id=accepted.invoice_draft_id,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=LEFTOVER,
+            remaining_outstanding_amount=Decimal("19.999"),
+            unapplied_cash_application_status="applied",
+            collection_case_status="open",
+            applied_at=None,
+            source_payload_hash="sha256:" + ("ef" * 32),
+            next_operator_action="collect",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "accepted unapplied cash applications must include identity"):
+            _enqueue_unapplied_cash_applied(ledger, TENANT_ONE, missing_time)
+        issued_payload = accepted.as_webhook_event_data(generate_record_id())
+        self.assertIn("issued_invoice_id", issued_payload)
+        orphaned = UnappliedCashApplicationResult(
+            unapplied_cash_application_outcome_code=UnappliedCashApplicationOutcomeCode.ACCEPTED,
+            unapplied_cash_application_contract_version=1,
+            unapplied_cash_application_id=generate_record_id(),
+            unapplied_cash_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            payment_receipt_id=accepted.payment_receipt_id,
+            invoice_draft_id=accepted.invoice_draft_id,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=LEFTOVER,
+            remaining_outstanding_amount=Decimal("19.999"),
+            unapplied_cash_application_status="applied",
+            collection_case_status="open",
+            applied_at=APPLIED_MORNING,
+            source_payload_hash="sha256:" + ("11" * 32),
+            next_operator_action="collect",
+            rejection_reason_code=None,
+        )
+        _enqueue_unapplied_cash_applied(ledger, TENANT_ONE, orphaned)
+        self.assertNotIn("issued_invoice_id", orphaned.as_webhook_event_data())
+        no_case = UnappliedCashApplicationResult(
+            unapplied_cash_application_outcome_code=UnappliedCashApplicationOutcomeCode.ACCEPTED,
+            unapplied_cash_application_contract_version=1,
+            unapplied_cash_application_id=generate_record_id(),
+            unapplied_cash_id=generate_record_id(),
+            collection_case_id=None,
+            payment_receipt_id=accepted.payment_receipt_id,
+            invoice_draft_id=accepted.invoice_draft_id,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=LEFTOVER,
+            remaining_outstanding_amount=Decimal("19.999"),
+            unapplied_cash_application_status="applied",
+            collection_case_status="open",
+            applied_at=APPLIED_MORNING,
+            source_payload_hash="sha256:" + ("22" * 32),
+            next_operator_action="collect",
+            rejection_reason_code=None,
+        )
+        _enqueue_unapplied_cash_applied(ledger, TENANT_ONE, no_case)
+        no_draft = UnappliedCashApplicationResult(
+            unapplied_cash_application_outcome_code=UnappliedCashApplicationOutcomeCode.ACCEPTED,
+            unapplied_cash_application_contract_version=1,
+            unapplied_cash_application_id=generate_record_id(),
+            unapplied_cash_id=generate_record_id(),
+            collection_case_id=collection.collection_case_id,
+            payment_receipt_id=accepted.payment_receipt_id,
+            invoice_draft_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=LEFTOVER,
+            remaining_outstanding_amount=Decimal("19.999"),
+            unapplied_cash_application_status="applied",
+            collection_case_status="open",
+            applied_at=APPLIED_MORNING,
+            source_payload_hash="sha256:" + ("33" * 32),
+            next_operator_action="collect",
+            rejection_reason_code=None,
+        )
+        _enqueue_unapplied_cash_applied(ledger, TENANT_ONE, no_draft)
 
     def test_ledger_insert_fail_closed_branches(self) -> None:
         """Ledger insert refuses invalid status, leftover, and duplicate identity."""
@@ -932,6 +1105,28 @@ class UnappliedCashApplicationTests(unittest.TestCase):
             ledger.apply_unapplied_cash_to_collection_case(
                 collection.collection_case_id, Decimal("21.00")
             )
+
+    def test_webhook_includes_issued_invoice_when_stored(self) -> None:
+        """Envelope carries issued_invoice_id only when that snapshot exists."""
+        ledger, parked, collection, _source_case_id, _receipt_id = (
+            park_leftover_and_open_second_case()
+        )
+        issued = IssuedInvoiceService(ledger).issue_invoice(
+            TENANT_ONE, collection.invoice_draft_id
+        )
+        applied = UnappliedCashApplicationService(ledger).apply_unapplied_cash(
+            TENANT_ONE, parked.unapplied_cash_id, collection.collection_case_id
+        )
+        events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_UNAPPLIED_CASH_APPLIED
+        ]
+        self.assertEqual(len(events), 1)
+        data = json.loads(events[0].payload_json)["data"]
+        self.assertEqual(data["issued_invoice_id"], str(issued.issued_invoice_id))
+        self.assertNotIn("remaining_outstanding_amount", data)
+        self.assertEqual(applied.unapplied_cash_application_outcome_code.value, "accepted")
 
 
 def _second_parked_and_case(ledger):

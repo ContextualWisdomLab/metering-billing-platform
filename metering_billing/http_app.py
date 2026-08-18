@@ -130,10 +130,11 @@ The application is a thin WSGI adapter:
     ``POST /v1/collection-cases/{collection_case_id}/unapplied-cash-applications``
     applies one parked leftover onto that open case.  Replay of the same
     tenant and leftover returns the stored
-    ``unapplied_cash_application_id``.  Remaining zero does not settle.
-    GET item and list present the stored application.  Do not invent a
-    journal, webhook, write-off, credit note, AIS call, or settlement
-    command.
+    ``unapplied_cash_application_id``.  First successful apply enqueues
+    one existing ``unapplied_cash.applied`` outbox event.  Remaining
+    zero does not settle.  GET item and list present the stored
+    application.  Do not invent a journal, write-off, credit note, AIS
+    call, settlement command, or second webhook system.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls

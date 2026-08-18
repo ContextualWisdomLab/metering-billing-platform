@@ -35,7 +35,8 @@
           "credit_note.issued",
           "credit_note.applied",
           "collection.settled",
-          "write_off.recorded"
+          "write_off.recorded",
+          "unapplied_cash.applied"
         ]
       }
     },
