@@ -99,6 +99,7 @@ REQUIRED_FILES = (
     "docs/adr/0067-issued-invoice-presentment-tax-assessment.md",
     "docs/adr/0068-issued-credit-note-presentment-tax-assessment.md",
     "docs/adr/0069-issued-credit-note-void.md",
+    "docs/adr/0070-credit-note-voided-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

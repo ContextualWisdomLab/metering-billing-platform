@@ -59,8 +59,9 @@ The application is a thin WSGI adapter:
     same tenant and issued credit note returns the stored
     ``issued_credit_note_void_id``.  Collection remaining is unchanged
     because the note was never applied.  GET item and list present the
-    stored void.  The void write does not compose a journal, enqueue a
-    webhook, or call AIS.
+    stored void.  First successful void enqueues one existing
+    ``credit_note.voided`` outbox event.  The void write does not compose
+    a journal or call AIS.
     10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
     GET one stored credential or list ``{tenant_api_credentials,

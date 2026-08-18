@@ -3,7 +3,7 @@
 The buyer-facing path is:
 
 1. Register an https callback for a closed event-type set.
-2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued-invoice void, issued credit note, credit-note application, collection-case settlement, collection write-off, leftover apply, leftover refund, collection-dispute hold, or collection-dispute release).
+2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued-invoice void, issued credit note, issued-credit-note void, credit-note application, collection-case settlement, collection write-off, leftover apply, leftover refund, collection-dispute hold, or collection-dispute release).
 3. Run ``deliver_due_events`` so active subscriptions receive a signed POST.
 
 Accepted facts include collection-dispute releases (``dispute.released``).
@@ -64,6 +64,7 @@ EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED = "credit_adjustment.recorded"
 EVENT_TYPE_INVOICE_ISSUED = "invoice.issued"
 EVENT_TYPE_INVOICE_VOIDED = "invoice.voided"
 EVENT_TYPE_CREDIT_NOTE_ISSUED = "credit_note.issued"
+EVENT_TYPE_CREDIT_NOTE_VOIDED = "credit_note.voided"
 EVENT_TYPE_CREDIT_NOTE_APPLIED = "credit_note.applied"
 EVENT_TYPE_COLLECTION_SETTLED = "collection.settled"
 EVENT_TYPE_WRITE_OFF_RECORDED = "write_off.recorded"
@@ -79,6 +80,7 @@ KNOWN_EVENT_TYPE_CODES = frozenset(
         EVENT_TYPE_INVOICE_ISSUED,
         EVENT_TYPE_INVOICE_VOIDED,
         EVENT_TYPE_CREDIT_NOTE_ISSUED,
+        EVENT_TYPE_CREDIT_NOTE_VOIDED,
         EVENT_TYPE_CREDIT_NOTE_APPLIED,
         EVENT_TYPE_COLLECTION_SETTLED,
         EVENT_TYPE_WRITE_OFF_RECORDED,

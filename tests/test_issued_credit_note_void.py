@@ -33,10 +33,12 @@ from metering_billing.errors import (
 )
 from metering_billing.issued_credit_note_void import (
     IssuedCreditNoteVoidResult,
+    _enqueue_credit_note_voided,
     _format_voided_at,
     _rejected,
 )
 from metering_billing.usage_ledger import generate_record_id
+from metering_billing.webhook_outbox import EVENT_TYPE_CREDIT_NOTE_VOIDED
 from test_credit_note_application import issue_morning_credit_then_open_case
 from test_http_app import invoke_http
 from test_issued_credit_note import record_known_morning_credit
@@ -47,6 +49,15 @@ from test_usage_rating import KNOWN_MORNING_TOTAL
 
 VOIDED_MORNING = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
 VOIDED_EVENING = datetime(2026, 8, 18, 21, 0, tzinfo=UTC)
+
+
+def _credit_note_voided_events(ledger):
+    """Return stored #24 credit_note.voided rows for one ledger."""
+    return [
+        event
+        for event in ledger.webhook_outbox_events.values()
+        if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_VOIDED
+    ]
 
 
 def issue_known_morning_credit_note(open_case: bool = False):
@@ -66,11 +77,11 @@ def issue_known_morning_credit_note(open_case: bool = False):
 class IssuedCreditNoteVoidTests(unittest.TestCase):
     """Verify void-once identity, unused-note isolation, and HTTP presentment."""
 
-    def test_void_unused_credit_note_once_without_journal_or_webhook(self) -> None:
+    def test_void_unused_credit_note_once_without_journal(self) -> None:
         """An unused issued credit note voids once and never changes remaining."""
         ledger, issued, collection = issue_known_morning_credit_note(open_case=True)
         prior_journals = len(ledger.journal_proposals)
-        prior_outbox = len(ledger.webhook_outbox_events)
+        prior_voided = len(_credit_note_voided_events(ledger))
         prior_applications = len(ledger.credit_note_applications)
         first = IssuedCreditNoteVoidService(
             ledger, clock=lambda: VOIDED_MORNING
@@ -112,7 +123,9 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
         self.assertEqual(stored_case.collection_case_status, "open")
         self.assertEqual(len(ledger.issued_credit_note_voids), 1)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        voided_events = _credit_note_voided_events(ledger)
+        self.assertEqual(len(voided_events), prior_voided + 1)
+        self.assertEqual(voided_events[0].source_id, first.issued_credit_note_void_id)
         self.assertEqual(len(ledger.credit_note_applications), prior_applications)
         applied = CreditNoteApplicationService(ledger).apply_credit_note(
             TENANT_ONE, issued.issued_credit_note_id, collection.collection_case_id
@@ -129,7 +142,7 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
     def test_void_without_collection_case_does_not_invent_one(self) -> None:
         """An unused issued credit note without a case still voids once."""
         ledger, issued, _collection = issue_known_morning_credit_note()
-        prior_outbox = len(ledger.webhook_outbox_events)
+        prior_voided = len(_credit_note_voided_events(ledger))
         first = IssuedCreditNoteVoidService(
             ledger, clock=lambda: VOIDED_MORNING
         ).void_issued_credit_note(TENANT_ONE, issued.issued_credit_note_id)
@@ -150,7 +163,9 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
         self.assertNotIn("collection_case_id", payload)
         self.assertEqual(validate_issued_credit_note_void(payload), ())
         self.assertEqual(len(ledger.collection_cases), 0)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        voided_events = _credit_note_voided_events(ledger)
+        self.assertEqual(len(voided_events), prior_voided + 1)
+        self.assertEqual(voided_events[0].source_id, first.issued_credit_note_void_id)
 
     def test_fail_closed_when_applied_or_isolated(self) -> None:
         """Applied notes, missing notes, and tenant isolation refuse the void."""
@@ -160,6 +175,7 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
             applied_note.issued_credit_note_id,
             applied_case.collection_case_id,
         )
+        prior_applied_voided = len(_credit_note_voided_events(applied_ledger))
         applied = IssuedCreditNoteVoidService(applied_ledger).void_issued_credit_note(
             TENANT_ONE, applied_note.issued_credit_note_id
         )
@@ -168,6 +184,7 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
             IssuedCreditNoteVoidRejectionReasonCode.CREDIT_NOTE_ALREADY_APPLIED,
         )
         self.assertEqual(len(applied_ledger.issued_credit_note_voids), 0)
+        self.assertEqual(len(_credit_note_voided_events(applied_ledger)), prior_applied_voided)
         remaining = applied_ledger.get_collection_case(applied_case.collection_case_id)
         self.assertEqual(
             remaining.outstanding_amount,
@@ -175,6 +192,7 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
         )
 
         ledger, issued, _collection = issue_known_morning_credit_note()
+        prior_voided = len(_credit_note_voided_events(ledger))
         missing = IssuedCreditNoteVoidService(ledger).void_issued_credit_note(
             TENANT_ONE, uuid4()
         )
@@ -203,6 +221,7 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
             currency.rejection_reason_code,
             IssuedCreditNoteVoidRejectionReasonCode.CURRENCY_MISMATCH,
         )
+        self.assertEqual(len(_credit_note_voided_events(ledger)), prior_voided)
         matching = IssuedCreditNoteVoidService(ledger).void_issued_credit_note(
             TENANT_ONE, issued.issued_credit_note_id, currency_code="USD"
         )
@@ -210,6 +229,9 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
             matching.issued_credit_note_void_outcome_code,
             IssuedCreditNoteVoidOutcomeCode.ACCEPTED,
         )
+        matching_events = _credit_note_voided_events(ledger)
+        self.assertEqual(len(matching_events), prior_voided + 1)
+        self.assertEqual(matching_events[0].source_id, matching.issued_credit_note_void_id)
 
     def test_http_void_get_and_paged_list_without_ais(self) -> None:
         """POST voids; GET item and list page metadata and never call AIS."""
@@ -221,7 +243,7 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
         second_issued = IssuedCreditNoteService(ledger).issue_credit_note(
             TENANT_ONE, second_credit.credit_adjustment_id
         )
-        prior_outbox = len(ledger.webhook_outbox_events)
+        prior_voided = len(_credit_note_voided_events(ledger))
         prior_journals = len(ledger.journal_proposals)
         app = create_http_app(ledger)
         refused_status, refused_body = invoke_http(
@@ -371,7 +393,12 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
         )
         self.assertEqual(item_method_status, 422)
         self.assertEqual(item_method_body["rejection_reason_code"], "request_invalid")
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        http_voided = _credit_note_voided_events(ledger)
+        self.assertEqual(len(http_voided), prior_voided + 2)
+        self.assertEqual(
+            {str(event.source_id) for event in http_voided},
+            {void_id, second_body["issued_credit_note_void_id"]},
+        )
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
 
     def test_presentment_rejects_invalid_page_and_missing_rows(self) -> None:
@@ -572,6 +599,165 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
             ).as_contract_dict()
         with self.assertRaises(ValueError):
             _format_voided_at(None)
+        webhook_data = voided.as_webhook_event_data()
+        self.assertEqual(
+            webhook_data["issued_credit_note_void_id"],
+            str(voided.issued_credit_note_void_id),
+        )
+        self.assertEqual(
+            webhook_data["issued_credit_note_id"], str(issued.issued_credit_note_id)
+        )
+        self.assertEqual(
+            webhook_data["credit_adjustment_id"], str(voided.credit_adjustment_id)
+        )
+        self.assertEqual(webhook_data["invoice_draft_id"], str(voided.invoice_draft_id))
+        self.assertEqual(webhook_data["source_payload_hash"], voided.source_payload_hash)
+        self.assertEqual(webhook_data["issued_credit_note_void_contract_version"], 1)
+        self.assertEqual(webhook_data["currency_code"], "USD")
+        self.assertEqual(
+            webhook_data["voided_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL)
+        )
+        self.assertEqual(webhook_data["issued_credit_note_void_status"], "recorded")
+        self.assertEqual(webhook_data["voided_at"], voided.as_contract_dict()["voided_at"])
+        self.assertNotIn("issued_invoice_id", webhook_data)
+        self.assertNotIn("remaining_outstanding_amount", webhook_data)
+        self.assertNotIn("tenant_reference", webhook_data)
+        self.assertNotIn("next_operator_action", webhook_data)
+        self.assertNotIn("legal_credit_note_number", webhook_data)
+        self.assertIn("issued_invoice_id", linked_void.as_webhook_event_data())
+        rejected = _rejected(
+            IssuedCreditNoteVoidRejectionReasonCode.ISSUED_CREDIT_NOTE_NOT_FOUND
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected issued-credit-note void has no webhook event data"
+        ):
+            rejected.as_webhook_event_data()
+        missing_note = IssuedCreditNoteVoidResult(
+            issued_credit_note_void_outcome_code=IssuedCreditNoteVoidOutcomeCode.ACCEPTED,
+            issued_credit_note_void_contract_version=1,
+            issued_credit_note_void_id=generate_record_id(),
+            issued_credit_note_id=None,
+            credit_adjustment_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            issued_credit_note_void_status="recorded",
+            voided_at=VOIDED_MORNING,
+            source_payload_hash="sha256:" + ("11" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected issued-credit-note void has no webhook event data"
+        ):
+            missing_note.as_webhook_event_data()
+        missing_credit = IssuedCreditNoteVoidResult(
+            issued_credit_note_void_outcome_code=IssuedCreditNoteVoidOutcomeCode.ACCEPTED,
+            issued_credit_note_void_contract_version=1,
+            issued_credit_note_void_id=generate_record_id(),
+            issued_credit_note_id=generate_record_id(),
+            credit_adjustment_id=None,
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            issued_credit_note_void_status="recorded",
+            voided_at=VOIDED_MORNING,
+            source_payload_hash="sha256:" + ("12" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected issued-credit-note void has no webhook event data"
+        ):
+            missing_credit.as_webhook_event_data()
+        missing_draft = IssuedCreditNoteVoidResult(
+            issued_credit_note_void_outcome_code=IssuedCreditNoteVoidOutcomeCode.ACCEPTED,
+            issued_credit_note_void_contract_version=1,
+            issued_credit_note_void_id=generate_record_id(),
+            issued_credit_note_id=generate_record_id(),
+            credit_adjustment_id=generate_record_id(),
+            invoice_draft_id=None,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            issued_credit_note_void_status="recorded",
+            voided_at=VOIDED_MORNING,
+            source_payload_hash="sha256:" + ("13" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected issued-credit-note void has no webhook event data"
+        ):
+            missing_draft.as_webhook_event_data()
+        accepted_without_time = IssuedCreditNoteVoidResult(
+            issued_credit_note_void_outcome_code=IssuedCreditNoteVoidOutcomeCode.ACCEPTED,
+            issued_credit_note_void_contract_version=1,
+            issued_credit_note_void_id=generate_record_id(),
+            issued_credit_note_id=issued.issued_credit_note_id,
+            credit_adjustment_id=issued.credit_adjustment_id,
+            invoice_draft_id=issued.invoice_draft_id,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            issued_credit_note_void_status="recorded",
+            voided_at=None,
+            source_payload_hash="sha256:" + ("14" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted issued-credit-note voids must include voided_at"
+        ):
+            accepted_without_time.as_webhook_event_data()
+        incomplete = IssuedCreditNoteVoidResult(
+            issued_credit_note_void_outcome_code=IssuedCreditNoteVoidOutcomeCode.ACCEPTED,
+            issued_credit_note_void_contract_version=1,
+            issued_credit_note_void_id=None,
+            issued_credit_note_id=issued.issued_credit_note_id,
+            credit_adjustment_id=issued.credit_adjustment_id,
+            invoice_draft_id=issued.invoice_draft_id,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            issued_credit_note_void_status="recorded",
+            voided_at=None,
+            source_payload_hash="sha256:" + ("22" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted issued-credit-note voids must include identity"
+        ):
+            _enqueue_credit_note_voided(ledger, TENANT_ONE, incomplete)
+        missing_time = IssuedCreditNoteVoidResult(
+            issued_credit_note_void_outcome_code=IssuedCreditNoteVoidOutcomeCode.ACCEPTED,
+            issued_credit_note_void_contract_version=1,
+            issued_credit_note_void_id=generate_record_id(),
+            issued_credit_note_id=issued.issued_credit_note_id,
+            credit_adjustment_id=issued.credit_adjustment_id,
+            invoice_draft_id=issued.invoice_draft_id,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            issued_credit_note_void_status="recorded",
+            voided_at=None,
+            source_payload_hash="sha256:" + ("33" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted issued-credit-note voids must include identity"
+        ):
+            _enqueue_credit_note_voided(ledger, TENANT_ONE, missing_time)
         service = IssuedCreditNoteVoidService(ledger)
         with mock.patch.object(service.ledger, "resolve_tenant", return_value=(None, None)):
             with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):

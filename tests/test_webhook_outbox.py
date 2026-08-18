@@ -27,6 +27,7 @@ from metering_billing import (
     UnappliedCashApplicationService,
     UnappliedCashRefundService,
     IssuedCreditNoteService,
+    IssuedCreditNoteVoidService,
     IssuedInvoiceService,
     IssuedInvoiceVoidService,
     MemoryUsageLedger,
@@ -57,6 +58,7 @@ from metering_billing.webhook_outbox import (
     EVENT_TYPE_DISPUTE_RELEASED,
     EVENT_TYPE_CREDIT_NOTE_APPLIED,
     EVENT_TYPE_CREDIT_NOTE_ISSUED,
+    EVENT_TYPE_CREDIT_NOTE_VOIDED,
     EVENT_TYPE_INVOICE_ISSUED,
     EVENT_TYPE_INVOICE_VOIDED,
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
@@ -82,6 +84,7 @@ from test_credit_note_application import issue_morning_credit_then_open_case
 from test_unapplied_cash import LEFTOVER
 from test_unapplied_cash_application import park_leftover_and_open_second_case
 from test_http_app import invoke_http
+from test_issued_credit_note_void import issue_known_morning_credit_note
 from test_issued_invoice_void import issue_known_morning_invoice
 from test_journal_proposal import draft_known_morning
 from test_payment_settlement import project_known_morning_intent
@@ -443,6 +446,121 @@ class WebhookOutboxTests(unittest.TestCase):
                         event
                         for event in ledger.webhook_outbox_events.values()
                         if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+                    ]
+                ),
+                1,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_credit_note_voided_enqueues_once_and_delivers_signed(self) -> None:
+        """First unused-note void enqueues credit_note.voided once; replay heals."""
+        ledger, issued, _collection = issue_known_morning_credit_note()
+        server, callback_url, received = _start_recorder()
+        try:
+            subscriptions = WebhookSubscriptionService(ledger, clock=lambda: ISSUED_AT)
+            registered = subscriptions.register_subscription(
+                TENANT_ONE, callback_url, (EVENT_TYPE_CREDIT_NOTE_VOIDED,)
+            )
+            self.assertEqual(
+                registered.webhook_subscription_outcome_code,
+                WebhookSubscriptionOutcomeCode.ACCEPTED,
+            )
+            self.assertEqual(registered.event_type_codes, (EVENT_TYPE_CREDIT_NOTE_VOIDED,))
+            self.assertEqual(validate_webhook_subscription(registered.as_contract_dict()), ())
+            first = IssuedCreditNoteVoidService(
+                ledger, clock=lambda: ISSUED_AT
+            ).void_issued_credit_note(TENANT_ONE, issued.issued_credit_note_id)
+            second = IssuedCreditNoteVoidService(
+                ledger, clock=lambda: ISSUED_AT
+            ).void_issued_credit_note(TENANT_ONE, issued.issued_credit_note_id)
+            voided_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_VOIDED
+            ]
+            self.assertEqual(first.issued_credit_note_void_outcome_code.value, "accepted")
+            self.assertEqual(
+                second.issued_credit_note_void_outcome_code.value, "duplicate_replay"
+            )
+            self.assertEqual(len(voided_events), 1)
+            self.assertEqual(voided_events[0].source_id, first.issued_credit_note_void_id)
+            envelope = json.loads(voided_events[0].payload_json)
+            self.assertEqual(envelope["event_type_code"], EVENT_TYPE_CREDIT_NOTE_VOIDED)
+            self.assertEqual(envelope["tenant_reference"], TENANT_ONE)
+            data = envelope["data"]
+            self.assertEqual(
+                data["issued_credit_note_void_id"], str(first.issued_credit_note_void_id)
+            )
+            self.assertEqual(
+                data["issued_credit_note_id"], str(issued.issued_credit_note_id)
+            )
+            self.assertEqual(
+                data["credit_adjustment_id"], str(issued.credit_adjustment_id)
+            )
+            self.assertEqual(data["invoice_draft_id"], str(issued.invoice_draft_id))
+            self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+            self.assertEqual(data["issued_credit_note_void_contract_version"], 1)
+            self.assertEqual(data["currency_code"], "USD")
+            self.assertEqual(data["voided_amount"], first.as_contract_dict()["voided_amount"])
+            self.assertEqual(data["voided_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
+            self.assertEqual(data["issued_credit_note_void_status"], "recorded")
+            self.assertEqual(data["voided_at"], first.as_contract_dict()["voided_at"])
+            self.assertNotIn("issued_invoice_id", data)
+            self.assertNotIn("remaining_outstanding_amount", data)
+            self.assertNotIn("collection_case_id", data)
+            self.assertNotIn("collection_case_status", data)
+            self.assertNotIn("next_operator_action", data)
+            self.assertNotIn("legal_credit_note_number", json.dumps(envelope))
+            self.assertNotIn("vat_register_id", json.dumps(envelope))
+            self.assertNotIn("journal_proposal_id", json.dumps(envelope))
+            self.assertNotIn("card_pan", json.dumps(envelope))
+            self.assertNotIn("webhook_secret", json.dumps(envelope))
+            delivered = WebhookDeliveryService(ledger).deliver_due_events(TENANT_ONE)
+            self.assertEqual(delivered.delivered_event_count, 1)
+            self.assertEqual(len(received), 1)
+            headers, raw_body = received[0]
+            posted = json.loads(raw_body.decode("utf-8"))
+            self.assertEqual(posted["event_type_code"], EVENT_TYPE_CREDIT_NOTE_VOIDED)
+            expected = sign_webhook_body(registered.webhook_secret or "", raw_body)
+            signature = next(
+                value
+                for key, value in headers.items()
+                if key.lower() == WEBHOOK_SIGNATURE_HEADER.lower()
+            )
+            self.assertEqual(signature, expected)
+            orphan_id = voided_events[0].outbox_event_id
+            identity = next(
+                key
+                for key, stored_id in ledger.webhook_outbox_identity_index.items()
+                if stored_id == orphan_id
+            )
+            del ledger.webhook_outbox_events[orphan_id]
+            del ledger.webhook_outbox_identity_index[identity]
+            healed = IssuedCreditNoteVoidService(
+                ledger, clock=lambda: ISSUED_AT
+            ).void_issued_credit_note(TENANT_ONE, issued.issued_credit_note_id)
+            healed_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_VOIDED
+            ]
+            self.assertEqual(
+                healed.issued_credit_note_void_outcome_code.value, "duplicate_replay"
+            )
+            self.assertEqual(len(healed_events), 1)
+            self.assertEqual(healed_events[0].source_id, first.issued_credit_note_void_id)
+            rejected = IssuedCreditNoteVoidService(ledger).void_issued_credit_note(
+                TENANT_TWO, issued.issued_credit_note_id
+            )
+            self.assertEqual(rejected.issued_credit_note_void_outcome_code.value, "rejected")
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in ledger.webhook_outbox_events.values()
+                        if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_VOIDED
                     ]
                 ),
                 1,
