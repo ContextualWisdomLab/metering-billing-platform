@@ -90,6 +90,7 @@ REQUIRED_FILES = (
     "docs/adr/0058-unapplied-cash-application-journal.md",
     "docs/adr/0059-account-statement-presentment.md",
     "docs/adr/0060-issued-invoice-void.md",
+    "docs/adr/0061-invoice-voided-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

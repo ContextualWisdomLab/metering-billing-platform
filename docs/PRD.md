@@ -181,7 +181,8 @@ contextual-orchestrator usage
 
 - A known unused same-tenant issued invoice voids once. `voided_amount` is the issued tax-inclusive amount in the same currency. Status is `recorded`. The issued snapshot stays `issued`.
 - A second void of the same tenant and `issued_invoice_id` returns the same `issued_invoice_void_id` as `duplicate_replay` and never re-closes a collection case.
-- `issued_invoice_void_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, a journal, webhook, refund, write-off rewrite, statement rewrite, or AIS call.
+- `issued_invoice_void_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, a journal, refund, write-off rewrite, statement rewrite, or AIS call.
+- First successful void enqueues one existing #24 `invoice.voided` outbox event. `source_id` is `issued_invoice_void_id`. Replay does not enqueue a second row. Rejected void writes zero outbox rows. HMAC, SSRF, and delivery contracts stay unchanged.
 - Fail closed when the related collection case has a payment receipt, credit-note apply, unapplied-cash apply, or write-off; remaining no longer equals the issued amount; the case is already settled; currency mismatches; the invoice is missing or cross-tenant; or the tenant is missing.
 - An unused open or dunning case closes as `voided` at exact-zero remaining. `settled` is not reused. Settle-when-zero then fail-closes as `collection_case_voided`.
 - `POST /v1/issued-invoices/{issued_invoice_id}/voids` is the nested void command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
@@ -189,7 +190,7 @@ contextual-orchestrator usage
 - `GET /v1/issued-invoice-voids/{issued_invoice_void_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/issued-invoice-voids` lists summaries as `{issued_invoice_voids, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{voided_at}|{issued_invoice_void_id}`.
 - Issued-invoice, collection, payment, credit, write-off, leftover, settlement, statement, and AIS contracts stay unchanged except the additive `voided` collection-case status and settle fail-closed on that status.
-- Operators void an unused issue. There is no login wall, Stripe, AIS call, journal, webhook, or production SPA.
+- Operators void an unused issue. Existing subscriptions opt in by including `invoice.voided`. There is no login wall, Stripe, AIS call, journal, second webhook system, or production SPA.
 
 ## Issued-credit-note acceptance
 
@@ -278,7 +279,7 @@ contextual-orchestrator usage
 - `GET /v1/webhook-subscriptions` lists summaries as `{webhook_subscriptions, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{webhook_subscription_id}`.
 - Presentment never returns `webhook_secret`, `webhook_secret_hash`, `webhook_secret_prefix`, a signature key, `payload_json`, or a signed body. `POST /v1/webhook-subscriptions/{id}/revoke` stays the #24 revoke. PAN, CVC, and provider secrets are refused on register and revoke.
 - When a journal proposal is validated, a payment receipt is applied, a credit is recorded, an invoice is issued, a credit note is issued, a credit note is applied, a collection case is settled, leftover remaining is written off, parked leftover is applied, or unused parked leftover is refunded, one `webhook_outbox_event` is appended. Replay of the commercial fact does not enqueue a second row.
-- Event types in this slice are `journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`, `invoice.issued`, `credit_note.issued`, `credit_note.applied`, `collection.settled`, `write_off.recorded`, `unapplied_cash.applied`, and `refund.recorded`. Journal, payment, and credit payloads wrap the published contract. `invoice.issued`, `credit_note.issued`, `credit_note.applied`, `collection.settled`, `write_off.recorded`, `unapplied_cash.applied`, and `refund.recorded` `data` are thin references plus hash and omit lines, PAN, secrets, and statutory identifiers.
+- Event types in this slice are `journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`, `invoice.issued`, `invoice.voided`, `credit_note.issued`, `credit_note.applied`, `collection.settled`, `write_off.recorded`, `unapplied_cash.applied`, and `refund.recorded`. Journal, payment, and credit payloads wrap the published contract. `invoice.issued`, `invoice.voided`, `credit_note.issued`, `credit_note.applied`, `collection.settled`, `write_off.recorded`, `unapplied_cash.applied`, and `refund.recorded` `data` are thin references plus hash and omit lines, PAN, secrets, and statutory identifiers.
 - `WebhookDeliveryService.deliver_due_events` and `POST /v1/webhook-deliveries` POST JSON to active same-tenant subscriptions and sign the raw body with `X-CWL-Webhook-Signature: sha256=<hex>`. PAN, CVC, and provider secrets are refused on the write.
 - Delivery attempts are append-only. Success marks the outbox event delivered. Later explicit runs may retry. There is no scheduler.
 - A known stored `webhook_delivery_attempt` presents one tenant-scoped statement with `delivery_attempt_id`, `webhook_subscription_id`, `event_type_code`, `source_id`, `attempt_number`, stored HTTP status or failure, timestamps, and `next_operator_action` (`wait` after stored success, otherwise `run_deliveries`).

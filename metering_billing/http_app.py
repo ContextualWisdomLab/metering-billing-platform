@@ -84,9 +84,11 @@ The application is a thin WSGI adapter:
     commercial void of an unused issued invoice.  Replay of the same
     tenant and issued invoice returns the stored
     ``issued_invoice_void_id``.  An unused open or dunning collection
-    case closes as ``voided``.  GET item and list present the stored
-    void.  Do not invent a journal, webhook, refund, write-off rewrite,
-    settlement, statutory numbering, or AIS call.
+    case closes as ``voided``.  First successful void enqueues one
+    existing ``invoice.voided`` outbox event.  GET item and list present
+    the stored void.  Do not invent a journal, second webhook system,
+    refund, write-off rewrite, settlement, statutory numbering, or AIS
+    call.
     Cross-tenant account is HTTP 403.  GET one stored
     ``collection_dunning_event`` or list ``{dunning_events, next_cursor}``.
     ``POST /v1/collection-cases/{collection_case_id}/dunning-events`` stays

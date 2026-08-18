@@ -29,6 +29,7 @@
         "payment_receipt.applied",
         "credit_adjustment.recorded",
         "invoice.issued",
+        "invoice.voided",
         "credit_note.issued",
         "credit_note.applied",
         "collection.settled",

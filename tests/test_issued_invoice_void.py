@@ -38,10 +38,12 @@ from metering_billing.errors import (
 )
 from metering_billing.issued_invoice_void import (
     IssuedInvoiceVoidResult,
+    _enqueue_invoice_voided,
     _format_voided_at,
     _rejected,
 )
 from metering_billing.usage_ledger import generate_record_id
+from metering_billing.webhook_outbox import EVENT_TYPE_INVOICE_VOIDED
 from test_collection_case import draft_known_morning
 from test_credit_note_application import issue_morning_credit_then_open_case
 from test_http_app import invoke_http
@@ -70,7 +72,7 @@ def issue_known_morning_invoice(open_case: bool = True):
 class IssuedInvoiceVoidTests(unittest.TestCase):
     """Verify void-once identity, unused-case close, and HTTP presentment."""
 
-    def test_void_closes_unused_open_case_once_without_journal_or_webhook(self) -> None:
+    def test_void_closes_unused_open_case_once_without_journal(self) -> None:
         """An unused issued invoice voids once and closes the case as voided."""
         ledger, issued, collection = issue_known_morning_invoice()
         prior_journals = len(ledger.journal_proposals)
@@ -116,7 +118,14 @@ class IssuedInvoiceVoidTests(unittest.TestCase):
         self.assertEqual(stored_invoice.issued_invoice_status, "issued")
         self.assertEqual(len(ledger.issued_invoice_voids), 1)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        voided_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+        ]
+        self.assertEqual(len(voided_events), 1)
+        self.assertEqual(voided_events[0].source_id, first.issued_invoice_void_id)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
         self.assertEqual(len(ledger.payment_receipts), prior_receipts)
         self.assertEqual(len(ledger.collection_case_settlements), prior_settlements)
         settled = CollectionCaseSettlementService(ledger).settle_collection_case(
@@ -162,6 +171,18 @@ class IssuedInvoiceVoidTests(unittest.TestCase):
         self.assertNotIn("remaining_outstanding_amount", payload)
         self.assertEqual(validate_issued_invoice_void(payload), ())
         self.assertEqual(len(ledger.collection_cases), 0)
+        webhook_data = first.as_webhook_event_data()
+        self.assertNotIn("collection_case_id", webhook_data)
+        self.assertNotIn("remaining_outstanding_amount", webhook_data)
+        self.assertNotIn("collection_case_status", webhook_data)
+        self.assertEqual(webhook_data["issued_invoice_void_id"], str(first.issued_invoice_void_id))
+        voided_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+        ]
+        self.assertEqual(len(voided_events), 1)
+        self.assertEqual(voided_events[0].source_id, first.issued_invoice_void_id)
 
     def test_dunning_case_and_projected_intent_still_void(self) -> None:
         """Dunning history and a projected intent do not block an unused void."""
@@ -470,7 +491,13 @@ class IssuedInvoiceVoidTests(unittest.TestCase):
         )
         self.assertEqual(item_method_status, 422)
         self.assertEqual(item_method_body["rejection_reason_code"], "request_invalid")
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        voided_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+        ]
+        self.assertEqual(len(voided_events), 2)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 2)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
         self.assertEqual(len(ledger.payment_receipts), 0)
         self.assertEqual(len(ledger.collection_case_settlements), 0)
@@ -809,6 +836,122 @@ class IssuedInvoiceVoidTests(unittest.TestCase):
             "accepted",
         )
         self.assertIn("collection_case_id", string_accepted.as_contract_dict())
+        webhook_data = voided.as_webhook_event_data()
+        self.assertEqual(
+            webhook_data["issued_invoice_void_id"], str(voided.issued_invoice_void_id)
+        )
+        self.assertEqual(webhook_data["issued_invoice_id"], str(issued.issued_invoice_id))
+        self.assertEqual(webhook_data["invoice_draft_id"], str(issued.invoice_draft_id))
+        self.assertEqual(
+            webhook_data["collection_case_id"], str(collection.collection_case_id)
+        )
+        self.assertEqual(webhook_data["source_payload_hash"], voided.source_payload_hash)
+        self.assertEqual(webhook_data["issued_invoice_void_contract_version"], 1)
+        self.assertEqual(webhook_data["currency_code"], "USD")
+        self.assertEqual(webhook_data["voided_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
+        self.assertEqual(webhook_data["issued_invoice_void_status"], "recorded")
+        self.assertEqual(webhook_data["voided_at"], voided.as_contract_dict()["voided_at"])
+        self.assertNotIn("remaining_outstanding_amount", webhook_data)
+        self.assertNotIn("collection_case_status", webhook_data)
+        self.assertNotIn("tenant_reference", webhook_data)
+        self.assertNotIn("legal_invoice_number", webhook_data)
+        rejected = _rejected(IssuedInvoiceVoidRejectionReasonCode.ISSUED_INVOICE_NOT_FOUND)
+        with self.assertRaisesRegex(
+            ValueError, "rejected issued-invoice void has no webhook event data"
+        ):
+            rejected.as_webhook_event_data()
+        missing_invoice = IssuedInvoiceVoidResult(
+            issued_invoice_void_outcome_code=IssuedInvoiceVoidOutcomeCode.ACCEPTED,
+            issued_invoice_void_contract_version=1,
+            issued_invoice_void_id=generate_record_id(),
+            issued_invoice_id=None,
+            invoice_draft_id=generate_record_id(),
+            collection_case_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            remaining_outstanding_amount=Decimal("0"),
+            issued_invoice_void_status="recorded",
+            collection_case_status=None,
+            voided_at=VOIDED_MORNING,
+            source_payload_hash="sha256:" + ("11" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected issued-invoice void has no webhook event data"
+        ):
+            missing_invoice.as_webhook_event_data()
+        missing_draft = IssuedInvoiceVoidResult(
+            issued_invoice_void_outcome_code=IssuedInvoiceVoidOutcomeCode.ACCEPTED,
+            issued_invoice_void_contract_version=1,
+            issued_invoice_void_id=generate_record_id(),
+            issued_invoice_id=generate_record_id(),
+            invoice_draft_id=None,
+            collection_case_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            remaining_outstanding_amount=Decimal("0"),
+            issued_invoice_void_status="recorded",
+            collection_case_status=None,
+            voided_at=VOIDED_MORNING,
+            source_payload_hash="sha256:" + ("12" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected issued-invoice void has no webhook event data"
+        ):
+            missing_draft.as_webhook_event_data()
+        with self.assertRaisesRegex(
+            ValueError, "accepted issued-invoice voids must include voided_at"
+        ):
+            accepted_without_time.as_webhook_event_data()
+        incomplete = IssuedInvoiceVoidResult(
+            issued_invoice_void_outcome_code=IssuedInvoiceVoidOutcomeCode.ACCEPTED,
+            issued_invoice_void_contract_version=1,
+            issued_invoice_void_id=None,
+            issued_invoice_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            collection_case_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            remaining_outstanding_amount=None,
+            issued_invoice_void_status="recorded",
+            collection_case_status=None,
+            voided_at=None,
+            source_payload_hash="sha256:" + ("22" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted issued-invoice voids must include identity"
+        ):
+            _enqueue_invoice_voided(ledger, TENANT_ONE, incomplete)
+        missing_time = IssuedInvoiceVoidResult(
+            issued_invoice_void_outcome_code=IssuedInvoiceVoidOutcomeCode.ACCEPTED,
+            issued_invoice_void_contract_version=1,
+            issued_invoice_void_id=generate_record_id(),
+            issued_invoice_id=issued.issued_invoice_id,
+            invoice_draft_id=issued.invoice_draft_id,
+            collection_case_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            voided_amount=KNOWN_MORNING_TOTAL,
+            remaining_outstanding_amount=None,
+            issued_invoice_void_status="recorded",
+            collection_case_status=None,
+            voided_at=None,
+            source_payload_hash="sha256:" + ("33" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted issued-invoice voids must include identity"
+        ):
+            _enqueue_invoice_voided(ledger, TENANT_ONE, missing_time)
         self.assertEqual(validate_issued_invoice_void_presentment(presentment_payload), ())
         self.assertIn("issued_invoice_void_id", presented.as_summary_dict())
         missing_presentment_remaining = json.loads(json.dumps(presentment_payload))

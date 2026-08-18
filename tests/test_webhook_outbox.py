@@ -26,6 +26,7 @@ from metering_billing import (
     UnappliedCashRefundService,
     IssuedCreditNoteService,
     IssuedInvoiceService,
+    IssuedInvoiceVoidService,
     MemoryUsageLedger,
     PaymentSettlementService,
     WebhookDeliveryService,
@@ -53,6 +54,7 @@ from metering_billing.webhook_outbox import (
     EVENT_TYPE_CREDIT_NOTE_APPLIED,
     EVENT_TYPE_CREDIT_NOTE_ISSUED,
     EVENT_TYPE_INVOICE_ISSUED,
+    EVENT_TYPE_INVOICE_VOIDED,
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
     EVENT_TYPE_PAYMENT_RECEIPT_APPLIED,
     EVENT_TYPE_REFUND_RECORDED,
@@ -76,6 +78,7 @@ from test_credit_note_application import issue_morning_credit_then_open_case
 from test_unapplied_cash import LEFTOVER
 from test_unapplied_cash_application import park_leftover_and_open_second_case
 from test_http_app import invoke_http
+from test_issued_invoice_void import issue_known_morning_invoice
 from test_journal_proposal import draft_known_morning
 from test_payment_settlement import project_known_morning_intent
 from test_usage_ingestion import TENANT_ONE, TENANT_TWO
@@ -333,6 +336,109 @@ class WebhookOutboxTests(unittest.TestCase):
                         event
                         for event in ledger.webhook_outbox_events.values()
                         if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+                    ]
+                ),
+                1,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_invoice_voided_enqueues_once_and_delivers_signed(self) -> None:
+        """First void enqueues invoice.voided once; replay heals without a second row."""
+        ledger, issued, collection = issue_known_morning_invoice()
+        server, callback_url, received = _start_recorder()
+        try:
+            subscriptions = WebhookSubscriptionService(ledger, clock=lambda: ISSUED_AT)
+            registered = subscriptions.register_subscription(
+                TENANT_ONE, callback_url, (EVENT_TYPE_INVOICE_VOIDED,)
+            )
+            self.assertEqual(
+                registered.webhook_subscription_outcome_code,
+                WebhookSubscriptionOutcomeCode.ACCEPTED,
+            )
+            self.assertEqual(registered.event_type_codes, (EVENT_TYPE_INVOICE_VOIDED,))
+            self.assertEqual(validate_webhook_subscription(registered.as_contract_dict()), ())
+            first = IssuedInvoiceVoidService(
+                ledger, clock=lambda: ISSUED_AT
+            ).void_issued_invoice(TENANT_ONE, issued.issued_invoice_id)
+            second = IssuedInvoiceVoidService(
+                ledger, clock=lambda: ISSUED_AT
+            ).void_issued_invoice(TENANT_ONE, issued.issued_invoice_id)
+            voided_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+            ]
+            self.assertEqual(first.issued_invoice_void_outcome_code.value, "accepted")
+            self.assertEqual(second.issued_invoice_void_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(voided_events), 1)
+            self.assertEqual(voided_events[0].source_id, first.issued_invoice_void_id)
+            envelope = json.loads(voided_events[0].payload_json)
+            self.assertEqual(envelope["event_type_code"], EVENT_TYPE_INVOICE_VOIDED)
+            data = envelope["data"]
+            self.assertEqual(
+                data["issued_invoice_void_id"], str(first.issued_invoice_void_id)
+            )
+            self.assertEqual(data["issued_invoice_id"], str(issued.issued_invoice_id))
+            self.assertEqual(data["invoice_draft_id"], str(issued.invoice_draft_id))
+            self.assertEqual(
+                data["collection_case_id"], str(collection.collection_case_id)
+            )
+            self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+            self.assertEqual(data["issued_invoice_void_contract_version"], 1)
+            self.assertEqual(data["currency_code"], "USD")
+            self.assertEqual(data["voided_amount"], first.as_contract_dict()["voided_amount"])
+            self.assertEqual(data["voided_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
+            self.assertEqual(data["issued_invoice_void_status"], "recorded")
+            self.assertEqual(data["voided_at"], first.as_contract_dict()["voided_at"])
+            self.assertNotIn("remaining_outstanding_amount", data)
+            self.assertNotIn("collection_case_status", data)
+            self.assertNotIn("legal_invoice_number", json.dumps(envelope))
+            self.assertNotIn("card_pan", json.dumps(envelope))
+            self.assertNotIn("webhook_secret", json.dumps(envelope))
+            delivered = WebhookDeliveryService(ledger).deliver_due_events(TENANT_ONE)
+            self.assertEqual(delivered.delivered_event_count, 1)
+            self.assertEqual(len(received), 1)
+            headers, raw_body = received[0]
+            posted = json.loads(raw_body.decode("utf-8"))
+            self.assertEqual(posted["event_type_code"], EVENT_TYPE_INVOICE_VOIDED)
+            expected = sign_webhook_body(registered.webhook_secret or "", raw_body)
+            signature = next(
+                value
+                for key, value in headers.items()
+                if key.lower() == WEBHOOK_SIGNATURE_HEADER.lower()
+            )
+            self.assertEqual(signature, expected)
+            orphan_id = voided_events[0].outbox_event_id
+            identity = next(
+                key
+                for key, stored_id in ledger.webhook_outbox_identity_index.items()
+                if stored_id == orphan_id
+            )
+            del ledger.webhook_outbox_events[orphan_id]
+            del ledger.webhook_outbox_identity_index[identity]
+            healed = IssuedInvoiceVoidService(
+                ledger, clock=lambda: ISSUED_AT
+            ).void_issued_invoice(TENANT_ONE, issued.issued_invoice_id)
+            healed_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+            ]
+            self.assertEqual(healed.issued_invoice_void_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(healed_events), 1)
+            self.assertEqual(healed_events[0].source_id, first.issued_invoice_void_id)
+            rejected = IssuedInvoiceVoidService(ledger).void_issued_invoice(
+                TENANT_TWO, issued.issued_invoice_id
+            )
+            self.assertEqual(rejected.issued_invoice_void_outcome_code.value, "rejected")
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in ledger.webhook_outbox_events.values()
+                        if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
                     ]
                 ),
                 1,

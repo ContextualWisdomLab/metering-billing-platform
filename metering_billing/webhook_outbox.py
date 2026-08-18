@@ -3,9 +3,10 @@
 The buyer-facing path is:
 
 1. Register an https callback for a closed event-type set.
-2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued credit note, credit-note application, collection-case settlement, collection write-off, leftover apply, or leftover refund).
+2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued-invoice void, issued credit note, credit-note application, collection-case settlement, collection write-off, leftover apply, or leftover refund).
 3. Run ``deliver_due_events`` so active subscriptions receive a signed POST.
 
+Accepted facts include issued-invoice voids (``invoice.voided``).
 AIS may keep polling ``GET /v1/journal-proposals``.  This slice does not
 require AIS to subscribe, does not flip ``proposal_status``, and does not
 call AIS posting-receipt (Fielding et al., 2022; Krawczyk et al., 1997).
@@ -61,6 +62,7 @@ EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED = "journal_proposal.validated"
 EVENT_TYPE_PAYMENT_RECEIPT_APPLIED = "payment_receipt.applied"
 EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED = "credit_adjustment.recorded"
 EVENT_TYPE_INVOICE_ISSUED = "invoice.issued"
+EVENT_TYPE_INVOICE_VOIDED = "invoice.voided"
 EVENT_TYPE_CREDIT_NOTE_ISSUED = "credit_note.issued"
 EVENT_TYPE_CREDIT_NOTE_APPLIED = "credit_note.applied"
 EVENT_TYPE_COLLECTION_SETTLED = "collection.settled"
@@ -73,6 +75,7 @@ KNOWN_EVENT_TYPE_CODES = frozenset(
         EVENT_TYPE_PAYMENT_RECEIPT_APPLIED,
         EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED,
         EVENT_TYPE_INVOICE_ISSUED,
+        EVENT_TYPE_INVOICE_VOIDED,
         EVENT_TYPE_CREDIT_NOTE_ISSUED,
         EVENT_TYPE_CREDIT_NOTE_APPLIED,
         EVENT_TYPE_COLLECTION_SETTLED,

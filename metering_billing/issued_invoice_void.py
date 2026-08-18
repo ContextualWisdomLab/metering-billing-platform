@@ -9,9 +9,11 @@ The service is the buyer-facing void path:
 4. Close an unused open or dunning case as ``voided`` at exact-zero remaining.
 
 Replay of the same tenant and ``issued_invoice_id`` returns the stored void
-and never re-closes the case.  The path does not emit a journal, webhook,
-refund, write-off, settlement, or AIS call.  The issued snapshot stays
-``issued``; history is the void row.
+and never re-closes the case.  First successful void enqueues one
+``invoice.voided`` outbox event; replay is ``duplicate_replay`` with
+crash-heal enqueue.  The path does not emit a journal, refund, write-off,
+settlement, or AIS call.  The issued snapshot stays ``issued``; history is
+the void row.
 """
 
 from __future__ import annotations
@@ -42,6 +44,10 @@ from metering_billing.usage_ledger import (
     StoredIssuedInvoice,
     StoredIssuedInvoiceVoid,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_INVOICE_VOIDED,
+    enqueue_accepted_fact,
 )
 
 
@@ -134,6 +140,38 @@ class IssuedInvoiceVoidResult:
             payload["collection_case_status"] = self.collection_case_status
         return payload
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``invoice.voided`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not a remaining snapshot or
+        collection status.  PII, PAN, secrets, and statutory identifiers
+        are omitted.
+        """
+        if (
+            self.issued_invoice_void_id is None
+            or self.issued_invoice_id is None
+            or self.invoice_draft_id is None
+        ):
+            raise ValueError("rejected issued-invoice void has no webhook event data")
+        if self.voided_at is None:
+            raise ValueError("accepted issued-invoice voids must include voided_at")
+        payload: dict[str, object] = {
+            "issued_invoice_void_id": str(self.issued_invoice_void_id),
+            "issued_invoice_id": str(self.issued_invoice_id),
+            "invoice_draft_id": str(self.invoice_draft_id),
+            "source_payload_hash": self.source_payload_hash,
+            "issued_invoice_void_contract_version": (
+                self.issued_invoice_void_contract_version
+            ),
+            "currency_code": self.currency_code,
+            "voided_amount": format_exact_decimal(self.voided_amount),
+            "issued_invoice_void_status": self.issued_invoice_void_status,
+            "voided_at": _format_voided_at(self.voided_at),
+        }
+        if self.collection_case_id is not None:
+            payload["collection_case_id"] = str(self.collection_case_id)
+        return payload
+
 
 class IssuedInvoiceVoidService:
     """Append-only writer of one commercial issued-invoice void."""
@@ -157,8 +195,9 @@ class IssuedInvoiceVoidService:
         Replay of the same tenant and ``issued_invoice_id`` returns the
         stored ``issued_invoice_void_id`` and does not close the case
         again.  Another tenant cannot see or void that invoice.  The
-        issued snapshot stays ``issued``.  The path writes no journal,
-        webhook, refund, or AIS observation.
+        issued snapshot stays ``issued``.  First successful void
+        enqueues one ``invoice.voided`` outbox event.  Replay of that
+        void does not enqueue a second row.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -175,12 +214,14 @@ class IssuedInvoiceVoidService:
                     return _rejected(
                         IssuedInvoiceVoidRejectionReasonCode.ISSUED_INVOICE_NOT_FOUND
                     )
-            return _from_stored(
+            result = _from_stored(
                 existing,
                 current_case,
                 tenant.tenant_reference,
                 IssuedInvoiceVoidOutcomeCode.DUPLICATE_REPLAY,
             )
+            _enqueue_invoice_voided(self.ledger, tenant.tenant_reference, result)
+            return result
         issued_invoice = self.ledger.get_issued_invoice(issued_invoice_id)
         if (
             issued_invoice is None
@@ -222,12 +263,39 @@ class IssuedInvoiceVoidService:
                 collection_case.collection_case_id,
                 issued_invoice.tax_inclusive_amount,
             )
-        return _from_stored(
+        result = _from_stored(
             stored,
             updated_case,
             tenant.tenant_reference,
             IssuedInvoiceVoidOutcomeCode.ACCEPTED,
         )
+        _enqueue_invoice_voided(self.ledger, tenant.tenant_reference, result)
+        return result
+
+
+def _enqueue_invoice_voided(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: IssuedInvoiceVoidResult,
+) -> None:
+    """Append one ``invoice.voided`` outbox row for a stored void.
+
+    Replay of the same tenant, event type, ``issued_invoice_void_id``,
+    and payload hash returns the stored row.  A crash after insert and
+    before enqueue is healed by the next void replay.
+    """
+    if result.issued_invoice_void_id is None or result.voided_at is None:
+        raise ValueError(
+            "accepted issued-invoice voids must include identity and voided_at"
+        )
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_INVOICE_VOIDED,
+        result.issued_invoice_void_id,
+        result.as_webhook_event_data(),
+        result.voided_at,
+    )
 
 
 def _blocking_collection_reason(
