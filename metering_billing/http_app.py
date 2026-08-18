@@ -132,10 +132,11 @@ The application is a thin WSGI adapter:
     closed while held.  ``POST /v1/collection-disputes/{collection_dispute_id}/releases``
     releases one held dispute in place.  Replay of the same tenant and
     dispute returns the stored ``collection_dispute_id`` and never changes
-    remaining outstanding.  Case status returns to ``open`` or ``dunning``.
-    GET release item and list present the stored release.  Do not invent a
-    journal, second webhook system, write-off, settlement, void rewrite,
-    statutory numbering, payment capture, or AIS call.
+    remaining outstanding.  First successful release enqueues one existing
+    ``dispute.released`` outbox event.  Case status returns to ``open`` or
+    ``dunning``.  GET release item and list present the stored release.  Do
+    not invent a journal, second webhook system, write-off, settlement,
+    void rewrite, statutory numbering, payment capture, or AIS call.
     ``POST /v1/credit-adjustments/{credit_adjustment_id}/journal-proposals``
     composes or replays the existing credit ``accounting_journal_proposal``.
     Credit accept already writes that journal.  Replay of the same tenant

@@ -95,6 +95,7 @@ REQUIRED_FILES = (
     "docs/adr/0063-collection-dispute-hold.md",
     "docs/adr/0064-collection-dispute-release.md",
     "docs/adr/0065-dispute-held-webhook.md",
+    "docs/adr/0066-dispute-released-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

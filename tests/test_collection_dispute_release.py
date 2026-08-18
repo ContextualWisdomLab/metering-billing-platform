@@ -46,9 +46,11 @@ from metering_billing.errors import (
 )
 from metering_billing.collection_dispute_release import (
     CollectionDisputeReleaseResult,
+    _enqueue_dispute_released,
     _format_released_at,
     _rejected,
 )
+from metering_billing.webhook_outbox import EVENT_TYPE_DISPUTE_RELEASED
 from metering_billing.usage_ledger import generate_record_id
 from test_collection_case import draft_known_morning
 from test_collection_write_off import open_morning_case_with_outstanding
@@ -113,7 +115,14 @@ class CollectionDisputeReleaseTests(unittest.TestCase):
         self.assertEqual(stored_dispute.remaining_outstanding_amount, remaining_before)
         self.assertEqual(len(ledger.collection_disputes), 1)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        released_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_DISPUTE_RELEASED
+        ]
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
+        self.assertEqual(len(released_events), 1)
+        self.assertEqual(released_events[0].source_id, first.collection_dispute_id)
         presented = CollectionCasePresentmentService(ledger).present_collection_case(
             TENANT_ONE, collection.collection_case_id
         )
@@ -512,7 +521,13 @@ class CollectionDisputeReleaseTests(unittest.TestCase):
             {"tenant_reference": TENANT_ONE},
         )
         self.assertEqual(method_status, 405)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        released_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_DISPUTE_RELEASED
+        ]
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 2)
+        self.assertEqual(len(released_events), 2)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
 
     def test_presentment_rejects_invalid_page_and_missing_rows(self) -> None:
@@ -704,6 +719,16 @@ class CollectionDisputeReleaseTests(unittest.TestCase):
             TENANT_ONE, held.collection_dispute_id
         )
         self.assertEqual(mutated_replay.remaining_outstanding_amount, Decimal("1.00"))
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_DISPUTE_RELEASED
+                ]
+            ),
+            1,
+        )
         del ledger.collection_cases[collection.collection_case_id]
         missing_replay = CollectionDisputeReleaseService(ledger).release_collection_dispute(
             TENANT_ONE, held.collection_dispute_id
@@ -754,6 +779,185 @@ class CollectionDisputeReleaseTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             accepted_without_time.as_contract_dict()
+        webhook_data = released.as_webhook_event_data()
+        self.assertEqual(
+            webhook_data["collection_dispute_id"], str(released.collection_dispute_id)
+        )
+        self.assertEqual(webhook_data["collection_case_id"], str(collection.collection_case_id))
+        self.assertEqual(webhook_data["invoice_draft_id"], str(collection.invoice_draft_id))
+        self.assertEqual(webhook_data["source_payload_hash"], released.source_payload_hash)
+        self.assertEqual(webhook_data["collection_dispute_release_contract_version"], 1)
+        self.assertEqual(webhook_data["currency_code"], "USD")
+        self.assertEqual(
+            webhook_data["remaining_outstanding_amount"],
+            format_exact_decimal(KNOWN_MORNING_TOTAL),
+        )
+        self.assertEqual(webhook_data["collection_dispute_status"], "released")
+        self.assertEqual(webhook_data["released_at"], released.as_contract_dict()["released_at"])
+        self.assertNotIn("issued_invoice_id", webhook_data)
+        self.assertNotIn("held_at", webhook_data)
+        self.assertNotIn("collection_case_status", webhook_data)
+        self.assertNotIn("next_operator_action", webhook_data)
+        self.assertNotIn("tenant_reference", webhook_data)
+        self.assertNotIn("legal_invoice_number", webhook_data)
+        rejected = _rejected(
+            CollectionDisputeReleaseRejectionReasonCode.COLLECTION_DISPUTE_NOT_FOUND
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected collection dispute release has no webhook event data"
+        ):
+            rejected.as_webhook_event_data()
+        missing_case = CollectionDisputeReleaseResult(
+            collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.ACCEPTED,
+            collection_dispute_release_contract_version=1,
+            collection_dispute_id=generate_record_id(),
+            collection_case_id=None,
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=KNOWN_MORNING_TOTAL,
+            collection_dispute_status="released",
+            collection_case_status="open",
+            released_at=RELEASED_MORNING,
+            source_payload_hash="sha256:" + ("11" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected collection dispute release has no webhook event data"
+        ):
+            missing_case.as_webhook_event_data()
+        missing_draft = CollectionDisputeReleaseResult(
+            collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.ACCEPTED,
+            collection_dispute_release_contract_version=1,
+            collection_dispute_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=None,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=KNOWN_MORNING_TOTAL,
+            collection_dispute_status="released",
+            collection_case_status="open",
+            released_at=RELEASED_MORNING,
+            source_payload_hash="sha256:" + ("12" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rejected collection dispute release has no webhook event data"
+        ):
+            missing_draft.as_webhook_event_data()
+        with self.assertRaisesRegex(
+            ValueError, "accepted collection dispute releases must include released_at"
+        ):
+            accepted_without_time.as_webhook_event_data()
+        still_held_result = CollectionDisputeReleaseResult(
+            collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.ACCEPTED,
+            collection_dispute_release_contract_version=1,
+            collection_dispute_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=KNOWN_MORNING_TOTAL,
+            collection_dispute_status="held",
+            collection_case_status="disputed",
+            released_at=RELEASED_MORNING,
+            source_payload_hash="sha256:" + ("13" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "collection dispute is not released"
+        ):
+            still_held_result.as_webhook_event_data()
+        incomplete = CollectionDisputeReleaseResult(
+            collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.ACCEPTED,
+            collection_dispute_release_contract_version=1,
+            collection_dispute_id=None,
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=None,
+            collection_dispute_status="released",
+            collection_case_status="open",
+            released_at=None,
+            source_payload_hash="sha256:" + ("22" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted collection dispute releases must include identity"
+        ):
+            _enqueue_dispute_released(ledger, TENANT_ONE, incomplete)
+        missing_time = CollectionDisputeReleaseResult(
+            collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.ACCEPTED,
+            collection_dispute_release_contract_version=1,
+            collection_dispute_id=generate_record_id(),
+            collection_case_id=collection.collection_case_id,
+            invoice_draft_id=collection.invoice_draft_id,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=KNOWN_MORNING_TOTAL,
+            collection_dispute_status="released",
+            collection_case_status="open",
+            released_at=None,
+            source_payload_hash="sha256:" + ("33" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted collection dispute releases must include identity"
+        ):
+            _enqueue_dispute_released(ledger, TENANT_ONE, missing_time)
+        missing_remaining = CollectionDisputeReleaseResult(
+            collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.ACCEPTED,
+            collection_dispute_release_contract_version=1,
+            collection_dispute_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=None,
+            collection_dispute_status="released",
+            collection_case_status="open",
+            released_at=RELEASED_MORNING,
+            source_payload_hash="sha256:" + ("44" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted collection dispute releases must include remaining outstanding"
+        ):
+            missing_remaining.as_webhook_event_data()
+        orphaned = CollectionDisputeReleaseResult(
+            collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.ACCEPTED,
+            collection_dispute_release_contract_version=1,
+            collection_dispute_id=generate_record_id(),
+            collection_case_id=collection.collection_case_id,
+            invoice_draft_id=collection.invoice_draft_id,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=KNOWN_MORNING_TOTAL,
+            collection_dispute_status="released",
+            collection_case_status="open",
+            released_at=RELEASED_MORNING,
+            source_payload_hash="sha256:" + ("55" * 32),
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "accepted collection dispute releases must include identity"
+        ):
+            _enqueue_dispute_released(ledger, TENANT_ONE, orphaned)
         none_reason = CollectionDisputeReleaseResult(
             collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.REJECTED,
             collection_dispute_release_contract_version=1,
@@ -790,6 +994,10 @@ class CollectionDisputeReleaseTests(unittest.TestCase):
         )
         self.assertEqual(issued_release.issued_invoice_id, issued.issued_invoice_id)
         self.assertIn("issued_invoice_id", issued_release.as_contract_dict())
+        self.assertEqual(
+            issued_release.as_webhook_event_data()["issued_invoice_id"],
+            str(issued.issued_invoice_id),
+        )
         issued_presentment = CollectionDisputeReleasePresentmentService(
             issued_ledger
         ).present_collection_dispute_release(
@@ -807,6 +1015,33 @@ class CollectionDisputeReleaseTests(unittest.TestCase):
         self.assertEqual(
             held_only.exception.rejection_reason_code, "collection_dispute_release_not_found"
         )
+        held_only_enqueue = CollectionDisputeReleaseResult(
+            collection_dispute_release_outcome_code=CollectionDisputeReleaseOutcomeCode.ACCEPTED,
+            collection_dispute_release_contract_version=1,
+            collection_dispute_id=still_held.collection_dispute_id,
+            collection_case_id=still_held.collection_case_id,
+            invoice_draft_id=still_held.invoice_draft_id,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=KNOWN_MORNING_TOTAL,
+            collection_dispute_status="released",
+            collection_case_status="open",
+            released_at=RELEASED_MORNING,
+            source_payload_hash=still_held.source_payload_hash,
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaisesRegex(ValueError, "collection dispute is not released"):
+            _enqueue_dispute_released(still_held_ledger, TENANT_ONE, held_only_enqueue)
+        stored_held = still_held_ledger.get_collection_dispute(still_held.collection_dispute_id)
+        still_held_ledger.collection_disputes[still_held.collection_dispute_id] = replace(
+            stored_held,
+            collection_dispute_status="released",
+            released_at=None,
+        )
+        with self.assertRaisesRegex(ValueError, "collection dispute is not released"):
+            _enqueue_dispute_released(still_held_ledger, TENANT_ONE, held_only_enqueue)
         app = create_http_app(issued_ledger)
         mismatch_status, mismatch_body = invoke_http(
             app,

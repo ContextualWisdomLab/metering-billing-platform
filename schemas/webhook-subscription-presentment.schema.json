@@ -39,7 +39,8 @@
           "write_off.recorded",
           "unapplied_cash.applied",
           "refund.recorded",
-          "dispute.held"
+          "dispute.held",
+          "dispute.released"
         ]
       }
     },
