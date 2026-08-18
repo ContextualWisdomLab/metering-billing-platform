@@ -16,6 +16,7 @@ from unittest import mock
 from metering_billing.contracts import (
     validate_ais_outbox_drain,
     validate_account_statement_presentment,
+    validate_rated_spend_presentment,
     validate_collection_aging_presentment,
     validate_collection_case_presentment,
     validate_payment_intent_presentment,
@@ -780,6 +781,89 @@ class RepositoryContractTests(unittest.TestCase):
             any(
                 "exact decimal" in error
                 for error in validate_account_statement_presentment(mixed_rows)
+            )
+        )
+
+    def test_rated_spend_presentment_accepts_product_totals_and_rejects_rerate(self) -> None:
+        """Rated spend stays exact, unique by currency and product, and cannot claim a re-rate."""
+        schema = self._schema("rated-spend-presentment.schema.json")
+        instance = {
+            "rated_spend_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "products": [
+                {
+                    "currency_code": "USD",
+                    "product_code": "contextual_orchestrator",
+                    "rated_amount": "0.003705",
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_rated_spend_presentment(instance), ())
+        posted = dict(instance)
+        posted["group_by"] = "project"
+        self.assertIn(
+            "$: additional property is not allowed: group_by",
+            validate_schema_instance(schema, posted),
+        )
+        duplicate = {
+            "rated_spend_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "products": [instance["products"][0], instance["products"][0]],
+        }
+        self.assertIn(
+            "$.products[1]: currency_code and product_code must be unique",
+            validate_rated_spend_presentment(duplicate),
+        )
+        negative = {
+            "rated_spend_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "products": [
+                {
+                    "currency_code": "USD",
+                    "product_code": "contextual_orchestrator",
+                    "rated_amount": "-1.00",
+                }
+            ],
+        }
+        self.assertIn(
+            "$.products[0].rated_amount: amount must not be negative",
+            validate_rated_spend_presentment(negative),
+        )
+        self.assertNotEqual(validate_rated_spend_presentment([]), ())
+        self.assertNotEqual(validate_rated_spend_presentment({"products": "USD"}), ())
+        mixed_rows = {
+            "rated_spend_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "products": [
+                "USD",
+                {
+                    "currency_code": 1,
+                    "product_code": "contextual_orchestrator",
+                    "rated_amount": "not-decimal",
+                },
+            ],
+        }
+        self.assertTrue(
+            any(
+                "exact decimal" in error
+                for error in validate_rated_spend_presentment(mixed_rows)
             )
         )
 

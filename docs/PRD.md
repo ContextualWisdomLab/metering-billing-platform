@@ -478,6 +478,13 @@ contextual-orchestrator usage
 - `GET /v1/billing-accounts/{billing_account_id}/statement` is HTTP 200 for the same tenant. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Missing tenant is HTTP 422.
 - Operators open the account statement, then collect, credit, park, apply, or refund. HTTP presentment does not capture cards, write money, or call AIS.
 
+## Rated-spend-presentment acceptance
+
+- A known tenant, `billing_account_id`, and half-open ISO 8601 window present already-rated spend grouped by `(currency_code, product_code)`. Each row carries exact `rated_amount` from stored rating-run or exclusive invoice-draft lines. Currencies are never mixed in one sum. The read does not re-rate, invent a unit price, or include unrated usage.
+- Money is attributed only through rating or invoice-draft lines exclusive to that billing account. Mixed-account and lineless drafts are omitted.
+- `GET /v1/billing-accounts/{billing_account_id}/rated-spend?window_started_at=&window_ended_at=` is HTTP 200 for the same tenant. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Missing tenant or an illegal window is HTTP 422.
+- Operators inspect rated product spend, then draft an invoice. HTTP presentment does not capture cards, write money, or call AIS. `group_by=project` is a later slice.
+
 ## Dunning-event-presentment acceptance
 
 - A known stored `collection_dunning_event` presents one tenant-scoped statement with `dunning_event_id`, `collection_case_id`, `dunning_event_number`, `dunning_notice_code`, `occurred_at`, and `next_operator_action` (`wait` when the parent case is settled, otherwise `collect`).

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/rated-spend-presentment/v1",
+  "title": "Rated Spend Presentment",
+  "description": "Billing-account-scoped already-rated spend projected from stored rating_run and exclusive invoice-draft lines inside one half-open ISO 8601 window. Rows are grouped by currency_code and product_code and never mixed. rated_amount is the stored rated or draft line amount as an exact-decimal string. The document is not a re-rate, budget, journal, webhook, or statutory ledger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "rated_spend_presentment_contract_version",
+    "tenant_reference",
+    "billing_account_id",
+    "billing_account_reference",
+    "window_started_at",
+    "window_ended_at",
+    "products"
+  ],
+  "properties": {
+    "rated_spend_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "billing_account_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "billing_account_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "window_started_at": {"type": "string", "format": "date-time"},
+    "window_ended_at": {"type": "string", "format": "date-time"},
+    "products": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 200,
+      "items": {"$ref": "#/$defs/product_spend"}
+    }
+  },
+  "$defs": {
+    "exact_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "product_spend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency_code", "product_code", "rated_amount"],
+      "properties": {
+        "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "product_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "rated_amount": {"$ref": "#/$defs/exact_amount"}
+      }
+    }
+  }
+}

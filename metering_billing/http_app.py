@@ -92,6 +92,10 @@ The application is a thin WSGI adapter:
     collection remaining, applied credits, unused issued-credit-note
     voids, write-offs, parked leftover, and refunded leftover for one
     billing account, grouped by currency.  Missing account is HTTP 404.
+    ``GET /v1/billing-accounts/{billing_account_id}/rated-spend`` projects
+    already-stored rating-run and exclusive invoice-draft line amounts
+    for one billing account and half-open window, grouped by
+    ``product_code``.  The read does not re-rate or write money.
     ``POST /v1/issued-invoices/{issued_invoice_id}/voids`` records one
     commercial void of an unused issued invoice.  Replay of the same
     tenant and issued invoice returns the stored
@@ -234,6 +238,7 @@ from metering_billing.collection_case import CollectionCaseService
 from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
     AccountStatementPresentmentQueryError,
+    RatedSpendPresentmentQueryError,
     CollectionAgingPresentmentQueryError,
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
@@ -322,6 +327,7 @@ from metering_billing.exact_decimal import parse_exact_decimal
 from metering_billing.account_statement_presentment import (
     AccountStatementPresentmentService,
 )
+from metering_billing.rated_spend_presentment import RatedSpendPresentmentService
 from metering_billing.collection_aging_presentment import (
     Clock,
     CollectionAgingPresentmentService,
@@ -365,6 +371,9 @@ COLLECTION_CASE_COLLECTION_PATH = "/v1/collection-cases"
 COLLECTION_AGING_PATH = "/v1/collection-aging"
 BILLING_ACCOUNT_STATEMENT_PATH = re.compile(
     r"^/v1/billing-accounts/([0-9a-fA-F-]{36})/statement$"
+)
+BILLING_ACCOUNT_RATED_SPEND_PATH = re.compile(
+    r"^/v1/billing-accounts/([0-9a-fA-F-]{36})/rated-spend$"
 )
 COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36})$")
 COLLECTION_DUNNING_PATH = re.compile(
@@ -629,6 +638,7 @@ def create_http_app(
     account_statement_presentments = AccountStatementPresentmentService(
         shared_ledger, clock=clock
     )
+    rated_spend_presentments = RatedSpendPresentmentService(shared_ledger)
     dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
@@ -1480,6 +1490,40 @@ def create_http_app(
                 )
                 return _send_json(start_response, 200, result.as_contract_dict())
             except AccountStatementPresentmentQueryError as error:
+                if error.rejection_reason_code == "billing_account_not_found":
+                    status_code = 404
+                elif error.rejection_reason_code == "billing_account_forbidden":
+                    status_code = 403
+                else:
+                    status_code = 422
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "rated_spend":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                window = TimeWindow.from_iso8601(
+                    query.get("window_started_at", ""),
+                    query.get("window_ended_at", ""),
+                )
+                result = rated_spend_presentments.present_rated_spend(
+                    tenant_reference,
+                    _parse_uuid(path_values["billing_account_id"], "billing_account_id"),
+                    window,
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except RatedSpendPresentmentQueryError as error:
                 if error.rejection_reason_code == "billing_account_not_found":
                     status_code = 404
                 elif error.rejection_reason_code == "billing_account_forbidden":
@@ -2527,6 +2571,11 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if statement_match is not None:
         if method == "GET":
             return "account_statement", {"billing_account_id": statement_match.group(1)}
+        return "method_not_allowed", {}
+    spend_match = BILLING_ACCOUNT_RATED_SPEND_PATH.fullmatch(path)
+    if spend_match is not None:
+        if method == "GET":
+            return "rated_spend", {"billing_account_id": spend_match.group(1)}
         return "method_not_allowed", {}
     if path == COLLECTION_AGING_PATH:
         if method == "GET":

@@ -33,6 +33,7 @@ __all__ = (
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
     "ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME",
+    "RATED_SPEND_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
@@ -81,6 +82,8 @@ __all__ = (
     "validate_invoice_presentment",
     "validate_collection_case_presentment",
     "validate_collection_aging_presentment",
+    "validate_account_statement_presentment",
+    "validate_rated_spend_presentment",
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",
     "validate_credit_adjustment_presentment",
@@ -146,6 +149,7 @@ INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
 COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
 COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME = "collection-aging-presentment.schema.json"
 ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME = "account-statement-presentment.schema.json"
+RATED_SPEND_PRESENTMENT_SCHEMA_NAME = "rated-spend-presentment.schema.json"
 PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json"
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
@@ -486,6 +490,46 @@ def validate_account_statement_presentment(
                 errors.append(
                     f"$.currencies[{index}].{field_name}: amount must be an exact decimal"
                 )
+    return tuple(errors)
+
+
+def validate_rated_spend_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate spend shape plus exact amounts and one row per currency and product."""
+    schema = load_json_schema(RATED_SPEND_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    products = statement.get("products")
+    if not isinstance(products, list):
+        return tuple(errors)
+    seen_keys: set[tuple[str, str]] = set()
+    for index, row in enumerate(products):
+        if not isinstance(row, Mapping):
+            continue
+        currency_code = row.get("currency_code")
+        product_code = row.get("product_code")
+        if isinstance(currency_code, str) and isinstance(product_code, str):
+            key = (currency_code, product_code)
+            if key in seen_keys:
+                errors.append(
+                    f"$.products[{index}]: currency_code and product_code must be unique"
+                )
+            seen_keys.add(key)
+        amount = row.get("rated_amount")
+        if not isinstance(amount, str):
+            continue
+        try:
+            parsed = Decimal(amount)
+            if parsed < Decimal("0"):
+                errors.append(
+                    f"$.products[{index}].rated_amount: amount must not be negative"
+                )
+        except Exception:
+            errors.append(
+                f"$.products[{index}].rated_amount: amount must be an exact decimal"
+            )
     return tuple(errors)
 
 

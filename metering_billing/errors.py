@@ -590,6 +590,14 @@ class AccountStatementPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class RatedSpendPresentmentQueryError(ValueError):
+    """Raised when already-rated spend cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class PaymentIntentPresentmentQueryError(ValueError):
     """Raised when a stored payment intent cannot be authorized or presented."""
 
