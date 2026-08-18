@@ -3,10 +3,10 @@
 The buyer-facing path is:
 
 1. Register an https callback for a closed event-type set.
-2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued-invoice void, issued credit note, credit-note application, collection-case settlement, collection write-off, leftover apply, or leftover refund).
+2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued-invoice void, issued credit note, credit-note application, collection-case settlement, collection write-off, leftover apply, leftover refund, or collection-dispute hold).
 3. Run ``deliver_due_events`` so active subscriptions receive a signed POST.
 
-Accepted facts include issued-invoice voids (``invoice.voided``).
+Accepted facts include collection-dispute holds (``dispute.held``).
 AIS may keep polling ``GET /v1/journal-proposals``.  This slice does not
 require AIS to subscribe, does not flip ``proposal_status``, and does not
 call AIS posting-receipt (Fielding et al., 2022; Krawczyk et al., 1997).
@@ -69,6 +69,7 @@ EVENT_TYPE_COLLECTION_SETTLED = "collection.settled"
 EVENT_TYPE_WRITE_OFF_RECORDED = "write_off.recorded"
 EVENT_TYPE_UNAPPLIED_CASH_APPLIED = "unapplied_cash.applied"
 EVENT_TYPE_REFUND_RECORDED = "refund.recorded"
+EVENT_TYPE_DISPUTE_HELD = "dispute.held"
 KNOWN_EVENT_TYPE_CODES = frozenset(
     {
         EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
@@ -82,6 +83,7 @@ KNOWN_EVENT_TYPE_CODES = frozenset(
         EVENT_TYPE_WRITE_OFF_RECORDED,
         EVENT_TYPE_UNAPPLIED_CASH_APPLIED,
         EVENT_TYPE_REFUND_RECORDED,
+        EVENT_TYPE_DISPUTE_HELD,
     }
 )
 LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})

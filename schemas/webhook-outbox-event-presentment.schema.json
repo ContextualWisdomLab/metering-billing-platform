@@ -35,7 +35,8 @@
         "collection.settled",
         "write_off.recorded",
         "unapplied_cash.applied",
-        "refund.recorded"
+        "refund.recorded",
+        "dispute.held"
       ]
     },
     "source_id": {"type": "string", "format": "uuid"},

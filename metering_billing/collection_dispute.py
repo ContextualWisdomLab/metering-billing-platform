@@ -7,9 +7,11 @@ The service is the buyer-facing hold path:
 3. Flip case status to ``disputed`` without changing remaining outstanding.
 
 Replay of the same tenant and ``collection_case_id`` returns the stored
-hold and never re-flips status.  The path does not emit a journal,
-webhook, unwind tax, capture payment, call AIS, write off, settle, or
-void.  Release is the sibling command on the same hold row.
+hold and never re-flips status.  First successful hold enqueues one
+``dispute.held`` outbox event.  Replay of that hold does not enqueue a
+second row.  The path does not emit a journal, unwind tax, capture
+payment, call AIS, write off, settle, or void.  Release is the sibling
+command on the same hold row.
 """
 
 from __future__ import annotations
@@ -40,6 +42,10 @@ from metering_billing.usage_ledger import (
     StoredCollectionCase,
     StoredCollectionDispute,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_DISPUTE_HELD,
+    enqueue_accepted_fact,
 )
 
 
@@ -127,6 +133,43 @@ class CollectionDisputeResult:
             payload["issued_invoice_id"] = str(self.issued_invoice_id)
         return payload
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``dispute.held`` facts for the #24 envelope.
+
+        The payload is a reference plus hash and the exact remaining
+        outstanding at hold.  Collection-case status, operator action,
+        PII, PAN, secrets, statutory identifiers, and dispute-reason
+        blobs are omitted.
+        """
+        if (
+            self.collection_dispute_id is None
+            or self.collection_case_id is None
+            or self.invoice_draft_id is None
+        ):
+            raise ValueError("rejected collection dispute has no webhook event data")
+        if self.held_at is None:
+            raise ValueError("accepted collection disputes must include held_at")
+        if self.remaining_outstanding_amount is None:
+            raise ValueError("accepted collection disputes must include remaining outstanding")
+        payload: dict[str, object] = {
+            "collection_dispute_id": str(self.collection_dispute_id),
+            "collection_case_id": str(self.collection_case_id),
+            "invoice_draft_id": str(self.invoice_draft_id),
+            "source_payload_hash": self.source_payload_hash,
+            "collection_dispute_contract_version": (
+                self.collection_dispute_contract_version
+            ),
+            "currency_code": self.currency_code,
+            "remaining_outstanding_amount": format_exact_decimal(
+                self.remaining_outstanding_amount
+            ),
+            "collection_dispute_status": self.collection_dispute_status,
+            "held_at": _format_held_at(self.held_at),
+        }
+        if self.issued_invoice_id is not None:
+            payload["issued_invoice_id"] = str(self.issued_invoice_id)
+        return payload
+
 
 class CollectionDisputeService:
     """Append-only writer of a commercial collection-case dispute hold."""
@@ -150,7 +193,9 @@ class CollectionDisputeService:
         Replay of the same tenant and ``collection_case_id`` returns the
         stored ``collection_dispute_id`` and does not change remaining
         outstanding again.  Another tenant cannot see or hold that case.
-        New dunning fails closed while the hold exists.
+        New dunning fails closed while the hold exists.  First successful
+        hold enqueues one ``dispute.held`` outbox event.  Replay of that
+        hold does not enqueue a second row.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -169,12 +214,14 @@ class CollectionDisputeService:
                 return _rejected(
                     CollectionDisputeRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
                 )
-            return _from_stored(
+            result = _from_stored(
                 existing,
                 current_case,
                 tenant.tenant_reference,
                 CollectionDisputeOutcomeCode.DUPLICATE_REPLAY,
             )
+            _enqueue_dispute_held(self.ledger, tenant.tenant_reference, result)
+            return result
         collection_case = self.ledger.get_collection_case(collection_case_id)
         if (
             collection_case is None
@@ -224,12 +271,51 @@ class CollectionDisputeService:
         updated_case = self.ledger.mark_collection_case_disputed(
             collection_case.collection_case_id
         )
-        return _from_stored(
+        result = _from_stored(
             stored,
             updated_case,
             tenant.tenant_reference,
             CollectionDisputeOutcomeCode.ACCEPTED,
         )
+        _enqueue_dispute_held(self.ledger, tenant.tenant_reference, result)
+        return result
+
+
+def _enqueue_dispute_held(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: CollectionDisputeResult,
+) -> None:
+    """Append one ``dispute.held`` outbox row for a stored hold.
+
+    Replay of the same tenant, event type, ``collection_dispute_id``,
+    and payload hash returns the stored row.  A crash after insert and
+    before enqueue is healed by the next hold replay.  Remaining
+    outstanding in the envelope is the stored hold snapshot, not a
+    later-mutated case remaining.
+    """
+    if result.collection_dispute_id is None or result.held_at is None:
+        raise ValueError(
+            "accepted collection disputes must include identity and held_at"
+        )
+    stored = ledger.get_collection_dispute(result.collection_dispute_id)
+    if stored is None:
+        raise ValueError(
+            "accepted collection disputes must include identity and held_at"
+        )
+    payload = result.as_webhook_event_data()
+    remaining = stored.remaining_outstanding_amount
+    if remaining == 0:
+        remaining = Decimal("0")
+    payload["remaining_outstanding_amount"] = format_exact_decimal(remaining)
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_DISPUTE_HELD,
+        result.collection_dispute_id,
+        payload,
+        stored.held_at,
+    )
 
 
 def _canonical_dispute_snapshot(
