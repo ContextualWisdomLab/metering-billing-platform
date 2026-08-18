@@ -164,6 +164,15 @@ class IssuedCreditNoteTests(unittest.TestCase):
             presented_payload["issued_invoice_id"],
             str(issued_invoice.issued_invoice_id),
         )
+        assessed = ledger.find_tax_assessment_for_draft(
+            ledger.resolve_tenant(TENANT_ONE)[0].tenant_account_id,
+            invoice_draft_id,
+        )
+        assert assessed is not None
+        self.assertEqual(
+            presented_payload["tax_assessment_id"],
+            str(assessed.tax_assessment_id),
+        )
         self.assertEqual(validate_issued_credit_note_presentment(presented_payload), ())
         issued_events = [
             event
@@ -174,6 +183,107 @@ class IssuedCreditNoteTests(unittest.TestCase):
         envelope = json.loads(issued_events[0].payload_json)
         self.assertEqual(envelope["data"]["issued_invoice_id"], str(issued_invoice.issued_invoice_id))
         self.assertEqual(envelope["data"]["credit_reason_code"], "goodwill")
+
+    def test_presentment_exposes_matching_tax_assessment_id_without_inventing_amounts(
+        self,
+    ) -> None:
+        """Item GET links a matching stored assessment; list and later assess omit it."""
+        untaxed_ledger, untaxed_credit = record_known_morning_credit()
+        untaxed = IssuedCreditNoteService(
+            untaxed_ledger, clock=lambda: ISSUED_MORNING
+        ).issue_credit_note(TENANT_ONE, untaxed_credit.credit_adjustment_id)
+        untaxed_presented = IssuedCreditNotePresentmentService(
+            untaxed_ledger
+        ).present_issued_credit_note(TENANT_ONE, untaxed.issued_credit_note_id)
+        untaxed_payload = untaxed_presented.as_contract_dict()
+        self.assertEqual(validate_issued_credit_note_presentment(untaxed_payload), ())
+        self.assertNotIn("tax_assessment_id", untaxed_payload)
+        self.assertNotIn("legal_credit_note_number", untaxed_payload)
+        self.assertNotIn("vat_register_id", untaxed_payload)
+        self.assertNotIn("tax_invoice_number", untaxed_payload)
+        self.assertNotIn("nts_approval_number", untaxed_payload)
+        self.assertNotIn("hometax_document_id", untaxed_payload)
+        self.assertNotIn("세금계산서", json.dumps(untaxed_payload))
+        later_ledger = seed_rated_ledger()
+        later_draft_id = insert_commercial_draft(later_ledger, TENANT_ONE, "USD", HUNDRED)
+        later_credit = CreditAdjustmentService(later_ledger).record_credit_adjustment(
+            TENANT_ONE, later_draft_id, HUNDRED, "billing_error"
+        )
+        later_issued = IssuedCreditNoteService(
+            later_ledger, clock=lambda: ISSUED_MORNING
+        ).issue_credit_note(TENANT_ONE, later_credit.credit_adjustment_id)
+        TaxRateService(later_ledger).publish_tax_rate(TENANT_ONE, "vat", STANDARD_TAX_RATE)
+        later_assessed = TaxAssessmentService(later_ledger).assess_tax(
+            TENANT_ONE, later_draft_id, 1
+        )
+        self.assertIsNotNone(later_assessed.tax_assessment_id)
+        later_presented = IssuedCreditNotePresentmentService(
+            later_ledger
+        ).present_issued_credit_note(TENANT_ONE, later_issued.issued_credit_note_id)
+        self.assertEqual(later_presented.tax_exclusive_amount, HUNDRED)
+        self.assertEqual(later_presented.tax_amount, Decimal("0"))
+        self.assertNotIn("tax_assessment_id", later_presented.as_contract_dict())
+        taxed_ledger = seed_rated_ledger()
+        TaxRateService(taxed_ledger).publish_tax_rate(TENANT_ONE, "vat", STANDARD_TAX_RATE)
+        taxed_draft_id = insert_commercial_draft(taxed_ledger, TENANT_ONE, "USD", HUNDRED)
+        assessed = TaxAssessmentService(taxed_ledger).assess_tax(
+            TENANT_ONE, taxed_draft_id, 1
+        )
+        taxed_credit = CreditAdjustmentService(taxed_ledger).record_credit_adjustment(
+            TENANT_ONE, taxed_draft_id, TAXED_CREDIT, "goodwill"
+        )
+        taxed = IssuedCreditNoteService(
+            taxed_ledger, clock=lambda: ISSUED_EVENING
+        ).issue_credit_note(TENANT_ONE, taxed_credit.credit_adjustment_id)
+        presented = IssuedCreditNotePresentmentService(
+            taxed_ledger
+        ).present_issued_credit_note(TENANT_ONE, taxed.issued_credit_note_id)
+        self.assertEqual(presented.tax_assessment_id, assessed.tax_assessment_id)
+        self.assertEqual(presented.tax_exclusive_amount, Decimal("10.00"))
+        self.assertEqual(presented.tax_amount, Decimal("1.00"))
+        self.assertEqual(presented.tax_inclusive_amount, TAXED_CREDIT)
+        payload = presented.as_contract_dict()
+        self.assertEqual(payload["tax_assessment_id"], str(assessed.tax_assessment_id))
+        self.assertEqual(payload["tax_inclusive_amount"], "11.00")
+        self.assertEqual(validate_issued_credit_note_presentment(payload), ())
+        self.assertNotIn("legal_credit_note_number", payload)
+        self.assertNotIn("vat_register_id", payload)
+        self.assertNotIn("tax_invoice_number", payload)
+        self.assertNotIn("nts_approval_number", payload)
+        self.assertNotIn("hometax_document_id", payload)
+        app = create_http_app(taxed_ledger)
+        get_status, get_body = invoke_http(
+            app,
+            "GET",
+            f"/v1/issued-credit-notes/{taxed.issued_credit_note_id}",
+            query={"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(get_status, 200)
+        self.assertEqual(get_body["tax_assessment_id"], str(assessed.tax_assessment_id))
+        self.assertEqual(get_body["tax_inclusive_amount"], "11.00")
+        self.assertEqual(validate_issued_credit_note_presentment(get_body), ())
+        list_status, list_body = invoke_http(
+            app,
+            "GET",
+            "/v1/issued-credit-notes",
+            query={"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(list_status, 200)
+        self.assertEqual(len(list_body["issued_credit_notes"]), 1)
+        self.assertNotIn("tax_assessment_id", list_body["issued_credit_notes"][0])
+        self.assertEqual(len(taxed_ledger.payment_intents), 0)
+        fake_assessment = mock.Mock(
+            tax_assessment_id=uuid4(),
+            tax_amount=Decimal("10.00"),
+            tax_inclusive_amount=Decimal("0"),
+        )
+        with mock.patch.object(
+            taxed_ledger, "find_tax_assessment_for_draft", return_value=fake_assessment
+        ):
+            closed = IssuedCreditNotePresentmentService(
+                taxed_ledger
+            ).present_issued_credit_note(TENANT_ONE, taxed.issued_credit_note_id)
+        self.assertNotIn("tax_assessment_id", closed.as_contract_dict())
 
     def test_http_issue_get_and_paged_list_without_capture(self) -> None:
         """POST issues; GET item and list page metadata and never capture payment."""
@@ -235,6 +345,7 @@ class IssuedCreditNoteTests(unittest.TestCase):
         self.assertEqual(get_body["credit_adjustment_id"], str(first_credit.credit_adjustment_id))
         self.assertEqual(get_body["next_operator_action"], "wait")
         self.assertNotIn("issued_credit_note_outcome_code", get_body)
+        self.assertNotIn("tax_assessment_id", get_body)
         self.assertEqual(validate_issued_credit_note_presentment(get_body), ())
         header_status, header_body = invoke_http(
             app,

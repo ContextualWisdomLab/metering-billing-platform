@@ -200,7 +200,7 @@ contextual-orchestrator usage
 - `issued_invoice_id` is stored only when an issued invoice already exists for the same draft. The field is omitted when absent.
 - The snapshot copies the closed `credit_reason_code`. It invents no credit-note lines and no PII.
 - `POST /v1/credit-adjustments/{credit_adjustment_id}/issued-credit-notes` is the nested issue command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422. Unknown or cross-tenant credits reject `credit_adjustment_not_found`.
-- A known stored issued credit note presents one tenant-scoped statement with identity, credit source, frozen totals, `issued_at`, and `next_operator_action` (`wait`).
+- A known stored issued credit note presents one tenant-scoped statement with identity, credit source, frozen totals, `issued_at`, optional stored `tax_assessment_id` when the draft assessment still reproduces those exclusive/tax amounts, and `next_operator_action` (`wait`).
 - `GET /v1/issued-credit-notes/{issued_credit_note_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/issued-credit-notes` lists summaries as `{issued_credit_notes, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{issued_credit_note_id}`.
 - Credit-adjustment, tax-unwind, journal-proposal, invoice, collection, payment, and AIS contracts stay unchanged. `credit_adjustment` stays `recorded`. `proposal_status` stays `validated`. First successful issue enqueues one existing #24 `credit_note.issued` outbox event. No payment capture or AIS call is added. HMAC, SSRF, and delivery contracts stay unchanged.

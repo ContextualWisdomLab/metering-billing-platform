@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.contextualwisdomlab.org/metering-billing/issued-credit-note-presentment/v1",
   "title": "Issued Credit Note Presentment",
-  "description": "Tenant-scoped commercial issued-credit-note statement projected from a stored issued_credit_note. Amounts are exact-decimal strings. Next operator action is wait. The document is not a statutory credit note, tax credit certificate, or AIS posting and does not invent sequential legal numbering.",
+  "description": "Tenant-scoped commercial issued-credit-note statement projected from a stored issued_credit_note. Amounts are exact-decimal strings. Optional tax_assessment_id is the stored commercial assessment whose current split still reproduces the frozen exclusive and tax amounts. Next operator action is wait. The document is not a statutory credit note, tax credit certificate, VAT register, NTS or hometax document, or AIS posting and does not invent sequential legal numbering.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -31,6 +31,7 @@
     "credit_adjustment_id": {"type": "string", "format": "uuid"},
     "invoice_draft_id": {"type": "string", "format": "uuid"},
     "issued_invoice_id": {"type": "string", "format": "uuid"},
+    "tax_assessment_id": {"type": "string", "format": "uuid"},
     "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
     "tax_exclusive_amount": {
       "type": "string",

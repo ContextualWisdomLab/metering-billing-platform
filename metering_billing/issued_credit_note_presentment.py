@@ -4,7 +4,8 @@ The service is a read path:
 
 1. Resolve the tenant.
 2. Load that tenant's stored ``issued_credit_note``.
-3. Project identity, credit source, frozen totals, and the next action.
+3. Project identity, credit source, frozen totals, optional matching
+   tax_assessment_id, and the next action.
 4. Return the snapshot.  Do not reissue, capture payment, or call AIS.
 
 RFC 9110 treats GET as a safe, idempotent read (Fielding et al., 2022).
@@ -19,11 +20,16 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+from metering_billing.credit_adjustment import CreditSplitError, split_inclusive_credit
 from metering_billing.errors import IssuedCreditNotePresentmentQueryError
 from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.issued_credit_note import OPERATOR_ACTION_WAIT
 from metering_billing.time_window import parse_iso8601_datetime
-from metering_billing.usage_ledger import MemoryUsageLedger, StoredIssuedCreditNote
+from metering_billing.usage_ledger import (
+    MemoryUsageLedger,
+    StoredIssuedCreditNote,
+    StoredTaxAssessment,
+)
 
 
 ISSUED_CREDIT_NOTE_PRESENTMENT_CONTRACT_VERSION = 1
@@ -38,7 +44,12 @@ def next_operator_action() -> str:
 
 @dataclass(frozen=True)
 class IssuedCreditNotePresentmentResult:
-    """Buyer-facing projection of one stored issued credit note."""
+    """Buyer-facing projection of one stored issued credit note.
+
+    ``tax_assessment_id`` is the stored commercial assessment whose
+    current split still reproduces this snapshot's exclusive and tax
+    amounts.
+    """
 
     issued_credit_note_id: UUID
     tenant_reference: str
@@ -57,6 +68,7 @@ class IssuedCreditNotePresentmentResult:
     credit_reason_code: str
     issued_credit_note_contract_version: int
     next_operator_action: str
+    tax_assessment_id: UUID | None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the closed JSON object published in the presentment schema."""
@@ -83,6 +95,8 @@ class IssuedCreditNotePresentmentResult:
         }
         if self.issued_invoice_id is not None:
             payload["issued_invoice_id"] = str(self.issued_invoice_id)
+        if self.tax_assessment_id is not None:
+            payload["tax_assessment_id"] = str(self.tax_assessment_id)
         return payload
 
     def as_summary_dict(self) -> dict[str, object]:
@@ -124,7 +138,7 @@ class IssuedCreditNotePresentmentService:
         """Return one same-tenant stored snapshot, or fail closed.
 
         A missing or cross-tenant identifier is indistinguishable.  The read
-        does not reissue, capture payment, or call AIS.
+        does not reissue, capture payment, invent amounts, or call AIS.
         """
         tenant = self._require_tenant(tenant_reference)
         stored = self.ledger.get_issued_credit_note(issued_credit_note_id)
@@ -182,6 +196,9 @@ class IssuedCreditNotePresentmentService:
         self, tenant_reference: str, stored: StoredIssuedCreditNote
     ) -> IssuedCreditNotePresentmentResult:
         """Project one stored snapshot using only persisted commercial fields."""
+        assessment = self.ledger.find_tax_assessment_for_draft(
+            stored.tenant_account_id, stored.invoice_draft_id
+        )
         return IssuedCreditNotePresentmentResult(
             issued_credit_note_id=stored.issued_credit_note_id,
             tenant_reference=tenant_reference,
@@ -200,7 +217,37 @@ class IssuedCreditNotePresentmentService:
             credit_reason_code=stored.credit_reason_code,
             issued_credit_note_contract_version=stored.issued_credit_note_contract_version,
             next_operator_action=next_operator_action(),
+            tax_assessment_id=_matching_tax_assessment_id(assessment, stored),
         )
+
+
+def _matching_tax_assessment_id(
+    assessment: StoredTaxAssessment | None, stored: StoredIssuedCreditNote
+) -> UUID | None:
+    """Return the stored assessment id only when it still splits this credit.
+
+    Credit notes freeze a proportional exclusive/tax split, not the full
+    assessment totals.  A later assessment that would produce a different
+    split is not the source of the snapshot.  The read does not copy
+    assessment amounts onto the credit note.
+    """
+    if assessment is None:
+        return None
+    try:
+        expected_exclusive, expected_tax = split_inclusive_credit(
+            stored.tax_inclusive_amount,
+            assessment.tax_amount,
+            assessment.tax_inclusive_amount,
+            stored.currency_code,
+        )
+    except CreditSplitError:
+        return None
+    if (expected_exclusive, expected_tax) != (
+        stored.tax_exclusive_amount,
+        stored.tax_amount,
+    ):
+        return None
+    return assessment.tax_assessment_id
 
 
 def _format_issued_at(issued_at: datetime) -> str:
