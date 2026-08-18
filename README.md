@@ -86,6 +86,8 @@ After an `issued_credit_note` and an open `collection_case` exist for the same i
 
 After an open `collection_case` already shows exact-zero outstanding, call `CollectionCaseSettlementService.settle_collection_case` or `POST /v1/collection-cases/{collection_case_id}/settlements`. Replay of the same tenant and case returns the same `collection_case_settlement_id` and never double-settles. First successful settle enqueues one existing `collection.settled` webhook outbox event. `GET /v1/collection-case-settlements/{collection_case_settlement_id}` and `GET /v1/collection-case-settlements` present the stored settlement. Settle the zero-outstanding case, then wait. The path does not invent a journal, tax unwind, second webhook system, statutory numbering, write-off, payment receipt, or AIS call.
 
+After an open `collection_case` still shows leftover remaining, call `CollectionWriteOffService.write_off_collection_case` or `POST /v1/collection-cases/{collection_case_id}/write-offs`. Replay of the same tenant and case returns the same `collection_write_off_id` and never re-zeros outstanding. Remaining becomes exact zero without settling. `GET /v1/collection-write-offs/{collection_write_off_id}` and `GET /v1/collection-write-offs` present the stored write-off. Write off leftover remaining, then settle. The path does not invent a journal, tax unwind, second webhook system, statutory numbering, payment receipt, credit note, settlement command, AIS call, or webhook event.
+
 ## Propose a journal
 
 ```bash
@@ -241,6 +243,17 @@ python3 -c "from metering_billing import CollectionCaseSettlementService, Collec
 ```
 
 After an open `collection_case` already shows exact-zero outstanding, `POST /v1/collection-cases/{collection_case_id}/settlements` flips status to `settled` without inventing a receipt or write-off. First successful settle enqueues one `collection.settled` outbox event. `GET /v1/collection-case-settlements/{collection_case_settlement_id}` returns the tenant-scoped statement. Settle the zero-outstanding case, then wait.
+
+## Write off leftover collection remaining
+
+```bash
+python3 -c "from metering_billing import CollectionWriteOffService, CollectionWriteOffPresentmentService"
+# POST /v1/collection-cases/{collection_case_id}/write-offs
+# GET /v1/collection-write-offs/{collection_write_off_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/collection-write-offs?tenant_reference=urn:cwl:tenant_001
+```
+
+After an open `collection_case` still shows leftover remaining, `POST /v1/collection-cases/{collection_case_id}/write-offs` zeros remaining without inventing a receipt, credit, settlement, or webhook. `GET /v1/collection-write-offs/{collection_write_off_id}` returns the tenant-scoped statement. Write off leftover remaining, then settle.
 
 ## Present a collection case
 

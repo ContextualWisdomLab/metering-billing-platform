@@ -446,6 +446,30 @@ class StoredCollectionCaseSettlement:
 
 
 @dataclass(frozen=True)
+class StoredCollectionWriteOff:
+    """Append-only commercial write-off of leftover collection remaining.
+
+    Identity is ``(tenant_account_id, collection_case_id)``.  One case
+    writes off at most once through this command.  ``collection_write_off_id``
+    is the opaque generated identifier.  This is not a payment receipt,
+    credit note, settlement, journal, or AIS posting.
+    """
+
+    collection_write_off_id: UUID
+    tenant_account_id: UUID
+    collection_case_id: UUID
+    invoice_draft_id: UUID
+    issued_invoice_id: UUID | None
+    collection_write_off_contract_version: int
+    source_payload_hash: str
+    currency_code: str
+    write_off_amount: Decimal
+    remaining_outstanding_amount: Decimal
+    collection_write_off_status: str
+    written_off_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredJournalProposalLine:
     """Append-only proposal line using a semantic account role, not a chart ID."""
 
@@ -789,6 +813,8 @@ class MemoryUsageLedger:
     collection_case_settlement_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
+    collection_write_offs: dict[UUID, StoredCollectionWriteOff] = field(default_factory=dict)
+    collection_write_off_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -1815,6 +1841,109 @@ class MemoryUsageLedger:
             persisted.collection_case_settlement_id
         )
         return persisted
+
+    def find_collection_write_off(
+        self, tenant_account_id: UUID, collection_case_id: UUID
+    ) -> StoredCollectionWriteOff | None:
+        """Return the write-off row for one tenant collection case, if any."""
+        collection_write_off_id = self.collection_write_off_index.get(
+            (tenant_account_id, collection_case_id)
+        )
+        if collection_write_off_id is None:
+            return None
+        return self.collection_write_offs[collection_write_off_id]
+
+    def get_collection_write_off(
+        self, collection_write_off_id: UUID
+    ) -> StoredCollectionWriteOff | None:
+        """Return one collection write-off by internal identifier, if present."""
+        return self.collection_write_offs.get(collection_write_off_id)
+
+    def list_collection_write_offs_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionWriteOff, ...]:
+        """Return collection write-offs limited to one tenant."""
+        return tuple(
+            write_off
+            for write_off in self.collection_write_offs.values()
+            if write_off.tenant_account_id == tenant_account_id
+        )
+
+    def insert_collection_write_off(
+        self, collection_write_off: StoredCollectionWriteOff
+    ) -> StoredCollectionWriteOff:
+        """Append an immutable write-off row.  Existing identity rows stay."""
+        if collection_write_off.collection_write_off_status != "recorded":
+            raise ValueError("collection_write_off_status must be recorded")
+        remaining = parse_exact_decimal(
+            format_exact_decimal(collection_write_off.remaining_outstanding_amount)
+        )
+        if remaining != 0:
+            raise ValueError("collection write-off remaining must be exact zero")
+        write_off_amount = parse_exact_decimal(
+            format_exact_decimal(collection_write_off.write_off_amount)
+        )
+        if write_off_amount <= 0:
+            raise ValueError("collection write-off amount must be a positive exact decimal")
+        if collection_write_off.collection_write_off_id in self.collection_write_offs:
+            raise ValueError("collection_write_off_id already stored")
+        identity_key = (
+            collection_write_off.tenant_account_id,
+            collection_write_off.collection_case_id,
+        )
+        if identity_key in self.collection_write_off_index:
+            raise ValueError("collection write-offs are immutable and cannot be replaced")
+        persisted = StoredCollectionWriteOff(
+            collection_write_off_id=collection_write_off.collection_write_off_id,
+            tenant_account_id=collection_write_off.tenant_account_id,
+            collection_case_id=collection_write_off.collection_case_id,
+            invoice_draft_id=collection_write_off.invoice_draft_id,
+            issued_invoice_id=collection_write_off.issued_invoice_id,
+            collection_write_off_contract_version=(
+                collection_write_off.collection_write_off_contract_version
+            ),
+            source_payload_hash=collection_write_off.source_payload_hash,
+            currency_code=collection_write_off.currency_code,
+            write_off_amount=write_off_amount,
+            remaining_outstanding_amount=remaining,
+            collection_write_off_status=collection_write_off.collection_write_off_status,
+            written_off_at=collection_write_off.written_off_at,
+        )
+        self.collection_write_offs[persisted.collection_write_off_id] = persisted
+        self.collection_write_off_index[identity_key] = persisted.collection_write_off_id
+        return persisted
+
+    def apply_collection_write_off(
+        self, collection_case_id: UUID, write_off_amount: Decimal
+    ) -> StoredCollectionCase:
+        """Zero leftover outstanding without flipping the case to settled.
+
+        This is the commercial write-off balance update.  #46 remains the
+        explicit settle-when-zero command.  Status stays ``open`` or
+        ``dunning``.
+        """
+        stored = self.collection_cases.get(collection_case_id)
+        if stored is None:
+            raise ValueError("collection write-off requires a stored collection case")
+        amount = parse_exact_decimal(format_exact_decimal(write_off_amount))
+        if amount <= 0:
+            raise ValueError("collection write-off amount must be a positive exact decimal")
+        if stored.collection_case_status == "settled":
+            raise ValueError("settled collection cases cannot accept a write-off")
+        remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+        if remaining != amount:
+            raise ValueError("collection write-off amount must equal remaining outstanding")
+        updated = StoredCollectionCase(
+            collection_case_id=stored.collection_case_id,
+            tenant_account_id=stored.tenant_account_id,
+            invoice_draft_id=stored.invoice_draft_id,
+            currency_code=stored.currency_code,
+            collection_case_status=stored.collection_case_status,
+            outstanding_amount=Decimal("0"),
+            opened_at=stored.opened_at,
+        )
+        self.collection_cases[updated.collection_case_id] = updated
+        return updated
 
     def mark_collection_case_settled(self, collection_case_id: UUID) -> StoredCollectionCase:
         """Flip an exact-zero case to ``settled`` without changing outstanding.

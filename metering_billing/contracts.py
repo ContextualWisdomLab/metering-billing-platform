@@ -50,6 +50,8 @@ __all__ = (
     "CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_SETTLEMENT_SCHEMA_NAME",
     "COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_WRITE_OFF_SCHEMA_NAME",
+    "COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -86,6 +88,8 @@ __all__ = (
     "validate_credit_note_application_presentment",
     "validate_collection_case_settlement",
     "validate_collection_case_settlement_presentment",
+    "validate_collection_write_off",
+    "validate_collection_write_off_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -144,6 +148,10 @@ CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME = (
 COLLECTION_CASE_SETTLEMENT_SCHEMA_NAME = "collection-case-settlement.schema.json"
 COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME = (
     "collection-case-settlement-presentment.schema.json"
+)
+COLLECTION_WRITE_OFF_SCHEMA_NAME = "collection-write-off.schema.json"
+COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME = (
+    "collection-write-off-presentment.schema.json"
 )
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
@@ -1577,6 +1585,119 @@ def validate_collection_case_settlement_presentment(
         if forbidden_name in statement:
             errors.append(
                 f"$: collection-case settlement presentment must not include {forbidden_name}"
+            )
+    return tuple(errors)
+
+
+def validate_collection_write_off(
+    write_off: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate write-off shape plus exact remaining and amount invariants.
+
+    Accepted and replayed write-offs must carry the case, invoice draft,
+    currency, positive write-off amount, exact-zero remaining, and
+    written-off timestamp. Rejections must carry a closed reason and must
+    not invent a legal number or settlement.
+    """
+    schema = load_json_schema(COLLECTION_WRITE_OFF_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, write_off))
+    if not isinstance(write_off, Mapping):
+        return tuple(errors)
+    outcome = write_off.get("collection_write_off_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        for field_name in (
+            "collection_write_off_id",
+            "collection_case_id",
+            "invoice_draft_id",
+            "currency_code",
+            "write_off_amount",
+            "remaining_outstanding_amount",
+            "written_off_at",
+        ):
+            if field_name not in write_off:
+                errors.append(f"$: {outcome} write-offs must include {field_name}")
+        remaining = write_off.get("remaining_outstanding_amount")
+        if isinstance(remaining, str):
+            try:
+                if Decimal(remaining) != Decimal("0"):
+                    errors.append("$: remaining_outstanding_amount must be exact zero")
+            except Exception:
+                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+        elif remaining is not None:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+        write_off_amount = write_off.get("write_off_amount")
+        if isinstance(write_off_amount, str):
+            try:
+                if Decimal(write_off_amount) <= Decimal("0"):
+                    errors.append("$: write_off_amount must be a positive exact decimal")
+            except Exception:
+                errors.append("$: write_off_amount must be an exact decimal")
+        elif write_off_amount is not None:
+            errors.append("$: write_off_amount must be an exact decimal")
+        for forbidden_name in (
+            "legal_credit_note_number",
+            "legal_invoice_number",
+            "card_pan",
+        ):
+            if forbidden_name in write_off:
+                errors.append(f"$: write-offs must not include {forbidden_name}")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in write_off:
+            errors.append("$: rejected write-offs must include rejection_reason_code")
+        if "legal_invoice_number" in write_off:
+            errors.append("$: rejected write-offs must not invent legal numbers")
+        if "legal_credit_note_number" in write_off:
+            errors.append("$: rejected write-offs must not invent legal numbers")
+    else:
+        if outcome is not None:
+            errors.append("$: unknown collection_write_off_outcome_code")
+    return tuple(errors)
+
+
+def validate_collection_write_off_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate write-off presentment plus exact remaining and amount invariants."""
+    schema = load_json_schema(
+        COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    remaining = statement.get("remaining_outstanding_amount")
+    action = statement.get("next_operator_action")
+    if remaining is None:
+        errors.append("$: remaining_outstanding_amount is required")
+    elif isinstance(remaining, str):
+        try:
+            if Decimal(remaining) != Decimal("0"):
+                errors.append("$: remaining_outstanding_amount must be exact zero")
+            if Decimal(remaining) == Decimal("0") and action != "settle":
+                errors.append("$: write-off presentment must settle")
+        except Exception:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    else:
+        errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    write_off_amount = statement.get("write_off_amount")
+    if write_off_amount is None:
+        errors.append("$: write_off_amount is required")
+    elif isinstance(write_off_amount, str):
+        try:
+            if Decimal(write_off_amount) <= Decimal("0"):
+                errors.append("$: write_off_amount must be a positive exact decimal")
+        except Exception:
+            errors.append("$: write_off_amount must be an exact decimal")
+    else:
+        errors.append("$: write_off_amount must be an exact decimal")
+    for forbidden_name in (
+        "legal_credit_note_number",
+        "legal_invoice_number",
+        "collection_write_off_outcome_code",
+        "card_pan",
+    ):
+        if forbidden_name in statement:
+            errors.append(
+                f"$: collection write-off presentment must not include {forbidden_name}"
             )
     return tuple(errors)
 

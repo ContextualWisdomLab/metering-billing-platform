@@ -217,6 +217,19 @@ contextual-orchestrator usage
 - Payment-receipt, credit-note-application, collection-open, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. Implicit #12/#17/#45 settle-when-zero on positive apply paths stays. First successful settle enqueues one existing #24 `collection.settled` outbox event. HMAC, SSRF, and delivery contracts stay unchanged. Cases already settled by #12/#45 without a settlement row are not backfilled.
 - Operators settle the zero-outstanding case, then wait. `operator_console` Storybook adds one `CollectionCaseSettlement` story. There is no login wall, Stripe, AIS call, or production SPA.
 
+## Collection-write-off acceptance
+
+- A known stored open collection case whose remaining outstanding is strictly positive writes off once and zeros remaining without flipping status.
+- A second write-off of the same tenant and `collection_case_id` returns the same `collection_write_off_id` as `duplicate_replay` and never re-zeros outstanding.
+- `collection_write_off_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment receipt, credit note, settlement command, AIS call, or a webhook event.
+- Missing case, already-settled case, remaining already zero, negative remaining, currency mismatch, and a supplied amount that does not equal remaining fail closed. Body may omit amount.
+- `POST /v1/collection-cases/{collection_case_id}/write-offs` is the nested write-off command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
+- A known stored write-off presents one tenant-scoped statement with identity, exact write-off amount, exact-zero remaining, `written_off_at`, and `next_operator_action` (`settle`).
+- `GET /v1/collection-write-offs/{collection_write_off_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/collection-write-offs` lists summaries as `{collection_write_offs, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{written_off_at}|{collection_write_off_id}`.
+- Payment-receipt, issued-credit-note, credit-note-application, collection-settlement, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. #46 remains the explicit settle-when-zero command.
+- Operators write off leftover remaining, then settle. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
+
 ## Tenant-API-credential acceptance
 
 - An operator can issue one append-only `tenant_api_credential` for a known tenant. The secret is returned once (prefix plus secret). The ledger stores only a keyed HMAC.

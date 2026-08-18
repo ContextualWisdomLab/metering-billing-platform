@@ -295,6 +295,35 @@ class CollectionCaseSettlementPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class CollectionWriteOffOutcomeCode(StrEnum):
+    """Terminal result of writing off leftover collection remaining."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class CollectionWriteOffRejectionReasonCode(StrEnum):
+    """Why a write-off request was refused without changing outstanding."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
+    COLLECTION_CASE_SETTLED = "collection_case_settled"
+    OUTSTANDING_ALREADY_ZERO = "outstanding_already_zero"
+    OUTSTANDING_NEGATIVE = "outstanding_negative"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    WRITE_OFF_AMOUNT_MISMATCH = "write_off_amount_mismatch"
+    REQUEST_INVALID = "request_invalid"
+
+
+class CollectionWriteOffPresentmentQueryError(ValueError):
+    """Raised when a stored collection write-off cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class CreditNoteApplicationPresentmentQueryError(ValueError):
     """Raised when a stored credit-note application cannot be authorized or presented."""
 

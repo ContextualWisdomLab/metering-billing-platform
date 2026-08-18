@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-write-off/v1",
+  "title": "Collection Write Off",
+  "description": "Append-only commercial write-off of leftover remaining on one same-tenant collection case. remaining_outstanding_amount must be exact zero after the write-off. Replays acknowledge the stored collection_write_off_id and never re-zero outstanding. The document is not a payment receipt, credit note, settlement, tax unwind, journal, webhook event, or AIS posting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "collection_write_off_contract_version",
+    "collection_write_off_outcome_code"
+  ],
+  "properties": {
+    "collection_write_off_contract_version": {"type": "integer", "minimum": 1},
+    "collection_write_off_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "collection_write_off_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "issued_invoice_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "write_off_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "collection_write_off_status": {"type": "string", "enum": ["recorded"]},
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled"]
+    },
+    "written_off_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "collection_case_not_found",
+        "collection_case_settled",
+        "outstanding_already_zero",
+        "outstanding_negative",
+        "currency_mismatch",
+        "write_off_amount_mismatch",
+        "request_invalid"
+      ]
+    }
+  }
+}

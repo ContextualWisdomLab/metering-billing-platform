@@ -91,6 +91,14 @@ The application is a thin WSGI adapter:
     one existing ``collection.settled`` outbox event.  GET item and list
     present the stored settlement.  Do not invent a journal, tax unwind,
     write-off, statutory numbering, or payment capture.
+    ``POST /v1/collection-cases/{collection_case_id}/write-offs``
+    writes off leftover remaining outstanding on one same-tenant open
+    case.  Replay of the same tenant and case returns the stored
+    ``collection_write_off_id`` and never re-zeros outstanding.  GET
+    item and list present the stored write-off.  Do not invent a
+    journal, tax unwind, settlement, statutory numbering, payment
+    capture, AIS call, or webhook event.  After write-off, #46 can
+    settle at exact zero.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -141,6 +149,7 @@ from metering_billing.errors import (
     IssuedCreditNotePresentmentQueryError,
     CreditNoteApplicationPresentmentQueryError,
     CollectionCaseSettlementPresentmentQueryError,
+    CollectionWriteOffPresentmentQueryError,
     TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
@@ -167,6 +176,11 @@ from metering_billing.collection_case_settlement import CollectionCaseSettlement
 from metering_billing.collection_case_settlement_presentment import (
     CollectionCaseSettlementPresentmentService,
 )
+from metering_billing.collection_write_off import CollectionWriteOffService
+from metering_billing.collection_write_off_presentment import (
+    CollectionWriteOffPresentmentService,
+)
+from metering_billing.exact_decimal import parse_exact_decimal
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
@@ -275,6 +289,13 @@ COLLECTION_CASE_SETTLEMENT_COLLECTION_PATH = "/v1/collection-case-settlements"
 COLLECTION_CASE_SETTLEMENT_ITEM_PATH = re.compile(
     r"^/v1/collection-case-settlements/([0-9a-fA-F-]{36})$"
 )
+COLLECTION_WRITE_OFF_NESTED_PATH = re.compile(
+    r"^/v1/collection-cases/([0-9a-fA-F-]{36})/write-offs$"
+)
+COLLECTION_WRITE_OFF_COLLECTION_PATH = "/v1/collection-write-offs"
+COLLECTION_WRITE_OFF_ITEM_PATH = re.compile(
+    r"^/v1/collection-write-offs/([0-9a-fA-F-]{36})$"
+)
 TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
 TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
     r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})/revoke$"
@@ -337,6 +358,10 @@ def create_http_app(
     )
     collection_case_settlements = CollectionCaseSettlementService(shared_ledger)
     collection_case_settlement_presentments = CollectionCaseSettlementPresentmentService(
+        shared_ledger
+    )
+    collection_write_offs = CollectionWriteOffService(shared_ledger)
+    collection_write_off_presentments = CollectionWriteOffPresentmentService(
         shared_ledger
     )
     exports = AccountingExportService(shared_ledger)
@@ -1339,6 +1364,79 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_collection_write_offs",
+            "get_collection_write_off",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_collection_write_offs":
+                    page = collection_write_off_presentments.list_collection_write_offs(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = collection_write_off_presentments.present_collection_write_off(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["collection_write_off_id"],
+                        "collection_write_off_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except CollectionWriteOffPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "collection_write_off_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "collection_write_offs":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                raw_amount = payload.get("write_off_amount")
+                parsed_amount = None
+                if raw_amount is not None:
+                    if not isinstance(raw_amount, str):
+                        raise HttpRequestError("request_invalid")
+                    parsed_amount = parse_exact_decimal(raw_amount)
+                currency_code = payload.get("currency_code")
+                if currency_code is not None and not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                result = collection_write_offs.write_off_collection_case(
+                    tenant_reference,
+                    _parse_uuid(path_values["collection_case_id"], "collection_case_id"),
+                    write_off_amount=parsed_amount,
+                    currency_code=currency_code,
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_credit_notes":
             try:
                 payload = _read_json_object(environ)
@@ -1523,6 +1621,24 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
                 "collection_case_id": settlement_nested.group(1)
             }
         return "http_method_not_allowed", {}
+    write_off_nested = COLLECTION_WRITE_OFF_NESTED_PATH.fullmatch(path)
+    if write_off_nested is not None:
+        if method == "POST":
+            return "collection_write_offs", {
+                "collection_case_id": write_off_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    if path == COLLECTION_WRITE_OFF_COLLECTION_PATH:
+        if method == "GET":
+            return "list_collection_write_offs", {}
+        return "method_not_allowed", {}
+    write_off_match = COLLECTION_WRITE_OFF_ITEM_PATH.fullmatch(path)
+    if write_off_match is not None:
+        if method == "GET":
+            return "get_collection_write_off", {
+                "collection_write_off_id": write_off_match.group(1)
+            }
+        return "method_not_allowed", {}
     if path == COLLECTION_CASE_SETTLEMENT_COLLECTION_PATH:
         if method == "GET":
             return "list_collection_case_settlements", {}
