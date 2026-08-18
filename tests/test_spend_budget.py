@@ -468,6 +468,7 @@ class SpendBudgetTests(unittest.TestCase):
         self.assertEqual(presentment.budget_amount, BUDGET_AMOUNT)
         self.assertEqual(presentment.next_operator_action, "wait")
         self.assertEqual(validate_spend_budget_presentment(presentment.as_contract_dict()), ())
+        ledger.register_tenant(TENANT_TWO)
         app = create_http_app(ledger)
         missing_status, missing_body = invoke_http(
             app, "GET", f"/v1/spend-budgets/{accepted.spend_budget_id}"

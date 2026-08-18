@@ -1383,6 +1383,27 @@ class RepositoryContractTests(unittest.TestCase):
             "$.rejection_reason_code: value is not in the allowed enumeration",
             validate_schema_instance(schema, unknown_reason),
         )
+        replayed = dict(instance, spend_budget_outcome_code="duplicate_replay")
+        self.assertEqual(validate_spend_budget(replayed), ())
+        rejected_known = {
+            "spend_budget_contract_version": 1,
+            "spend_budget_outcome_code": "rejected",
+            "rejection_reason_code": "tenant_not_found",
+        }
+        self.assertEqual(validate_spend_budget(rejected_known), ())
+        non_string_amount = dict(instance, budget_amount=100)
+        self.assertNotEqual(validate_spend_budget(non_string_amount), ())
+        unpublished = dict(instance)
+        unpublished.pop("spend_budget_status")
+        self.assertIn(
+            "$: accepted spend budgets must include spend_budget_status",
+            validate_spend_budget(unpublished),
+        )
+        posted_outcome = {
+            "spend_budget_contract_version": 1,
+            "spend_budget_outcome_code": "posted",
+        }
+        self.assertNotEqual(validate_spend_budget(posted_outcome), ())
 
     def test_spend_budget_presentment_accepts_published_row_and_rejects_posted(self) -> None:
         """A spend-budget statement records exact amounts and cannot claim posting."""
@@ -1450,6 +1471,8 @@ class RepositoryContractTests(unittest.TestCase):
             "$: spend budget presentment must not include card_pan",
             validate_spend_budget_presentment(pan_presentment),
         )
+        non_string_presentment = dict(instance, budget_amount=100)
+        self.assertNotEqual(validate_spend_budget_presentment(non_string_presentment), ())
 
     def test_spend_budget_migration_is_tenant_scoped_and_append_only(self) -> None:
         """Spend-budget rows stay tenant-scoped and append-only."""
