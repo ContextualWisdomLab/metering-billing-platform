@@ -169,6 +169,93 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(taxed_envelope["data"]["tax_inclusive_amount"], "110.00")
         self.assertNotIn("issued_invoice_lines", taxed_envelope["data"])
 
+    def test_presentment_exposes_stored_tax_assessment_id_without_inventing_amounts(
+        self,
+    ) -> None:
+        """Item GET links a matching stored assessment; list and later assess omit it."""
+        untaxed_ledger, untaxed_draft_id = draft_known_morning()
+        untaxed = IssuedInvoiceService(
+            untaxed_ledger, clock=lambda: ISSUED_MORNING
+        ).issue_invoice(TENANT_ONE, untaxed_draft_id)
+        untaxed_presented = IssuedInvoicePresentmentService(
+            untaxed_ledger
+        ).present_issued_invoice(TENANT_ONE, untaxed.issued_invoice_id)
+        untaxed_payload = untaxed_presented.as_contract_dict()
+        self.assertEqual(validate_issued_invoice_presentment(untaxed_payload), ())
+        self.assertNotIn("tax_assessment_id", untaxed_payload)
+        self.assertNotIn("legal_invoice_number", untaxed_payload)
+        self.assertNotIn("vat_register_id", untaxed_payload)
+        self.assertNotIn("tax_invoice_number", untaxed_payload)
+        self.assertNotIn("nts_approval_number", untaxed_payload)
+        self.assertNotIn("hometax_document_id", untaxed_payload)
+        self.assertNotIn("세금계산서", json.dumps(untaxed_payload))
+        later_assess_ledger = seed_rated_ledger()
+        later_draft_id = insert_commercial_draft(
+            later_assess_ledger, TENANT_ONE, "USD", HUNDRED
+        )
+        later_issued = IssuedInvoiceService(
+            later_assess_ledger, clock=lambda: ISSUED_MORNING
+        ).issue_invoice(TENANT_ONE, later_draft_id)
+        TaxRateService(later_assess_ledger).publish_tax_rate(
+            TENANT_ONE, "vat", STANDARD_TAX_RATE
+        )
+        later_assessed = TaxAssessmentService(later_assess_ledger).assess_tax(
+            TENANT_ONE, later_draft_id, 1
+        )
+        self.assertIsNotNone(later_assessed.tax_assessment_id)
+        later_presented = IssuedInvoicePresentmentService(
+            later_assess_ledger
+        ).present_issued_invoice(TENANT_ONE, later_issued.issued_invoice_id)
+        self.assertEqual(later_presented.tax_exclusive_amount, HUNDRED)
+        self.assertEqual(later_presented.tax_amount, Decimal("0"))
+        self.assertNotIn("tax_assessment_id", later_presented.as_contract_dict())
+        taxed_ledger = seed_rated_ledger()
+        TaxRateService(taxed_ledger).publish_tax_rate(TENANT_ONE, "vat", STANDARD_TAX_RATE)
+        taxed_draft_id = insert_commercial_draft(taxed_ledger, TENANT_ONE, "USD", HUNDRED)
+        assessed = TaxAssessmentService(taxed_ledger).assess_tax(
+            TENANT_ONE, taxed_draft_id, 1
+        )
+        taxed = IssuedInvoiceService(
+            taxed_ledger, clock=lambda: ISSUED_MORNING
+        ).issue_invoice(TENANT_ONE, taxed_draft_id, due_at=DUE_AT)
+        presented = IssuedInvoicePresentmentService(taxed_ledger).present_issued_invoice(
+            TENANT_ONE, taxed.issued_invoice_id
+        )
+        self.assertEqual(presented.tax_assessment_id, assessed.tax_assessment_id)
+        self.assertEqual(presented.tax_exclusive_amount, HUNDRED)
+        self.assertEqual(presented.tax_amount, Decimal("10.00"))
+        self.assertEqual(presented.tax_inclusive_amount, Decimal("110.00"))
+        payload = presented.as_contract_dict()
+        self.assertEqual(payload["tax_assessment_id"], str(assessed.tax_assessment_id))
+        self.assertEqual(payload["tax_inclusive_amount"], "110.00")
+        self.assertEqual(validate_issued_invoice_presentment(payload), ())
+        self.assertNotIn("legal_invoice_number", payload)
+        self.assertNotIn("vat_register_id", payload)
+        self.assertNotIn("tax_invoice_number", payload)
+        self.assertNotIn("nts_approval_number", payload)
+        self.assertNotIn("hometax_document_id", payload)
+        app = create_http_app(taxed_ledger)
+        get_status, get_body = invoke_http(
+            app,
+            "GET",
+            f"/v1/issued-invoices/{taxed.issued_invoice_id}",
+            query={"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(get_status, 200)
+        self.assertEqual(get_body["tax_assessment_id"], str(assessed.tax_assessment_id))
+        self.assertEqual(get_body["tax_inclusive_amount"], "110.00")
+        self.assertEqual(validate_issued_invoice_presentment(get_body), ())
+        list_status, list_body = invoke_http(
+            app,
+            "GET",
+            "/v1/issued-invoices",
+            query={"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(list_status, 200)
+        self.assertEqual(len(list_body["issued_invoices"]), 1)
+        self.assertNotIn("tax_assessment_id", list_body["issued_invoices"][0])
+        self.assertEqual(len(taxed_ledger.journal_proposals), 0)
+
     def test_http_issue_get_and_paged_list_without_capture(self) -> None:
         """POST issues; GET item and list page metadata and never capture payment."""
         ledger, first_draft_id = draft_known_morning()
@@ -223,6 +310,7 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(get_body["invoice_draft_id"], str(first_draft_id))
         self.assertEqual(get_body["next_operator_action"], "collect")
         self.assertNotIn("issued_invoice_outcome_code", get_body)
+        self.assertNotIn("tax_assessment_id", get_body)
         self.assertEqual(validate_issued_invoice_presentment(get_body), ())
         header_status, header_body = invoke_http(
             app,
@@ -635,6 +723,15 @@ class IssuedInvoiceTests(unittest.TestCase):
         )
         self.assertEqual(presented.due_at, DUE_AT)
         self.assertEqual(presented.as_contract_dict()["due_at"], "2026-09-16T21:00:00Z")
+        assessed = taxed_ledger.find_tax_assessment_for_draft(
+            taxed_ledger.resolve_tenant(TENANT_ONE)[0].tenant_account_id,
+            taxed_draft_id,
+        )
+        assert assessed is not None
+        self.assertEqual(
+            presented.as_contract_dict()["tax_assessment_id"],
+            str(assessed.tax_assessment_id),
+        )
         none_reason = rejected.__class__(
             issued_invoice_outcome_code=IssuedInvoiceOutcomeCode.REJECTED,
             issued_invoice_contract_version=1,

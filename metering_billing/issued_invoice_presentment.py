@@ -4,7 +4,8 @@ The service is a read path:
 
 1. Resolve the tenant.
 2. Load that tenant's stored ``issued_invoice``.
-3. Project identity, draft source, frozen totals, and the next action.
+3. Project identity, draft source, frozen totals, optional matching
+   tax_assessment_id, and the next action.
 4. Return the snapshot.  Do not reissue, collect, credit, or call AIS.
 
 RFC 9110 treats GET as a safe, idempotent read (Fielding et al., 2022).
@@ -23,7 +24,11 @@ from metering_billing.errors import IssuedInvoicePresentmentQueryError
 from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.issued_invoice import OPERATOR_ACTION_COLLECT
 from metering_billing.time_window import parse_iso8601_datetime
-from metering_billing.usage_ledger import MemoryUsageLedger, StoredIssuedInvoice
+from metering_billing.usage_ledger import (
+    MemoryUsageLedger,
+    StoredIssuedInvoice,
+    StoredTaxAssessment,
+)
 
 
 ISSUED_INVOICE_PRESENTMENT_CONTRACT_VERSION = 1
@@ -63,7 +68,11 @@ class IssuedInvoicePresentmentLine:
 
 @dataclass(frozen=True)
 class IssuedInvoicePresentmentResult:
-    """Buyer-facing projection of one stored issued invoice."""
+    """Buyer-facing projection of one stored issued invoice.
+
+    ``tax_assessment_id`` is the stored commercial assessment whose
+    exclusive, tax, and inclusive amounts still match this snapshot.
+    """
 
     issued_invoice_id: UUID
     tenant_reference: str
@@ -81,6 +90,7 @@ class IssuedInvoicePresentmentResult:
     issued_invoice_contract_version: int
     next_operator_action: str
     issued_invoice_lines: tuple[IssuedInvoicePresentmentLine, ...]
+    tax_assessment_id: UUID | None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the closed JSON object published in the presentment schema."""
@@ -108,6 +118,8 @@ class IssuedInvoicePresentmentResult:
         }
         if self.due_at is not None:
             payload["due_at"] = _format_issued_at(self.due_at)
+        if self.tax_assessment_id is not None:
+            payload["tax_assessment_id"] = str(self.tax_assessment_id)
         return payload
 
     def as_summary_dict(self) -> dict[str, object]:
@@ -149,7 +161,7 @@ class IssuedInvoicePresentmentService:
         """Return one same-tenant stored snapshot, or fail closed.
 
         A missing or cross-tenant identifier is indistinguishable.  The read
-        does not reissue, collect, credit, or call AIS.
+        does not reissue, collect, credit, invent amounts, or call AIS.
         """
         tenant = self._require_tenant(tenant_reference)
         stored = self.ledger.get_issued_invoice(issued_invoice_id)
@@ -207,6 +219,9 @@ class IssuedInvoicePresentmentService:
         self, tenant_reference: str, stored: StoredIssuedInvoice
     ) -> IssuedInvoicePresentmentResult:
         """Project one stored snapshot using only persisted commercial fields."""
+        assessment = self.ledger.find_tax_assessment_for_draft(
+            stored.tenant_account_id, stored.invoice_draft_id
+        )
         return IssuedInvoicePresentmentResult(
             issued_invoice_id=stored.issued_invoice_id,
             tenant_reference=tenant_reference,
@@ -235,7 +250,33 @@ class IssuedInvoicePresentmentService:
                 )
                 for line in stored.issued_invoice_lines
             ),
+            tax_assessment_id=_matching_tax_assessment_id(assessment, stored),
         )
+
+
+def _matching_tax_assessment_id(
+    assessment: StoredTaxAssessment | None, stored: StoredIssuedInvoice
+) -> UUID | None:
+    """Return the stored assessment id only when frozen issued totals still match.
+
+    A later assessment on the same draft is not the source of the issued
+    snapshot.  The read does not copy assessment amounts onto the invoice.
+    """
+    if assessment is None:
+        return None
+    issued_totals = (
+        stored.tax_exclusive_amount,
+        stored.tax_amount,
+        stored.tax_inclusive_amount,
+    )
+    assessed_totals = (
+        assessment.tax_exclusive_amount,
+        assessment.tax_amount,
+        assessment.tax_inclusive_amount,
+    )
+    if issued_totals != assessed_totals:
+        return None
+    return assessment.tax_assessment_id
 
 
 def _format_issued_at(issued_at: datetime) -> str:

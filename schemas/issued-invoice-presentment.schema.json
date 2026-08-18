@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.contextualwisdomlab.org/metering-billing/issued-invoice-presentment/v1",
   "title": "Issued Invoice Presentment",
-  "description": "Tenant-scoped commercial issued-invoice statement projected from a stored issued_invoice. Amounts are exact-decimal strings. Next operator action is collect. The document is not a statutory invoice, tax invoice certificate, or AIS posting and does not invent sequential legal numbering.",
+  "description": "Tenant-scoped commercial issued-invoice statement projected from a stored issued_invoice. Amounts are exact-decimal strings. Optional tax_assessment_id is the stored commercial assessment whose totals still match the frozen issued amounts. Next operator action is collect. The document is not a statutory invoice, tax invoice certificate, VAT register, NTS or hometax document, or AIS posting and does not invent sequential legal numbering.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -49,6 +49,7 @@
     "issued_invoice_status": {"type": "string", "enum": ["issued"]},
     "issued_at": {"type": "string", "format": "date-time"},
     "due_at": {"type": "string", "format": "date-time"},
+    "tax_assessment_id": {"type": "string", "format": "uuid"},
     "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "issued_invoice_contract_version": {"type": "integer", "minimum": 1},
     "next_operator_action": {
