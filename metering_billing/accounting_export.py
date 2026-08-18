@@ -1,11 +1,12 @@
-"""Accounting journal proposals produced from stored drafts, receipts, credits, write-offs, leftover refunds, and parked leftover.
+"""Accounting journal proposals produced from stored drafts, receipts, credits, write-offs, leftover refunds, parked leftover, and leftover applies.
 
 The service is the buyer-facing export path:
 
 1. Resolve the tenant.
 2. Load that tenant's stored ``invoice_draft``, ``payment_receipt``,
    ``credit_adjustment``, ``collection_write_off``,
-   ``unapplied_cash_refund``, or ``unapplied_cash``.
+   ``unapplied_cash_refund``, ``unapplied_cash``, or
+   ``unapplied_cash_application``.
 3. Copy the exact commercial amount into one balanced debit and credit pair.
 4. Replay the same tenant, source identity, payload hash, and contract version.
 
@@ -45,6 +46,7 @@ from metering_billing.usage_ledger import (
     StoredPaymentReceipt,
     StoredTaxAssessment,
     StoredUnappliedCash,
+    StoredUnappliedCashApplication,
     StoredUnappliedCashRefund,
     generate_record_id,
 )
@@ -137,6 +139,7 @@ class JournalProposalResult:
     credit_adjustment_id: UUID | None = None
     unapplied_cash_refund_id: UUID | None = None
     unapplied_cash_id: UUID | None = None
+    unapplied_cash_application_id: UUID | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the published proposal, or a sparse rejected operational result."""
@@ -696,6 +699,103 @@ class AccountingExportService:
         )
         return result
 
+    def propose_unapplied_cash_application_journal(
+        self,
+        tenant_reference: str,
+        unapplied_cash_application_id: UUID,
+        currency_code: str | None = None,
+    ) -> JournalProposalResult:
+        """Propose one balanced unapplied-cash/AR journal from a leftover apply.
+
+        A replay of the same tenant and ``unapplied_cash_application_id``
+        returns the stored ``proposal_id``.  Another tenant cannot see or
+        propose from that application.  Leftover, apply, refund, and cash
+        facts are not changed.  AIS next pulls validated proposals; this
+        service never posts.
+        """
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
+        if tenant_error is not None:
+            return _rejected(JournalProposalRejectionReasonCode.TENANT_NOT_FOUND)
+        tenant = require_resolved(tenant, "tenant")
+
+        existing = self.ledger.find_journal_proposal_for_unapplied_cash_application(
+            tenant.tenant_account_id, unapplied_cash_application_id
+        )
+        if existing is not None:
+            return _from_stored(
+                existing, tenant.tenant_reference, JournalProposalOutcomeCode.DUPLICATE_REPLAY
+            )
+
+        application = self.ledger.get_unapplied_cash_application(unapplied_cash_application_id)
+        if application is None or application.tenant_account_id != tenant.tenant_account_id:
+            return _rejected(JournalProposalRejectionReasonCode.UNAPPLIED_CASH_APPLICATION_NOT_FOUND)
+        if currency_code is not None and currency_code != application.currency_code:
+            return _rejected(JournalProposalRejectionReasonCode.CURRENCY_MISMATCH)
+
+        try:
+            applied_amount = parse_proposal_amount(application.applied_amount)
+        except ExactDecimalError:
+            return _rejected(JournalProposalRejectionReasonCode.APPLIED_AMOUNT_INVALID)
+        if applied_amount <= 0:
+            return _rejected(JournalProposalRejectionReasonCode.APPLIED_AMOUNT_INVALID)
+
+        commercial_date = application.applied_at.astimezone(UTC).date().isoformat()
+        legal_entity_reference = f"{tenant.tenant_reference}:legal_entity:commercial"
+        source_event_reference = (
+            f"{tenant.tenant_reference}:unapplied_cash_application:"
+            f"{application.unapplied_cash_application_id}"
+        )
+        canonical_payload = _canonical_unapplied_cash_application_proposal_payload(
+            tenant_reference=tenant.tenant_reference,
+            application=application,
+            applied_amount=applied_amount,
+            commercial_date=commercial_date,
+            legal_entity_reference=legal_entity_reference,
+            source_event_reference=source_event_reference,
+        )
+        source_payload_hash = compute_proposal_payload_hash(canonical_payload)
+        journal_proposal_id = generate_record_id()
+        stored_lines = _build_unapplied_cash_application_proposal_lines(
+            journal_proposal_id,
+            tenant.tenant_account_id,
+            applied_amount,
+        )
+        stored = self.ledger.insert_journal_proposal(
+            StoredJournalProposal(
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant.tenant_account_id,
+                invoice_draft_id=application.invoice_draft_id,
+                proposal_contract_version=PROPOSAL_CONTRACT_VERSION,
+                idempotency_key=(
+                    f"{tenant.tenant_reference}:unapplied_cash_application:"
+                    f"{application.unapplied_cash_application_id}"
+                    f":{source_payload_hash}:v{PROPOSAL_CONTRACT_VERSION}"
+                ),
+                legal_entity_reference=legal_entity_reference,
+                intended_book_role_code=INTENDED_BOOK_ROLE_CODE,
+                transaction_currency=application.currency_code,
+                transaction_date=commercial_date,
+                accounting_date=commercial_date,
+                source_payload_hash=source_payload_hash,
+                proposed_at=self._clock(),
+                proposal_status=PROPOSAL_STATUS,
+                source_event_reference=source_event_reference,
+                proposal_lines=stored_lines,
+                unapplied_cash_application_id=application.unapplied_cash_application_id,
+            ),
+            stored_lines,
+        )
+        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            stored.journal_proposal_id,
+            result.as_contract_dict(),
+            stored.proposed_at,
+        )
+        return result
+
     def propose_credit_journal(
         self,
         tenant_reference: str,
@@ -1007,6 +1107,73 @@ def _canonical_refund_proposal_payload(
     }
 
 
+def _canonical_unapplied_cash_application_proposal_payload(
+    tenant_reference: str,
+    application: StoredUnappliedCashApplication,
+    applied_amount: Decimal,
+    commercial_date: str,
+    legal_entity_reference: str,
+    source_event_reference: str,
+) -> dict[str, object]:
+    """Return leftover-apply-proposal facts excluding identifiers and timestamps."""
+    amount_text = format_exact_decimal(applied_amount)
+    return {
+        "proposal_contract_version": PROPOSAL_CONTRACT_VERSION,
+        "tenant_reference": tenant_reference,
+        "unapplied_cash_application_id": str(application.unapplied_cash_application_id),
+        "legal_entity_reference": legal_entity_reference,
+        "intended_book_role_code": INTENDED_BOOK_ROLE_CODE,
+        "transaction_currency": application.currency_code,
+        "transaction_date": commercial_date,
+        "accounting_date": commercial_date,
+        "proposal_status": PROPOSAL_STATUS,
+        "source_event_references": [source_event_reference],
+        "lines": [
+            {
+                "line_number": 1,
+                "account_role_code": UNAPPLIED_CASH_ACCOUNT_ROLE_CODE,
+                "debit_amount": amount_text,
+                "credit_amount": "0",
+            },
+            {
+                "line_number": 2,
+                "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
+                "debit_amount": "0",
+                "credit_amount": amount_text,
+            },
+        ],
+    }
+
+
+def _build_unapplied_cash_application_proposal_lines(
+    journal_proposal_id: UUID,
+    tenant_account_id: UUID,
+    applied_amount: Decimal,
+) -> tuple[StoredJournalProposalLine, ...]:
+    """Build the unapplied-cash debit and receivable credit for one leftover apply."""
+    amount = parse_proposal_amount(applied_amount)
+    return (
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=1,
+            account_role_code=UNAPPLIED_CASH_ACCOUNT_ROLE_CODE,
+            debit_amount=amount,
+            credit_amount=Decimal("0"),
+        ),
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=2,
+            account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
+            debit_amount=Decimal("0"),
+            credit_amount=amount,
+        ),
+    )
+
+
 def _canonical_unapplied_cash_proposal_payload(
     tenant_reference: str,
     leftover: StoredUnappliedCash,
@@ -1294,6 +1461,7 @@ def _from_stored(
         credit_adjustment_id=stored.credit_adjustment_id,
         unapplied_cash_refund_id=stored.unapplied_cash_refund_id,
         unapplied_cash_id=stored.unapplied_cash_id,
+        unapplied_cash_application_id=stored.unapplied_cash_application_id,
     )
 
 

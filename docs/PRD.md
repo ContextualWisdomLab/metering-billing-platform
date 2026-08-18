@@ -331,7 +331,7 @@ contextual-orchestrator usage
 - `GET /v1/unapplied-cash-applications/{unapplied_cash_application_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/unapplied-cash-applications` lists summaries as `{unapplied_cash_applications, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{applied_at}|{unapplied_cash_application_id}`.
 - Missing tenant, illegal cursor, and illegal page_limit fail closed.
-- Operators apply parked leftover, then collect the residual or settle at exact zero. First successful apply enqueues one existing #24 `unapplied_cash.applied` outbox event. HTTP does not auto-settle, capture cards, write a journal, or call AIS.
+- Operators apply parked leftover, then collect the residual or settle at exact zero. First successful apply enqueues one existing #24 `unapplied_cash.applied` outbox event. HTTP does not auto-settle, capture cards, or call AIS. Journal compose is an explicit later command.
 
 ## Unapplied-cash-refund acceptance
 
@@ -363,6 +363,16 @@ contextual-orchestrator usage
 - Leftover, refund, and payment-receipt rows are not changed. Status stays inside the proposal lifecycle and is never `posted`. AIS pulls validated proposals through existing GET journal-proposal routes.
 - `POST /v1/unapplied-cash/{unapplied_cash_id}/journal-proposals` is the explicit compose because #54 shipped without compose. PAN, CVC, and provider secrets are refused.
 - Invoice-draft, cash, credit, write-off, refund-journal, and payment-receipt contracts stay unchanged.
+
+## Unapplied-cash-application-journal acceptance
+
+- A known stored leftover apply produces one balanced exact-decimal `accounting_journal_proposal` that debits `unapplied_cash` and credits `accounts_receivable`.
+- A second propose of the same tenant and `unapplied_cash_application_id` returns the same `proposal_id` as `duplicate_replay` and does not grow the store.
+- Another tenant cannot see or propose from the first tenant's application.
+- Missing applications, cross-tenant IDs, currency mismatch, float money, and zero or negative amounts fail closed.
+- Leftover, apply, refund, and payment-receipt rows are not changed. Status stays inside the proposal lifecycle and is never `posted`. AIS pulls validated proposals through existing GET journal-proposal routes.
+- `POST /v1/unapplied-cash-applications/{unapplied_cash_application_id}/journal-proposals` is the explicit compose because #55 shipped without compose. PAN, CVC, and provider secrets are refused.
+- Invoice-draft, cash, credit, write-off, refund-journal, leftover-park-journal, and payment-receipt contracts stay unchanged.
 
 ## Payment-intent-presentment acceptance
 

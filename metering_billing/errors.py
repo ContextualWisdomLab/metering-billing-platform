@@ -603,6 +603,8 @@ class JournalProposalRejectionReasonCode(StrEnum):
     UNAPPLIED_CASH_NOT_FOUND = "unapplied_cash_not_found"
     UNAPPLIED_CASH_NOT_PARKED = "unapplied_cash_not_parked"
     UNAPPLIED_AMOUNT_INVALID = "unapplied_amount_invalid"
+    UNAPPLIED_CASH_APPLICATION_NOT_FOUND = "unapplied_cash_application_not_found"
+    APPLIED_AMOUNT_INVALID = "applied_amount_invalid"
     CREDIT_ADJUSTMENT_NOT_FOUND = "credit_adjustment_not_found"
     CREDIT_AMOUNT_INVALID = "credit_amount_invalid"
     CURRENCY_MISMATCH = "currency_mismatch"

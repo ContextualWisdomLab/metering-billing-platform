@@ -125,6 +125,13 @@ The application is a thin WSGI adapter:
     existing GET journal-proposal routes.  Do not invent a statutory
     account ID, webhook type, PSP, write-off, settlement, refund rewrite,
     or AIS call.
+    ``POST /v1/unapplied-cash-applications/{unapplied_cash_application_id}/journal-proposals``
+    composes one existing ``accounting_journal_proposal`` from a stored
+    leftover apply.  Replay of the same tenant and application returns
+    the stored ``proposal_id``.  AIS pulls the validated proposal through
+    existing GET journal-proposal routes.  Do not invent a statutory
+    account ID, webhook type, PSP, write-off, settlement, park rewrite,
+    refund rewrite, or AIS call.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -149,8 +156,11 @@ The application is a thin WSGI adapter:
     ``unapplied_cash_application_id``.  First successful apply enqueues
     one existing ``unapplied_cash.applied`` outbox event.  Remaining
     zero does not settle.  GET item and list present the stored
-    application.  Do not invent a journal, write-off, credit note, AIS
-    call, settlement command, or second webhook system.
+    application.  After apply exists,
+    ``POST /v1/unapplied-cash-applications/{unapplied_cash_application_id}/journal-proposals``
+    composes one validated unapplied-cash/AR journal.  Do not invent a
+    write-off, credit note, AIS call, settlement command, or second
+    webhook system.
     ``POST /v1/unapplied-cash/{unapplied_cash_id}/refunds`` records one
     commercial refund of the parked leftover.  Replay of the same tenant
     and leftover returns the stored ``unapplied_cash_refund_id``.  First
@@ -321,6 +331,9 @@ UNAPPLIED_CASH_APPLICATION_NESTED_PATH = re.compile(
 UNAPPLIED_CASH_APPLICATION_COLLECTION_PATH = "/v1/unapplied-cash-applications"
 UNAPPLIED_CASH_APPLICATION_ITEM_PATH = re.compile(
     r"^/v1/unapplied-cash-applications/([0-9a-fA-F-]{36})$"
+)
+UNAPPLIED_CASH_APPLICATION_JOURNAL_NESTED_PATH = re.compile(
+    r"^/v1/unapplied-cash-applications/([0-9a-fA-F-]{36})/journal-proposals$"
 )
 FORBIDDEN_PAYMENT_INTENT_KEYS = frozenset(
     {
@@ -2028,6 +2041,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "list_unapplied_cash_applications", {}
         return "method_not_allowed", {}
+    apply_journal_nested = UNAPPLIED_CASH_APPLICATION_JOURNAL_NESTED_PATH.fullmatch(path)
+    if apply_journal_nested is not None:
+        if method == "POST":
+            return "unapplied_cash_application_journal_proposals", {
+                "unapplied_cash_application_id": apply_journal_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
     unapplied_application_match = UNAPPLIED_CASH_APPLICATION_ITEM_PATH.fullmatch(path)
     if unapplied_application_match is not None:
         if method == "GET":
@@ -2544,6 +2564,21 @@ def _dispatch_write(
         result = exports.propose_unapplied_cash_journal(
             tenant_reference,
             _parse_uuid(path_values["unapplied_cash_id"], "unapplied_cash_id"),
+            currency_code=currency_code,
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "unapplied_cash_application_journal_proposals":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
+        currency_code = payload.get("currency_code")
+        if currency_code is not None and not isinstance(currency_code, str):
+            raise HttpRequestError("request_invalid")
+        result = exports.propose_unapplied_cash_application_journal(
+            tenant_reference,
+            _parse_uuid(
+                path_values["unapplied_cash_application_id"],
+                "unapplied_cash_application_id",
+            ),
             currency_code=currency_code,
         )
         return result.as_contract_dict(), _status_for_result(result)

@@ -484,7 +484,7 @@ class StoredJournalProposalLine:
 
 @dataclass(frozen=True)
 class StoredJournalProposal:
-    """Append-only balanced journal proposal for one tenant draft, receipt, credit, write-off, leftover refund, or parked leftover."""
+    """Append-only balanced journal proposal for one tenant draft, receipt, credit, write-off, leftover refund, parked leftover, or leftover apply."""
 
     journal_proposal_id: UUID
     tenant_account_id: UUID
@@ -506,6 +506,7 @@ class StoredJournalProposal:
     collection_write_off_id: UUID | None = None
     unapplied_cash_refund_id: UUID | None = None
     unapplied_cash_id: UUID | None = None
+    unapplied_cash_application_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -835,6 +836,9 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     unapplied_cash_journal_proposal_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    unapplied_cash_application_journal_proposal_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
     credit_adjustments: dict[UUID, StoredCreditAdjustment] = field(default_factory=dict)
@@ -2525,6 +2529,19 @@ class MemoryUsageLedger:
             return None
         return self.journal_proposals[journal_proposal_id]
 
+    def find_journal_proposal_for_unapplied_cash_application(
+        self,
+        tenant_account_id: UUID,
+        unapplied_cash_application_id: UUID,
+    ) -> StoredJournalProposal | None:
+        """Return the apply proposal for one tenant-scoped leftover apply, if it exists."""
+        journal_proposal_id = self.unapplied_cash_application_journal_proposal_index.get(
+            (tenant_account_id, unapplied_cash_application_id)
+        )
+        if journal_proposal_id is None:
+            return None
+        return self.journal_proposals[journal_proposal_id]
+
     def insert_journal_proposal(
         self,
         journal_proposal: StoredJournalProposal,
@@ -2602,6 +2619,12 @@ class MemoryUsageLedger:
                 journal_proposal.tenant_account_id,
                 journal_proposal.unapplied_cash_id,
             )
+        application_identity_key = None
+        if journal_proposal.unapplied_cash_application_id is not None:
+            application_identity_key = (
+                journal_proposal.tenant_account_id,
+                journal_proposal.unapplied_cash_application_id,
+            )
         if journal_proposal.journal_proposal_id in self.journal_proposals:
             raise ValueError("journal proposals are immutable and cannot be replaced")
         if identity_key in self.journal_proposal_index:
@@ -2633,6 +2656,11 @@ class MemoryUsageLedger:
             and leftover_identity_key in self.unapplied_cash_journal_proposal_index
         ):
             raise ValueError("journal proposals are immutable and cannot be replaced")
+        if (
+            application_identity_key is not None
+            and application_identity_key in self.unapplied_cash_application_journal_proposal_index
+        ):
+            raise ValueError("journal proposals are immutable and cannot be replaced")
         persisted = StoredJournalProposal(
             journal_proposal_id=journal_proposal.journal_proposal_id,
             tenant_account_id=journal_proposal.tenant_account_id,
@@ -2654,6 +2682,7 @@ class MemoryUsageLedger:
             collection_write_off_id=journal_proposal.collection_write_off_id,
             unapplied_cash_refund_id=journal_proposal.unapplied_cash_refund_id,
             unapplied_cash_id=journal_proposal.unapplied_cash_id,
+            unapplied_cash_application_id=journal_proposal.unapplied_cash_application_id,
         )
         self.journal_proposals[persisted.journal_proposal_id] = persisted
         self.journal_proposal_index[identity_key] = persisted.journal_proposal_id
@@ -2675,6 +2704,10 @@ class MemoryUsageLedger:
             )
         if leftover_identity_key is not None:
             self.unapplied_cash_journal_proposal_index[leftover_identity_key] = (
+                persisted.journal_proposal_id
+            )
+        if application_identity_key is not None:
+            self.unapplied_cash_application_journal_proposal_index[application_identity_key] = (
                 persisted.journal_proposal_id
             )
         self.journal_proposal_lines.extend(parsed_lines)
