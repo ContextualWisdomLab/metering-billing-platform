@@ -496,7 +496,7 @@ def validate_account_statement_presentment(
 def validate_rated_spend_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
-    """Validate spend shape plus exact amounts and one row per currency and product."""
+    """Validate spend shape plus exact amounts and one row per grouping key."""
     schema = load_json_schema(RATED_SPEND_PRESENTMENT_SCHEMA_NAME, schemas_directory)
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
@@ -504,18 +504,27 @@ def validate_rated_spend_presentment(
     products = statement.get("products")
     if not isinstance(products, list):
         return tuple(errors)
-    seen_keys: set[tuple[str, str]] = set()
+    seen_keys: set[tuple[str, str, str | None]] = set()
     for index, row in enumerate(products):
         if not isinstance(row, Mapping):
             continue
         currency_code = row.get("currency_code")
         product_code = row.get("product_code")
+        project_reference = row.get("project_reference")
         if isinstance(currency_code, str) and isinstance(product_code, str):
-            key = (currency_code, product_code)
+            project_key = project_reference if isinstance(project_reference, str) else None
+            key = (currency_code, product_code, project_key)
             if key in seen_keys:
-                errors.append(
-                    f"$.products[{index}]: currency_code and product_code must be unique"
-                )
+                if project_key is None:
+                    errors.append(
+                        f"$.products[{index}]: currency_code and product_code must be unique"
+                    )
+                else:
+                    errors.append(
+                        "$."
+                        f"products[{index}]: currency_code, product_code, and "
+                        "project_reference must be unique"
+                    )
             seen_keys.add(key)
         amount = row.get("rated_amount")
         if not isinstance(amount, str):

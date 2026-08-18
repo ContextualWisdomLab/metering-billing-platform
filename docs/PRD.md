@@ -480,10 +480,10 @@ contextual-orchestrator usage
 
 ## Rated-spend-presentment acceptance
 
-- A known tenant, `billing_account_id`, and half-open ISO 8601 window present already-rated spend grouped by `(currency_code, product_code)`. Each row carries exact `rated_amount` from stored rating-run or exclusive invoice-draft lines. Currencies are never mixed in one sum. The read does not re-rate, invent a unit price, or include unrated usage.
+- A known tenant, `billing_account_id`, and half-open ISO 8601 window present already-rated spend grouped by `(currency_code, product_code)`. Optional `group_by=project` presents one row per `(currency_code, product_code, project_reference)` whose `project_reference` is the stored exclusive-account usage URN. Usage without `project_reference` is omitted from the project grouping. Mixed projects omit the run. Each row carries exact `rated_amount` from stored rating-run or exclusive invoice-draft lines. Currencies are never mixed in one sum. The read does not re-rate, invent a unit price, or include unrated usage.
 - Money is attributed only through rating or invoice-draft lines exclusive to that billing account. Mixed-account and lineless drafts are omitted.
-- `GET /v1/billing-accounts/{billing_account_id}/rated-spend?window_started_at=&window_ended_at=` is HTTP 200 for the same tenant. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Missing tenant or an illegal window is HTTP 422.
-- Operators inspect rated product spend, then draft an invoice. HTTP presentment does not capture cards, write money, or call AIS. `group_by=project` is a later slice.
+- `GET /v1/billing-accounts/{billing_account_id}/rated-spend?window_started_at=&window_ended_at=&group_by=product|project` is HTTP 200 for the same tenant. Omitting `group_by` keeps product rows. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Missing tenant, an illegal window, or unknown `group_by` is HTTP 422.
+- Operators inspect rated product or project spend, then draft an invoice. HTTP presentment does not capture cards, write money, or call AIS. `group_by=credential` is a later slice.
 
 ## Dunning-event-presentment acceptance
 

@@ -871,6 +871,42 @@ class RepositoryContractTests(unittest.TestCase):
                 for error in validate_rated_spend_presentment(mixed_rows)
             )
         )
+        project_row = {
+            "currency_code": "USD",
+            "product_code": "contextual_orchestrator",
+            "project_reference": "urn:cwl:tenant_001:project:metering",
+            "rated_amount": "0.003705",
+        }
+        project_instance = {
+            "rated_spend_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "products": [project_row],
+        }
+        self.assertEqual(validate_schema_instance(schema, project_instance), ())
+        self.assertEqual(validate_rated_spend_presentment(project_instance), ())
+        split_projects = {
+            **project_instance,
+            "products": [
+                project_row,
+                {
+                    "currency_code": "USD",
+                    "product_code": "contextual_orchestrator",
+                    "project_reference": "urn:cwl:tenant_001:project:memory",
+                    "rated_amount": "0.000085",
+                },
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, split_projects), ())
+        self.assertEqual(validate_rated_spend_presentment(split_projects), ())
+        duplicate_project = {**project_instance, "products": [project_row, project_row]}
+        self.assertIn(
+            "$.products[1]: currency_code, product_code, and project_reference must be unique",
+            validate_rated_spend_presentment(duplicate_project),
+        )
 
     def test_payment_intent_presentment_accepts_amount_and_rejects_captured(self) -> None:
         """A payment-intent statement records exact amount and cannot claim capture."""

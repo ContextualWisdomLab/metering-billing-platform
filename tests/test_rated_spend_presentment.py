@@ -40,6 +40,8 @@ from test_usage_rating import (
 AS_OF = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
 PRODUCT_ONE = "contextual_orchestrator"
 PRODUCT_TWO = "contextual_memory"
+PROJECT_ONE = "urn:cwl:tenant_001:project:metering"
+PROJECT_TWO = "urn:cwl:tenant_001:project:memory"
 
 
 def _rate_known_morning():
@@ -56,12 +58,48 @@ def _spend_path(billing_account_id) -> str:
     return f"/v1/billing-accounts/{billing_account_id}/rated-spend"
 
 
-def _morning_query() -> dict[str, str]:
+def _morning_query(**extra: str) -> dict[str, str]:
     """Return the known morning half-open window as query fields."""
     return {
         "window_started_at": "2026-08-16T10:00:00Z",
         "window_ended_at": "2026-08-16T11:00:00Z",
+        **extra,
     }
+
+
+def _rate_morning_events(*events: dict[str, object]):
+    """Ingest caller-supplied morning events and persist one rating run."""
+    ingest = UsageIngestionService(seed_rated_ledger())
+    ingest.ingest_usage_batch(events)
+    rated = UsageRatingService(ingest.ledger, clock=lambda: AS_OF).rate_usage_window(
+        TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+    )
+    return ingest.ledger, rated
+
+
+def _known_morning_event(
+    *,
+    event_id: str,
+    source_event_key: str,
+    occurred_at: str,
+    quantity: str,
+    **overrides: object,
+) -> dict[str, object]:
+    """Return one known-morning token event, optionally attributed to a project."""
+    return make_event(
+        event_id=event_id,
+        source_event_key=source_event_key,
+        occurred_at=occurred_at,
+        measurements=[
+            {
+                "meter_code": "gen_ai_output_token",
+                "quantity": quantity,
+                "unit_code": "token",
+                "quality_code": "provider_reported",
+            }
+        ],
+        **overrides,
+    )
 
 
 class RatedSpendPresentmentTests(unittest.TestCase):
@@ -96,8 +134,14 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertIsInstance(payload["products"][0]["rated_amount"], str)
         self.assertNotIsInstance(payload["products"][0]["rated_amount"], float)
         self.assertNotIn("group_by", payload)
+        self.assertNotIn("project_reference", payload["products"][0])
         self.assertNotIn("card_pan", payload)
         self.assertNotIn("statutory_account_id", payload)
+        by_product = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="product"
+        )
+        self.assertEqual(presented.as_contract_dict(), by_product.as_contract_dict())
+        self.assertNotIn("project_reference", by_product.as_contract_dict()["products"][0])
         self.assertEqual(len(ledger.rating_runs), prior_runs)
         self.assertEqual(len(ledger.invoice_drafts), prior_drafts)
         self.assertEqual(len(ledger.journal_proposals), 0)
@@ -219,6 +263,111 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(after_mixed.products[0].rated_amount, KNOWN_MORNING_TOTAL)
         self.assertNotEqual(after_mixed.products[0].rated_amount, Decimal("15"))
 
+    def test_group_by_project_uses_usage_project_and_omits_unattributed(self) -> None:
+        """Project grouping reads usage URNs and never invents a project or split."""
+        ledger, _rated = _rate_known_morning()
+        unattributed = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="project"
+        )
+        self.assertEqual(unattributed.products, ())
+        self.assertEqual(validate_rated_spend_presentment(unattributed.as_contract_dict()), ())
+        self.assertNotIn("group_by", unattributed.as_contract_dict())
+        attributed_ledger, attributed = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf710",
+                source_event_key="project_morning_output",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+                project_reference=PROJECT_ONE,
+            ),
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf711",
+                source_event_key="project_morning_followup",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+                project_reference=PROJECT_ONE,
+            ),
+        )
+        product_rows = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW
+        )
+        project_rows = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW, group_by="project"
+        )
+        replay = RatedSpendPresentmentService(attributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(attributed_ledger), MORNING_WINDOW, group_by="project"
+        )
+        self.assertEqual(project_rows.as_contract_dict(), replay.as_contract_dict())
+        self.assertEqual(len(product_rows.products), 1)
+        self.assertNotIn("project_reference", product_rows.as_contract_dict()["products"][0])
+        self.assertEqual(product_rows.products[0].rated_amount, attributed.rated_total_amount)
+        self.assertEqual(product_rows.products[0].rated_amount, KNOWN_MORNING_TOTAL)
+        self.assertEqual(len(project_rows.products), 1)
+        row = project_rows.products[0]
+        self.assertEqual(row.currency_code, "USD")
+        self.assertEqual(row.product_code, PRODUCT_ONE)
+        self.assertEqual(row.project_reference, PROJECT_ONE)
+        self.assertEqual(row.rated_amount, KNOWN_MORNING_TOTAL)
+        payload = project_rows.as_contract_dict()
+        self.assertEqual(validate_rated_spend_presentment(payload), ())
+        self.assertEqual(payload["products"][0]["project_reference"], PROJECT_ONE)
+        self.assertEqual(payload["products"][0]["rated_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
+        self.assertNotIn("group_by", payload)
+        mixed_ledger, mixed = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf712",
+                source_event_key="project_mixed_metering",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+                project_reference=PROJECT_ONE,
+            ),
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf713",
+                source_event_key="project_mixed_memory",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+                project_reference=PROJECT_TWO,
+            ),
+        )
+        mixed_product = RatedSpendPresentmentService(mixed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(mixed_ledger), MORNING_WINDOW, group_by="product"
+        )
+        mixed_project = RatedSpendPresentmentService(mixed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(mixed_ledger), MORNING_WINDOW, group_by="project"
+        )
+        self.assertEqual(mixed_product.products[0].rated_amount, mixed.rated_total_amount)
+        self.assertNotIn("project_reference", mixed_product.as_contract_dict()["products"][0])
+        self.assertEqual(mixed_project.products, ())
+        partial_ledger, partial = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf714",
+                source_event_key="project_partial_attributed",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+                project_reference=PROJECT_ONE,
+            ),
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf715",
+                source_event_key="project_partial_plain",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+            ),
+        )
+        partial_project = RatedSpendPresentmentService(partial_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(partial_ledger), MORNING_WINDOW, group_by="project"
+        )
+        self.assertEqual(len(partial_project.products), 1)
+        self.assertEqual(partial_project.products[0].project_reference, PROJECT_ONE)
+        self.assertEqual(partial_project.products[0].rated_amount, partial.rated_total_amount)
+        self.assertEqual(len(attributed_ledger.rating_runs), 1)
+        self.assertEqual(len(attributed_ledger.invoice_drafts), 0)
+        self.assertEqual(len(attributed_ledger.journal_proposals), 0)
+        with self.assertRaises(RatedSpendPresentmentQueryError) as unknown_group:
+            RatedSpendPresentmentService(ledger).present_rated_spend(
+                TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="credential"
+            )
+        self.assertEqual(unknown_group.exception.rejection_reason_code, "request_invalid")
+
     def test_http_reads_rated_spend_without_writing_money(self) -> None:
         """GET /v1/billing-accounts/{id}/rated-spend is a tenant-scoped read."""
         ledger, _rated = _rate_known_morning()
@@ -338,6 +487,75 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(keyed_status, 200)
         self.assertEqual(
             keyed_body["products"][0]["rated_amount"],
+            format_exact_decimal(KNOWN_MORNING_TOTAL),
+        )
+        product_status, product_body = invoke_http(
+            app,
+            "GET",
+            _spend_path(billing_account_id),
+            query=_morning_query(group_by="product"),
+            headers={
+                "X-CWL-Tenant-Reference": TENANT_ONE,
+                "Authorization": f"Bearer {issue_body['api_credential_secret']}",
+            },
+        )
+        self.assertEqual(product_status, 200)
+        self.assertEqual(product_body, keyed_body)
+        self.assertNotIn("project_reference", product_body["products"][0])
+        project_status, project_body = invoke_http(
+            app,
+            "GET",
+            _spend_path(billing_account_id),
+            query=_morning_query(group_by="project"),
+            headers={
+                "X-CWL-Tenant-Reference": TENANT_ONE,
+                "Authorization": f"Bearer {issue_body['api_credential_secret']}",
+            },
+        )
+        self.assertEqual(project_status, 200)
+        self.assertEqual(validate_rated_spend_presentment(project_body), ())
+        self.assertEqual(project_body["products"], [])
+        unknown_group_status, unknown_group_body = invoke_http(
+            app,
+            "GET",
+            _spend_path(billing_account_id),
+            query=_morning_query(group_by="credential"),
+            headers={
+                "X-CWL-Tenant-Reference": TENANT_ONE,
+                "Authorization": f"Bearer {issue_body['api_credential_secret']}",
+            },
+        )
+        self.assertEqual(unknown_group_status, 422)
+        self.assertEqual(unknown_group_body["rejection_reason_code"], "request_invalid")
+        attributed_ledger, _attributed = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf716",
+                source_event_key="http_project_morning",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+                project_reference=PROJECT_ONE,
+            ),
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf717",
+                source_event_key="http_project_followup",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+                project_reference=PROJECT_ONE,
+            ),
+        )
+        attributed_app = create_http_app(attributed_ledger)
+        attributed_status, attributed_body = invoke_http(
+            attributed_app,
+            "GET",
+            _spend_path(_account_id(attributed_ledger)),
+            query=_morning_query(group_by="project"),
+            headers={"X-CWL-Tenant-Reference": TENANT_ONE},
+        )
+        self.assertEqual(attributed_status, 200)
+        self.assertEqual(validate_rated_spend_presentment(attributed_body), ())
+        self.assertEqual(attributed_body["products"][0]["project_reference"], PROJECT_ONE)
+        self.assertEqual(
+            attributed_body["products"][0]["rated_amount"],
             format_exact_decimal(KNOWN_MORNING_TOTAL),
         )
         self.assertEqual(len(ledger.rating_runs), 1)
