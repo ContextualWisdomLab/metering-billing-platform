@@ -86,7 +86,10 @@ The application is a thin WSGI adapter:
     ``issued_invoice_void_id``.  An unused open or dunning collection
     case closes as ``voided``.  First successful void enqueues one
     existing ``invoice.voided`` outbox event.  GET item and list present
-    the stored void.  Do not invent a journal, second webhook system,
+    the stored void.  The void write does not compose a journal.
+    ``POST /v1/issued-invoice-voids/{issued_invoice_void_id}/journal-proposals``
+    is the explicit later compose.  AIS pull stays existing GET
+    journal-proposal routes.  Do not invent a second webhook system,
     refund, write-off rewrite, settlement, statutory numbering, or AIS
     call.
     Cross-tenant account is HTTP 403.  GET one stored
@@ -409,6 +412,9 @@ ISSUED_INVOICE_VOID_NESTED_PATH = re.compile(
 ISSUED_INVOICE_VOID_COLLECTION_PATH = "/v1/issued-invoice-voids"
 ISSUED_INVOICE_VOID_ITEM_PATH = re.compile(
     r"^/v1/issued-invoice-voids/([0-9a-fA-F-]{36})$"
+)
+VOID_JOURNAL_NESTED_PATH = re.compile(
+    r"^/v1/issued-invoice-voids/([0-9a-fA-F-]{36})/journal-proposals$"
 )
 ISSUED_CREDIT_NOTE_NESTED_PATH = re.compile(
     r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})/issued-credit-notes$"
@@ -2320,6 +2326,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "list_issued_invoice_voids", {}
         return "method_not_allowed", {}
+    void_journal_nested = VOID_JOURNAL_NESTED_PATH.fullmatch(path)
+    if void_journal_nested is not None:
+        if method == "POST":
+            return "issued_invoice_void_journal_proposals", {
+                "issued_invoice_void_id": void_journal_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
     issued_void_match = ISSUED_INVOICE_VOID_ITEM_PATH.fullmatch(path)
     if issued_void_match is not None:
         if method == "GET":
@@ -2687,6 +2700,18 @@ def _dispatch_write(
         result = exports.propose_cash_journal(
             tenant_reference,
             _parse_uuid(payload.get("payment_receipt_id"), "payment_receipt_id"),
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "issued_invoice_void_journal_proposals":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
+        currency_code = payload.get("currency_code")
+        if currency_code is not None and not isinstance(currency_code, str):
+            raise HttpRequestError("request_invalid")
+        result = exports.propose_void_journal(
+            tenant_reference,
+            _parse_uuid(path_values["issued_invoice_void_id"], "issued_invoice_void_id"),
+            currency_code=currency_code,
         )
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "write_off_journal_proposals":

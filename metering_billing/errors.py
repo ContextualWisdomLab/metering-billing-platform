@@ -647,6 +647,8 @@ class JournalProposalRejectionReasonCode(StrEnum):
     APPLIED_AMOUNT_INVALID = "applied_amount_invalid"
     CREDIT_ADJUSTMENT_NOT_FOUND = "credit_adjustment_not_found"
     CREDIT_AMOUNT_INVALID = "credit_amount_invalid"
+    ISSUED_INVOICE_VOID_NOT_FOUND = "issued_invoice_void_not_found"
+    VOIDED_AMOUNT_INVALID = "voided_amount_invalid"
     CURRENCY_MISMATCH = "currency_mismatch"
 
 
