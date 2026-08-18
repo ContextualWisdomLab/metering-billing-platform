@@ -395,6 +395,14 @@ class AccountStatementPresentmentTests(unittest.TestCase):
         )
         self.assertEqual(no_tenant_status, 422)
         self.assertEqual(no_tenant_body["rejection_reason_code"], "tenant_not_found")
+        unknown_tenant_status, unknown_tenant_body = invoke_http(
+            app,
+            "GET",
+            _statement_path(billing_account_id),
+            headers={"X-CWL-Tenant-Reference": "urn:cwl:missing_tenant"},
+        )
+        self.assertEqual(unknown_tenant_status, 422)
+        self.assertEqual(unknown_tenant_body["rejection_reason_code"], "tenant_not_found")
         method_status, _method_body = invoke_http(
             app,
             "POST",
