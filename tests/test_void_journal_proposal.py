@@ -468,6 +468,18 @@ class VoidJournalProposalTests(unittest.TestCase):
                 generate_record_id(),
             )
         )
+        self.assertIsNone(
+            ledger.find_journal_proposal_for_invoice_draft(
+                generate_record_id(),
+                stored.invoice_draft_id,
+            )
+        )
+        self.assertIsNone(
+            ledger.find_journal_proposal_for_invoice_draft(
+                stored.tenant_account_id,
+                stored.invoice_draft_id,
+            )
+        )
         empty = AccountingExportService()
         rejected = empty.propose_void_journal(TENANT_ONE, generate_record_id())
         self.assertEqual(

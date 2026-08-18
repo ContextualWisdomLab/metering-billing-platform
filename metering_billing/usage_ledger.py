@@ -2705,19 +2705,16 @@ class MemoryUsageLedger:
                 continue
             if proposal.invoice_draft_id != invoice_draft_id:
                 continue
-            if proposal.payment_receipt_id is not None:
-                continue
-            if proposal.credit_adjustment_id is not None:
-                continue
-            if proposal.collection_write_off_id is not None:
-                continue
-            if proposal.unapplied_cash_refund_id is not None:
-                continue
-            if proposal.unapplied_cash_id is not None:
-                continue
-            if proposal.unapplied_cash_application_id is not None:
-                continue
-            if proposal.issued_invoice_void_id is not None:
+            specialized_ids = (
+                proposal.payment_receipt_id,
+                proposal.credit_adjustment_id,
+                proposal.collection_write_off_id,
+                proposal.unapplied_cash_refund_id,
+                proposal.unapplied_cash_id,
+                proposal.unapplied_cash_application_id,
+                proposal.issued_invoice_void_id,
+            )
+            if any(specialized_id is not None for specialized_id in specialized_ids):
                 continue
             return proposal
         return None
