@@ -70,6 +70,7 @@ REQUIRED_FILES = (
     "docs/adr/0038-issued-invoice-from-draft.md",
     "docs/adr/0039-invoice-issued-webhook.md",
     "docs/adr/0040-issued-credit-note-from-adjustment.md",
+    "docs/adr/0041-credit-note-issued-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

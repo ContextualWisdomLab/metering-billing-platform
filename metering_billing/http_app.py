@@ -50,9 +50,10 @@ The application is a thin WSGI adapter:
     9b. Let an operator POST an issued commercial credit-note snapshot from
     a stored credit adjustment, then GET that snapshot.  Replay of the
     same tenant and credit returns the stored ``issued_credit_note_id``.
-    Refuse PAN, CVC, and provider secrets.  Issue the credit note; the
-    validated journal remains available for AIS.  Do not invent statutory
-    numbering, capture payment, enqueue a webhook, or call AIS.
+    Refuse PAN, CVC, and provider secrets.  First successful issue
+    enqueues one existing ``credit_note.issued`` outbox event.  Issue
+    the credit note; the validated journal remains available for AIS.
+    Do not invent statutory numbering, capture payment, or call AIS.
     10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
     GET one stored credential or list ``{tenant_api_credentials,

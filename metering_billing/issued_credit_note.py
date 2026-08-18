@@ -9,8 +9,10 @@ The service is the buyer-facing issue path:
 
 The issued document is a commercial artifact, not a statutory credit note,
 tax credit certificate, or AIS posting (IFRS Foundation, 2024).  It does
-not invent sequential legal numbering, capture payment, enqueue a webhook,
-or flip ``proposal_status``.  The validated credit journal remains
+not invent sequential legal numbering, capture payment, or flip
+``proposal_status``.  First successful issue enqueues one existing
+``credit_note.issued`` outbox event; replay of the same issued credit
+note does not enqueue a second row.  The validated credit journal remains
 available for AIS to pull.
 """
 
@@ -34,6 +36,10 @@ from metering_billing.usage_ledger import (
     StoredCreditAdjustment,
     StoredIssuedCreditNote,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_CREDIT_NOTE_ISSUED,
+    enqueue_accepted_fact,
 )
 
 
@@ -130,6 +136,33 @@ class IssuedCreditNoteResult:
             payload["issued_invoice_id"] = str(self.issued_invoice_id)
         return payload
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``credit_note.issued`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not the issued credit-note body.
+        Lines, PII, reason prose, PAN, secrets, and statutory identifiers
+        are omitted.
+        """
+        if self.issued_credit_note_id is None or self.credit_adjustment_id is None:
+            raise ValueError("rejected issued credit note has no webhook event data")
+        payload: dict[str, object] = {
+            "issued_credit_note_id": str(self.issued_credit_note_id),
+            "credit_adjustment_id": str(self.credit_adjustment_id),
+            "invoice_draft_id": str(self.invoice_draft_id),
+            "source_payload_hash": self.source_payload_hash,
+            "issued_credit_note_contract_version": self.issued_credit_note_contract_version,
+            "currency_code": self.currency_code,
+            "tax_exclusive_amount": format_exact_decimal(self.tax_exclusive_amount),
+            "tax_amount": format_exact_decimal(self.tax_amount),
+            "tax_inclusive_amount": format_exact_decimal(self.tax_inclusive_amount),
+            "issued_credit_note_status": self.issued_credit_note_status,
+            "issued_at": _format_issued_at(self.issued_at),
+            "credit_reason_code": self.credit_reason_code,
+        }
+        if self.issued_invoice_id is not None:
+            payload["issued_invoice_id"] = str(self.issued_invoice_id)
+        return payload
+
 
 class IssuedCreditNoteService:
     """Append-only issuer of commercial credit-note snapshots from stored credits."""
@@ -150,8 +183,9 @@ class IssuedCreditNoteService:
         """Issue one immutable snapshot for a same-tenant stored credit.
 
         Replay of the same tenant and ``credit_adjustment_id`` returns the
-        stored ``issued_credit_note_id`` and frozen totals.  The path does
-        not enqueue a webhook or change the credit journal.
+        stored ``issued_credit_note_id`` and frozen totals.  First successful
+        issue enqueues one ``credit_note.issued`` outbox event.  Replay of
+        that snapshot does not enqueue a second row.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -164,9 +198,11 @@ class IssuedCreditNoteService:
             tenant.tenant_account_id, credit.credit_adjustment_id
         )
         if existing is not None:
-            return _from_stored(
+            result = _from_stored(
                 existing, tenant.tenant_reference, IssuedCreditNoteOutcomeCode.DUPLICATE_REPLAY
             )
+            _enqueue_credit_note_issued(self.ledger, tenant.tenant_reference, result)
+            return result
         issued_invoice = self.ledger.find_issued_invoice(
             tenant.tenant_account_id, credit.invoice_draft_id
         )
@@ -196,9 +232,11 @@ class IssuedCreditNoteService:
                 issued_at=self._clock(),
             )
         )
-        return _from_stored(
+        result = _from_stored(
             stored, tenant.tenant_reference, IssuedCreditNoteOutcomeCode.ACCEPTED
         )
+        _enqueue_credit_note_issued(self.ledger, tenant.tenant_reference, result)
+        return result
 
 
 def _canonical_snapshot(
@@ -219,6 +257,29 @@ def _canonical_snapshot(
     if issued_invoice_id is not None:
         payload["issued_invoice_id"] = str(issued_invoice_id)
     return payload
+
+
+def _enqueue_credit_note_issued(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: IssuedCreditNoteResult,
+) -> None:
+    """Append one ``credit_note.issued`` outbox row for a stored snapshot.
+
+    Replay of the same tenant, event type, ``issued_credit_note_id``, and
+    payload hash returns the stored row.  A crash after insert and before
+    enqueue is healed by the next issue replay.
+    """
+    assert result.issued_credit_note_id is not None
+    assert result.issued_at is not None
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_CREDIT_NOTE_ISSUED,
+        result.issued_credit_note_id,
+        result.as_webhook_event_data(),
+        result.issued_at,
+    )
 
 
 def _rejected(reason: IssuedCreditNoteRejectionReasonCode) -> IssuedCreditNoteResult:

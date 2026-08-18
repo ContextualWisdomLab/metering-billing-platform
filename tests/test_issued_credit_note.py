@@ -33,7 +33,10 @@ from metering_billing.issued_credit_note_presentment import (
     next_operator_action as presentment_action,
 )
 from metering_billing.usage_ledger import generate_record_id
-from metering_billing.webhook_outbox import EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED,
+    EVENT_TYPE_CREDIT_NOTE_ISSUED,
+)
 from test_collection_case import draft_known_morning
 from test_http_app import invoke_http
 from test_tax_assessment import HUNDRED, STANDARD_TAX_RATE, insert_commercial_draft
@@ -104,7 +107,7 @@ class IssuedCreditNoteTests(unittest.TestCase):
         self.assertNotIn("card_pan", payload)
         self.assertEqual(credit.credit_adjustment_outcome_code.value, "accepted")
         self.assertEqual(len(ledger.issued_credit_notes), 1)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
         self.assertEqual(
             len(
                 [
@@ -115,6 +118,13 @@ class IssuedCreditNoteTests(unittest.TestCase):
             ),
             1,
         )
+        issued_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_ISSUED
+        ]
+        self.assertEqual(len(issued_events), 1)
+        self.assertEqual(issued_events[0].source_id, first.issued_credit_note_id)
         self.assertNotIn("credit_note.issued", json.dumps(payload))
 
     def test_taxed_credit_and_issued_invoice_link_are_preserved(self) -> None:
@@ -155,6 +165,15 @@ class IssuedCreditNoteTests(unittest.TestCase):
             str(issued_invoice.issued_invoice_id),
         )
         self.assertEqual(validate_issued_credit_note_presentment(presented_payload), ())
+        issued_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_ISSUED
+        ]
+        self.assertEqual(len(issued_events), 1)
+        envelope = json.loads(issued_events[0].payload_json)
+        self.assertEqual(envelope["data"]["issued_invoice_id"], str(issued_invoice.issued_invoice_id))
+        self.assertEqual(envelope["data"]["credit_reason_code"], "goodwill")
 
     def test_http_issue_get_and_paged_list_without_capture(self) -> None:
         """POST issues; GET item and list page metadata and never capture payment."""
@@ -276,7 +295,17 @@ class IssuedCreditNoteTests(unittest.TestCase):
         self.assertEqual(empty_status, 200)
         self.assertEqual(empty_body["issued_credit_notes"], [])
         self.assertIsNone(empty_body["next_cursor"])
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 2)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_ISSUED
+                ]
+            ),
+            2,
+        )
         self.assertEqual(len(ledger.payment_intents), 0)
 
     def test_cross_tenant_and_unknown_reads_are_404_without_leak(self) -> None:
@@ -555,6 +584,32 @@ class IssuedCreditNoteTests(unittest.TestCase):
             unknown_outcome.as_contract_dict()
         rejected = IssuedCreditNoteService(ledger).issue_credit_note("", credit.credit_adjustment_id)
         self.assertEqual(validate_issued_credit_note(rejected.as_contract_dict()), ())
+        with self.assertRaises(ValueError):
+            rejected.as_webhook_event_data()
+        missing_credit = rejected.__class__(
+            issued_credit_note_outcome_code=IssuedCreditNoteOutcomeCode.ACCEPTED,
+            issued_credit_note_contract_version=1,
+            issued_credit_note_id=issued.issued_credit_note_id,
+            credit_adjustment_id=None,
+            invoice_draft_id=issued.invoice_draft_id,
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            tax_exclusive_amount=KNOWN_MORNING_TOTAL,
+            tax_amount=Decimal("0"),
+            tax_inclusive_amount=KNOWN_MORNING_TOTAL,
+            issued_credit_note_status="issued",
+            issued_at=ISSUED_MORNING,
+            source_payload_hash=issued.source_payload_hash,
+            credit_adjustment_source_payload_hash=issued.credit_adjustment_source_payload_hash,
+            credit_adjustment_contract_version=1,
+            credit_reason_code="rating_correction",
+            idempotency_key=issued.idempotency_key,
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaises(ValueError):
+            missing_credit.as_webhook_event_data()
         none_reason = rejected.__class__(
             issued_credit_note_outcome_code=IssuedCreditNoteOutcomeCode.REJECTED,
             issued_credit_note_contract_version=1,

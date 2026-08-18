@@ -31,7 +31,8 @@
           "journal_proposal.validated",
           "payment_receipt.applied",
           "credit_adjustment.recorded",
-          "invoice.issued"
+          "invoice.issued",
+          "credit_note.issued"
         ]
       }
     },
