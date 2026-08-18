@@ -377,11 +377,41 @@ class CollectionDisputeRejectionReasonCode(StrEnum):
     COLLECTION_CASE_SETTLED = "collection_case_settled"
     COLLECTION_CASE_VOIDED = "collection_case_voided"
     CURRENCY_MISMATCH = "currency_mismatch"
+    COLLECTION_DISPUTE_RELEASED = "collection_dispute_released"
     REQUEST_INVALID = "request_invalid"
 
 
 class CollectionDisputePresentmentQueryError(ValueError):
     """Raised when a stored collection dispute cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
+class CollectionDisputeReleaseOutcomeCode(StrEnum):
+    """Terminal result of releasing one held collection dispute."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class CollectionDisputeReleaseRejectionReasonCode(StrEnum):
+    """Why a dispute release was refused without changing case status."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    COLLECTION_DISPUTE_NOT_FOUND = "collection_dispute_not_found"
+    COLLECTION_DISPUTE_NOT_HELD = "collection_dispute_not_held"
+    COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
+    COLLECTION_CASE_SETTLED = "collection_case_settled"
+    COLLECTION_CASE_VOIDED = "collection_case_voided"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    REQUEST_INVALID = "request_invalid"
+
+
+class CollectionDisputeReleasePresentmentQueryError(ValueError):
+    """Raised when a stored collection-dispute release cannot be presented."""
 
     def __init__(self, rejection_reason_code: str) -> None:
         super().__init__(rejection_reason_code)

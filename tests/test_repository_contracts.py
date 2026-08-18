@@ -2830,6 +2830,43 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_collection_dispute_release_accepts_released_status(self) -> None:
+        """A collection-dispute-release contract records exact remaining and released status."""
+        schema = self._schema("collection-dispute-release.schema.json")
+        instance = {
+            "collection_dispute_release_contract_version": 1,
+            "collection_dispute_release_outcome_code": "accepted",
+            "collection_dispute_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd70",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd21",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "currency_code": "USD",
+            "remaining_outstanding_amount": "0.003705",
+            "collection_dispute_status": "released",
+            "collection_case_status": "open",
+            "released_at": "2026-08-18T15:00:00Z",
+            "source_payload_hash": "sha256:" + "d" * 64,
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        held = dict(instance, collection_dispute_status="held")
+        self.assertIn(
+            "$.collection_dispute_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, held),
+        )
+
+    def test_collection_dispute_release_migration_allows_released_status(self) -> None:
+        """The release migration adds released status without a second hold row."""
+        sql = (ROOT / "database/migrations/0032_collection_dispute_release.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "collection_dispute_status IN ('held', 'released')",
+            "ADD COLUMN released_at timestamptz",
+            "collection_dispute_status = 'released'",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_void_journal_migration_reuses_journal_proposal_for_voids(self) -> None:
         """Void proposals reuse journal_proposal and add a void-scoped identity."""
         sql = (ROOT / "database/migrations/0030_void_journal_proposal.sql").read_text(

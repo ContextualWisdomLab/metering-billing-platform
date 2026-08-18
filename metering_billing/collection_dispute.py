@@ -9,7 +9,7 @@ The service is the buyer-facing hold path:
 Replay of the same tenant and ``collection_case_id`` returns the stored
 hold and never re-flips status.  The path does not emit a journal,
 webhook, unwind tax, capture payment, call AIS, write off, settle, or
-void.  Release remains a later slice.
+void.  Release is the sibling command on the same hold row.
 """
 
 from __future__ import annotations
@@ -160,6 +160,10 @@ class CollectionDisputeService:
             tenant.tenant_account_id, collection_case_id
         )
         if existing is not None:
+            if existing.collection_dispute_status != COLLECTION_DISPUTE_STATUS:
+                return _rejected(
+                    CollectionDisputeRejectionReasonCode.COLLECTION_DISPUTE_RELEASED
+                )
             current_case = self.ledger.get_collection_case(existing.collection_case_id)
             if current_case is None:
                 return _rejected(

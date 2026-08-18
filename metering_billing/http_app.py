@@ -128,8 +128,13 @@ The application is a thin WSGI adapter:
     Replay of the same tenant and case returns the stored
     ``collection_dispute_id`` and never changes remaining outstanding.
     GET item and list present the stored hold.  New dunning fails closed
-    while held.  Do not invent a journal, webhook, write-off, settlement,
-    void rewrite, statutory numbering, payment capture, or AIS call.
+    while held.  ``POST /v1/collection-disputes/{collection_dispute_id}/releases``
+    releases one held dispute in place.  Replay of the same tenant and
+    dispute returns the stored ``collection_dispute_id`` and never changes
+    remaining outstanding.  Case status returns to ``open`` or ``dunning``.
+    GET release item and list present the stored release.  Do not invent a
+    journal, webhook, write-off, settlement, void rewrite, statutory
+    numbering, payment capture, or AIS call.
     ``POST /v1/credit-adjustments/{credit_adjustment_id}/journal-proposals``
     composes or replays the existing credit ``accounting_journal_proposal``.
     Credit accept already writes that journal.  Replay of the same tenant
@@ -238,6 +243,7 @@ from metering_billing.errors import (
     CollectionCaseSettlementPresentmentQueryError,
     CollectionWriteOffPresentmentQueryError,
     CollectionDisputePresentmentQueryError,
+    CollectionDisputeReleasePresentmentQueryError,
     UnappliedCashPresentmentQueryError,
     UnappliedCashApplicationPresentmentQueryError,
     UnappliedCashRefundPresentmentQueryError,
@@ -278,6 +284,10 @@ from metering_billing.collection_write_off_presentment import (
 from metering_billing.collection_dispute import CollectionDisputeService
 from metering_billing.collection_dispute_presentment import (
     CollectionDisputePresentmentService,
+)
+from metering_billing.collection_dispute_release import CollectionDisputeReleaseService
+from metering_billing.collection_dispute_release_presentment import (
+    CollectionDisputeReleasePresentmentService,
 )
 from metering_billing.unapplied_cash import UnappliedCashService
 from metering_billing.unapplied_cash_presentment import UnappliedCashPresentmentService
@@ -464,6 +474,13 @@ COLLECTION_DISPUTE_COLLECTION_PATH = "/v1/collection-disputes"
 COLLECTION_DISPUTE_ITEM_PATH = re.compile(
     r"^/v1/collection-disputes/([0-9a-fA-F-]{36})$"
 )
+COLLECTION_DISPUTE_RELEASE_NESTED_PATH = re.compile(
+    r"^/v1/collection-disputes/([0-9a-fA-F-]{36})/releases$"
+)
+COLLECTION_DISPUTE_RELEASE_COLLECTION_PATH = "/v1/collection-dispute-releases"
+COLLECTION_DISPUTE_RELEASE_ITEM_PATH = re.compile(
+    r"^/v1/collection-dispute-releases/([0-9a-fA-F-]{36})$"
+)
 WRITE_OFF_JOURNAL_NESTED_PATH = re.compile(
     r"^/v1/collection-write-offs/([0-9a-fA-F-]{36})/journal-proposals$"
 )
@@ -542,6 +559,10 @@ def create_http_app(
     )
     collection_disputes = CollectionDisputeService(shared_ledger)
     collection_dispute_presentments = CollectionDisputePresentmentService(
+        shared_ledger
+    )
+    collection_dispute_releases = CollectionDisputeReleaseService(shared_ledger)
+    collection_dispute_release_presentments = CollectionDisputeReleasePresentmentService(
         shared_ledger
     )
     unapplied_cash = UnappliedCashService(shared_ledger)
@@ -1963,6 +1984,75 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_collection_dispute_releases",
+            "get_collection_dispute_release",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_collection_dispute_releases":
+                    page = collection_dispute_release_presentments.list_collection_dispute_releases(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = collection_dispute_release_presentments.present_collection_dispute_release(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["collection_dispute_id"],
+                        "collection_dispute_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except CollectionDisputeReleasePresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "collection_dispute_release_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "collection_dispute_releases":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                currency_code = payload.get("currency_code")
+                if currency_code is not None and not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                result = collection_dispute_releases.release_collection_dispute(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["collection_dispute_id"],
+                        "collection_dispute_id",
+                    ),
+                    currency_code=currency_code,
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_credit_notes":
             try:
                 payload = _read_json_object(environ)
@@ -2237,6 +2327,24 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == COLLECTION_DISPUTE_COLLECTION_PATH:
         if method == "GET":
             return "list_collection_disputes", {}
+        return "http_method_not_allowed", {}
+    dispute_release_nested = COLLECTION_DISPUTE_RELEASE_NESTED_PATH.fullmatch(path)
+    if dispute_release_nested is not None:
+        if method == "POST":
+            return "collection_dispute_releases", {
+                "collection_dispute_id": dispute_release_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    if path == COLLECTION_DISPUTE_RELEASE_COLLECTION_PATH:
+        if method == "GET":
+            return "list_collection_dispute_releases", {}
+        return "http_method_not_allowed", {}
+    dispute_release_match = COLLECTION_DISPUTE_RELEASE_ITEM_PATH.fullmatch(path)
+    if dispute_release_match is not None:
+        if method == "GET":
+            return "get_collection_dispute_release", {
+                "collection_dispute_id": dispute_release_match.group(1)
+            }
         return "http_method_not_allowed", {}
     dispute_match = COLLECTION_DISPUTE_ITEM_PATH.fullmatch(path)
     if dispute_match is not None:

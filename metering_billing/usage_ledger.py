@@ -12,7 +12,7 @@ Python 3.12 and CI Python 3.13 behave identically at the API boundary.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from types import ModuleType
@@ -491,6 +491,7 @@ class StoredCollectionDispute:
     remaining_outstanding_amount: Decimal
     collection_dispute_status: str
     held_at: datetime
+    released_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -2133,10 +2134,76 @@ class MemoryUsageLedger:
             remaining_outstanding_amount=remaining,
             collection_dispute_status=collection_dispute.collection_dispute_status,
             held_at=collection_dispute.held_at,
+            released_at=collection_dispute.released_at,
         )
         self.collection_disputes[persisted.collection_dispute_id] = persisted
         self.collection_dispute_index[identity_key] = persisted.collection_dispute_id
         return persisted
+
+    def mark_collection_dispute_released(
+        self, collection_dispute_id: UUID, released_at: datetime
+    ) -> StoredCollectionDispute:
+        """Flip one held dispute to ``released`` without changing remaining.
+
+        Replay of an already-released row returns the stored row.  A
+        status other than ``held`` or ``released`` fails closed.
+        """
+        stored = self.collection_disputes.get(collection_dispute_id)
+        if stored is None:
+            raise ValueError("collection dispute release requires a stored dispute")
+        if stored.collection_dispute_status == "released":
+            return stored
+        if stored.collection_dispute_status != "held":
+            raise ValueError("only held collection disputes can release")
+        remaining = parse_exact_decimal(
+            format_exact_decimal(stored.remaining_outstanding_amount)
+        )
+        updated = replace(
+            stored,
+            collection_dispute_status="released",
+            remaining_outstanding_amount=remaining,
+            released_at=released_at,
+        )
+        self.collection_disputes[updated.collection_dispute_id] = updated
+        return updated
+
+    def mark_collection_case_released_from_dispute(
+        self, collection_case_id: UUID
+    ) -> StoredCollectionCase:
+        """Restore a disputed case to open or dunning without changing outstanding.
+
+        Replay of an already-open or dunning case returns the stored row.
+        Settled or voided cases fail closed.  Dunning events that already
+        exist restore ``dunning``; otherwise the case returns to ``open``.
+        """
+        stored = self.collection_cases.get(collection_case_id)
+        if stored is None:
+            raise ValueError("collection dispute release requires a stored collection case")
+        if stored.collection_case_status in {"open", "dunning"}:
+            return stored
+        if stored.collection_case_status == "settled":
+            raise ValueError("settled collection cases cannot release from dispute")
+        if stored.collection_case_status == "voided":
+            raise ValueError("voided collection cases cannot release from dispute")
+        if stored.collection_case_status != "disputed":
+            raise ValueError("only disputed collection cases can release to open")
+        remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+        restored_status = (
+            "dunning"
+            if self.list_collection_dunning_events(collection_case_id)
+            else "open"
+        )
+        updated = StoredCollectionCase(
+            collection_case_id=stored.collection_case_id,
+            tenant_account_id=stored.tenant_account_id,
+            invoice_draft_id=stored.invoice_draft_id,
+            currency_code=stored.currency_code,
+            collection_case_status=restored_status,
+            outstanding_amount=remaining,
+            opened_at=stored.opened_at,
+        )
+        self.collection_cases[updated.collection_case_id] = updated
+        return updated
 
     def find_issued_invoice_void(
         self, tenant_account_id: UUID, issued_invoice_id: UUID

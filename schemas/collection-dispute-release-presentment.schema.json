@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-dispute-presentment/v1",
-  "title": "Collection Dispute Presentment",
-  "description": "Tenant-scoped commercial statement projected from a stored collection_dispute and the current collection_case. remaining_outstanding_amount is the current exact-decimal remaining snapshot. Dispute status stays held. Case status is disputed. Next operator action is wait. The document is not a payment receipt, credit note, settlement, write-off, void, journal, webhook event, or AIS posting.",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-dispute-release-presentment/v1",
+  "title": "Collection Dispute Release Presentment",
+  "description": "Tenant-scoped commercial statement projected from a released collection_dispute and the current collection_case. remaining_outstanding_amount is the current exact-decimal remaining snapshot. Dispute status stays released. Case status is open or dunning. Next operator action is wait. The document is not a payment receipt, credit note, settlement, write-off, void, journal, webhook event, or AIS posting.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "collection_dispute_presentment_contract_version",
+    "collection_dispute_release_presentment_contract_version",
     "collection_dispute_id",
     "tenant_reference",
     "collection_case_id",
@@ -15,12 +15,12 @@
     "remaining_outstanding_amount",
     "collection_dispute_status",
     "collection_case_status",
-    "held_at",
+    "released_at",
     "source_payload_hash",
     "next_operator_action"
   ],
   "properties": {
-    "collection_dispute_presentment_contract_version": {
+    "collection_dispute_release_presentment_contract_version": {
       "type": "integer",
       "minimum": 1
     },
@@ -35,12 +35,12 @@
       "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
       "maxLength": 39
     },
-    "collection_dispute_status": {"type": "string", "enum": ["held", "released"]},
+    "collection_dispute_status": {"type": "string", "enum": ["released"]},
     "collection_case_status": {
       "type": "string",
-      "enum": ["open", "dunning", "disputed"]
+      "enum": ["open", "dunning"]
     },
-    "held_at": {"type": "string", "format": "date-time"},
+    "released_at": {"type": "string", "format": "date-time"},
     "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "next_operator_action": {
       "type": "string",

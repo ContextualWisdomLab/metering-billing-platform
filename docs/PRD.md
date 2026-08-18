@@ -244,8 +244,22 @@ contextual-orchestrator usage
 - A known stored hold presents one tenant-scoped statement with identity, remaining snapshot, `held_at`, and `next_operator_action` (`wait`).
 - `GET /v1/collection-disputes/{collection_dispute_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/collection-disputes` lists summaries as `{collection_disputes, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{held_at}|{collection_dispute_id}`.
-- Write-off, void, settle, receipt, credit-apply, leftover-apply, journal, and AIS contracts stay unchanged except additive fail-closed `collection_case_disputed` reasons. Release is a later slice.
+- Write-off, void, settle, receipt, credit-apply, leftover-apply, journal, and AIS contracts stay unchanged except additive fail-closed `collection_case_disputed` reasons.
 - Operators hold the disputed case, then wait. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
+
+## Collection-dispute-release acceptance
+
+- A known stored held collection dispute releases once. Remaining outstanding stays the current exact-decimal snapshot. Dispute status becomes `released`. Case status returns to `open`, or to `dunning` when stored notices already exist.
+- A second release of the same tenant and `collection_dispute_id` returns the same `collection_dispute_id` as `duplicate_replay` and never changes remaining outstanding.
+- The path does not invent a second hold row, journal, webhook, write-off, settlement, void rewrite, statutory numbering, or AIS call.
+- Missing dispute, not-held dispute, missing case, already-settled case, already-voided case, currency mismatch, and missing tenant fail closed.
+- After release, dunning, payment receipt, credit apply, leftover apply, write-off, settle-when-zero, and void follow the existing open-case rules. A later hold of the same case fail-closes as `collection_dispute_released`.
+- `POST /v1/collection-disputes/{collection_dispute_id}/releases` is the nested release command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
+- A known stored release presents one tenant-scoped statement with identity, remaining snapshot, `released_at`, and `next_operator_action` (`wait`).
+- `GET /v1/collection-dispute-releases/{collection_dispute_id}` is HTTP 200 for the same tenant. Cross-tenant, unknown, or still-held is HTTP 404 with no leak.
+- `GET /v1/collection-dispute-releases` lists summaries as `{collection_dispute_releases, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{released_at}|{collection_dispute_id}`.
+- Hold, write-off, void, settle, receipt, credit-apply, leftover-apply, journal, and AIS contracts stay unchanged except additive fail-closed `collection_dispute_released` on a later hold.
+- Operators release the hold, then collect or dunn. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Collection-write-off acceptance
 
