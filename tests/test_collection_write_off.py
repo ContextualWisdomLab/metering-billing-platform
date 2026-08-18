@@ -227,6 +227,10 @@ class CollectionWriteOffTests(unittest.TestCase):
         )
         self.assertEqual(written.issued_invoice_id, issued_invoice.issued_invoice_id)
         self.assertIn("issued_invoice_id", written.as_contract_dict())
+        presented = CollectionWriteOffPresentmentService(ledger).present_collection_write_off(
+            TENANT_ONE, written.collection_write_off_id
+        )
+        self.assertIn("issued_invoice_id", presented.as_contract_dict())
 
     def test_resolver_hollow_success_raises_value_error(self) -> None:
         """A broken tenant resolve must raise ValueError, not assert."""
@@ -476,6 +480,10 @@ class CollectionWriteOffTests(unittest.TestCase):
             settled_ledger.apply_collection_write_off(
                 settled_case.collection_case_id, Decimal("0")
             )
+        with self.assertRaises(ValueError):
+            settled_ledger.apply_collection_write_off(
+                settled_case.collection_case_id, KNOWN_MORNING_TOTAL
+            )
         missing_remaining = json.loads(json.dumps(valid))
         del missing_remaining["remaining_outstanding_amount"]
         self.assertTrue(validate_collection_write_off(missing_remaining))
@@ -519,6 +527,16 @@ class CollectionWriteOffTests(unittest.TestCase):
         bad_amount = json.loads(json.dumps(valid))
         bad_amount["write_off_amount"] = 1
         self.assertTrue(validate_collection_write_off(bad_amount))
+        unreadable_amount = json.loads(json.dumps(valid))
+        unreadable_amount["write_off_amount"] = "not-decimal"
+        self.assertTrue(validate_collection_write_off(unreadable_amount))
+        rejected_credit_legal = {
+            "collection_write_off_contract_version": 1,
+            "collection_write_off_outcome_code": "rejected",
+            "rejection_reason_code": "outstanding_already_zero",
+            "legal_credit_note_number": "CN-1",
+        }
+        self.assertTrue(validate_collection_write_off(rejected_credit_legal))
 
     def test_coverage_guards_for_write_off_and_presentment_edges(self) -> None:
         """Closed branches stay explicit: replay, presentment, constructors, and HTTP."""
@@ -729,6 +747,45 @@ class CollectionWriteOffTests(unittest.TestCase):
         )
         self.assertEqual(bad_amount_status, 422)
         self.assertEqual(bad_amount_body["rejection_reason_code"], "request_invalid")
+        unreadable_status, unreadable_body = invoke_http(
+            app,
+            "POST",
+            f"/v1/collection-cases/{currency_case.collection_case_id}/write-offs",
+            {"tenant_reference": TENANT_ONE, "write_off_amount": "not-a-decimal"},
+        )
+        self.assertEqual(unreadable_status, 422)
+        self.assertEqual(unreadable_body["rejection_reason_code"], "request_invalid")
+        currency_type_status, currency_type_body = invoke_http(
+            app,
+            "POST",
+            f"/v1/collection-cases/{currency_case.collection_case_id}/write-offs",
+            {"tenant_reference": TENANT_ONE, "currency_code": 1},
+        )
+        self.assertEqual(currency_type_status, 422)
+        self.assertEqual(currency_type_body["rejection_reason_code"], "request_invalid")
+        bad_cursor_status, bad_cursor_body = invoke_http(
+            app,
+            "GET",
+            "/v1/collection-write-offs",
+            query={
+                "tenant_reference": TENANT_ONE,
+                "cursor": f"not-a-datetime|{written.collection_write_off_id}",
+            },
+        )
+        self.assertEqual(bad_cursor_status, 422)
+        self.assertEqual(bad_cursor_body["rejection_reason_code"], "request_invalid")
+        with mock.patch(
+            "metering_billing.http_app.CollectionWriteOffPresentmentService.present_collection_write_off",
+            side_effect=ValueError("boom"),
+        ):
+            get_boom_status, get_boom = invoke_http(
+                app,
+                "GET",
+                f"/v1/collection-write-offs/{written.collection_write_off_id}",
+                query={"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(get_boom_status, 422)
+        self.assertEqual(get_boom["rejection_reason_code"], "request_invalid")
         collection_method_status, _collection_method = invoke_http(
             app,
             "POST",
