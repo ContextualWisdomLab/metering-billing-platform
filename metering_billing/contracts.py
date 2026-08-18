@@ -57,6 +57,8 @@ __all__ = (
     "UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME",
     "UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME",
     "UNAPPLIED_CASH_APPLICATION_PRESENTMENT_SCHEMA_NAME",
+    "UNAPPLIED_CASH_REFUND_SCHEMA_NAME",
+    "UNAPPLIED_CASH_REFUND_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -100,6 +102,8 @@ __all__ = (
     "validate_unapplied_cash_presentment",
     "validate_unapplied_cash_application",
     "validate_unapplied_cash_application_presentment",
+    "validate_unapplied_cash_refund",
+    "validate_unapplied_cash_refund_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -169,6 +173,10 @@ UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME = "unapplied-cash-presentment.schema.json
 UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME = "unapplied-cash-application.schema.json"
 UNAPPLIED_CASH_APPLICATION_PRESENTMENT_SCHEMA_NAME = (
     "unapplied-cash-application-presentment.schema.json"
+)
+UNAPPLIED_CASH_REFUND_SCHEMA_NAME = "unapplied-cash-refund.schema.json"
+UNAPPLIED_CASH_REFUND_PRESENTMENT_SCHEMA_NAME = (
+    "unapplied-cash-refund-presentment.schema.json"
 )
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
@@ -1938,9 +1946,104 @@ def validate_unapplied_cash_application_presentment(
     return tuple(errors)
 
 
+def validate_unapplied_cash_refund(
+    refund: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate leftover-refund shape plus exact refund-amount invariants.
+
+    Accepted and replayed refunds must carry leftover, receipt, currency,
+    exact refund amount, parked leftover snapshot, and refunded timestamp.
+    Rejections must carry a closed reason and must not invent a legal number.
+    """
+    schema = load_json_schema(UNAPPLIED_CASH_REFUND_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, refund))
+    if not isinstance(refund, Mapping):
+        return tuple(errors)
+    outcome = refund.get("unapplied_cash_refund_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        for field_name in (
+            "unapplied_cash_refund_id",
+            "unapplied_cash_id",
+            "payment_receipt_id",
+            "payment_intent_id",
+            "collection_case_id",
+            "currency_code",
+            "refund_amount",
+            "unapplied_amount",
+            "refunded_at",
+        ):
+            if field_name not in refund:
+                errors.append(f"$: {outcome} refunds must include {field_name}")
+        refund_amount = refund.get("refund_amount")
+        if isinstance(refund_amount, str):
+            try:
+                if Decimal(refund_amount) <= Decimal("0"):
+                    errors.append("$: refund_amount must be a positive exact decimal")
+            except Exception:
+                errors.append("$: refund_amount must be an exact decimal")
+        elif refund_amount is not None:
+            errors.append("$: refund_amount must be an exact decimal")
+        for forbidden_name in (
+            "legal_credit_note_number",
+            "legal_invoice_number",
+            "card_pan",
+        ):
+            if forbidden_name in refund:
+                errors.append(f"$: refunds must not include {forbidden_name}")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in refund:
+            errors.append("$: rejected refunds must include rejection_reason_code")
+        if "legal_invoice_number" in refund:
+            errors.append("$: rejected refunds must not invent legal numbers")
+        if "legal_credit_note_number" in refund:
+            errors.append("$: rejected refunds must not invent legal numbers")
+    else:
+        if outcome is not None:
+            errors.append("$: unknown unapplied_cash_refund_outcome_code")
+    return tuple(errors)
+
+
+def validate_unapplied_cash_refund_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate leftover-refund presentment plus exact refund-amount invariants."""
+    schema = load_json_schema(
+        UNAPPLIED_CASH_REFUND_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    if action != "wait":
+        errors.append("$: unapplied cash refund presentment must wait")
+    refund_amount = statement.get("refund_amount")
+    if refund_amount is None:
+        errors.append("$: refund_amount is required")
+    elif isinstance(refund_amount, str):
+        try:
+            if Decimal(refund_amount) <= Decimal("0"):
+                errors.append("$: refund_amount must be a positive exact decimal")
+        except Exception:
+            errors.append("$: refund_amount must be an exact decimal")
+    else:
+        errors.append("$: refund_amount must be an exact decimal")
+    for forbidden_name in (
+        "legal_credit_note_number",
+        "legal_invoice_number",
+        "unapplied_cash_refund_outcome_code",
+        "card_pan",
+    ):
+        if forbidden_name in statement:
+            errors.append(
+                f"$: unapplied cash refund presentment must not include {forbidden_name}"
+            )
+    return tuple(errors)
+
+
 def validate_unapplied_cash_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
+
     """Validate leftover presentment plus exact parked-amount invariants."""
     schema = load_json_schema(
         UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME, schemas_directory

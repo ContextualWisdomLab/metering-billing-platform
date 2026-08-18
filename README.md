@@ -155,6 +155,7 @@ After a stored `payment_receipt` exists, `POST /v1/payment-receipts/{payment_rec
 ```
 
 After leftover is parked, `POST /v1/collection-cases/{collection_case_id}/unapplied-cash-applications` applies the full parked amount onto another open case. Replay of the same tenant and leftover returns the same `unapplied_cash_application_id`. First successful apply enqueues one existing `unapplied_cash.applied` webhook outbox event. Remaining zero does not settle; #46 remains the explicit settle-when-zero command. `GET /v1/unapplied-cash-applications/{unapplied_cash_application_id}` returns the tenant-scoped statement. The path does not invent a journal, write-off, credit note, AIS call, settlement command, or second webhook system.
+After leftover is parked and unused, `POST /v1/unapplied-cash/{unapplied_cash_id}/refunds` records a commercial refund of the full parked amount. Replay of the same tenant and leftover returns the same `unapplied_cash_refund_id`. The parked leftover row stays `parked`. `GET /v1/unapplied-cash-refunds/{unapplied_cash_refund_id}` returns the tenant-scoped statement. The path does not invent a journal, webhook, write-off, settlement, credit note, PSP capture, AIS call, or statutory numbering.
 
 ## Present a credit adjustment
 

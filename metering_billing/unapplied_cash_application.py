@@ -207,6 +207,13 @@ class UnappliedCashApplicationService:
         parked = self.ledger.get_unapplied_cash(unapplied_cash_id)
         if parked is None or parked.tenant_account_id != tenant.tenant_account_id:
             return _rejected(UnappliedCashApplicationRejectionReasonCode.UNAPPLIED_CASH_NOT_FOUND)
+        existing_refund = self.ledger.find_unapplied_cash_refund(
+            tenant.tenant_account_id, parked.unapplied_cash_id
+        )
+        if existing_refund is not None:
+            return _rejected(
+                UnappliedCashApplicationRejectionReasonCode.UNAPPLIED_CASH_ALREADY_REFUNDED
+            )
         existing = self.ledger.find_unapplied_cash_application(
             tenant.tenant_account_id, parked.unapplied_cash_id
         )

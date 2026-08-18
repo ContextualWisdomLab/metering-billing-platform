@@ -368,6 +368,7 @@ class UnappliedCashApplicationRejectionReasonCode(StrEnum):
     UNAPPLIED_CASH_NOT_FOUND = "unapplied_cash_not_found"
     COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
     COLLECTION_CASE_SETTLED = "collection_case_settled"
+    UNAPPLIED_CASH_ALREADY_REFUNDED = "unapplied_cash_already_refunded"
     CURRENCY_MISMATCH = "currency_mismatch"
     APPLIED_AMOUNT_ZERO = "applied_amount_zero"
     APPLIED_AMOUNT_NEGATIVE = "applied_amount_negative"
@@ -380,6 +381,36 @@ class UnappliedCashApplicationRejectionReasonCode(StrEnum):
 
 class UnappliedCashApplicationPresentmentQueryError(ValueError):
     """Raised when a stored leftover application cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
+class UnappliedCashRefundOutcomeCode(StrEnum):
+    """Terminal result of refunding parked leftover remittance."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class UnappliedCashRefundRejectionReasonCode(StrEnum):
+    """Why leftover refund was refused without writing a new money fact."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    UNAPPLIED_CASH_NOT_FOUND = "unapplied_cash_not_found"
+    UNAPPLIED_CASH_ALREADY_APPLIED = "unapplied_cash_already_applied"
+    UNAPPLIED_CASH_NOT_PARKED = "unapplied_cash_not_parked"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    REFUND_AMOUNT_ZERO = "refund_amount_zero"
+    REFUND_AMOUNT_NEGATIVE = "refund_amount_negative"
+    REFUND_AMOUNT_MISMATCH = "refund_amount_mismatch"
+    REQUEST_INVALID = "request_invalid"
+
+
+class UnappliedCashRefundPresentmentQueryError(ValueError):
+    """Raised when a stored leftover refund cannot be authorized or presented."""
 
     def __init__(self, rejection_reason_code: str) -> None:
         super().__init__(rejection_reason_code)

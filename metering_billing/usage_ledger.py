@@ -604,6 +604,31 @@ class StoredUnappliedCashApplication:
 
 
 @dataclass(frozen=True)
+class StoredUnappliedCashRefund:
+    """Append-only commercial refund of one parked leftover.
+
+    Identity is ``(tenant_account_id, unapplied_cash_id)``.  One parked
+    leftover refunds at most once.  ``unapplied_cash_refund_id`` is the
+    opaque generated identifier.  This is not a journal, webhook,
+    write-off, settlement, credit note, PSP capture, or AIS posting.
+    """
+
+    unapplied_cash_refund_id: UUID
+    tenant_account_id: UUID
+    unapplied_cash_id: UUID
+    payment_receipt_id: UUID
+    payment_intent_id: UUID
+    collection_case_id: UUID
+    unapplied_cash_refund_contract_version: int
+    source_payload_hash: str
+    currency_code: str
+    refund_amount: Decimal
+    unapplied_amount: Decimal
+    unapplied_cash_refund_status: str
+    refunded_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredPaymentReceipt:
     """Append-only commercial receipt applied against one projected intent."""
 
@@ -877,6 +902,12 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     unapplied_cash_application_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    unapplied_cash_refunds: dict[UUID, StoredUnappliedCashRefund] = field(
+        default_factory=dict
+    )
+    unapplied_cash_refund_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
 
@@ -2113,6 +2144,78 @@ class MemoryUsageLedger:
         self.unapplied_cash_application_index[identity_key] = (
             persisted.unapplied_cash_application_id
         )
+        return persisted
+
+    def find_unapplied_cash_refund(
+        self, tenant_account_id: UUID, unapplied_cash_id: UUID
+    ) -> StoredUnappliedCashRefund | None:
+        """Return the refund for one tenant parked leftover, if any."""
+        unapplied_cash_refund_id = self.unapplied_cash_refund_index.get(
+            (tenant_account_id, unapplied_cash_id)
+        )
+        if unapplied_cash_refund_id is None:
+            return None
+        return self.unapplied_cash_refunds[unapplied_cash_refund_id]
+
+    def get_unapplied_cash_refund(
+        self, unapplied_cash_refund_id: UUID
+    ) -> StoredUnappliedCashRefund | None:
+        """Return one leftover refund by internal identifier, if present."""
+        return self.unapplied_cash_refunds.get(unapplied_cash_refund_id)
+
+    def list_unapplied_cash_refunds_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredUnappliedCashRefund, ...]:
+        """Return leftover refunds limited to one tenant."""
+        return tuple(
+            refund
+            for refund in self.unapplied_cash_refunds.values()
+            if refund.tenant_account_id == tenant_account_id
+        )
+
+    def insert_unapplied_cash_refund(
+        self, unapplied_cash_refund: StoredUnappliedCashRefund
+    ) -> StoredUnappliedCashRefund:
+        """Append an immutable leftover refund.  Existing identity stays."""
+        if unapplied_cash_refund.unapplied_cash_refund_status != "recorded":
+            raise ValueError("unapplied_cash_refund_status must be recorded")
+        refund_amount = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash_refund.refund_amount)
+        )
+        if refund_amount <= 0:
+            raise ValueError("unapplied cash refund amount must be a positive exact decimal")
+        unapplied_amount = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash_refund.unapplied_amount)
+        )
+        if unapplied_amount <= 0:
+            raise ValueError("unapplied cash amount must be a positive exact decimal")
+        if unapplied_cash_refund.unapplied_cash_refund_id in self.unapplied_cash_refunds:
+            raise ValueError("unapplied_cash_refund_id already stored")
+        identity_key = (
+            unapplied_cash_refund.tenant_account_id,
+            unapplied_cash_refund.unapplied_cash_id,
+        )
+        if identity_key in self.unapplied_cash_refund_index:
+            raise ValueError("unapplied cash refunds are immutable and cannot be replaced")
+        persisted = StoredUnappliedCashRefund(
+            unapplied_cash_refund_id=unapplied_cash_refund.unapplied_cash_refund_id,
+            tenant_account_id=unapplied_cash_refund.tenant_account_id,
+            unapplied_cash_id=unapplied_cash_refund.unapplied_cash_id,
+            payment_receipt_id=unapplied_cash_refund.payment_receipt_id,
+            payment_intent_id=unapplied_cash_refund.payment_intent_id,
+            collection_case_id=unapplied_cash_refund.collection_case_id,
+            unapplied_cash_refund_contract_version=(
+                unapplied_cash_refund.unapplied_cash_refund_contract_version
+            ),
+            source_payload_hash=unapplied_cash_refund.source_payload_hash,
+            currency_code=unapplied_cash_refund.currency_code,
+            refund_amount=refund_amount,
+            unapplied_amount=unapplied_amount,
+            unapplied_cash_refund_status=unapplied_cash_refund.unapplied_cash_refund_status,
+            refunded_at=unapplied_cash_refund.refunded_at,
+        )
+        self.unapplied_cash_refunds[persisted.unapplied_cash_refund_id] = persisted
+        self.unapplied_cash_refund_index[identity_key] = persisted.unapplied_cash_refund_id
         return persisted
 
     def apply_unapplied_cash_to_collection_case(

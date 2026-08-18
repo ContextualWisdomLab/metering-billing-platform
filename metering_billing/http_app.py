@@ -135,6 +135,11 @@ The application is a thin WSGI adapter:
     zero does not settle.  GET item and list present the stored
     application.  Do not invent a journal, write-off, credit note, AIS
     call, settlement command, or second webhook system.
+    ``POST /v1/unapplied-cash/{unapplied_cash_id}/refunds`` records one
+    commercial refund of the parked leftover.  Replay of the same tenant
+    and leftover returns the stored ``unapplied_cash_refund_id``.  GET
+    item and list present the stored refund.  Do not invent a journal,
+    webhook, write-off, settlement, credit note, PSP capture, or AIS call.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -180,6 +185,7 @@ from metering_billing.errors import (
     CollectionWriteOffPresentmentQueryError,
     UnappliedCashPresentmentQueryError,
     UnappliedCashApplicationPresentmentQueryError,
+    UnappliedCashRefundPresentmentQueryError,
     TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
@@ -215,6 +221,10 @@ from metering_billing.unapplied_cash_presentment import UnappliedCashPresentment
 from metering_billing.unapplied_cash_application import UnappliedCashApplicationService
 from metering_billing.unapplied_cash_application_presentment import (
     UnappliedCashApplicationPresentmentService,
+)
+from metering_billing.unapplied_cash_refund import UnappliedCashRefundService
+from metering_billing.unapplied_cash_refund_presentment import (
+    UnappliedCashRefundPresentmentService,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 from metering_billing.collection_aging_presentment import (
@@ -274,6 +284,13 @@ UNAPPLIED_CASH_NESTED_PATH = re.compile(
 )
 UNAPPLIED_CASH_COLLECTION_PATH = "/v1/unapplied-cash"
 UNAPPLIED_CASH_ITEM_PATH = re.compile(r"^/v1/unapplied-cash/([0-9a-fA-F-]{36})$")
+UNAPPLIED_CASH_REFUND_NESTED_PATH = re.compile(
+    r"^/v1/unapplied-cash/([0-9a-fA-F-]{36})/refunds$"
+)
+UNAPPLIED_CASH_REFUND_COLLECTION_PATH = "/v1/unapplied-cash-refunds"
+UNAPPLIED_CASH_REFUND_ITEM_PATH = re.compile(
+    r"^/v1/unapplied-cash-refunds/([0-9a-fA-F-]{36})$"
+)
 UNAPPLIED_CASH_APPLICATION_NESTED_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/unapplied-cash-applications$"
 )
@@ -428,6 +445,10 @@ def create_http_app(
     unapplied_cash_presentments = UnappliedCashPresentmentService(shared_ledger)
     unapplied_cash_applications = UnappliedCashApplicationService(shared_ledger)
     unapplied_cash_application_presentments = UnappliedCashApplicationPresentmentService(
+        shared_ledger
+    )
+    unapplied_cash_refunds = UnappliedCashRefundService(shared_ledger)
+    unapplied_cash_refund_presentments = UnappliedCashRefundPresentmentService(
         shared_ledger
     )
     exports = AccountingExportService(shared_ledger)
@@ -1487,6 +1508,47 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_unapplied_cash_refunds",
+            "get_unapplied_cash_refund",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_unapplied_cash_refunds":
+                    page = unapplied_cash_refund_presentments.list_unapplied_cash_refunds(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = unapplied_cash_refund_presentments.present_unapplied_cash_refund(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["unapplied_cash_refund_id"],
+                        "unapplied_cash_refund_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except UnappliedCashRefundPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "unapplied_cash_refund_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "unapplied_cash":
             try:
                 payload = _read_json_object(environ)
@@ -1539,6 +1601,38 @@ def create_http_app(
                     _parse_uuid(payload.get("unapplied_cash_id"), "unapplied_cash_id"),
                     _parse_uuid(path_values["collection_case_id"], "collection_case_id"),
                     applied_amount=parsed_amount,
+                    currency_code=currency_code,
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "unapplied_cash_refunds":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                raw_amount = payload.get("refund_amount")
+                parsed_amount = None
+                if raw_amount is not None:
+                    if not isinstance(raw_amount, str):
+                        raise HttpRequestError("request_invalid")
+                    parsed_amount = parse_exact_decimal(raw_amount)
+                currency_code = payload.get("currency_code")
+                if currency_code is not None and not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                result = unapplied_cash_refunds.refund_unapplied_cash(
+                    tenant_reference,
+                    _parse_uuid(path_values["unapplied_cash_id"], "unapplied_cash_id"),
+                    refund_amount=parsed_amount,
                     currency_code=currency_code,
                 )
                 return _send_json(
@@ -1969,6 +2063,24 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if unapplied_nested is not None:
         if method == "POST":
             return "unapplied_cash", {"payment_receipt_id": unapplied_nested.group(1)}
+        return "method_not_allowed", {}
+    refund_nested = UNAPPLIED_CASH_REFUND_NESTED_PATH.fullmatch(path)
+    if refund_nested is not None:
+        if method == "POST":
+            return "unapplied_cash_refunds", {
+                "unapplied_cash_id": refund_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    if path == UNAPPLIED_CASH_REFUND_COLLECTION_PATH:
+        if method == "GET":
+            return "list_unapplied_cash_refunds", {}
+        return "method_not_allowed", {}
+    refund_match = UNAPPLIED_CASH_REFUND_ITEM_PATH.fullmatch(path)
+    if refund_match is not None:
+        if method == "GET":
+            return "get_unapplied_cash_refund", {
+                "unapplied_cash_refund_id": refund_match.group(1)
+            }
         return "method_not_allowed", {}
     if path == UNAPPLIED_CASH_COLLECTION_PATH:
         if method == "GET":

@@ -333,6 +333,17 @@ contextual-orchestrator usage
 - Missing tenant, illegal cursor, and illegal page_limit fail closed.
 - Operators apply parked leftover, then collect the residual or settle at exact zero. First successful apply enqueues one existing #24 `unapplied_cash.applied` outbox event. HTTP does not auto-settle, capture cards, write a journal, or call AIS.
 
+## Unapplied-cash-refund acceptance
+
+- `POST /v1/unapplied-cash/{unapplied_cash_id}/refunds` records one commercial refund of parked leftover. Replay of the same tenant and leftover returns the same `unapplied_cash_refund_id` as `duplicate_replay`.
+- The refund uses the full parked amount. Omitting `refund_amount` uses the parked leftover. A supplied amount must equal the parked leftover.
+- The parked leftover row stays `parked`. Refund uniqueness consumes it. Apply fail-closes when a refund already exists.
+- A known stored refund presents one tenant-scoped statement with `refund_amount`, parked leftover snapshot, `unapplied_cash_refund_status` (`recorded`), and `next_operator_action` (`wait`).
+- `GET /v1/unapplied-cash-refunds/{unapplied_cash_refund_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/unapplied-cash-refunds` lists summaries as `{unapplied_cash_refunds, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{refunded_at}|{unapplied_cash_refund_id}`.
+- Missing tenant, leftover already applied, leftover not parked, currency mismatch, zero/negative leftover, mismatched amount, IEEE leftover, illegal cursor, and illegal page_limit fail closed.
+- Operators refund unused parked leftover as a commercial fact. HTTP does not capture cards, call a PSP, write a journal, enqueue a webhook, or call AIS.
+
 ## Payment-intent-presentment acceptance
 
 - `POST /v1/payment-intents` projects one #11 intent from a stored `collection_case_id`. Amount and currency come from the case. Replay of the same tenant, case snapshot, and contract version returns the same `payment_intent_id`. PAN, CVC, and provider secrets are refused.
