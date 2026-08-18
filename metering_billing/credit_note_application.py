@@ -8,8 +8,10 @@ The service is the buyer-facing apply path:
 4. Persist one append-only ``credit_note_application`` per issued note.
 
 Replay of the same tenant and ``issued_credit_note_id`` returns the stored
-application and never double-reduces.  The path does not emit a journal,
-unwind tax, capture payment, call AIS, or enqueue a new webhook type.
+application and never double-reduces.  First successful apply enqueues
+one existing ``credit_note.applied`` outbox event; replay of the same
+application does not enqueue a second row.  The path does not emit a
+journal, unwind tax, capture payment, call AIS, or invent a settlement.
 """
 
 from __future__ import annotations
@@ -35,6 +37,10 @@ from metering_billing.usage_ledger import (
     StoredCreditNoteApplication,
     StoredIssuedCreditNote,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_CREDIT_NOTE_APPLIED,
+    enqueue_accepted_fact,
 )
 
 
@@ -131,6 +137,41 @@ class CreditNoteApplicationResult:
             payload["issued_invoice_id"] = str(self.issued_invoice_id)
         return payload
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``credit_note.applied`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not a payment receipt or
+        settlement.  PII, PAN, secrets, and statutory identifiers are omitted.
+        Remaining outstanding is not stored on the application row, so it is
+        omitted to keep the outbox payload hash stable across later case
+        mutations.
+        """
+        if self.credit_note_application_id is None or self.issued_credit_note_id is None:
+            raise ValueError("rejected credit note application has no webhook event data")
+        if self.applied_at is None:
+            raise ValueError("accepted credit note applications must include applied_at")
+        payload: dict[str, object] = {
+            "credit_note_application_id": str(self.credit_note_application_id),
+            "issued_credit_note_id": str(self.issued_credit_note_id),
+            "collection_case_id": str(self.collection_case_id),
+            "invoice_draft_id": str(self.invoice_draft_id),
+            "source_payload_hash": self.source_payload_hash,
+            "credit_note_application_contract_version": (
+                self.credit_note_application_contract_version
+            ),
+            "issued_credit_note_contract_version": self.issued_credit_note_contract_version,
+            "issued_credit_note_source_payload_hash": (
+                self.issued_credit_note_source_payload_hash
+            ),
+            "currency_code": self.currency_code,
+            "applied_amount": format_exact_decimal(self.applied_amount),
+            "credit_note_application_status": self.credit_note_application_status,
+            "applied_at": _format_applied_at(self.applied_at),
+        }
+        if self.issued_invoice_id is not None:
+            payload["issued_invoice_id"] = str(self.issued_invoice_id)
+        return payload
+
 
 class CreditNoteApplicationService:
     """Append-only applier of issued credit notes onto collection cases."""
@@ -153,7 +194,9 @@ class CreditNoteApplicationService:
 
         Replay of the same tenant and ``issued_credit_note_id`` returns the
         stored ``credit_note_application_id`` and does not reduce outstanding
-        again.  Another tenant cannot see or apply that note.
+        again.  First successful apply enqueues one ``credit_note.applied``
+        outbox event.  Replay of that application does not enqueue a second
+        row.  Another tenant cannot see or apply that note.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -169,12 +212,14 @@ class CreditNoteApplicationService:
             current_case = self.ledger.get_collection_case(existing.collection_case_id)
             if current_case is None:
                 return _rejected(CreditNoteApplicationRejectionReasonCode.COLLECTION_CASE_NOT_FOUND)
-            return _from_stored(
+            result = _from_stored(
                 existing,
                 current_case,
                 tenant.tenant_reference,
                 CreditNoteApplicationOutcomeCode.DUPLICATE_REPLAY,
             )
+            _enqueue_credit_note_applied(self.ledger, tenant.tenant_reference, result)
+            return result
         collection_case = self.ledger.get_collection_case(collection_case_id)
         if (
             collection_case is None
@@ -215,12 +260,14 @@ class CreditNoteApplicationService:
         updated_case = self.ledger.apply_collection_settlement(
             collection_case.collection_case_id, applied_amount
         )
-        return _from_stored(
+        result = _from_stored(
             stored,
             updated_case,
             tenant.tenant_reference,
             CreditNoteApplicationOutcomeCode.ACCEPTED,
         )
+        _enqueue_credit_note_applied(self.ledger, tenant.tenant_reference, result)
+        return result
 
 
 def _canonical_application_snapshot(
@@ -239,6 +286,31 @@ def _canonical_application_snapshot(
     if issued.issued_invoice_id is not None:
         payload["issued_invoice_id"] = str(issued.issued_invoice_id)
     return payload
+
+
+def _enqueue_credit_note_applied(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: CreditNoteApplicationResult,
+) -> None:
+    """Append one ``credit_note.applied`` outbox row for a stored application.
+
+    Replay of the same tenant, event type, ``credit_note_application_id``,
+    and payload hash returns the stored row.  A crash after insert and
+    before enqueue is healed by the next apply replay.
+    """
+    if result.credit_note_application_id is None or result.applied_at is None:
+        raise ValueError(
+            "accepted credit note applications must include identity and applied_at"
+        )
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_CREDIT_NOTE_APPLIED,
+        result.credit_note_application_id,
+        result.as_webhook_event_data(),
+        result.applied_at,
+    )
 
 
 def _invoice_mismatch(

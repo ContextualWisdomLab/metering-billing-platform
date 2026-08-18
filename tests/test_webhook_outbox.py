@@ -19,6 +19,7 @@ from metering_billing import (
     AccountingExportService,
     CollectionCaseSettlementService,
     CreditAdjustmentService,
+    CreditNoteApplicationService,
     IssuedCreditNoteService,
     IssuedInvoiceService,
     MemoryUsageLedger,
@@ -45,6 +46,7 @@ from metering_billing.tenant_api_credential import DEFAULT_CREDENTIAL_PEPPER
 from metering_billing.webhook_outbox import (
     EVENT_TYPE_COLLECTION_SETTLED,
     EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED,
+    EVENT_TYPE_CREDIT_NOTE_APPLIED,
     EVENT_TYPE_CREDIT_NOTE_ISSUED,
     EVENT_TYPE_INVOICE_ISSUED,
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
@@ -62,6 +64,7 @@ from metering_billing.webhook_outbox import (
     sign_webhook_body,
 )
 from test_collection_case_settlement import open_morning_case_at_zero
+from test_credit_note_application import issue_morning_credit_then_open_case
 from test_http_app import invoke_http
 from test_journal_proposal import draft_known_morning
 from test_payment_settlement import project_known_morning_intent
@@ -524,6 +527,114 @@ class WebhookOutboxTests(unittest.TestCase):
                         event
                         for event in ledger.webhook_outbox_events.values()
                         if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
+                    ]
+                ),
+                1,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_credit_note_applied_enqueues_once_and_delivers_signed(self) -> None:
+        """First apply enqueues credit_note.applied once; replay heals without a second row."""
+        ledger, issued, collection = issue_morning_credit_then_open_case()
+        server, callback_url, received = _start_recorder()
+        try:
+            subscriptions = WebhookSubscriptionService(ledger, clock=lambda: ISSUED_AT)
+            registered = subscriptions.register_subscription(
+                TENANT_ONE, callback_url, (EVENT_TYPE_CREDIT_NOTE_APPLIED,)
+            )
+            self.assertEqual(
+                registered.webhook_subscription_outcome_code,
+                WebhookSubscriptionOutcomeCode.ACCEPTED,
+            )
+            self.assertEqual(registered.event_type_codes, (EVENT_TYPE_CREDIT_NOTE_APPLIED,))
+            self.assertEqual(validate_webhook_subscription(registered.as_contract_dict()), ())
+            first = CreditNoteApplicationService(
+                ledger, clock=lambda: ISSUED_AT
+            ).apply_credit_note(
+                TENANT_ONE, issued.issued_credit_note_id, collection.collection_case_id
+            )
+            second = CreditNoteApplicationService(
+                ledger, clock=lambda: ISSUED_AT
+            ).apply_credit_note(
+                TENANT_ONE, issued.issued_credit_note_id, collection.collection_case_id
+            )
+            applied_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
+            ]
+            self.assertEqual(first.credit_note_application_outcome_code.value, "accepted")
+            self.assertEqual(second.credit_note_application_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(applied_events), 1)
+            self.assertEqual(applied_events[0].source_id, first.credit_note_application_id)
+            envelope = json.loads(applied_events[0].payload_json)
+            self.assertEqual(envelope["event_type_code"], EVENT_TYPE_CREDIT_NOTE_APPLIED)
+            data = envelope["data"]
+            self.assertEqual(
+                data["credit_note_application_id"],
+                str(first.credit_note_application_id),
+            )
+            self.assertEqual(data["issued_credit_note_id"], str(issued.issued_credit_note_id))
+            self.assertEqual(data["collection_case_id"], str(collection.collection_case_id))
+            self.assertEqual(data["invoice_draft_id"], str(issued.invoice_draft_id))
+            self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+            self.assertEqual(data["credit_note_application_contract_version"], 1)
+            self.assertEqual(data["currency_code"], "USD")
+            self.assertEqual(data["applied_amount"], first.as_contract_dict()["applied_amount"])
+            self.assertEqual(data["credit_note_application_status"], "applied")
+            self.assertEqual(data["applied_at"], first.as_contract_dict()["applied_at"])
+            self.assertNotIn("issued_invoice_id", data)
+            self.assertNotIn("remaining_outstanding_amount", data)
+            self.assertNotIn("card_pan", json.dumps(envelope))
+            self.assertNotIn("credit_note_number", json.dumps(envelope))
+            self.assertNotIn("webhook_secret", json.dumps(envelope))
+            self.assertNotIn("legal_credit_note_number", json.dumps(envelope))
+            delivered = WebhookDeliveryService(ledger).deliver_due_events(TENANT_ONE)
+            self.assertEqual(delivered.delivered_event_count, 1)
+            self.assertEqual(len(received), 1)
+            headers, raw_body = received[0]
+            posted = json.loads(raw_body.decode("utf-8"))
+            self.assertEqual(posted["event_type_code"], EVENT_TYPE_CREDIT_NOTE_APPLIED)
+            expected = sign_webhook_body(registered.webhook_secret or "", raw_body)
+            signature = next(
+                value
+                for key, value in headers.items()
+                if key.lower() == WEBHOOK_SIGNATURE_HEADER.lower()
+            )
+            self.assertEqual(signature, expected)
+            orphan_id = applied_events[0].outbox_event_id
+            identity = next(
+                key
+                for key, stored_id in ledger.webhook_outbox_identity_index.items()
+                if stored_id == orphan_id
+            )
+            del ledger.webhook_outbox_events[orphan_id]
+            del ledger.webhook_outbox_identity_index[identity]
+            healed = CreditNoteApplicationService(
+                ledger, clock=lambda: ISSUED_AT
+            ).apply_credit_note(
+                TENANT_ONE, issued.issued_credit_note_id, collection.collection_case_id
+            )
+            healed_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
+            ]
+            self.assertEqual(healed.credit_note_application_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(healed_events), 1)
+            self.assertEqual(healed_events[0].source_id, first.credit_note_application_id)
+            rejected = CreditNoteApplicationService(ledger).apply_credit_note(
+                TENANT_TWO, issued.issued_credit_note_id, collection.collection_case_id
+            )
+            self.assertEqual(rejected.credit_note_application_outcome_code.value, "rejected")
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in ledger.webhook_outbox_events.values()
+                        if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
                     ]
                 ),
                 1,

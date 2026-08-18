@@ -26,9 +26,11 @@ from metering_billing.contracts import (
 )
 from metering_billing.credit_note_application import (
     CreditNoteApplicationResult,
+    _enqueue_credit_note_applied,
     _format_applied_at,
     _rejected,
 )
+from metering_billing.webhook_outbox import EVENT_TYPE_CREDIT_NOTE_APPLIED
 from metering_billing.errors import (
     CreditNoteApplicationOutcomeCode,
     CreditNoteApplicationPresentmentQueryError,
@@ -109,7 +111,47 @@ class CreditNoteApplicationTests(unittest.TestCase):
         self.assertEqual(stored_case.collection_case_status, "settled")
         self.assertEqual(len(ledger.credit_note_applications), 1)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
+        applied_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
+        ]
+        self.assertEqual(len(applied_events), 1)
+        self.assertEqual(applied_events[0].source_id, first.credit_note_application_id)
+        envelope = json.loads(applied_events[0].payload_json)
+        self.assertEqual(envelope["event_type_code"], EVENT_TYPE_CREDIT_NOTE_APPLIED)
+        data = envelope["data"]
+        self.assertEqual(data["credit_note_application_id"], str(first.credit_note_application_id))
+        self.assertEqual(data["issued_credit_note_id"], str(first.issued_credit_note_id))
+        self.assertEqual(data["collection_case_id"], str(first.collection_case_id))
+        self.assertEqual(data["invoice_draft_id"], str(first.invoice_draft_id))
+        self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+        self.assertEqual(data["credit_note_application_contract_version"], 1)
+        self.assertEqual(
+            data["issued_credit_note_contract_version"],
+            first.issued_credit_note_contract_version,
+        )
+        self.assertEqual(
+            data["issued_credit_note_source_payload_hash"],
+            first.issued_credit_note_source_payload_hash,
+        )
+        self.assertEqual(data["currency_code"], "USD")
+        self.assertEqual(data["applied_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
+        self.assertEqual(data["credit_note_application_status"], "applied")
+        self.assertEqual(data["applied_at"], first.as_contract_dict()["applied_at"])
+        self.assertNotIn("issued_invoice_id", data)
+        self.assertNotIn("remaining_outstanding_amount", data)
+        self.assertNotIn("collection_case_status", data)
+        self.assertNotIn("card_pan", json.dumps(envelope))
+        self.assertNotIn("credit_note_number", json.dumps(envelope))
+        self.assertNotIn("legal_credit_note_number", json.dumps(envelope))
+        self.assertNotIn("webhook_secret", json.dumps(envelope))
+        webhook_data = first.as_webhook_event_data()
+        self.assertEqual(webhook_data["applied_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
+        self.assertNotIn("remaining_outstanding_amount", webhook_data)
+        self.assertNotIn("credit_note_application_outcome_code", webhook_data)
+        self.assertNotIn("next_operator_action", webhook_data)
         self.assertEqual(issued.issued_credit_note_status, "issued")
         self.assertEqual(len(ledger.issued_credit_notes), 1)
 
@@ -138,6 +180,19 @@ class CreditNoteApplicationTests(unittest.TestCase):
         )
         self.assertEqual(applied.collection_case_status, "open")
         self.assertEqual(applied.next_operator_action, "collect")
+        applied_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
+        ]
+        self.assertEqual(len(applied_events), 1)
+        self.assertEqual(applied_events[0].source_id, applied.credit_note_application_id)
+        envelope = json.loads(applied_events[0].payload_json)
+        self.assertEqual(
+            envelope["data"]["applied_amount"], format_exact_decimal(PARTIAL_CREDIT)
+        )
+        self.assertNotIn("remaining_outstanding_amount", envelope["data"])
+        self.assertNotIn("collection.settled", json.dumps(envelope))
 
     def test_fail_closed_when_case_settled_or_outstanding_would_go_negative(self) -> None:
         """Settled cases and over-application write zero application rows."""
@@ -165,6 +220,26 @@ class CreditNoteApplicationTests(unittest.TestCase):
         )
         self.assertEqual(len(ledger.credit_note_applications), 0)
         self.assertEqual(len(ledger_two.credit_note_applications), 0)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger_two.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
+                ]
+            ),
+            0,
+        )
 
     def test_fail_closed_on_currency_and_invoice_mismatch(self) -> None:
         """A credit cannot reduce another draft or a different currency case."""
@@ -424,7 +499,17 @@ class CreditNoteApplicationTests(unittest.TestCase):
             {"tenant_reference": TENANT_ONE},
         )
         self.assertEqual(item_method_status, 422)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 2)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
+                ]
+            ),
+            2,
+        )
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
         self.assertEqual(len(ledger.payment_receipts), 0)
         invalid_cursor_status, invalid_cursor = invoke_http(
@@ -604,6 +689,31 @@ class CreditNoteApplicationTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             unsupported.as_contract_dict()
+        accepted_without_time = CreditNoteApplicationResult(
+            credit_note_application_outcome_code=CreditNoteApplicationOutcomeCode.ACCEPTED,
+            credit_note_application_contract_version=1,
+            credit_note_application_id=generate_record_id(),
+            issued_credit_note_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=Decimal("1.00"),
+            remaining_outstanding_amount=Decimal("0"),
+            credit_note_application_status="applied",
+            collection_case_status="settled",
+            applied_at=None,
+            source_payload_hash="sha256:" + "e" * 64,
+            issued_credit_note_source_payload_hash="sha256:" + "f" * 64,
+            issued_credit_note_contract_version=1,
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaises(ValueError):
+            accepted_without_time.as_contract_dict()
+        with self.assertRaises(ValueError):
+            accepted_without_time.as_webhook_event_data()
         none_reason = CreditNoteApplicationResult(
             credit_note_application_outcome_code=CreditNoteApplicationOutcomeCode.REJECTED,
             credit_note_application_contract_version=1,
@@ -629,6 +739,57 @@ class CreditNoteApplicationTests(unittest.TestCase):
             none_reason.as_contract_dict()["rejection_reason_code"],
             "collection_case_not_found",
         )
+        with self.assertRaises(ValueError):
+            none_reason.as_webhook_event_data()
+        missing_note = replace(accepted_without_time, issued_credit_note_id=None)
+        with self.assertRaises(ValueError):
+            missing_note.as_webhook_event_data()
+        incomplete = CreditNoteApplicationResult(
+            credit_note_application_outcome_code=CreditNoteApplicationOutcomeCode.ACCEPTED,
+            credit_note_application_contract_version=1,
+            credit_note_application_id=None,
+            issued_credit_note_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=Decimal("1.00"),
+            remaining_outstanding_amount=Decimal("0"),
+            credit_note_application_status="applied",
+            collection_case_status="settled",
+            applied_at=None,
+            source_payload_hash="sha256:" + "a" * 64,
+            issued_credit_note_source_payload_hash="sha256:" + "b" * 64,
+            issued_credit_note_contract_version=1,
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaises(ValueError):
+            _enqueue_credit_note_applied(empty.ledger, TENANT_ONE, incomplete)
+        missing_time = CreditNoteApplicationResult(
+            credit_note_application_outcome_code=CreditNoteApplicationOutcomeCode.ACCEPTED,
+            credit_note_application_contract_version=1,
+            credit_note_application_id=generate_record_id(),
+            issued_credit_note_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            applied_amount=Decimal("1.00"),
+            remaining_outstanding_amount=Decimal("0"),
+            credit_note_application_status="applied",
+            collection_case_status="settled",
+            applied_at=None,
+            source_payload_hash="sha256:" + "a" * 64,
+            issued_credit_note_source_payload_hash="sha256:" + "b" * 64,
+            issued_credit_note_contract_version=1,
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaises(ValueError):
+            _enqueue_credit_note_applied(empty.ledger, TENANT_ONE, missing_time)
         ledger, issued, collection = issue_morning_credit_then_open_case()
         applied = CreditNoteApplicationService(
             ledger, clock=lambda: APPLIED_MORNING
@@ -703,6 +864,20 @@ class CreditNoteApplicationTests(unittest.TestCase):
         )
         payload = accepted.as_contract_dict()
         self.assertEqual(payload["issued_invoice_id"], str(issued_invoice.issued_invoice_id))
+        applied_events = [
+            event
+            for event in ledger_invoice.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_APPLIED
+        ]
+        self.assertEqual(len(applied_events), 1)
+        envelope = json.loads(applied_events[0].payload_json)
+        self.assertEqual(
+            envelope["data"]["issued_invoice_id"], str(issued_invoice.issued_invoice_id)
+        )
+        self.assertEqual(
+            accepted.as_webhook_event_data()["issued_invoice_id"],
+            str(issued_invoice.issued_invoice_id),
+        )
         presented = CreditNoteApplicationPresentmentService(
             ledger_invoice
         ).present_credit_note_application(TENANT_ONE, accepted.credit_note_application_id)

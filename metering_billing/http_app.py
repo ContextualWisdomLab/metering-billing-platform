@@ -80,9 +80,10 @@ The application is a thin WSGI adapter:
     ``POST /v1/collection-cases/{collection_case_id}/credit-note-applications``
     applies one issued credit note onto that open case.  Replay of the
     same tenant and issued credit note returns the stored
-    ``credit_note_application_id``.  GET item and list present the
-    stored application.  Do not invent a journal, tax unwind, webhook,
-    statutory numbering, or payment capture.
+    ``credit_note_application_id``.  First successful apply enqueues
+    one existing ``credit_note.applied`` outbox event.  GET item and list
+    present the stored application.  Do not invent a journal, tax unwind,
+    write-off, settlement, statutory numbering, or payment capture.
     ``POST /v1/collection-cases/{collection_case_id}/settlements``
     settles one same-tenant open case whose remaining outstanding is
     exact zero.  Replay of the same tenant and case returns the stored
