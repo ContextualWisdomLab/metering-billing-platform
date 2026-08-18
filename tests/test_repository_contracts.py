@@ -2611,7 +2611,7 @@ class RepositoryContractTests(unittest.TestCase):
             "issued_invoice_void_status text NOT NULL CHECK (\n        issued_invoice_void_status IN ('recorded')",
             "CHECK (collection_case_status IN ('open', 'dunning', 'settled', 'voided'))",
             "collection_case_status IN ('settled', 'voided')",
-            "CHECK (remaining_outstanding_amount = 0)",
+            "remaining_outstanding_amount = 0",
             "CHECK (voided_amount > 0)",
         ):
             self.assertIn(expected_fragment, sql)

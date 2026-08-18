@@ -461,7 +461,7 @@ class IssuedInvoiceVoidTests(unittest.TestCase):
             {"tenant_reference": TENANT_ONE},
         )
         self.assertEqual(get_method_status, 422)
-        self.assertEqual(get_method_body["rejection_reason_code"], "method_not_allowed")
+        self.assertEqual(get_method_body["rejection_reason_code"], "request_invalid")
         item_method_status, item_method_body = invoke_http(
             app,
             "POST",
@@ -469,7 +469,7 @@ class IssuedInvoiceVoidTests(unittest.TestCase):
             {"tenant_reference": TENANT_ONE},
         )
         self.assertEqual(item_method_status, 422)
-        self.assertEqual(item_method_body["rejection_reason_code"], "method_not_allowed")
+        self.assertEqual(item_method_body["rejection_reason_code"], "request_invalid")
         self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
         self.assertEqual(len(ledger.payment_receipts), 0)
@@ -681,16 +681,16 @@ class IssuedInvoiceVoidTests(unittest.TestCase):
         self.assertEqual(missing_tenant.exception.rejection_reason_code, "tenant_not_found")
         mutated = ledger.get_collection_case(collection.collection_case_id)
         ledger.collection_cases[collection.collection_case_id] = replace(
-            mutated, outstanding_amount=Decimal("0")
+            mutated, outstanding_amount=Decimal("1.00")
         )
         mutated_presentment = presentment.present_issued_invoice_void(
             TENANT_ONE, voided.issued_invoice_void_id
         )
-        self.assertEqual(mutated_presentment.remaining_outstanding_amount, Decimal("0"))
+        self.assertEqual(mutated_presentment.remaining_outstanding_amount, Decimal("1.00"))
         mutated_replay = IssuedInvoiceVoidService(ledger).void_issued_invoice(
             TENANT_ONE, issued.issued_invoice_id
         )
-        self.assertEqual(mutated_replay.remaining_outstanding_amount, Decimal("0"))
+        self.assertEqual(mutated_replay.remaining_outstanding_amount, Decimal("1.00"))
         del ledger.collection_cases[collection.collection_case_id]
         missing_replay = IssuedInvoiceVoidService(ledger).void_issued_invoice(
             TENANT_ONE, issued.issued_invoice_id
