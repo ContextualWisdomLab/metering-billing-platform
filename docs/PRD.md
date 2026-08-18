@@ -374,6 +374,15 @@ contextual-orchestrator usage
 - Missing drafts, cross-tenant IDs, float money, zero or negative amounts, over-remaining amounts, credits that exceed case outstanding, and invalid tax splits fail closed.
 - Operators record the credit; AIS pulls the validated three-line unwind. This slice does not call AIS, post, emit journal-reversals, refund-to-card, or chargeback.
 
+## Credit-journal-proposal acceptance
+
+- A stored credit adjustment composes or replays one balanced credit `accounting_journal_proposal` through `AccountingExportService.propose_credit_journal`.
+- Identity is `(tenant_account_id, credit_adjustment_id)`. Credit accept already writes the first row. A second compose returns the same `proposal_id` as `duplicate_replay`.
+- Untaxed lines debit semantic `usage_revenue` and credit semantic `accounts_receivable` for the exact inclusive credit. Taxed credits reuse the existing `tax_payable` unwind on the same journal.
+- `POST /v1/credit-adjustments/{credit_adjustment_id}/journal-proposals` is the explicit compose. AIS pull stays `GET /v1/journal-proposals` and `GET /v1/journal-proposals/{proposal_id}`.
+- `proposal_status` stays `validated` and is never `posted`. Missing or cross-tenant credits, currency mismatch, and zero or negative amounts fail closed.
+- Operators record the credit, then POST compose if needed. This slice does not call AIS, invent a second journal store, webhook, write-off, settlement, payment, or statutory account ID.
+
 ## Usage-ingestion acceptance
 
 - A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.

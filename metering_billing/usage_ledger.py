@@ -749,6 +749,9 @@ class MemoryUsageLedger:
     credit_journal_proposal_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
         default_factory=dict
     )
+    credit_journal_adjustment_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
     write_off_journal_proposal_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
@@ -2133,6 +2136,19 @@ class MemoryUsageLedger:
             return None
         return self.journal_proposals[journal_proposal_id]
 
+    def find_journal_proposal_for_credit_adjustment(
+        self,
+        tenant_account_id: UUID,
+        credit_adjustment_id: UUID,
+    ) -> StoredJournalProposal | None:
+        """Return the credit proposal for one tenant-scoped credit, if it exists."""
+        journal_proposal_id = self.credit_journal_adjustment_index.get(
+            (tenant_account_id, credit_adjustment_id)
+        )
+        if journal_proposal_id is None:
+            return None
+        return self.journal_proposals[journal_proposal_id]
+
     def find_journal_proposal_for_write_off(
         self,
         tenant_account_id: UUID,
@@ -2193,12 +2209,17 @@ class MemoryUsageLedger:
                 journal_proposal.proposal_contract_version,
             )
         credit_identity_key = None
+        credit_adjustment_only_key = None
         if journal_proposal.credit_adjustment_id is not None:
             credit_identity_key = (
                 journal_proposal.tenant_account_id,
                 journal_proposal.credit_adjustment_id,
                 journal_proposal.source_payload_hash,
                 journal_proposal.proposal_contract_version,
+            )
+            credit_adjustment_only_key = (
+                journal_proposal.tenant_account_id,
+                journal_proposal.credit_adjustment_id,
             )
         write_off_identity_key = None
         if journal_proposal.collection_write_off_id is not None:
@@ -2215,6 +2236,11 @@ class MemoryUsageLedger:
         if (
             credit_identity_key is not None
             and credit_identity_key in self.credit_journal_proposal_index
+        ):
+            raise ValueError("journal proposals are immutable and cannot be replaced")
+        if (
+            credit_adjustment_only_key is not None
+            and credit_adjustment_only_key in self.credit_journal_adjustment_index
         ):
             raise ValueError("journal proposals are immutable and cannot be replaced")
         if (
@@ -2248,6 +2274,10 @@ class MemoryUsageLedger:
             self.cash_journal_proposal_index[cash_identity_key] = persisted.journal_proposal_id
         if credit_identity_key is not None:
             self.credit_journal_proposal_index[credit_identity_key] = persisted.journal_proposal_id
+        if credit_adjustment_only_key is not None:
+            self.credit_journal_adjustment_index[credit_adjustment_only_key] = (
+                persisted.journal_proposal_id
+            )
         if write_off_identity_key is not None:
             self.write_off_journal_proposal_index[write_off_identity_key] = (
                 persisted.journal_proposal_id

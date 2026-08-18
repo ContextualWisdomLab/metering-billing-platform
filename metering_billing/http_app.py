@@ -104,6 +104,12 @@ The application is a thin WSGI adapter:
     existing GET journal-proposal routes.  Do not invent a tax unwind,
     settlement, statutory numbering, payment capture, or AIS call.
     After write-off, compose the journal, then settle at exact zero.
+    ``POST /v1/credit-adjustments/{credit_adjustment_id}/journal-proposals``
+    composes or replays the existing credit ``accounting_journal_proposal``.
+    Credit accept already writes that journal.  Replay of the same tenant
+    and credit returns the stored ``proposal_id``.  AIS pulls through
+    existing GET journal-proposal routes.  Do not invent a second journal
+    store, tax unwind, webhook, statutory numbering, or AIS call.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -277,6 +283,9 @@ ISSUED_INVOICE_COLLECTION_PATH = "/v1/issued-invoices"
 ISSUED_INVOICE_ITEM_PATH = re.compile(r"^/v1/issued-invoices/([0-9a-fA-F-]{36})$")
 ISSUED_CREDIT_NOTE_NESTED_PATH = re.compile(
     r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})/issued-credit-notes$"
+)
+CREDIT_JOURNAL_NESTED_PATH = re.compile(
+    r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})/journal-proposals$"
 )
 ISSUED_CREDIT_NOTE_COLLECTION_PATH = "/v1/issued-credit-notes"
 ISSUED_CREDIT_NOTE_ITEM_PATH = re.compile(r"^/v1/issued-credit-notes/([0-9a-fA-F-]{36})$")
@@ -1827,6 +1836,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "list_credit_adjustments", {}
         return "method_not_allowed", {}
+    credit_journal_nested = CREDIT_JOURNAL_NESTED_PATH.fullmatch(path)
+    if credit_journal_nested is not None:
+        if method == "POST":
+            return "credit_journal_proposals", {
+                "credit_adjustment_id": credit_journal_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
     credit_note_nested = ISSUED_CREDIT_NOTE_NESTED_PATH.fullmatch(path)
     if credit_note_nested is not None:
         if method == "POST":
@@ -2104,6 +2120,18 @@ def _dispatch_write(
         result = exports.propose_write_off_journal(
             tenant_reference,
             _parse_uuid(path_values["collection_write_off_id"], "collection_write_off_id"),
+            currency_code=currency_code,
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "credit_journal_proposals":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
+        currency_code = payload.get("currency_code")
+        if currency_code is not None and not isinstance(currency_code, str):
+            raise HttpRequestError("request_invalid")
+        result = exports.propose_credit_journal(
+            tenant_reference,
+            _parse_uuid(path_values["credit_adjustment_id"], "credit_adjustment_id"),
             currency_code=currency_code,
         )
         return result.as_contract_dict(), _status_for_result(result)

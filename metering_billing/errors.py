@@ -497,6 +497,8 @@ class JournalProposalRejectionReasonCode(StrEnum):
     RECEIPT_AMOUNT_INVALID = "receipt_amount_invalid"
     COLLECTION_WRITE_OFF_NOT_FOUND = "collection_write_off_not_found"
     WRITE_OFF_AMOUNT_INVALID = "write_off_amount_invalid"
+    CREDIT_ADJUSTMENT_NOT_FOUND = "credit_adjustment_not_found"
+    CREDIT_AMOUNT_INVALID = "credit_amount_invalid"
     CURRENCY_MISMATCH = "currency_mismatch"
 
 

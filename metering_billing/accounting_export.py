@@ -1,10 +1,10 @@
-"""Accounting journal proposals produced from stored drafts, receipts, and write-offs.
+"""Accounting journal proposals produced from stored drafts, receipts, credits, and write-offs.
 
 The service is the buyer-facing export path:
 
 1. Resolve the tenant.
-2. Load that tenant's stored ``invoice_draft``, ``payment_receipt``, or
-   ``collection_write_off``.
+2. Load that tenant's stored ``invoice_draft``, ``payment_receipt``,
+   ``credit_adjustment``, or ``collection_write_off``.
 3. Copy the exact commercial amount into one balanced debit and credit pair.
 4. Replay the same tenant, source identity, payload hash, and contract version.
 
@@ -129,6 +129,7 @@ class JournalProposalResult:
     proposal_lines: tuple[JournalProposalLineResult, ...]
     payment_receipt_id: UUID | None = None
     collection_write_off_id: UUID | None = None
+    credit_adjustment_id: UUID | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the published proposal, or a sparse rejected operational result."""
@@ -471,6 +472,69 @@ class AccountingExportService:
                 collection_write_off_id=write_off.collection_write_off_id,
             ),
             stored_lines,
+        )
+        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            stored.journal_proposal_id,
+            result.as_contract_dict(),
+            stored.proposed_at,
+        )
+        return result
+
+    def propose_credit_journal(
+        self,
+        tenant_reference: str,
+        credit_adjustment_id: UUID,
+        currency_code: str | None = None,
+    ) -> JournalProposalResult:
+        """Propose one balanced credit/AR journal from a stored credit.
+
+        Credit accept already composes this write.  A replay of the same
+        tenant and ``credit_adjustment_id`` returns the stored
+        ``proposal_id``.  Another tenant cannot see or propose from that
+        credit.  AIS next pulls validated proposals; this service never posts.
+        """
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
+        if tenant_error is not None:
+            return _rejected(JournalProposalRejectionReasonCode.TENANT_NOT_FOUND)
+        tenant = require_resolved(tenant, "tenant")
+
+        existing = self.ledger.find_journal_proposal_for_credit_adjustment(
+            tenant.tenant_account_id, credit_adjustment_id
+        )
+        if existing is not None:
+            return _from_stored(
+                existing, tenant.tenant_reference, JournalProposalOutcomeCode.DUPLICATE_REPLAY
+            )
+
+        credit = self.ledger.get_credit_adjustment(credit_adjustment_id)
+        if credit is None or credit.tenant_account_id != tenant.tenant_account_id:
+            return _rejected(JournalProposalRejectionReasonCode.CREDIT_ADJUSTMENT_NOT_FOUND)
+        invoice_draft = self.ledger.get_invoice_draft(credit.invoice_draft_id)
+        if invoice_draft is None or invoice_draft.tenant_account_id != tenant.tenant_account_id:
+            return _rejected(JournalProposalRejectionReasonCode.CREDIT_ADJUSTMENT_NOT_FOUND)
+        if currency_code is not None and currency_code != credit.currency_code:
+            return _rejected(JournalProposalRejectionReasonCode.CURRENCY_MISMATCH)
+
+        try:
+            credit_amount = parse_proposal_amount(credit.credit_amount)
+            exclusive_amount = parse_proposal_amount(credit.tax_exclusive_amount)
+            tax_amount = parse_proposal_amount(credit.tax_amount)
+        except ExactDecimalError:
+            return _rejected(JournalProposalRejectionReasonCode.CREDIT_AMOUNT_INVALID)
+        if credit_amount <= 0 or exclusive_amount + tax_amount != credit_amount:
+            return _rejected(JournalProposalRejectionReasonCode.CREDIT_AMOUNT_INVALID)
+
+        # Circular: CreditAdjustmentService imports this module to enqueue
+        # journal_proposal.validated.  Reuse the existing credit-journal insert
+        # so this command does not invent a second proposal store.
+        from metering_billing.credit_adjustment import _insert_credit_journal
+
+        stored = _insert_credit_journal(
+            self.ledger, tenant.tenant_reference, credit, invoice_draft
         )
         result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
         enqueue_accepted_fact(
@@ -881,6 +945,7 @@ def _from_stored(
         ),
         payment_receipt_id=stored.payment_receipt_id,
         collection_write_off_id=stored.collection_write_off_id,
+        credit_adjustment_id=stored.credit_adjustment_id,
     )
 
 
