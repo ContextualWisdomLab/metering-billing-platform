@@ -204,6 +204,19 @@ contextual-orchestrator usage
 - Issued-credit-note, credit-adjustment, collection, payment, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. Payment receipts stay unchanged.
 - Operators apply the issued credit note, then collect the residual. `operator_console` Storybook adds one `CreditNoteApplication` story. There is no login wall, Stripe, AIS call, or production SPA.
 
+## Collection-case-settlement acceptance
+
+- A known stored open collection case whose remaining outstanding is exact zero settles once and flips status to `settled`.
+- A second settle of the same tenant and `collection_case_id` returns the same `collection_case_settlement_id` as `duplicate_replay` and never double-settles.
+- `collection_case_settlement_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment receipt, write-off, AIS call, or a new webhook event type.
+- Outstanding that is not zero, an already-settled case, and a tenant mismatch fail closed.
+- `POST /v1/collection-cases/{collection_case_id}/settlements` is the nested settle command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
+- A known stored settlement presents one tenant-scoped statement with identity, exact-zero remaining, `settled_at`, and `next_operator_action` (`wait`).
+- `GET /v1/collection-case-settlements/{collection_case_settlement_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/collection-case-settlements` lists summaries as `{collection_case_settlements, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{settled_at}|{collection_case_settlement_id}`.
+- Payment-receipt, credit-note-application, collection-open, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. Implicit #12/#17/#45 settle-when-zero on positive apply paths stays.
+- Operators settle the zero-outstanding case, then wait. `operator_console` Storybook adds one `CollectionCaseSettlement` story. There is no login wall, Stripe, AIS call, or production SPA.
+
 ## Tenant-API-credential acceptance
 
 - An operator can issue one append-only `tenant_api_credential` for a known tenant. The secret is returned once (prefix plus secret). The ledger stores only a keyed HMAC.

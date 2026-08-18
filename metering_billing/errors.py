@@ -269,6 +269,32 @@ class CreditNoteApplicationRejectionReasonCode(StrEnum):
     REQUEST_INVALID = "request_invalid"
 
 
+class CollectionCaseSettlementOutcomeCode(StrEnum):
+    """Terminal result of settling one collection case at exact-zero outstanding."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class CollectionCaseSettlementRejectionReasonCode(StrEnum):
+    """Why a settle request was refused without flipping case status."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
+    OUTSTANDING_NOT_ZERO = "outstanding_not_zero"
+    COLLECTION_CASE_SETTLED = "collection_case_settled"
+    REQUEST_INVALID = "request_invalid"
+
+
+class CollectionCaseSettlementPresentmentQueryError(ValueError):
+    """Raised when a stored collection-case settlement cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class CreditNoteApplicationPresentmentQueryError(ValueError):
     """Raised when a stored credit-note application cannot be authorized or presented."""
 

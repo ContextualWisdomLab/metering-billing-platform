@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-case-settlement/v1",
+  "title": "Collection Case Settlement",
+  "description": "Append-only settle-when-zero of one same-tenant collection case. remaining_outstanding_amount must be exact zero. Replays acknowledge the stored collection_case_settlement_id and never double-settle. The document is not a payment receipt, write-off, tax unwind, or AIS posting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "collection_case_settlement_contract_version",
+    "collection_case_settlement_outcome_code"
+  ],
+  "properties": {
+    "collection_case_settlement_contract_version": {"type": "integer", "minimum": 1},
+    "collection_case_settlement_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "collection_case_settlement_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "issued_invoice_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "collection_case_settlement_status": {"type": "string", "enum": ["settled"]},
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled"]
+    },
+    "settled_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "collection_case_not_found",
+        "outstanding_not_zero",
+        "collection_case_settled",
+        "request_invalid"
+      ]
+    }
+  }
+}

@@ -76,7 +76,7 @@ A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id
 
 ## Collection-case identity
 
-A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as `tax_inclusive_amount` when a tax assessment exists, otherwise the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts, commercial credits recorded against an already-open case, or a later `credit_note_application` reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
+A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as `tax_inclusive_amount` when a tax assessment exists, otherwise the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts, commercial credits recorded against an already-open case, a later `credit_note_application`, or an explicit `collection_case_settlement` reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
 
 ## Payment-intent identity
 
@@ -109,6 +109,10 @@ A stored issued credit note is identified by `(tenant_account_id, credit_adjustm
 ## Credit-note-application identity
 
 A stored credit-note application is identified by `(tenant_account_id, issued_credit_note_id)`.  Internal primary key is the opaque generated `credit_note_application_id`.  The hash covers the issued note, collection case, invoice draft, optional issued invoice, currency, exact applied amount, and both contract versions.  Status is `applied` only.  Applied amount is the issued tax-inclusive credit.  One issued credit note applies at most once.  The row invents no statutory credit-note number, journal, tax unwind, or webhook event.  `GET /v1/credit-note-applications/{credit_note_application_id}` projects the stored row plus current remaining outstanding.  `GET /v1/credit-note-applications` lists `{credit_note_applications, next_cursor}` ordered by `applied_at` then `credit_note_application_id`.
+
+## Collection-case-settlement identity
+
+A stored collection-case settlement is identified by `(tenant_account_id, collection_case_id)`.  Internal primary key is the opaque generated `collection_case_settlement_id`.  The hash covers the case, invoice draft, optional issued invoice, currency, exact-zero remaining, and contract version.  Status is `settled` only.  Remaining outstanding is exact zero.  One case settles at most once through this command.  The row invents no payment receipt, write-off, journal, tax unwind, or webhook event.  `GET /v1/collection-case-settlements/{collection_case_settlement_id}` projects the stored row plus current remaining outstanding.  `GET /v1/collection-case-settlements` lists `{collection_case_settlements, next_cursor}` ordered by `settled_at` then `collection_case_settlement_id`.
 
 ## Collection-case-presentment projection
 

@@ -83,6 +83,12 @@ The application is a thin WSGI adapter:
     ``credit_note_application_id``.  GET item and list present the
     stored application.  Do not invent a journal, tax unwind, webhook,
     statutory numbering, or payment capture.
+    ``POST /v1/collection-cases/{collection_case_id}/settlements``
+    settles one same-tenant open case whose remaining outstanding is
+    exact zero.  Replay of the same tenant and case returns the stored
+    ``collection_case_settlement_id``.  GET item and list present the
+    stored settlement.  Do not invent a journal, tax unwind, webhook,
+    write-off, statutory numbering, or payment capture.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -132,6 +138,7 @@ from metering_billing.errors import (
     IssuedInvoicePresentmentQueryError,
     IssuedCreditNotePresentmentQueryError,
     CreditNoteApplicationPresentmentQueryError,
+    CollectionCaseSettlementPresentmentQueryError,
     TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
@@ -153,6 +160,10 @@ from metering_billing.issued_credit_note_presentment import IssuedCreditNotePres
 from metering_billing.credit_note_application import CreditNoteApplicationService
 from metering_billing.credit_note_application_presentment import (
     CreditNoteApplicationPresentmentService,
+)
+from metering_billing.collection_case_settlement import CollectionCaseSettlementService
+from metering_billing.collection_case_settlement_presentment import (
+    CollectionCaseSettlementPresentmentService,
 )
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
@@ -255,6 +266,13 @@ CREDIT_NOTE_APPLICATION_COLLECTION_PATH = "/v1/credit-note-applications"
 CREDIT_NOTE_APPLICATION_ITEM_PATH = re.compile(
     r"^/v1/credit-note-applications/([0-9a-fA-F-]{36})$"
 )
+COLLECTION_CASE_SETTLEMENT_NESTED_PATH = re.compile(
+    r"^/v1/collection-cases/([0-9a-fA-F-]{36})/settlements$"
+)
+COLLECTION_CASE_SETTLEMENT_COLLECTION_PATH = "/v1/collection-case-settlements"
+COLLECTION_CASE_SETTLEMENT_ITEM_PATH = re.compile(
+    r"^/v1/collection-case-settlements/([0-9a-fA-F-]{36})$"
+)
 TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
 TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
     r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})/revoke$"
@@ -313,6 +331,10 @@ def create_http_app(
     credit_note_presentments = IssuedCreditNotePresentmentService(shared_ledger)
     credit_note_applications = CreditNoteApplicationService(shared_ledger)
     credit_note_application_presentments = CreditNoteApplicationPresentmentService(
+        shared_ledger
+    )
+    collection_case_settlements = CollectionCaseSettlementService(shared_ledger)
+    collection_case_settlement_presentments = CollectionCaseSettlementPresentmentService(
         shared_ledger
     )
     exports = AccountingExportService(shared_ledger)
@@ -1031,6 +1053,47 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_collection_case_settlements",
+            "get_collection_case_settlement",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_collection_case_settlements":
+                    page = collection_case_settlement_presentments.list_collection_case_settlements(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = collection_case_settlement_presentments.present_collection_case_settlement(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["collection_case_settlement_id"],
+                        "collection_case_settlement_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except CollectionCaseSettlementPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "collection_case_settlement_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {"list_issued_credit_notes", "get_issued_credit_note"}:
             try:
                 query = _read_query(environ)
@@ -1253,6 +1316,27 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "collection_case_settlements":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                result = collection_case_settlements.settle_collection_case(
+                    tenant_reference,
+                    _parse_uuid(path_values["collection_case_id"], "collection_case_id"),
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_credit_notes":
             try:
                 payload = _read_json_object(environ)
@@ -1430,6 +1514,24 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
                 "collection_case_id": application_nested.group(1)
             }
         return "http_method_not_allowed", {}
+    settlement_nested = COLLECTION_CASE_SETTLEMENT_NESTED_PATH.fullmatch(path)
+    if settlement_nested is not None:
+        if method == "POST":
+            return "collection_case_settlements", {
+                "collection_case_id": settlement_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    if path == COLLECTION_CASE_SETTLEMENT_COLLECTION_PATH:
+        if method == "GET":
+            return "list_collection_case_settlements", {}
+        return "method_not_allowed", {}
+    settlement_match = COLLECTION_CASE_SETTLEMENT_ITEM_PATH.fullmatch(path)
+    if settlement_match is not None:
+        if method == "GET":
+            return "get_collection_case_settlement", {
+                "collection_case_settlement_id": settlement_match.group(1)
+            }
+        return "method_not_allowed", {}
     if path == CREDIT_NOTE_APPLICATION_COLLECTION_PATH:
         if method == "GET":
             return "list_credit_note_applications", {}

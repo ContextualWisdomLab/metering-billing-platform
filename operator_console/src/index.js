@@ -89,3 +89,8 @@ export {
   CREDIT_NOTE_APPLICATION_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCreditNoteApplicationActionCopy,
 } from "./credit_note_application.js";
+export {
+  renderCollectionCaseSettlement,
+  COLLECTION_CASE_SETTLEMENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCollectionCaseSettlementActionCopy,
+} from "./collection_case_settlement.js";

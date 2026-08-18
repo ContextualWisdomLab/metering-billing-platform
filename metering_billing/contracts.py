@@ -48,6 +48,8 @@ __all__ = (
     "ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME",
     "CREDIT_NOTE_APPLICATION_SCHEMA_NAME",
     "CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_CASE_SETTLEMENT_SCHEMA_NAME",
+    "COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -82,6 +84,8 @@ __all__ = (
     "validate_issued_credit_note_presentment",
     "validate_credit_note_application",
     "validate_credit_note_application_presentment",
+    "validate_collection_case_settlement",
+    "validate_collection_case_settlement_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -136,6 +140,10 @@ ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME = (
 CREDIT_NOTE_APPLICATION_SCHEMA_NAME = "credit-note-application.schema.json"
 CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME = (
     "credit-note-application-presentment.schema.json"
+)
+COLLECTION_CASE_SETTLEMENT_SCHEMA_NAME = "collection-case-settlement.schema.json"
+COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME = (
+    "collection-case-settlement-presentment.schema.json"
 )
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
@@ -1476,6 +1484,99 @@ def validate_credit_note_application_presentment(
         if forbidden_name in statement:
             errors.append(
                 f"$: credit-note application presentment must not include {forbidden_name}"
+            )
+    return tuple(errors)
+
+
+def validate_collection_case_settlement(
+    settlement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate settle-when-zero shape plus exact-zero remaining invariants.
+
+    Accepted and replayed settlements must carry the case, invoice draft,
+    currency, exact-zero remaining, and settled timestamp. Rejections must
+    carry a closed reason and must not invent a write-off or legal number.
+    """
+    schema = load_json_schema(COLLECTION_CASE_SETTLEMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, settlement))
+    if not isinstance(settlement, Mapping):
+        return tuple(errors)
+    outcome = settlement.get("collection_case_settlement_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        for field_name in (
+            "collection_case_settlement_id",
+            "collection_case_id",
+            "invoice_draft_id",
+            "currency_code",
+            "remaining_outstanding_amount",
+            "settled_at",
+        ):
+            if field_name not in settlement:
+                errors.append(f"$: {outcome} settlements must include {field_name}")
+        remaining = settlement.get("remaining_outstanding_amount")
+        if isinstance(remaining, str):
+            try:
+                if Decimal(remaining) != Decimal("0"):
+                    errors.append("$: remaining_outstanding_amount must be exact zero")
+            except Exception:
+                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+        elif remaining is not None:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+        for forbidden_name in (
+            "write_off_amount",
+            "legal_credit_note_number",
+            "legal_invoice_number",
+            "card_pan",
+        ):
+            if forbidden_name in settlement:
+                errors.append(f"$: settlements must not include {forbidden_name}")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in settlement:
+            errors.append("$: rejected settlements must include rejection_reason_code")
+        if "write_off_amount" in settlement:
+            errors.append("$: rejected settlements must not invent a write-off")
+        if "legal_credit_note_number" in settlement:
+            errors.append("$: rejected settlements must not invent legal numbers")
+    else:
+        if outcome is not None:
+            errors.append("$: unknown collection_case_settlement_outcome_code")
+    return tuple(errors)
+
+
+def validate_collection_case_settlement_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate settlement presentment plus exact-zero remaining invariants."""
+    schema = load_json_schema(
+        COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    remaining = statement.get("remaining_outstanding_amount")
+    action = statement.get("next_operator_action")
+    if remaining is None:
+        errors.append("$: remaining_outstanding_amount is required")
+    elif isinstance(remaining, str):
+        try:
+            if Decimal(remaining) != Decimal("0"):
+                errors.append("$: remaining_outstanding_amount must be exact zero")
+            if Decimal(remaining) == Decimal("0") and action != "wait":
+                errors.append("$: settled presentment must wait")
+        except Exception:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    else:
+        errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    for forbidden_name in (
+        "write_off_amount",
+        "legal_credit_note_number",
+        "legal_invoice_number",
+        "collection_case_settlement_outcome_code",
+        "card_pan",
+    ):
+        if forbidden_name in statement:
+            errors.append(
+                f"$: collection-case settlement presentment must not include {forbidden_name}"
             )
     return tuple(errors)
 

@@ -25,6 +25,7 @@ from metering_billing.contracts import (
     validate_webhook_outbox_event_presentment,
     validate_issued_credit_note_presentment,
     validate_credit_note_application_presentment,
+    validate_collection_case_settlement_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -98,6 +99,7 @@ ISSUED_CREDIT_NOTE_FIXTURE_NAMES = (
     "issued_taxed_credit_note.json",
 )
 CREDIT_NOTE_APPLICATION_FIXTURE_NAMES = ("applied_morning_credit_note.json",)
+COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES = ("settled_morning_zero.json",)
 MONEY_FIELDS = (
     "tax_exclusive_amount",
     "tax_amount",
@@ -366,6 +368,20 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("applied_morning_credit_note.json")["next_operator_action"],
             "wait",
         )
+        for fixture_name in COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_collection_case_settlement_presentment(payload), ())
+            remaining = payload["remaining_outstanding_amount"]
+            self.assertIsInstance(remaining, str)
+            self.assertNotIsInstance(remaining, float)
+            parse_exact_decimal(remaining)
+            self.assertEqual(payload["collection_case_settlement_status"], "settled")
+            self.assertNotIn("write_off_amount", payload)
+            self.assertNotIn("collection_case_settlement_outcome_code", payload)
+        self.assertEqual(
+            self._fixture("settled_morning_zero.json")["next_operator_action"],
+            "wait",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -406,6 +422,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "IssuedInvoice",
             "IssuedCreditNote",
             "CreditNoteApplication",
+            "CollectionCaseSettlement",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -426,6 +443,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + WEBHOOK_OUTBOX_EVENT_FIXTURE_NAMES
             + ISSUED_CREDIT_NOTE_FIXTURE_NAMES
             + CREDIT_NOTE_APPLICATION_FIXTURE_NAMES
+            + COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -462,6 +480,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "Apply the issued credit note, then collect the residual",
             inventory,
         )
+        self.assertIn("Settle the zero-outstanding case, then wait", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

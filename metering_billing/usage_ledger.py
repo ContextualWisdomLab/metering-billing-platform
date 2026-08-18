@@ -423,6 +423,29 @@ class StoredCreditNoteApplication:
 
 
 @dataclass(frozen=True)
+class StoredCollectionCaseSettlement:
+    """Append-only settle-when-zero fact for one collection case.
+
+    Identity is ``(tenant_account_id, collection_case_id)``.  One case
+    settles at most once through this command.  ``collection_case_settlement_id``
+    is the opaque generated identifier.  This is not a payment receipt,
+    write-off, or AIS posting.
+    """
+
+    collection_case_settlement_id: UUID
+    tenant_account_id: UUID
+    collection_case_id: UUID
+    invoice_draft_id: UUID
+    issued_invoice_id: UUID | None
+    collection_case_settlement_contract_version: int
+    source_payload_hash: str
+    currency_code: str
+    remaining_outstanding_amount: Decimal
+    collection_case_settlement_status: str
+    settled_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredJournalProposalLine:
     """Append-only proposal line using a semantic account role, not a chart ID."""
 
@@ -758,6 +781,12 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     credit_note_application_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    collection_case_settlements: dict[UUID, StoredCollectionCaseSettlement] = field(
+        default_factory=dict
+    )
+    collection_case_settlement_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
 
@@ -1714,6 +1743,104 @@ class MemoryUsageLedger:
         self.credit_note_applications[persisted.credit_note_application_id] = persisted
         self.credit_note_application_index[identity_key] = persisted.credit_note_application_id
         return persisted
+
+    def find_collection_case_settlement(
+        self, tenant_account_id: UUID, collection_case_id: UUID
+    ) -> StoredCollectionCaseSettlement | None:
+        """Return the settle-when-zero row for one tenant collection case, if any."""
+        collection_case_settlement_id = self.collection_case_settlement_index.get(
+            (tenant_account_id, collection_case_id)
+        )
+        if collection_case_settlement_id is None:
+            return None
+        return self.collection_case_settlements[collection_case_settlement_id]
+
+    def get_collection_case_settlement(
+        self, collection_case_settlement_id: UUID
+    ) -> StoredCollectionCaseSettlement | None:
+        """Return one collection-case settlement by internal identifier, if present."""
+        return self.collection_case_settlements.get(collection_case_settlement_id)
+
+    def list_collection_case_settlements_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionCaseSettlement, ...]:
+        """Return collection-case settlements limited to one tenant."""
+        return tuple(
+            settlement
+            for settlement in self.collection_case_settlements.values()
+            if settlement.tenant_account_id == tenant_account_id
+        )
+
+    def insert_collection_case_settlement(
+        self, collection_case_settlement: StoredCollectionCaseSettlement
+    ) -> StoredCollectionCaseSettlement:
+        """Append an immutable settle-when-zero row.  Existing identity rows stay."""
+        if collection_case_settlement.collection_case_settlement_status != "settled":
+            raise ValueError("collection_case_settlement_status must be settled")
+        remaining = parse_exact_decimal(
+            format_exact_decimal(collection_case_settlement.remaining_outstanding_amount)
+        )
+        if remaining != 0:
+            raise ValueError("collection case settlement remaining must be exact zero")
+        if (
+            collection_case_settlement.collection_case_settlement_id
+            in self.collection_case_settlements
+        ):
+            raise ValueError("collection_case_settlement_id already stored")
+        identity_key = (
+            collection_case_settlement.tenant_account_id,
+            collection_case_settlement.collection_case_id,
+        )
+        if identity_key in self.collection_case_settlement_index:
+            raise ValueError("collection case settlements are immutable and cannot be replaced")
+        persisted = StoredCollectionCaseSettlement(
+            collection_case_settlement_id=collection_case_settlement.collection_case_settlement_id,
+            tenant_account_id=collection_case_settlement.tenant_account_id,
+            collection_case_id=collection_case_settlement.collection_case_id,
+            invoice_draft_id=collection_case_settlement.invoice_draft_id,
+            issued_invoice_id=collection_case_settlement.issued_invoice_id,
+            collection_case_settlement_contract_version=(
+                collection_case_settlement.collection_case_settlement_contract_version
+            ),
+            source_payload_hash=collection_case_settlement.source_payload_hash,
+            currency_code=collection_case_settlement.currency_code,
+            remaining_outstanding_amount=remaining,
+            collection_case_settlement_status=(
+                collection_case_settlement.collection_case_settlement_status
+            ),
+            settled_at=collection_case_settlement.settled_at,
+        )
+        self.collection_case_settlements[persisted.collection_case_settlement_id] = persisted
+        self.collection_case_settlement_index[identity_key] = (
+            persisted.collection_case_settlement_id
+        )
+        return persisted
+
+    def mark_collection_case_settled(self, collection_case_id: UUID) -> StoredCollectionCase:
+        """Flip an exact-zero case to ``settled`` without changing outstanding.
+
+        This is the explicit settle command.  Receipt and credit-note apply
+        paths still settle through ``apply_collection_settlement``.
+        """
+        stored = self.collection_cases.get(collection_case_id)
+        if stored is None:
+            raise ValueError("collection settlement requires a stored collection case")
+        remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+        if remaining != 0:
+            raise ValueError("collection case outstanding must be exact zero to settle")
+        if stored.collection_case_status == "settled":
+            return stored
+        updated = StoredCollectionCase(
+            collection_case_id=stored.collection_case_id,
+            tenant_account_id=stored.tenant_account_id,
+            invoice_draft_id=stored.invoice_draft_id,
+            currency_code=stored.currency_code,
+            collection_case_status="settled",
+            outstanding_amount=Decimal("0"),
+            opened_at=stored.opened_at,
+        )
+        self.collection_cases[updated.collection_case_id] = updated
+        return updated
 
     def find_credit_adjustment(
         self,

@@ -94,6 +94,11 @@ import {
   CREDIT_NOTE_APPLICATION_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCreditNoteApplicationActionCopy,
 } from "../src/credit_note_application.js";
+import {
+  renderCollectionCaseSettlement,
+  COLLECTION_CASE_SETTLEMENT_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCollectionCaseSettlementActionCopy,
+} from "../src/collection_case_settlement.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -572,6 +577,25 @@ test("applied morning credit note shows applied amount and residual wait", () =>
   assert.ok(!("card_pan" in statement));
 });
 
+test("settled morning zero shows exact-zero remaining and wait", () => {
+  const statement = loadFixture("settled_morning_zero.json");
+  const html = renderCollectionCaseSettlement(statement);
+  assert.match(html, /0 USD/);
+  assert.match(html, /settled/);
+  assert.match(html, /Settle the zero-outstanding case, then wait/);
+  assert.equal(
+    COLLECTION_CASE_SETTLEMENT_CUSTOMER_COPY,
+    "Settle the zero-outstanding case, then wait.",
+  );
+  assert.equal(nextCollectionCaseSettlementActionCopy("wait"), "Wait");
+  assert.equal(nextCollectionCaseSettlementActionCopy("settle"), "Settle");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+  assert.ok(!("write_off_amount" in statement));
+  assert.ok(!("collection_case_settlement_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+});
+
 test("issued taxed credit note freezes inclusive 11.00", () => {
   const statement = loadFixture("issued_taxed_credit_note.json");
   const html = renderIssuedCreditNote(statement);
@@ -632,6 +656,10 @@ test("float money fails closed", () => {
         applied_amount: 0.003705,
         remaining_outstanding_amount: "0",
       }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderCollectionCaseSettlement({ remaining_outstanding_amount: 0.0 }),
     TypeError,
   );
   assert.throws(
