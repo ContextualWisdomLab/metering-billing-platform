@@ -1,4 +1,4 @@
-"""Accounting journal proposals produced from stored drafts, receipts, credits, write-offs, leftover refunds, parked leftover, leftover applies, and issued-invoice voids.
+"""Accounting journal proposals produced from stored drafts, receipts, credits, write-offs, leftover refunds, parked leftover, leftover applies, issued-invoice voids, and issued-credit-note voids.
 
 The service is the buyer-facing export path:
 
@@ -6,7 +6,8 @@ The service is the buyer-facing export path:
 2. Load that tenant's stored ``invoice_draft``, ``payment_receipt``,
    ``credit_adjustment``, ``collection_write_off``,
    ``unapplied_cash_refund``, ``unapplied_cash``,
-   ``unapplied_cash_application``, or ``issued_invoice_void``.
+   ``unapplied_cash_application``, ``issued_invoice_void``, or
+   ``issued_credit_note_void``.
 3. Copy the exact commercial amount into one balanced debit and credit pair.
 4. Replay the same tenant, source identity, payload hash, and contract version.
 
@@ -41,6 +42,8 @@ from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredCollectionWriteOff,
     StoredInvoiceDraft,
+    StoredIssuedCreditNote,
+    StoredIssuedCreditNoteVoid,
     StoredIssuedInvoice,
     StoredIssuedInvoiceVoid,
     StoredJournalProposal,
@@ -143,6 +146,7 @@ class JournalProposalResult:
     unapplied_cash_id: UUID | None = None
     unapplied_cash_application_id: UUID | None = None
     issued_invoice_void_id: UUID | None = None
+    issued_credit_note_void_id: UUID | None = None
     reversed_journal_proposal_id: UUID | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
@@ -990,6 +994,139 @@ class AccountingExportService:
         )
         return result
 
+    def propose_credit_note_void_journal(
+        self,
+        tenant_reference: str,
+        issued_credit_note_void_id: UUID,
+        currency_code: str | None = None,
+    ) -> JournalProposalResult:
+        """Propose one balanced AR/revenue reverse from a stored unused-note void.
+
+        A replay of the same tenant and ``issued_credit_note_void_id``
+        returns the stored ``proposal_id``.  Another tenant cannot see or
+        propose from that void.  Collection, issued-credit-note, and void
+        status are not changed.  AIS next pulls validated proposals; this
+        service never posts and never emits statutory IDs or
+        ``journal_entry_id``.
+        """
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
+        if tenant_error is not None:
+            return _rejected(JournalProposalRejectionReasonCode.TENANT_NOT_FOUND)
+        tenant = require_resolved(tenant, "tenant")
+
+        existing = self.ledger.find_journal_proposal_for_issued_credit_note_void(
+            tenant.tenant_account_id, issued_credit_note_void_id
+        )
+        if existing is not None:
+            return _credit_note_void_result_from_stored(
+                existing,
+                tenant.tenant_reference,
+                JournalProposalOutcomeCode.DUPLICATE_REPLAY,
+                self.ledger,
+            )
+
+        void_row = self.ledger.get_issued_credit_note_void(issued_credit_note_void_id)
+        if void_row is None or void_row.tenant_account_id != tenant.tenant_account_id:
+            return _rejected(JournalProposalRejectionReasonCode.ISSUED_CREDIT_NOTE_VOID_NOT_FOUND)
+        issued = self.ledger.get_issued_credit_note(void_row.issued_credit_note_id)
+        if issued is None or issued.tenant_account_id != tenant.tenant_account_id:
+            return _rejected(JournalProposalRejectionReasonCode.ISSUED_CREDIT_NOTE_VOID_NOT_FOUND)
+        if self.ledger.find_credit_note_application(
+            tenant.tenant_account_id, void_row.issued_credit_note_id
+        ) is not None:
+            return _rejected(JournalProposalRejectionReasonCode.CREDIT_NOTE_ALREADY_APPLIED)
+        if currency_code is not None and currency_code != void_row.currency_code:
+            return _rejected(JournalProposalRejectionReasonCode.CURRENCY_MISMATCH)
+
+        try:
+            voided_amount = parse_proposal_amount(void_row.voided_amount)
+            exclusive_amount = parse_proposal_amount(issued.tax_exclusive_amount)
+            tax_amount = parse_proposal_amount(issued.tax_amount)
+            inclusive_amount = parse_proposal_amount(issued.tax_inclusive_amount)
+        except ExactDecimalError:
+            return _rejected(JournalProposalRejectionReasonCode.VOIDED_AMOUNT_INVALID)
+        if (
+            voided_amount <= 0
+            or exclusive_amount + tax_amount != inclusive_amount
+            or voided_amount != inclusive_amount
+        ):
+            return _rejected(JournalProposalRejectionReasonCode.VOIDED_AMOUNT_INVALID)
+
+        credit_journal = self.ledger.find_journal_proposal_for_credit_adjustment(
+            tenant.tenant_account_id, void_row.credit_adjustment_id
+        )
+        if credit_journal is None:
+            return _rejected(JournalProposalRejectionReasonCode.CREDIT_JOURNAL_NOT_FOUND)
+        reversed_journal_proposal_id = credit_journal.journal_proposal_id
+        commercial_date = void_row.voided_at.astimezone(UTC).date().isoformat()
+        legal_entity_reference = f"{tenant.tenant_reference}:legal_entity:commercial"
+        source_event_reference = (
+            f"{tenant.tenant_reference}:issued_credit_note_void:"
+            f"{void_row.issued_credit_note_void_id}"
+        )
+        canonical_payload = _canonical_credit_note_void_proposal_payload(
+            tenant_reference=tenant.tenant_reference,
+            void_row=void_row,
+            issued=issued,
+            exclusive_amount=exclusive_amount,
+            tax_amount=tax_amount,
+            inclusive_amount=inclusive_amount,
+            commercial_date=commercial_date,
+            legal_entity_reference=legal_entity_reference,
+            source_event_reference=source_event_reference,
+            reversed_journal_proposal_id=reversed_journal_proposal_id,
+        )
+        source_payload_hash = compute_proposal_payload_hash(canonical_payload)
+        journal_proposal_id = generate_record_id()
+        stored_lines = _build_credit_note_void_proposal_lines(
+            journal_proposal_id,
+            tenant.tenant_account_id,
+            exclusive_amount,
+            tax_amount,
+            inclusive_amount,
+        )
+        stored = self.ledger.insert_journal_proposal(
+            StoredJournalProposal(
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant.tenant_account_id,
+                invoice_draft_id=void_row.invoice_draft_id,
+                proposal_contract_version=PROPOSAL_CONTRACT_VERSION,
+                idempotency_key=(
+                    f"{tenant.tenant_reference}:issued_credit_note_void:"
+                    f"{void_row.issued_credit_note_void_id}"
+                    f":{void_row.source_payload_hash}"
+                    f":v{void_row.issued_credit_note_void_contract_version}"
+                ),
+                legal_entity_reference=legal_entity_reference,
+                intended_book_role_code=INTENDED_BOOK_ROLE_CODE,
+                transaction_currency=void_row.currency_code,
+                transaction_date=commercial_date,
+                accounting_date=commercial_date,
+                source_payload_hash=source_payload_hash,
+                proposed_at=self._clock(),
+                proposal_status=PROPOSAL_STATUS,
+                source_event_reference=source_event_reference,
+                proposal_lines=stored_lines,
+                issued_credit_note_void_id=void_row.issued_credit_note_void_id,
+            ),
+            stored_lines,
+        )
+        result = _credit_note_void_result_from_stored(
+            stored,
+            tenant.tenant_reference,
+            JournalProposalOutcomeCode.ACCEPTED,
+            self.ledger,
+        )
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            stored.journal_proposal_id,
+            result.as_contract_dict(),
+            stored.proposed_at,
+        )
+        return result
+
     def list_journal_proposals(
         self,
         tenant_reference: str,
@@ -1001,8 +1138,9 @@ class AccountingExportService:
         """Return one tenant page of persisted proposals without mutating status.
 
         Order is ``proposed_at`` then ``proposal_id``.  Cash, AR, credit,
-        write-off, leftover, apply, and void proposals share
-        ``journal_proposal`` and therefore appear in the same list.
+        write-off, leftover, apply, invoice-void, and credit-note-void
+        proposals share ``journal_proposal`` and therefore appear in the
+        same list.
         AIS owns ``posting_receipt``; this query never marks exported or posted.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
@@ -1548,6 +1686,125 @@ def _void_result_from_stored(
     return replace(result, reversed_journal_proposal_id=reversed_journal_proposal_id)
 
 
+def _canonical_credit_note_void_proposal_payload(
+    tenant_reference: str,
+    void_row: StoredIssuedCreditNoteVoid,
+    issued: StoredIssuedCreditNote,
+    exclusive_amount: Decimal,
+    tax_amount: Decimal,
+    inclusive_amount: Decimal,
+    commercial_date: str,
+    legal_entity_reference: str,
+    source_event_reference: str,
+    reversed_journal_proposal_id: UUID,
+) -> dict[str, object]:
+    """Return credit-note-void-proposal facts excluding timestamps and statutory IDs."""
+    exclusive_text = format_exact_decimal(exclusive_amount)
+    tax_text = format_exact_decimal(tax_amount)
+    inclusive_text = format_exact_decimal(inclusive_amount)
+    lines: list[dict[str, object]] = [
+        {
+            "line_number": 1,
+            "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
+            "debit_amount": inclusive_text,
+            "credit_amount": "0",
+        },
+        {
+            "line_number": 2,
+            "account_role_code": REVENUE_ACCOUNT_ROLE_CODE,
+            "debit_amount": "0",
+            "credit_amount": exclusive_text,
+        },
+    ]
+    if tax_amount > 0:
+        lines.append(
+            {
+                "line_number": 3,
+                "account_role_code": TAX_PAYABLE_ACCOUNT_ROLE_CODE,
+                "debit_amount": "0",
+                "credit_amount": tax_text,
+            }
+        )
+    return {
+        "proposal_contract_version": PROPOSAL_CONTRACT_VERSION,
+        "tenant_reference": tenant_reference,
+        "issued_credit_note_void_id": str(void_row.issued_credit_note_void_id),
+        "issued_credit_note_id": str(issued.issued_credit_note_id),
+        "credit_adjustment_id": str(void_row.credit_adjustment_id),
+        "invoice_draft_id": str(void_row.invoice_draft_id),
+        "legal_entity_reference": legal_entity_reference,
+        "intended_book_role_code": INTENDED_BOOK_ROLE_CODE,
+        "transaction_currency": void_row.currency_code,
+        "transaction_date": commercial_date,
+        "accounting_date": commercial_date,
+        "proposal_status": PROPOSAL_STATUS,
+        "source_event_references": [source_event_reference],
+        "reversed_journal_proposal_id": str(reversed_journal_proposal_id),
+        "lines": lines,
+    }
+
+
+def _build_credit_note_void_proposal_lines(
+    journal_proposal_id: UUID,
+    tenant_account_id: UUID,
+    exclusive_amount: Decimal,
+    tax_amount: Decimal,
+    inclusive_amount: Decimal,
+) -> tuple[StoredJournalProposalLine, ...]:
+    """Build the AR, revenue, and optional tax-payable reverse of one credit journal."""
+    exclusive = parse_proposal_amount(exclusive_amount)
+    tax = parse_proposal_amount(tax_amount)
+    inclusive = parse_proposal_amount(inclusive_amount)
+    lines = [
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=1,
+            account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
+            debit_amount=inclusive,
+            credit_amount=Decimal("0"),
+        ),
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=2,
+            account_role_code=REVENUE_ACCOUNT_ROLE_CODE,
+            debit_amount=Decimal("0"),
+            credit_amount=exclusive,
+        ),
+    ]
+    if tax > 0:
+        lines.append(
+            StoredJournalProposalLine(
+                journal_proposal_line_id=generate_record_id(),
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant_account_id,
+                line_number=3,
+                account_role_code=TAX_PAYABLE_ACCOUNT_ROLE_CODE,
+                debit_amount=Decimal("0"),
+                credit_amount=tax,
+            )
+        )
+    return tuple(lines)
+
+
+def _credit_note_void_result_from_stored(
+    stored: StoredJournalProposal,
+    tenant_reference: str,
+    outcome: JournalProposalOutcomeCode,
+    ledger: MemoryUsageLedger,
+) -> JournalProposalResult:
+    """Project a credit-note void proposal and bind the original credit journal."""
+    result = _from_stored(stored, tenant_reference, outcome)
+    void_row = ledger.get_issued_credit_note_void(stored.issued_credit_note_void_id)
+    credit_journal = ledger.find_journal_proposal_for_credit_adjustment(
+        stored.tenant_account_id, void_row.credit_adjustment_id
+    )
+    return replace(result, reversed_journal_proposal_id=credit_journal.journal_proposal_id)
+
+
 def _build_write_off_proposal_lines(
     journal_proposal_id: UUID,
     tenant_account_id: UUID,
@@ -1741,6 +1998,7 @@ def _from_stored(
         unapplied_cash_id=stored.unapplied_cash_id,
         unapplied_cash_application_id=stored.unapplied_cash_application_id,
         issued_invoice_void_id=stored.issued_invoice_void_id,
+        issued_credit_note_void_id=stored.issued_credit_note_void_id,
     )
 
 

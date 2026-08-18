@@ -738,6 +738,9 @@ class JournalProposalRejectionReasonCode(StrEnum):
     CREDIT_ADJUSTMENT_NOT_FOUND = "credit_adjustment_not_found"
     CREDIT_AMOUNT_INVALID = "credit_amount_invalid"
     ISSUED_INVOICE_VOID_NOT_FOUND = "issued_invoice_void_not_found"
+    ISSUED_CREDIT_NOTE_VOID_NOT_FOUND = "issued_credit_note_void_not_found"
+    CREDIT_JOURNAL_NOT_FOUND = "credit_journal_not_found"
+    CREDIT_NOTE_ALREADY_APPLIED = "credit_note_already_applied"
     VOIDED_AMOUNT_INVALID = "voided_amount_invalid"
     CURRENCY_MISMATCH = "currency_mismatch"
 

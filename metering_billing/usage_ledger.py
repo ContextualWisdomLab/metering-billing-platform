@@ -561,7 +561,7 @@ class StoredJournalProposalLine:
 
 @dataclass(frozen=True)
 class StoredJournalProposal:
-    """Append-only balanced journal proposal for one tenant draft, receipt, credit, write-off, leftover refund, parked leftover, leftover apply, or issued-invoice void."""
+    """Append-only balanced journal proposal for one tenant draft, receipt, credit, write-off, leftover refund, parked leftover, leftover apply, issued-invoice void, or issued-credit-note void."""
 
     journal_proposal_id: UUID
     tenant_account_id: UUID
@@ -585,6 +585,7 @@ class StoredJournalProposal:
     unapplied_cash_id: UUID | None = None
     unapplied_cash_application_id: UUID | None = None
     issued_invoice_void_id: UUID | None = None
+    issued_credit_note_void_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -920,6 +921,9 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     void_journal_proposal_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    credit_note_void_journal_proposal_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
     credit_adjustments: dict[UUID, StoredCreditAdjustment] = field(default_factory=dict)
     credit_adjustment_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
         default_factory=dict
@@ -2980,6 +2984,19 @@ class MemoryUsageLedger:
             return None
         return self.journal_proposals[journal_proposal_id]
 
+    def find_journal_proposal_for_issued_credit_note_void(
+        self,
+        tenant_account_id: UUID,
+        issued_credit_note_void_id: UUID,
+    ) -> StoredJournalProposal | None:
+        """Return the void proposal for one tenant-scoped issued-credit-note void, if it exists."""
+        journal_proposal_id = self.credit_note_void_journal_proposal_index.get(
+            (tenant_account_id, issued_credit_note_void_id)
+        )
+        if journal_proposal_id is None:
+            return None
+        return self.journal_proposals[journal_proposal_id]
+
     def find_journal_proposal_for_invoice_draft(
         self,
         tenant_account_id: UUID,
@@ -2987,8 +3004,9 @@ class MemoryUsageLedger:
     ) -> StoredJournalProposal | None:
         """Return the draft-only invoice journal for one tenant-scoped draft, if it exists.
 
-        Specialized cash, credit, write-off, leftover, apply, and void
-        proposals share ``invoice_draft_id`` but are not this identity.
+        Specialized cash, credit, write-off, leftover, apply, invoice-void,
+        and credit-note-void proposals share ``invoice_draft_id`` but are
+        not this identity.
         Binding uses Billing ``proposal_id`` only.
         """
         for proposal in self.journal_proposals.values():
@@ -3004,6 +3022,7 @@ class MemoryUsageLedger:
                 proposal.unapplied_cash_id,
                 proposal.unapplied_cash_application_id,
                 proposal.issued_invoice_void_id,
+                proposal.issued_credit_note_void_id,
             )
             if any(specialized_id is not None for specialized_id in specialized_ids):
                 continue
@@ -3099,6 +3118,12 @@ class MemoryUsageLedger:
                 journal_proposal.tenant_account_id,
                 journal_proposal.issued_invoice_void_id,
             )
+        credit_note_void_identity_key = None
+        if journal_proposal.issued_credit_note_void_id is not None:
+            credit_note_void_identity_key = (
+                journal_proposal.tenant_account_id,
+                journal_proposal.issued_credit_note_void_id,
+            )
         if journal_proposal.journal_proposal_id in self.journal_proposals:
             raise ValueError("journal proposals are immutable and cannot be replaced")
         if identity_key in self.journal_proposal_index:
@@ -3140,6 +3165,11 @@ class MemoryUsageLedger:
             and void_identity_key in self.void_journal_proposal_index
         ):
             raise ValueError("journal proposals are immutable and cannot be replaced")
+        if (
+            credit_note_void_identity_key is not None
+            and credit_note_void_identity_key in self.credit_note_void_journal_proposal_index
+        ):
+            raise ValueError("journal proposals are immutable and cannot be replaced")
         persisted = StoredJournalProposal(
             journal_proposal_id=journal_proposal.journal_proposal_id,
             tenant_account_id=journal_proposal.tenant_account_id,
@@ -3163,6 +3193,7 @@ class MemoryUsageLedger:
             unapplied_cash_id=journal_proposal.unapplied_cash_id,
             unapplied_cash_application_id=journal_proposal.unapplied_cash_application_id,
             issued_invoice_void_id=journal_proposal.issued_invoice_void_id,
+            issued_credit_note_void_id=journal_proposal.issued_credit_note_void_id,
         )
         self.journal_proposals[persisted.journal_proposal_id] = persisted
         self.journal_proposal_index[identity_key] = persisted.journal_proposal_id
@@ -3192,6 +3223,10 @@ class MemoryUsageLedger:
             )
         if void_identity_key is not None:
             self.void_journal_proposal_index[void_identity_key] = persisted.journal_proposal_id
+        if credit_note_void_identity_key is not None:
+            self.credit_note_void_journal_proposal_index[credit_note_void_identity_key] = (
+                persisted.journal_proposal_id
+            )
         self.journal_proposal_lines.extend(parsed_lines)
         return persisted
 

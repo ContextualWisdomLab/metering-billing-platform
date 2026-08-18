@@ -540,6 +540,16 @@ contextual-orchestrator usage
 - `proposal_status` stays `validated` and is never `posted`. Missing or cross-tenant voids, currency mismatch, and zero or negative amounts fail closed.
 - Operators void an unused issued invoice, then POST compose. This slice does not call AIS, invent a webhook, PSP, write-off, settlement rewrite, negative invoice, or statutory account ID.
 
+## Credit-note-void-journal-proposal acceptance
+
+- A stored unused issued-credit-note void composes one balanced reverse `accounting_journal_proposal` through `AccountingExportService.propose_credit_note_void_journal`.
+- Identity is `(tenant_account_id, issued_credit_note_void_id)`. A second compose returns the same `proposal_id` as `duplicate_replay`.
+- Untaxed lines debit semantic `accounts_receivable` and credit semantic `usage_revenue` for the exact tax-inclusive voided amount. Taxed unused notes also credit `tax_payable` on the same journal for the issued exclusive/tax split.
+- The original credit journal is bound by Billing `proposal_id` plus `credit_adjustment_id` / `issued_credit_note_id` only. Missing original Billing proposal fails closed. The payload never includes `journal_entry_id` or a statutory account ID.
+- `POST /v1/issued-credit-note-voids/{issued_credit_note_void_id}/journal-proposals` is the explicit compose. AIS pull stays `GET /v1/journal-proposals` and `GET /v1/journal-proposals/{proposal_id}`.
+- `proposal_status` stays `validated` and is never `posted`. Missing or cross-tenant voids, already-applied notes, currency mismatch, and zero or negative amounts fail closed.
+- Operators void an unused issued credit note, then POST compose. This slice does not call AIS, invent a webhook, PSP, VAT register, NTS filing, 연말정산, negative invoice, or statutory account ID.
+
 ## Usage-ingestion acceptance
 
 - A known event batch stores one usage set; replaying the same batch returns `duplicate_replay` and does not grow that set.

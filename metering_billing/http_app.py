@@ -62,6 +62,9 @@ The application is a thin WSGI adapter:
     stored void.  First successful void enqueues one existing
     ``credit_note.voided`` outbox event.  The void write does not compose
     a journal or call AIS.
+    ``POST /v1/issued-credit-note-voids/{issued_credit_note_void_id}/journal-proposals``
+    is the explicit later compose.  AIS pull stays existing GET
+    journal-proposal routes.
     10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
     GET one stored credential or list ``{tenant_api_credentials,
@@ -467,6 +470,9 @@ ISSUED_CREDIT_NOTE_VOID_NESTED_PATH = re.compile(
 ISSUED_CREDIT_NOTE_VOID_COLLECTION_PATH = "/v1/issued-credit-note-voids"
 ISSUED_CREDIT_NOTE_VOID_ITEM_PATH = re.compile(
     r"^/v1/issued-credit-note-voids/([0-9a-fA-F-]{36})$"
+)
+CREDIT_NOTE_VOID_JOURNAL_NESTED_PATH = re.compile(
+    r"^/v1/issued-credit-note-voids/([0-9a-fA-F-]{36})/journal-proposals$"
 )
 CREDIT_NOTE_APPLICATION_NESTED_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/credit-note-applications$"
@@ -2763,6 +2769,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "list_issued_credit_note_voids", {}
         return "method_not_allowed", {}
+    credit_note_void_journal_nested = CREDIT_NOTE_VOID_JOURNAL_NESTED_PATH.fullmatch(path)
+    if credit_note_void_journal_nested is not None:
+        if method == "POST":
+            return "issued_credit_note_void_journal_proposals", {
+                "issued_credit_note_void_id": credit_note_void_journal_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
     credit_note_void_match = ISSUED_CREDIT_NOTE_VOID_ITEM_PATH.fullmatch(path)
     if credit_note_void_match is not None:
         if method == "GET":
@@ -3038,6 +3051,21 @@ def _dispatch_write(
         result = exports.propose_void_journal(
             tenant_reference,
             _parse_uuid(path_values["issued_invoice_void_id"], "issued_invoice_void_id"),
+            currency_code=currency_code,
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "issued_credit_note_void_journal_proposals":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
+        currency_code = payload.get("currency_code")
+        if currency_code is not None and not isinstance(currency_code, str):
+            raise HttpRequestError("request_invalid")
+        result = exports.propose_credit_note_void_journal(
+            tenant_reference,
+            _parse_uuid(
+                path_values["issued_credit_note_void_id"],
+                "issued_credit_note_void_id",
+            ),
             currency_code=currency_code,
         )
         return result.as_contract_dict(), _status_for_result(result)
