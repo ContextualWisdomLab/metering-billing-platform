@@ -817,3 +817,56 @@ class CollectionDisputeTests(unittest.TestCase):
             orphan.rejection_reason_code,
             CollectionDisputeRejectionReasonCode.COLLECTION_CASE_DISPUTED,
         )
+        unknown_ledger, unknown_case = open_morning_case_with_outstanding()
+        unknown_ledger.collection_cases[unknown_case.collection_case_id] = replace(
+            unknown_ledger.get_collection_case(unknown_case.collection_case_id),
+            collection_case_status="archived",
+        )
+        unknown = CollectionDisputeService(unknown_ledger).hold_collection_case(
+            TENANT_ONE, unknown_case.collection_case_id
+        )
+        self.assertEqual(
+            unknown.rejection_reason_code,
+            CollectionDisputeRejectionReasonCode.COLLECTION_CASE_NOT_FOUND,
+        )
+        zero_ledger, zero_case = open_morning_case_with_outstanding()
+        CollectionWriteOffService(zero_ledger).write_off_collection_case(
+            TENANT_ONE, zero_case.collection_case_id
+        )
+        zero_hold = CollectionDisputeService(zero_ledger).hold_collection_case(
+            TENANT_ONE, zero_case.collection_case_id
+        )
+        self.assertEqual(zero_hold.remaining_outstanding_amount, Decimal("0"))
+        zero_presented = CollectionDisputePresentmentService(
+            zero_ledger
+        ).present_collection_dispute(TENANT_ONE, zero_hold.collection_dispute_id)
+        self.assertEqual(zero_presented.remaining_outstanding_amount, Decimal("0"))
+        with self.assertRaises(ValueError):
+            zero_ledger.mark_collection_case_settled(zero_case.collection_case_id)
+        negative_presentment = dict(presented.as_contract_dict())
+        negative_presentment["remaining_outstanding_amount"] = "-1"
+        self.assertTrue(validate_collection_dispute_presentment(negative_presentment))
+        with mock.patch(
+            "metering_billing.http_app.CollectionDisputePresentmentService.present_collection_dispute",
+            side_effect=ValueError("boom"),
+        ):
+            get_boom_status, get_boom = invoke_http(
+                app,
+                "GET",
+                f"/v1/collection-disputes/{issued_hold.collection_dispute_id}",
+                query={"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(get_boom_status, 422)
+        self.assertEqual(get_boom["rejection_reason_code"], "request_invalid")
+        with mock.patch(
+            "metering_billing.http_app.CollectionDisputeService.hold_collection_case",
+            side_effect=ValueError("boom"),
+        ):
+            post_boom_status, post_boom = invoke_http(
+                app,
+                "POST",
+                f"/v1/collection-cases/{issued_case.collection_case_id}/disputes",
+                {"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(post_boom_status, 422)
+        self.assertEqual(post_boom["rejection_reason_code"], "request_invalid")

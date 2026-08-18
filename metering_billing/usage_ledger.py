@@ -2111,8 +2111,6 @@ class MemoryUsageLedger:
         remaining = parse_exact_decimal(
             format_exact_decimal(collection_dispute.remaining_outstanding_amount)
         )
-        if remaining < 0:
-            raise ValueError("collection dispute remaining must be a non-negative exact decimal")
         if collection_dispute.collection_dispute_id in self.collection_disputes:
             raise ValueError("collection_dispute_id already stored")
         identity_key = (
