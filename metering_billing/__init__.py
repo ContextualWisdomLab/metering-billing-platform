@@ -10,7 +10,7 @@ commercial credit-note snapshot from a stored credit adjustment, present
 that issued credit note, publish tax rates, assess tax on a draft, present
 those assessments, present stored posting-receipt observations, emit
 journal proposals, open collection cases, present those cases as statements, present open-case remaining as aging buckets, present stored dunning events, project provider-neutral payment
-intents, present those intents as statements, apply commercial payment receipts, present those receipts as statements, record commercial credits,
+intents, present those intents as statements, apply commercial payment receipts, park leftover remittance as unapplied cash, present those receipts and parked leftovers as statements, record commercial credits,
 register webhook callbacks for accepted commercial facts, present
 those subscriptions as statements, present stored commercial webhook
 outbox events as statements, drain
@@ -46,6 +46,8 @@ from metering_billing.contracts import (
     INVOICE_DRAFT_SCHEMA_NAME,
     COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME,
     COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME,
+    UNAPPLIED_CASH_SCHEMA_NAME,
+    UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME,
@@ -105,6 +107,8 @@ from metering_billing.contracts import (
     validate_collection_case_settlement_presentment,
     validate_collection_write_off,
     validate_collection_write_off_presentment,
+    validate_unapplied_cash,
+    validate_unapplied_cash_presentment,
     validate_issued_invoice,
     validate_issued_invoice_presentment,
     validate_invoice_presentment,
@@ -154,6 +158,9 @@ from metering_billing.errors import (
     CollectionWriteOffOutcomeCode,
     CollectionWriteOffPresentmentQueryError,
     CollectionWriteOffRejectionReasonCode,
+    UnappliedCashOutcomeCode,
+    UnappliedCashPresentmentQueryError,
+    UnappliedCashRejectionReasonCode,
     CreditNoteApplicationOutcomeCode,
     CreditNoteApplicationPresentmentQueryError,
     CreditNoteApplicationRejectionReasonCode,
@@ -213,6 +220,8 @@ from metering_billing.collection_write_off import CollectionWriteOffService
 from metering_billing.collection_write_off_presentment import (
     CollectionWriteOffPresentmentService,
 )
+from metering_billing.unapplied_cash import UnappliedCashService
+from metering_billing.unapplied_cash_presentment import UnappliedCashPresentmentService
 from metering_billing.issued_invoice import IssuedInvoiceService
 from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
@@ -257,6 +266,8 @@ __all__ = (
     "INVOICE_DRAFT_SCHEMA_NAME",
     "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
+    "UNAPPLIED_CASH_SCHEMA_NAME",
+    "UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
@@ -356,6 +367,11 @@ __all__ = (
     "CollectionWriteOffPresentmentService",
     "CollectionWriteOffRejectionReasonCode",
     "CollectionWriteOffService",
+    "UnappliedCashOutcomeCode",
+    "UnappliedCashPresentmentQueryError",
+    "UnappliedCashPresentmentService",
+    "UnappliedCashRejectionReasonCode",
+    "UnappliedCashService",
     "CreditNoteApplicationOutcomeCode",
     "CreditNoteApplicationPresentmentQueryError",
     "CreditNoteApplicationPresentmentService",
@@ -436,6 +452,8 @@ __all__ = (
     "validate_collection_case_settlement_presentment",
     "validate_collection_write_off",
     "validate_collection_write_off_presentment",
+    "validate_unapplied_cash",
+    "validate_unapplied_cash_presentment",
     "validate_issued_invoice",
     "validate_issued_invoice_presentment",
     "validate_invoice_presentment",

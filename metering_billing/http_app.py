@@ -118,9 +118,15 @@ The application is a thin WSGI adapter:
     The read does not capture, settle, call AIS, or start a web UI.
 15. Let an operator POST an applied payment receipt and GET the stored
     receipt as a commercial statement.  Record the receipt; the cash
-    journal is already validated for AIS to pull.  The write refuses PAN
+    journal is already validated for AIS to pull.      The write refuses PAN
     and provider secrets.  The read does not capture, post, call AIS, or
     start a web UI.
+    ``POST /v1/payment-receipts/{payment_receipt_id}/unapplied-cash``
+    parks leftover remittance against one stored receipt.  Replay of
+    the same tenant and receipt returns the stored ``unapplied_cash_id``.
+    #12 still rejects overpay.  GET item and list present the parked
+    leftover.  Do not invent a journal, webhook, write-off, settlement,
+    credit note, or AIS call.  Do not auto-apply leftover to another case.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -164,6 +170,7 @@ from metering_billing.errors import (
     CreditNoteApplicationPresentmentQueryError,
     CollectionCaseSettlementPresentmentQueryError,
     CollectionWriteOffPresentmentQueryError,
+    UnappliedCashPresentmentQueryError,
     TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
@@ -194,6 +201,8 @@ from metering_billing.collection_write_off import CollectionWriteOffService
 from metering_billing.collection_write_off_presentment import (
     CollectionWriteOffPresentmentService,
 )
+from metering_billing.unapplied_cash import UnappliedCashService
+from metering_billing.unapplied_cash_presentment import UnappliedCashPresentmentService
 from metering_billing.exact_decimal import parse_exact_decimal
 from metering_billing.collection_aging_presentment import (
     Clock,
@@ -247,6 +256,11 @@ PAYMENT_INTENT_ITEM_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})$
 PAYMENT_CANCEL_PATH = re.compile(r"^/v1/payment-intents/([0-9a-fA-F-]{36})/cancel$")
 PAYMENT_RECEIPT_COLLECTION_PATH = "/v1/payment-receipts"
 PAYMENT_RECEIPT_ITEM_PATH = re.compile(r"^/v1/payment-receipts/([0-9a-fA-F-]{36})$")
+UNAPPLIED_CASH_NESTED_PATH = re.compile(
+    r"^/v1/payment-receipts/([0-9a-fA-F-]{36})/unapplied-cash$"
+)
+UNAPPLIED_CASH_COLLECTION_PATH = "/v1/unapplied-cash"
+UNAPPLIED_CASH_ITEM_PATH = re.compile(r"^/v1/unapplied-cash/([0-9a-fA-F-]{36})$")
 FORBIDDEN_PAYMENT_INTENT_KEYS = frozenset(
     {
         "card_pan",
@@ -390,6 +404,8 @@ def create_http_app(
     collection_write_off_presentments = CollectionWriteOffPresentmentService(
         shared_ledger
     )
+    unapplied_cash = UnappliedCashService(shared_ledger)
+    unapplied_cash_presentments = UnappliedCashPresentmentService(shared_ledger)
     exports = AccountingExportService(shared_ledger)
     collections = CollectionCaseService(shared_ledger)
     intents = PaymentIntentService(shared_ledger)
@@ -1368,6 +1384,76 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_unapplied_cash", "get_unapplied_cash"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_unapplied_cash":
+                    page = unapplied_cash_presentments.list_unapplied_cash(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = unapplied_cash_presentments.present_unapplied_cash(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["unapplied_cash_id"],
+                        "unapplied_cash_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except UnappliedCashPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "unapplied_cash_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "unapplied_cash":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                raw_amount = payload.get("unapplied_amount")
+                parsed_amount = None
+                if raw_amount is not None:
+                    if not isinstance(raw_amount, str):
+                        raise HttpRequestError("request_invalid")
+                    parsed_amount = parse_exact_decimal(raw_amount)
+                currency_code = payload.get("currency_code")
+                if currency_code is not None and not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                result = unapplied_cash.park_unapplied_cash(
+                    tenant_reference,
+                    _parse_uuid(path_values["payment_receipt_id"], "payment_receipt_id"),
+                    unapplied_amount=parsed_amount,
+                    currency_code=currency_code,
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "credit_note_applications":
             try:
                 payload = _read_json_object(environ)
@@ -1762,6 +1848,20 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "payment_receipts", {}
         if method == "GET":
             return "list_payment_receipts", {}
+        return "method_not_allowed", {}
+    unapplied_nested = UNAPPLIED_CASH_NESTED_PATH.fullmatch(path)
+    if unapplied_nested is not None:
+        if method == "POST":
+            return "unapplied_cash", {"payment_receipt_id": unapplied_nested.group(1)}
+        return "method_not_allowed", {}
+    if path == UNAPPLIED_CASH_COLLECTION_PATH:
+        if method == "GET":
+            return "list_unapplied_cash", {}
+        return "method_not_allowed", {}
+    unapplied_match = UNAPPLIED_CASH_ITEM_PATH.fullmatch(path)
+    if unapplied_match is not None:
+        if method == "GET":
+            return "get_unapplied_cash", {"unapplied_cash_id": unapplied_match.group(1)}
         return "method_not_allowed", {}
     payment_receipt_match = PAYMENT_RECEIPT_ITEM_PATH.fullmatch(path)
     if payment_receipt_match is not None:

@@ -324,6 +324,35 @@ class CollectionWriteOffPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class UnappliedCashOutcomeCode(StrEnum):
+    """Terminal result of parking leftover remittance against a receipt."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class UnappliedCashRejectionReasonCode(StrEnum):
+    """Why leftover parking was refused without writing a new money fact."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    PAYMENT_RECEIPT_NOT_FOUND = "payment_receipt_not_found"
+    PAYMENT_RECEIPT_ALREADY_CONSUMED = "payment_receipt_already_consumed"
+    UNAPPLIED_AMOUNT_ZERO = "unapplied_amount_zero"
+    UNAPPLIED_AMOUNT_NEGATIVE = "unapplied_amount_negative"
+    UNAPPLIED_AMOUNT_EXCEEDS_RECEIPT = "unapplied_amount_exceeds_receipt"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    REQUEST_INVALID = "request_invalid"
+
+
+class UnappliedCashPresentmentQueryError(ValueError):
+    """Raised when stored unapplied cash cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class CreditNoteApplicationPresentmentQueryError(ValueError):
     """Raised when a stored credit-note application cannot be authorized or presented."""
 

@@ -53,6 +53,8 @@ __all__ = (
     "COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_WRITE_OFF_SCHEMA_NAME",
     "COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME",
+    "UNAPPLIED_CASH_SCHEMA_NAME",
+    "UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -92,6 +94,8 @@ __all__ = (
     "validate_collection_case_settlement_presentment",
     "validate_collection_write_off",
     "validate_collection_write_off_presentment",
+    "validate_unapplied_cash",
+    "validate_unapplied_cash_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -156,6 +160,8 @@ COLLECTION_WRITE_OFF_SCHEMA_NAME = "collection-write-off.schema.json"
 COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME = (
     "collection-write-off-presentment.schema.json"
 )
+UNAPPLIED_CASH_SCHEMA_NAME = "unapplied-cash.schema.json"
+UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME = "unapplied-cash-presentment.schema.json"
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
 AIS_OUTBOX_DRAIN_SCHEMA_NAME = "ais-outbox-drain.schema.json"
@@ -1751,6 +1757,105 @@ def validate_collection_write_off_presentment(
         if forbidden_name in statement:
             errors.append(
                 f"$: collection write-off presentment must not include {forbidden_name}"
+            )
+    return tuple(errors)
+
+
+def validate_unapplied_cash(
+    leftover: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate leftover shape plus exact parked-amount invariants.
+
+    Accepted and replayed leftover must carry the receipt, leftover
+    amount, receipt snapshots, parked timestamp, and hash. Rejections
+    must carry a closed reason and must not invent a legal number.
+    """
+    schema = load_json_schema(UNAPPLIED_CASH_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, leftover))
+    if not isinstance(leftover, Mapping):
+        return tuple(errors)
+    outcome = leftover.get("unapplied_cash_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        for field_name in (
+            "unapplied_cash_id",
+            "tenant_reference",
+            "payment_receipt_id",
+            "payment_intent_id",
+            "collection_case_id",
+            "currency_code",
+            "unapplied_amount",
+            "received_amount",
+            "applied_amount",
+            "unapplied_cash_status",
+            "parked_at",
+            "source_payload_hash",
+        ):
+            if field_name not in leftover:
+                errors.append(f"$: {outcome} unapplied cash must include {field_name}")
+        unapplied_amount = leftover.get("unapplied_amount")
+        if isinstance(unapplied_amount, str):
+            try:
+                if Decimal(unapplied_amount) <= Decimal("0"):
+                    errors.append("$: unapplied_amount must be a positive exact decimal")
+            except Exception:
+                errors.append("$: unapplied_amount must be an exact decimal")
+        elif unapplied_amount is not None:
+            errors.append("$: unapplied_amount must be an exact decimal")
+        for forbidden_name in (
+            "legal_credit_note_number",
+            "legal_invoice_number",
+            "card_pan",
+        ):
+            if forbidden_name in leftover:
+                errors.append(f"$: unapplied cash must not include {forbidden_name}")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in leftover:
+            errors.append("$: rejected unapplied cash must include rejection_reason_code")
+        if "legal_invoice_number" in leftover:
+            errors.append("$: rejected unapplied cash must not invent legal numbers")
+        if "legal_credit_note_number" in leftover:
+            errors.append("$: rejected unapplied cash must not invent legal numbers")
+    else:
+        if outcome is not None:
+            errors.append("$: unknown unapplied_cash_outcome_code")
+    return tuple(errors)
+
+
+def validate_unapplied_cash_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate leftover presentment plus exact parked-amount invariants."""
+    schema = load_json_schema(
+        UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    action = statement.get("next_operator_action")
+    if action != "wait":
+        errors.append("$: unapplied cash presentment must wait")
+    if "apply_to_collection_case_id" in statement:
+        errors.append("$: unapplied cash presentment must not apply leftover")
+    unapplied_amount = statement.get("unapplied_amount")
+    if unapplied_amount is None:
+        errors.append("$: unapplied_amount is required")
+    elif isinstance(unapplied_amount, str):
+        try:
+            if Decimal(unapplied_amount) <= Decimal("0"):
+                errors.append("$: unapplied_amount must be a positive exact decimal")
+        except Exception:
+            errors.append("$: unapplied_amount must be an exact decimal")
+    else:
+        errors.append("$: unapplied_amount must be an exact decimal")
+    for forbidden_name in (
+        "legal_credit_note_number",
+        "legal_invoice_number",
+        "unapplied_cash_outcome_code",
+        "card_pan",
+    ):
+        if forbidden_name in statement:
+            errors.append(
+                f"$: unapplied cash presentment must not include {forbidden_name}"
             )
     return tuple(errors)
 

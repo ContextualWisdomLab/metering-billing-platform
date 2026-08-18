@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/unapplied-cash/v1",
+  "title": "Unapplied Cash",
+  "description": "Append-only leftover remittance parked against one same-tenant payment receipt. One receipt parks leftover at most once. Replays acknowledge the stored unapplied_cash_id and never write a second row. The document is not a journal, webhook, write-off, settlement, credit note, or AIS posting. Apply leftover to another case is a later slice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "unapplied_cash_contract_version",
+    "unapplied_cash_outcome_code"
+  ],
+  "properties": {
+    "unapplied_cash_contract_version": {"type": "integer", "minimum": 1},
+    "unapplied_cash_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "unapplied_cash_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "payment_receipt_id": {"type": "string", "format": "uuid"},
+    "payment_intent_id": {"type": "string", "format": "uuid"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "unapplied_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "received_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "applied_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "unapplied_cash_status": {"type": "string", "enum": ["parked"]},
+    "parked_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "payment_receipt_not_found",
+        "payment_receipt_already_consumed",
+        "unapplied_amount_zero",
+        "unapplied_amount_negative",
+        "unapplied_amount_exceeds_receipt",
+        "currency_mismatch",
+        "request_invalid"
+      ]
+    }
+  }
+}

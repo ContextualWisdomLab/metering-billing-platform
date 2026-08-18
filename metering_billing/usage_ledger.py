@@ -555,6 +555,31 @@ class StoredPaymentIntent:
 
 
 @dataclass(frozen=True)
+class StoredUnappliedCash:
+    """Append-only leftover remittance parked against one payment receipt.
+
+    Identity is ``(tenant_account_id, payment_receipt_id)``.  One receipt
+    parks leftover at most once.  ``unapplied_cash_id`` is the opaque
+    generated identifier.  This is not a journal, webhook, write-off,
+    settlement, credit note, or AIS posting.
+    """
+
+    unapplied_cash_id: UUID
+    tenant_account_id: UUID
+    payment_receipt_id: UUID
+    payment_intent_id: UUID
+    collection_case_id: UUID
+    unapplied_cash_contract_version: int
+    source_payload_hash: str
+    currency_code: str
+    unapplied_amount: Decimal
+    received_amount: Decimal
+    applied_amount: Decimal
+    unapplied_cash_status: str
+    parked_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredPaymentReceipt:
     """Append-only commercial receipt applied against one projected intent."""
 
@@ -822,6 +847,8 @@ class MemoryUsageLedger:
     )
     collection_write_offs: dict[UUID, StoredCollectionWriteOff] = field(default_factory=dict)
     collection_write_off_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    unapplied_cash: dict[UUID, StoredUnappliedCash] = field(default_factory=dict)
+    unapplied_cash_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -1918,6 +1945,71 @@ class MemoryUsageLedger:
         )
         self.collection_write_offs[persisted.collection_write_off_id] = persisted
         self.collection_write_off_index[identity_key] = persisted.collection_write_off_id
+        return persisted
+
+    def find_unapplied_cash(
+        self, tenant_account_id: UUID, payment_receipt_id: UUID
+    ) -> StoredUnappliedCash | None:
+        """Return the parked leftover for one tenant payment receipt, if any."""
+        unapplied_cash_id = self.unapplied_cash_index.get(
+            (tenant_account_id, payment_receipt_id)
+        )
+        if unapplied_cash_id is None:
+            return None
+        return self.unapplied_cash[unapplied_cash_id]
+
+    def get_unapplied_cash(self, unapplied_cash_id: UUID) -> StoredUnappliedCash | None:
+        """Return one unapplied-cash row by internal identifier, if present."""
+        return self.unapplied_cash.get(unapplied_cash_id)
+
+    def list_unapplied_cash_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredUnappliedCash, ...]:
+        """Return unapplied-cash rows limited to one tenant."""
+        return tuple(
+            parked
+            for parked in self.unapplied_cash.values()
+            if parked.tenant_account_id == tenant_account_id
+        )
+
+    def insert_unapplied_cash(self, unapplied_cash: StoredUnappliedCash) -> StoredUnappliedCash:
+        """Append an immutable parked leftover.  Existing identity rows stay."""
+        if unapplied_cash.unapplied_cash_status != "parked":
+            raise ValueError("unapplied_cash_status must be parked")
+        leftover = parse_exact_decimal(format_exact_decimal(unapplied_cash.unapplied_amount))
+        if leftover <= 0:
+            raise ValueError("unapplied cash amount must be a positive exact decimal")
+        received_amount = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash.received_amount)
+        )
+        applied_amount = parse_exact_decimal(format_exact_decimal(unapplied_cash.applied_amount))
+        if leftover > received_amount:
+            raise ValueError("unapplied cash cannot exceed the stored receipt")
+        if unapplied_cash.unapplied_cash_id in self.unapplied_cash:
+            raise ValueError("unapplied_cash_id already stored")
+        identity_key = (
+            unapplied_cash.tenant_account_id,
+            unapplied_cash.payment_receipt_id,
+        )
+        if identity_key in self.unapplied_cash_index:
+            raise ValueError("unapplied cash rows are immutable and cannot be replaced")
+        persisted = StoredUnappliedCash(
+            unapplied_cash_id=unapplied_cash.unapplied_cash_id,
+            tenant_account_id=unapplied_cash.tenant_account_id,
+            payment_receipt_id=unapplied_cash.payment_receipt_id,
+            payment_intent_id=unapplied_cash.payment_intent_id,
+            collection_case_id=unapplied_cash.collection_case_id,
+            unapplied_cash_contract_version=unapplied_cash.unapplied_cash_contract_version,
+            source_payload_hash=unapplied_cash.source_payload_hash,
+            currency_code=unapplied_cash.currency_code,
+            unapplied_amount=leftover,
+            received_amount=received_amount,
+            applied_amount=applied_amount,
+            unapplied_cash_status=unapplied_cash.unapplied_cash_status,
+            parked_at=unapplied_cash.parked_at,
+        )
+        self.unapplied_cash[persisted.unapplied_cash_id] = persisted
+        self.unapplied_cash_index[identity_key] = persisted.unapplied_cash_id
         return persisted
 
     def apply_collection_write_off(

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/unapplied-cash-presentment/v1",
+  "title": "Unapplied Cash Presentment",
+  "description": "Tenant-scoped commercial statement projected from a stored unapplied_cash row. Amounts are exact-decimal strings. Status stays parked. Next operator action is wait. The document is not a journal, webhook, write-off, settlement, credit note, or AIS posting. Apply leftover to another case is a later slice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "unapplied_cash_presentment_contract_version",
+    "unapplied_cash_id",
+    "tenant_reference",
+    "payment_receipt_id",
+    "payment_intent_id",
+    "collection_case_id",
+    "currency_code",
+    "unapplied_amount",
+    "received_amount",
+    "applied_amount",
+    "unapplied_cash_status",
+    "parked_at",
+    "source_payload_hash",
+    "next_operator_action"
+  ],
+  "properties": {
+    "unapplied_cash_presentment_contract_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "unapplied_cash_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "payment_receipt_id": {"type": "string", "format": "uuid"},
+    "payment_intent_id": {"type": "string", "format": "uuid"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "unapplied_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "received_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "applied_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "unapplied_cash_status": {"type": "string", "enum": ["parked"]},
+    "parked_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}

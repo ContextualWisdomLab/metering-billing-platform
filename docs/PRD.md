@@ -312,6 +312,16 @@ contextual-orchestrator usage
 - Operators record the receipt; the cash journal is already validated for AIS to pull. HTTP presentment does not capture cards or call AIS.
 - `operator_console` Storybook renders that receipt with tokenized amount due and status chip. Fixtures are applied-full and applied-partial.
 
+## Unapplied-cash acceptance
+
+- `POST /v1/payment-receipts/{payment_receipt_id}/unapplied-cash` parks leftover remittance against one same-tenant stored receipt. Replay of the same tenant and receipt returns the same `unapplied_cash_id`. PAN, CVC, and provider secrets are refused.
+- #12 still rejects overpay. Omitting leftover fail-closes as `payment_receipt_already_consumed`. A supplied leftover must be a positive exact decimal that does not exceed the stored receipt.
+- A known stored leftover presents one tenant-scoped statement with `unapplied_amount`, receipt snapshots, `unapplied_cash_status` (`parked`), and `next_operator_action` (`wait`).
+- `GET /v1/unapplied-cash/{unapplied_cash_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/unapplied-cash` lists summaries as `{unapplied_cash, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{parked_at}|{unapplied_cash_id}`.
+- Missing tenant, illegal cursor, and illegal page_limit fail closed.
+- Operators park leftover against a stored receipt. HTTP does not apply leftover to another case, capture cards, write a journal, or call AIS.
+
 ## Payment-intent-presentment acceptance
 
 - `POST /v1/payment-intents` projects one #11 intent from a stored `collection_case_id`. Amount and currency come from the case. Replay of the same tenant, case snapshot, and contract version returns the same `payment_intent_id`. PAN, CVC, and provider secrets are refused.
