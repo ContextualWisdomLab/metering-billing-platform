@@ -29,7 +29,8 @@
           "payment_receipt.applied",
           "credit_adjustment.recorded",
           "invoice.issued",
-          "credit_note.issued"
+          "credit_note.issued",
+          "collection.settled"
         ]
       }
     },

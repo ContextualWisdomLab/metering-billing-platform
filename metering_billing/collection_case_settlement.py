@@ -8,8 +8,10 @@ The service is the buyer-facing settle path:
 4. Flip the case to ``settled`` without inventing a receipt or write-off.
 
 Replay of the same tenant and ``collection_case_id`` returns the stored
-settlement and never double-settles.  The path does not emit a journal,
-unwind tax, capture payment, call AIS, or enqueue a new webhook type.
+settlement and never double-settles.  First successful settle enqueues
+one existing ``collection.settled`` outbox event; replay of the same
+settlement does not enqueue a second row.  The path does not emit a
+journal, unwind tax, capture payment, call AIS, or invent a write-off.
 """
 
 from __future__ import annotations
@@ -34,6 +36,10 @@ from metering_billing.usage_ledger import (
     StoredCollectionCase,
     StoredCollectionCaseSettlement,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_COLLECTION_SETTLED,
+    enqueue_accepted_fact,
 )
 
 
@@ -123,6 +129,32 @@ class CollectionCaseSettlementResult:
             payload["issued_invoice_id"] = str(self.issued_invoice_id)
         return payload
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``collection.settled`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not a payment receipt or
+        write-off.  PII, PAN, secrets, and statutory identifiers are omitted.
+        Remaining outstanding is the stored exact-zero settlement fact.
+        """
+        if self.collection_case_settlement_id is None or self.collection_case_id is None:
+            raise ValueError("rejected collection case settlement has no webhook event data")
+        payload: dict[str, object] = {
+            "collection_case_settlement_id": str(self.collection_case_settlement_id),
+            "collection_case_id": str(self.collection_case_id),
+            "invoice_draft_id": str(self.invoice_draft_id),
+            "source_payload_hash": self.source_payload_hash,
+            "collection_case_settlement_contract_version": (
+                self.collection_case_settlement_contract_version
+            ),
+            "currency_code": self.currency_code,
+            "remaining_outstanding_amount": "0",
+            "collection_case_status": self.collection_case_status,
+            "settled_at": _format_settled_at(self.settled_at),
+        }
+        if self.issued_invoice_id is not None:
+            payload["issued_invoice_id"] = str(self.issued_invoice_id)
+        return payload
+
 
 class CollectionCaseSettlementService:
     """Append-only settler of exact-zero collection cases."""
@@ -142,7 +174,9 @@ class CollectionCaseSettlementService:
 
         Replay of the same tenant and ``collection_case_id`` returns the
         stored ``collection_case_settlement_id`` and does not flip status
-        again.  Another tenant cannot see or settle that case.
+        again.  First successful settle enqueues one ``collection.settled``
+        outbox event.  Replay of that settlement does not enqueue a second
+        row.  Another tenant cannot see or settle that case.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -157,12 +191,14 @@ class CollectionCaseSettlementService:
                 return _rejected(
                     CollectionCaseSettlementRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
                 )
-            return _from_stored(
+            result = _from_stored(
                 existing,
                 current_case,
                 tenant.tenant_reference,
                 CollectionCaseSettlementOutcomeCode.DUPLICATE_REPLAY,
             )
+            _enqueue_collection_settled(self.ledger, tenant.tenant_reference, result)
+            return result
         collection_case = self.ledger.get_collection_case(collection_case_id)
         if (
             collection_case is None
@@ -211,12 +247,14 @@ class CollectionCaseSettlementService:
         updated_case = self.ledger.mark_collection_case_settled(
             collection_case.collection_case_id
         )
-        return _from_stored(
+        result = _from_stored(
             stored,
             updated_case,
             tenant.tenant_reference,
             CollectionCaseSettlementOutcomeCode.ACCEPTED,
         )
+        _enqueue_collection_settled(self.ledger, tenant.tenant_reference, result)
+        return result
 
 
 def _canonical_settlement_snapshot(
@@ -235,6 +273,31 @@ def _canonical_settlement_snapshot(
     if issued_invoice_id is not None:
         payload["issued_invoice_id"] = str(issued_invoice_id)
     return payload
+
+
+def _enqueue_collection_settled(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: CollectionCaseSettlementResult,
+) -> None:
+    """Append one ``collection.settled`` outbox row for a stored settlement.
+
+    Replay of the same tenant, event type, ``collection_case_settlement_id``,
+    and payload hash returns the stored row.  A crash after insert and
+    before enqueue is healed by the next settle replay.
+    """
+    if result.collection_case_settlement_id is None or result.settled_at is None:
+        raise ValueError(
+            "accepted collection case settlements must include identity and settled_at"
+        )
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_COLLECTION_SETTLED,
+        result.collection_case_settlement_id,
+        result.as_webhook_event_data(),
+        result.settled_at,
+    )
 
 
 def _rejected(

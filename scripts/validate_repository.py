@@ -73,6 +73,7 @@ REQUIRED_FILES = (
     "docs/adr/0041-credit-note-issued-webhook.md",
     "docs/adr/0042-credit-note-application-to-collection-case.md",
     "docs/adr/0043-collection-case-settle-when-zero.md",
+    "docs/adr/0044-collection-settled-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

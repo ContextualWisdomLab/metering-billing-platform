@@ -86,8 +86,9 @@ The application is a thin WSGI adapter:
     ``POST /v1/collection-cases/{collection_case_id}/settlements``
     settles one same-tenant open case whose remaining outstanding is
     exact zero.  Replay of the same tenant and case returns the stored
-    ``collection_case_settlement_id``.  GET item and list present the
-    stored settlement.  Do not invent a journal, tax unwind, webhook,
+    ``collection_case_settlement_id``.  First successful settle enqueues
+    one existing ``collection.settled`` outbox event.  GET item and list
+    present the stored settlement.  Do not invent a journal, tax unwind,
     write-off, statutory numbering, or payment capture.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,

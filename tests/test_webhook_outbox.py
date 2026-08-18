@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from metering_billing import (
     AccountingExportService,
+    CollectionCaseSettlementService,
     CreditAdjustmentService,
     IssuedCreditNoteService,
     IssuedInvoiceService,
@@ -42,6 +43,7 @@ from metering_billing.usage_ledger import (
 )
 from metering_billing.tenant_api_credential import DEFAULT_CREDENTIAL_PEPPER
 from metering_billing.webhook_outbox import (
+    EVENT_TYPE_COLLECTION_SETTLED,
     EVENT_TYPE_CREDIT_ADJUSTMENT_RECORDED,
     EVENT_TYPE_CREDIT_NOTE_ISSUED,
     EVENT_TYPE_INVOICE_ISSUED,
@@ -59,6 +61,7 @@ from metering_billing.webhook_outbox import (
     post_signed_webhook,
     sign_webhook_body,
 )
+from test_collection_case_settlement import open_morning_case_at_zero
 from test_http_app import invoke_http
 from test_journal_proposal import draft_known_morning
 from test_payment_settlement import project_known_morning_intent
@@ -421,6 +424,106 @@ class WebhookOutboxTests(unittest.TestCase):
                         event
                         for event in ledger.webhook_outbox_events.values()
                         if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_ISSUED
+                    ]
+                ),
+                1,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_collection_settled_enqueues_once_and_delivers_signed(self) -> None:
+        """First settle enqueues collection.settled once; replay heals without a second row."""
+        ledger, collection = open_morning_case_at_zero()
+        server, callback_url, received = _start_recorder()
+        try:
+            subscriptions = WebhookSubscriptionService(ledger, clock=lambda: ISSUED_AT)
+            registered = subscriptions.register_subscription(
+                TENANT_ONE, callback_url, (EVENT_TYPE_COLLECTION_SETTLED,)
+            )
+            self.assertEqual(
+                registered.webhook_subscription_outcome_code,
+                WebhookSubscriptionOutcomeCode.ACCEPTED,
+            )
+            self.assertEqual(registered.event_type_codes, (EVENT_TYPE_COLLECTION_SETTLED,))
+            self.assertEqual(validate_webhook_subscription(registered.as_contract_dict()), ())
+            first = CollectionCaseSettlementService(
+                ledger, clock=lambda: ISSUED_AT
+            ).settle_collection_case(TENANT_ONE, collection.collection_case_id)
+            second = CollectionCaseSettlementService(
+                ledger, clock=lambda: ISSUED_AT
+            ).settle_collection_case(TENANT_ONE, collection.collection_case_id)
+            settled_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
+            ]
+            self.assertEqual(first.collection_case_settlement_outcome_code.value, "accepted")
+            self.assertEqual(second.collection_case_settlement_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(settled_events), 1)
+            self.assertEqual(settled_events[0].source_id, first.collection_case_settlement_id)
+            envelope = json.loads(settled_events[0].payload_json)
+            self.assertEqual(envelope["event_type_code"], EVENT_TYPE_COLLECTION_SETTLED)
+            data = envelope["data"]
+            self.assertEqual(
+                data["collection_case_settlement_id"],
+                str(first.collection_case_settlement_id),
+            )
+            self.assertEqual(data["collection_case_id"], str(collection.collection_case_id))
+            self.assertEqual(data["invoice_draft_id"], str(collection.invoice_draft_id))
+            self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+            self.assertEqual(data["collection_case_settlement_contract_version"], 1)
+            self.assertEqual(data["currency_code"], "USD")
+            self.assertEqual(data["remaining_outstanding_amount"], "0")
+            self.assertEqual(data["collection_case_status"], "settled")
+            self.assertEqual(data["settled_at"], first.as_contract_dict()["settled_at"])
+            self.assertNotIn("issued_invoice_id", data)
+            self.assertNotIn("card_pan", json.dumps(envelope))
+            self.assertNotIn("write_off_amount", json.dumps(envelope))
+            self.assertNotIn("webhook_secret", json.dumps(envelope))
+            self.assertNotIn("legal_invoice_number", json.dumps(envelope))
+            delivered = WebhookDeliveryService(ledger).deliver_due_events(TENANT_ONE)
+            self.assertEqual(delivered.delivered_event_count, 1)
+            self.assertEqual(len(received), 1)
+            headers, raw_body = received[0]
+            posted = json.loads(raw_body.decode("utf-8"))
+            self.assertEqual(posted["event_type_code"], EVENT_TYPE_COLLECTION_SETTLED)
+            expected = sign_webhook_body(registered.webhook_secret or "", raw_body)
+            signature = next(
+                value
+                for key, value in headers.items()
+                if key.lower() == WEBHOOK_SIGNATURE_HEADER.lower()
+            )
+            self.assertEqual(signature, expected)
+            orphan_id = settled_events[0].outbox_event_id
+            identity = next(
+                key
+                for key, stored_id in ledger.webhook_outbox_identity_index.items()
+                if stored_id == orphan_id
+            )
+            del ledger.webhook_outbox_events[orphan_id]
+            del ledger.webhook_outbox_identity_index[identity]
+            healed = CollectionCaseSettlementService(
+                ledger, clock=lambda: ISSUED_AT
+            ).settle_collection_case(TENANT_ONE, collection.collection_case_id)
+            healed_events = [
+                event
+                for event in ledger.webhook_outbox_events.values()
+                if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
+            ]
+            self.assertEqual(healed.collection_case_settlement_outcome_code.value, "duplicate_replay")
+            self.assertEqual(len(healed_events), 1)
+            self.assertEqual(healed_events[0].source_id, first.collection_case_settlement_id)
+            rejected = CollectionCaseSettlementService(ledger).settle_collection_case(
+                TENANT_TWO, collection.collection_case_id
+            )
+            self.assertEqual(rejected.collection_case_settlement_outcome_code.value, "rejected")
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in ledger.webhook_outbox_events.values()
+                        if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
                     ]
                 ),
                 1,

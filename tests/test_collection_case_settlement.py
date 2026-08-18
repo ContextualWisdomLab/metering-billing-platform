@@ -29,9 +29,11 @@ from metering_billing.errors import (
 )
 from metering_billing.collection_case_settlement import (
     CollectionCaseSettlementResult,
+    _enqueue_collection_settled,
     _format_settled_at,
 )
 from metering_billing.usage_ledger import generate_record_id
+from metering_billing.webhook_outbox import EVENT_TYPE_COLLECTION_SETTLED
 from test_collection_case import draft_known_morning
 from test_credit_note_application import issue_morning_credit_then_open_case
 from test_http_app import invoke_http
@@ -103,7 +105,35 @@ class CollectionCaseSettlementTests(unittest.TestCase):
         self.assertEqual(stored_case.collection_case_status, "settled")
         self.assertEqual(len(ledger.collection_case_settlements), 1)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 1)
+        settled_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
+        ]
+        self.assertEqual(len(settled_events), 1)
+        self.assertEqual(settled_events[0].source_id, first.collection_case_settlement_id)
+        envelope = json.loads(settled_events[0].payload_json)
+        self.assertEqual(envelope["event_type_code"], EVENT_TYPE_COLLECTION_SETTLED)
+        data = envelope["data"]
+        self.assertEqual(data["collection_case_settlement_id"], str(first.collection_case_settlement_id))
+        self.assertEqual(data["collection_case_id"], str(first.collection_case_id))
+        self.assertEqual(data["invoice_draft_id"], str(first.invoice_draft_id))
+        self.assertEqual(data["source_payload_hash"], first.source_payload_hash)
+        self.assertEqual(data["collection_case_settlement_contract_version"], 1)
+        self.assertEqual(data["currency_code"], "USD")
+        self.assertEqual(data["remaining_outstanding_amount"], "0")
+        self.assertEqual(data["collection_case_status"], "settled")
+        self.assertEqual(data["settled_at"], first.as_contract_dict()["settled_at"])
+        self.assertNotIn("issued_invoice_id", data)
+        self.assertNotIn("card_pan", json.dumps(envelope))
+        self.assertNotIn("write_off_amount", json.dumps(envelope))
+        self.assertNotIn("webhook_secret", json.dumps(envelope))
+        self.assertNotIn("legal_invoice_number", json.dumps(envelope))
+        webhook_data = first.as_webhook_event_data()
+        self.assertEqual(webhook_data["remaining_outstanding_amount"], "0")
+        self.assertNotIn("collection_case_settlement_outcome_code", webhook_data)
+        self.assertNotIn("next_operator_action", webhook_data)
         self.assertEqual(len(ledger.payment_receipts), prior_receipts)
         self.assertEqual(len(ledger.credit_note_applications), 0)
 
@@ -126,6 +156,16 @@ class CollectionCaseSettlementTests(unittest.TestCase):
         )
         self.assertEqual(collection.outstanding_amount, KNOWN_MORNING_TOTAL)
         self.assertEqual(len(ledger.collection_case_settlements), 0)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
+                ]
+            ),
+            0,
+        )
         stored = ledger.get_collection_case(collection.collection_case_id)
         self.assertEqual(stored.collection_case_status, "open")
 
@@ -145,6 +185,16 @@ class CollectionCaseSettlementTests(unittest.TestCase):
         )
         self.assertEqual(len(ledger.collection_case_settlements), 0)
         self.assertEqual(len(ledger.credit_note_applications), 1)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
+                ]
+            ),
+            0,
+        )
 
     def test_issued_invoice_is_preserved_when_stored(self) -> None:
         """A stored issued invoice on the case draft is copied onto the settlement."""
@@ -167,6 +217,18 @@ class CollectionCaseSettlementTests(unittest.TestCase):
         )
         self.assertEqual(settled.issued_invoice_id, issued_invoice.issued_invoice_id)
         self.assertIn("issued_invoice_id", settled.as_contract_dict())
+        settled_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
+        ]
+        self.assertEqual(len(settled_events), 1)
+        envelope = json.loads(settled_events[0].payload_json)
+        self.assertEqual(envelope["data"]["issued_invoice_id"], str(issued_invoice.issued_invoice_id))
+        self.assertEqual(
+            settled.as_webhook_event_data()["issued_invoice_id"],
+            str(issued_invoice.issued_invoice_id),
+        )
 
     def test_unknown_and_cross_tenant_targets_are_rejected(self) -> None:
         """Missing tenant or case cannot invent a settlement."""
@@ -324,7 +386,17 @@ class CollectionCaseSettlementTests(unittest.TestCase):
             {"tenant_reference": TENANT_ONE},
         )
         self.assertEqual(method_status, 405)
-        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox + 2)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_COLLECTION_SETTLED
+                ]
+            ),
+            2,
+        )
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
         self.assertEqual(len(ledger.payment_receipts), 0)
 
@@ -601,6 +673,8 @@ class CollectionCaseSettlementTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             accepted_without_time.as_contract_dict()
+        with self.assertRaises(ValueError):
+            accepted_without_time.as_webhook_event_data()
         rejected_without_reason = CollectionCaseSettlementResult(
             collection_case_settlement_outcome_code=CollectionCaseSettlementOutcomeCode.REJECTED,
             collection_case_settlement_contract_version=1,
@@ -622,6 +696,46 @@ class CollectionCaseSettlementTests(unittest.TestCase):
             rejected_without_reason.as_contract_dict()["rejection_reason_code"],
             "collection_case_not_found",
         )
+        with self.assertRaises(ValueError):
+            rejected_without_reason.as_webhook_event_data()
+        incomplete = CollectionCaseSettlementResult(
+            collection_case_settlement_outcome_code=CollectionCaseSettlementOutcomeCode.ACCEPTED,
+            collection_case_settlement_contract_version=1,
+            collection_case_settlement_id=None,
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=Decimal("0"),
+            collection_case_settlement_status="settled",
+            collection_case_status="settled",
+            settled_at=None,
+            source_payload_hash="sha256:" + "a" * 64,
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaises(ValueError):
+            _enqueue_collection_settled(ledger, TENANT_ONE, incomplete)
+        missing_time = CollectionCaseSettlementResult(
+            collection_case_settlement_outcome_code=CollectionCaseSettlementOutcomeCode.ACCEPTED,
+            collection_case_settlement_contract_version=1,
+            collection_case_settlement_id=generate_record_id(),
+            collection_case_id=generate_record_id(),
+            invoice_draft_id=generate_record_id(),
+            issued_invoice_id=None,
+            tenant_reference=TENANT_ONE,
+            currency_code="USD",
+            remaining_outstanding_amount=Decimal("0"),
+            collection_case_settlement_status="settled",
+            collection_case_status="settled",
+            settled_at=None,
+            source_payload_hash="sha256:" + "a" * 64,
+            next_operator_action="wait",
+            rejection_reason_code=None,
+        )
+        with self.assertRaises(ValueError):
+            _enqueue_collection_settled(ledger, TENANT_ONE, missing_time)
         string_rejected = CollectionCaseSettlementResult(
             collection_case_settlement_outcome_code="rejected",
             collection_case_settlement_contract_version=1,
