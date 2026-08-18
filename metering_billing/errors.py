@@ -495,6 +495,9 @@ class JournalProposalRejectionReasonCode(StrEnum):
     DRAFT_TOTAL_INVALID = "draft_total_invalid"
     PAYMENT_RECEIPT_NOT_FOUND = "payment_receipt_not_found"
     RECEIPT_AMOUNT_INVALID = "receipt_amount_invalid"
+    COLLECTION_WRITE_OFF_NOT_FOUND = "collection_write_off_not_found"
+    WRITE_OFF_AMOUNT_INVALID = "write_off_amount_invalid"
+    CURRENCY_MISMATCH = "currency_mismatch"
 
 
 class JournalProposalQueryError(ValueError):

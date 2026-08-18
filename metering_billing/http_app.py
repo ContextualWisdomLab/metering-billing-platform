@@ -96,10 +96,14 @@ The application is a thin WSGI adapter:
     case.  Replay of the same tenant and case returns the stored
     ``collection_write_off_id`` and never re-zeros outstanding.  First
     successful write-off enqueues one existing ``write_off.recorded``
-    outbox event.  GET item and list present the stored write-off.  Do
-    not invent a journal, tax unwind, settlement, statutory numbering,
-    payment capture, or AIS call.  After write-off, #46 can settle at
-    exact zero.
+    outbox event.  GET item and list present the stored write-off.
+    ``POST /v1/collection-write-offs/{collection_write_off_id}/journal-proposals``
+    composes one existing ``accounting_journal_proposal`` from that
+    write-off.  Replay of the same tenant and write-off returns the
+    stored ``proposal_id``.  AIS pulls the validated proposal through
+    existing GET journal-proposal routes.  Do not invent a tax unwind,
+    settlement, statutory numbering, payment capture, or AIS call.
+    After write-off, compose the journal, then settle at exact zero.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -296,6 +300,9 @@ COLLECTION_WRITE_OFF_NESTED_PATH = re.compile(
 COLLECTION_WRITE_OFF_COLLECTION_PATH = "/v1/collection-write-offs"
 COLLECTION_WRITE_OFF_ITEM_PATH = re.compile(
     r"^/v1/collection-write-offs/([0-9a-fA-F-]{36})$"
+)
+WRITE_OFF_JOURNAL_NESTED_PATH = re.compile(
+    r"^/v1/collection-write-offs/([0-9a-fA-F-]{36})/journal-proposals$"
 )
 TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
 TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
@@ -1633,6 +1640,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "list_collection_write_offs", {}
         return "method_not_allowed", {}
+    write_off_journal_nested = WRITE_OFF_JOURNAL_NESTED_PATH.fullmatch(path)
+    if write_off_journal_nested is not None:
+        if method == "POST":
+            return "write_off_journal_proposals", {
+                "collection_write_off_id": write_off_journal_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
     write_off_match = COLLECTION_WRITE_OFF_ITEM_PATH.fullmatch(path)
     if write_off_match is not None:
         if method == "GET":
@@ -2079,6 +2093,18 @@ def _dispatch_write(
         result = exports.propose_cash_journal(
             tenant_reference,
             _parse_uuid(payload.get("payment_receipt_id"), "payment_receipt_id"),
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "write_off_journal_proposals":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
+        currency_code = payload.get("currency_code")
+        if currency_code is not None and not isinstance(currency_code, str):
+            raise HttpRequestError("request_invalid")
+        result = exports.propose_write_off_journal(
+            tenant_reference,
+            _parse_uuid(path_values["collection_write_off_id"], "collection_write_off_id"),
+            currency_code=currency_code,
         )
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "credit_adjustments":

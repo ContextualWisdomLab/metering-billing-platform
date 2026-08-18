@@ -2525,6 +2525,20 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_write_off_journal_migration_reuses_journal_proposal_for_write_offs(self) -> None:
+        """Write-off proposals reuse journal_proposal and add a write-off-scoped identity."""
+        sql = (ROOT / "database/migrations/0022_write_off_journal_proposal.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ADD COLUMN collection_write_off_id uuid",
+            "FOREIGN KEY (tenant_account_id, collection_write_off_id)",
+            "REFERENCES billing_core.collection_write_off (tenant_account_id, collection_write_off_id)",
+            "CREATE UNIQUE INDEX journal_proposal_write_off_identity",
+            "collection_write_off_id IS NOT NULL",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_credit_adjustment_accepts_recorded_status_and_closed_reasons(self) -> None:
         """A credit-adjustment contract records exact amounts and closed reasons."""
         schema = self._schema("credit-adjustment.schema.json")

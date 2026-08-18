@@ -86,7 +86,7 @@ After an `issued_credit_note` and an open `collection_case` exist for the same i
 
 After an open `collection_case` already shows exact-zero outstanding, call `CollectionCaseSettlementService.settle_collection_case` or `POST /v1/collection-cases/{collection_case_id}/settlements`. Replay of the same tenant and case returns the same `collection_case_settlement_id` and never double-settles. First successful settle enqueues one existing `collection.settled` webhook outbox event. `GET /v1/collection-case-settlements/{collection_case_settlement_id}` and `GET /v1/collection-case-settlements` present the stored settlement. Settle the zero-outstanding case, then wait. The path does not invent a journal, tax unwind, second webhook system, statutory numbering, write-off, payment receipt, or AIS call.
 
-After an open `collection_case` still shows leftover remaining, call `CollectionWriteOffService.write_off_collection_case` or `POST /v1/collection-cases/{collection_case_id}/write-offs`. Replay of the same tenant and case returns the same `collection_write_off_id` and never re-zeros outstanding. Remaining becomes exact zero without settling. First successful write-off enqueues one existing `write_off.recorded` webhook outbox event. `GET /v1/collection-write-offs/{collection_write_off_id}` and `GET /v1/collection-write-offs` present the stored write-off. Write off leftover remaining, then settle. The path does not invent a journal, tax unwind, second webhook system, statutory numbering, payment receipt, credit note, settlement command, or AIS call.
+After an open `collection_case` still shows leftover remaining, call `CollectionWriteOffService.write_off_collection_case` or `POST /v1/collection-cases/{collection_case_id}/write-offs`. Replay of the same tenant and case returns the same `collection_write_off_id` and never re-zeros outstanding. Remaining becomes exact zero without settling. First successful write-off enqueues one existing `write_off.recorded` webhook outbox event. `GET /v1/collection-write-offs/{collection_write_off_id}` and `GET /v1/collection-write-offs` present the stored write-off. After the write-off exists, `POST /v1/collection-write-offs/{collection_write_off_id}/journal-proposals` composes one validated write-off/AR journal for AIS to pull. Write off leftover remaining, compose the journal, then settle. The path does not invent a tax unwind, second webhook system, statutory numbering, payment receipt, credit note, settlement command, or AIS call.
 
 ## Propose a journal
 
@@ -94,7 +94,7 @@ After an open `collection_case` still shows leftover remaining, call `Collection
 python3 -c "from metering_billing import AccountingExportService"
 ```
 
-After an `invoice_draft` exists, call `AccountingExportService.propose_journal` with the tenant and `invoice_draft_id`. After a `payment_receipt` exists, the receipt write already proposed the cash journal; `AccountingExportService.propose_cash_journal` remains a manual replay. Each proposal is one balanced exact-decimal `accounting_journal_proposal` that uses semantic account roles and an intended book role. An identical replay returns the same `proposal_id`. Status stays inside the proposal lifecycle and is never `posted`. Cash lines debit `cash_receipt` and credit `accounts_receivable`.
+After an `invoice_draft` exists, call `AccountingExportService.propose_journal` with the tenant and `invoice_draft_id`. After a `payment_receipt` exists, the receipt write already proposed the cash journal; `AccountingExportService.propose_cash_journal` remains a manual replay. After a `collection_write_off` exists, call `AccountingExportService.propose_write_off_journal` or `POST /v1/collection-write-offs/{collection_write_off_id}/journal-proposals`. Each proposal is one balanced exact-decimal `accounting_journal_proposal` that uses semantic account roles and an intended book role. An identical replay returns the same `proposal_id`. Status stays inside the proposal lifecycle and is never `posted`. Cash lines debit `cash_receipt` and credit `accounts_receivable`. Write-off lines debit `write_off_expense` and credit `accounts_receivable`.
 
 ## Open a collection case
 
@@ -253,7 +253,7 @@ python3 -c "from metering_billing import CollectionWriteOffService, CollectionWr
 # GET /v1/collection-write-offs?tenant_reference=urn:cwl:tenant_001
 ```
 
-After an open `collection_case` still shows leftover remaining, `POST /v1/collection-cases/{collection_case_id}/write-offs` zeros remaining without inventing a receipt, credit, or settlement. First successful write-off enqueues one `write_off.recorded` outbox event. `GET /v1/collection-write-offs/{collection_write_off_id}` returns the tenant-scoped statement. Write off leftover remaining, then settle.
+After an open `collection_case` still shows leftover remaining, `POST /v1/collection-cases/{collection_case_id}/write-offs` zeros remaining without inventing a receipt, credit, or settlement. First successful write-off enqueues one `write_off.recorded` outbox event. `GET /v1/collection-write-offs/{collection_write_off_id}` returns the tenant-scoped statement. `POST /v1/collection-write-offs/{collection_write_off_id}/journal-proposals` composes one validated write-off/AR journal for AIS to pull. Write off leftover remaining, compose the journal, then settle.
 
 ## Present a collection case
 

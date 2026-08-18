@@ -221,14 +221,24 @@ contextual-orchestrator usage
 
 - A known stored open collection case whose remaining outstanding is strictly positive writes off once and zeros remaining without flipping status.
 - A second write-off of the same tenant and `collection_case_id` returns the same `collection_write_off_id` as `duplicate_replay` and never re-zeros outstanding.
-- `collection_write_off_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment receipt, credit note, settlement command, or AIS call.
+- `collection_write_off_id` is an opaque generated identifier. The write-off command does not compose a journal. Statutory numbering, tax unwind, payment receipt, credit note, settlement command, and AIS call stay out of this path.
 - Missing case, already-settled case, remaining already zero, negative remaining, currency mismatch, and a supplied amount that does not equal remaining fail closed. Body may omit amount.
 - `POST /v1/collection-cases/{collection_case_id}/write-offs` is the nested write-off command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
 - A known stored write-off presents one tenant-scoped statement with identity, exact write-off amount, exact-zero remaining, `written_off_at`, and `next_operator_action` (`settle`).
 - `GET /v1/collection-write-offs/{collection_write_off_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/collection-write-offs` lists summaries as `{collection_write_offs, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{written_off_at}|{collection_write_off_id}`.
 - Payment-receipt, issued-credit-note, credit-note-application, collection-settlement, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. #46 remains the explicit settle-when-zero command. First successful write-off enqueues one existing #24 `write_off.recorded` outbox event. HMAC, SSRF, and delivery contracts stay unchanged.
-- Operators write off leftover remaining, then settle. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
+- Operators write off leftover remaining, compose the journal, then settle. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
+
+## Write-off-journal acceptance
+
+- A known stored collection write-off produces one balanced exact-decimal `accounting_journal_proposal` that debits `write_off_expense` and credits `accounts_receivable`.
+- A second propose of the same tenant and `collection_write_off_id` returns the same `proposal_id` as `duplicate_replay` and does not grow the store.
+- Another tenant cannot see or propose from the first tenant's write-off.
+- Missing write-offs, cross-tenant IDs, currency mismatch, float money, and zero or negative amounts fail closed.
+- Collection outstanding is not changed. Status stays inside the proposal lifecycle and is never `posted`. AIS pulls validated proposals through existing GET journal-proposal routes.
+- `POST /v1/collection-write-offs/{collection_write_off_id}/journal-proposals` is the explicit compose because #49 shipped without compose. PAN, CVC, and provider secrets are refused.
+- Invoice-draft, cash, credit, payment-receipt, settlement, and `write_off.recorded` contracts stay unchanged.
 
 ## Tenant-API-credential acceptance
 

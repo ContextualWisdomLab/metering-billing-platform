@@ -1,9 +1,10 @@
-"""Accounting journal proposals produced from stored drafts and payment receipts.
+"""Accounting journal proposals produced from stored drafts, receipts, and write-offs.
 
 The service is the buyer-facing export path:
 
 1. Resolve the tenant.
-2. Load that tenant's stored ``invoice_draft`` or ``payment_receipt``.
+2. Load that tenant's stored ``invoice_draft``, ``payment_receipt``, or
+   ``collection_write_off``.
 3. Copy the exact commercial amount into one balanced debit and credit pair.
 4. Replay the same tenant, source identity, payload hash, and contract version.
 
@@ -29,11 +30,13 @@ from metering_billing.errors import (
     JournalProposalOutcomeCode,
     JournalProposalQueryError,
     JournalProposalRejectionReasonCode,
+    require_resolved,
 )
 from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
 from metering_billing.time_window import parse_iso8601_datetime
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
+    StoredCollectionWriteOff,
     StoredInvoiceDraft,
     StoredJournalProposal,
     StoredJournalProposalLine,
@@ -55,6 +58,7 @@ RECEIVABLE_ACCOUNT_ROLE_CODE = "accounts_receivable"
 REVENUE_ACCOUNT_ROLE_CODE = "usage_revenue"
 CASH_RECEIPT_ACCOUNT_ROLE_CODE = "cash_receipt"
 TAX_PAYABLE_ACCOUNT_ROLE_CODE = "tax_payable"
+WRITE_OFF_EXPENSE_ACCOUNT_ROLE_CODE = "write_off_expense"
 ALLOWED_PROPOSAL_STATUSES = frozenset({"draft", "validated", "exported", "rejected"})
 DEFAULT_PAGE_LIMIT = 50
 MAXIMUM_PAGE_LIMIT = 100
@@ -124,6 +128,7 @@ class JournalProposalResult:
     rejection_reason_code: JournalProposalRejectionReasonCode | None
     proposal_lines: tuple[JournalProposalLineResult, ...]
     payment_receipt_id: UUID | None = None
+    collection_write_off_id: UUID | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the published proposal, or a sparse rejected operational result."""
@@ -383,6 +388,101 @@ class AccountingExportService:
         )
         return result
 
+    def propose_write_off_journal(
+        self,
+        tenant_reference: str,
+        collection_write_off_id: UUID,
+        currency_code: str | None = None,
+    ) -> JournalProposalResult:
+        """Propose one balanced write-off/AR journal from a stored write-off.
+
+        A replay of the same tenant and ``collection_write_off_id`` returns
+        the stored ``proposal_id``.  Another tenant cannot see or propose
+        from that write-off.  Collection outstanding is not changed.
+        AIS next pulls validated proposals; this service never posts.
+        """
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
+        if tenant_error is not None:
+            return _rejected(JournalProposalRejectionReasonCode.TENANT_NOT_FOUND)
+        tenant = require_resolved(tenant, "tenant")
+
+        existing = self.ledger.find_journal_proposal_for_write_off(
+            tenant.tenant_account_id, collection_write_off_id
+        )
+        if existing is not None:
+            return _from_stored(
+                existing, tenant.tenant_reference, JournalProposalOutcomeCode.DUPLICATE_REPLAY
+            )
+
+        write_off = self.ledger.get_collection_write_off(collection_write_off_id)
+        if write_off is None or write_off.tenant_account_id != tenant.tenant_account_id:
+            return _rejected(JournalProposalRejectionReasonCode.COLLECTION_WRITE_OFF_NOT_FOUND)
+        if currency_code is not None and currency_code != write_off.currency_code:
+            return _rejected(JournalProposalRejectionReasonCode.CURRENCY_MISMATCH)
+
+        try:
+            write_off_amount = parse_proposal_amount(write_off.write_off_amount)
+        except ExactDecimalError:
+            return _rejected(JournalProposalRejectionReasonCode.WRITE_OFF_AMOUNT_INVALID)
+        if write_off_amount <= 0:
+            return _rejected(JournalProposalRejectionReasonCode.WRITE_OFF_AMOUNT_INVALID)
+
+        commercial_date = write_off.written_off_at.astimezone(UTC).date().isoformat()
+        legal_entity_reference = f"{tenant.tenant_reference}:legal_entity:commercial"
+        source_event_reference = (
+            f"{tenant.tenant_reference}:collection_write_off:{write_off.collection_write_off_id}"
+        )
+        canonical_payload = _canonical_write_off_proposal_payload(
+            tenant_reference=tenant.tenant_reference,
+            write_off=write_off,
+            write_off_amount=write_off_amount,
+            commercial_date=commercial_date,
+            legal_entity_reference=legal_entity_reference,
+            source_event_reference=source_event_reference,
+        )
+        source_payload_hash = compute_proposal_payload_hash(canonical_payload)
+        journal_proposal_id = generate_record_id()
+        stored_lines = _build_write_off_proposal_lines(
+            journal_proposal_id,
+            tenant.tenant_account_id,
+            write_off_amount,
+        )
+        stored = self.ledger.insert_journal_proposal(
+            StoredJournalProposal(
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant.tenant_account_id,
+                invoice_draft_id=write_off.invoice_draft_id,
+                proposal_contract_version=PROPOSAL_CONTRACT_VERSION,
+                idempotency_key=(
+                    f"{tenant.tenant_reference}:collection_write_off:"
+                    f"{write_off.collection_write_off_id}"
+                    f":{source_payload_hash}:v{PROPOSAL_CONTRACT_VERSION}"
+                ),
+                legal_entity_reference=legal_entity_reference,
+                intended_book_role_code=INTENDED_BOOK_ROLE_CODE,
+                transaction_currency=write_off.currency_code,
+                transaction_date=commercial_date,
+                accounting_date=commercial_date,
+                source_payload_hash=source_payload_hash,
+                proposed_at=self._clock(),
+                proposal_status=PROPOSAL_STATUS,
+                source_event_reference=source_event_reference,
+                proposal_lines=stored_lines,
+                collection_write_off_id=write_off.collection_write_off_id,
+            ),
+            stored_lines,
+        )
+        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            stored.journal_proposal_id,
+            result.as_contract_dict(),
+            stored.proposed_at,
+        )
+        return result
+
     def list_journal_proposals(
         self,
         tenant_reference: str,
@@ -393,8 +493,9 @@ class AccountingExportService:
     ) -> JournalProposalPage:
         """Return one tenant page of persisted proposals without mutating status.
 
-        Order is ``proposed_at`` then ``proposal_id``.  Cash and AR proposals
-        share ``journal_proposal`` and therefore appear in the same list.
+        Order is ``proposed_at`` then ``proposal_id``.  Cash, AR, credit, and
+        write-off proposals share ``journal_proposal`` and therefore appear
+        in the same list.
         AIS owns ``posting_receipt``; this query never marks exported or posted.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
@@ -552,6 +653,73 @@ def _canonical_cash_proposal_payload(
             },
         ],
     }
+
+
+def _canonical_write_off_proposal_payload(
+    tenant_reference: str,
+    write_off: StoredCollectionWriteOff,
+    write_off_amount: Decimal,
+    commercial_date: str,
+    legal_entity_reference: str,
+    source_event_reference: str,
+) -> dict[str, object]:
+    """Return write-off-proposal facts excluding identifiers and timestamps."""
+    amount_text = format_exact_decimal(write_off_amount)
+    return {
+        "proposal_contract_version": PROPOSAL_CONTRACT_VERSION,
+        "tenant_reference": tenant_reference,
+        "collection_write_off_id": str(write_off.collection_write_off_id),
+        "legal_entity_reference": legal_entity_reference,
+        "intended_book_role_code": INTENDED_BOOK_ROLE_CODE,
+        "transaction_currency": write_off.currency_code,
+        "transaction_date": commercial_date,
+        "accounting_date": commercial_date,
+        "proposal_status": PROPOSAL_STATUS,
+        "source_event_references": [source_event_reference],
+        "lines": [
+            {
+                "line_number": 1,
+                "account_role_code": WRITE_OFF_EXPENSE_ACCOUNT_ROLE_CODE,
+                "debit_amount": amount_text,
+                "credit_amount": "0",
+            },
+            {
+                "line_number": 2,
+                "account_role_code": RECEIVABLE_ACCOUNT_ROLE_CODE,
+                "debit_amount": "0",
+                "credit_amount": amount_text,
+            },
+        ],
+    }
+
+
+def _build_write_off_proposal_lines(
+    journal_proposal_id: UUID,
+    tenant_account_id: UUID,
+    write_off_amount: Decimal,
+) -> tuple[StoredJournalProposalLine, ...]:
+    """Build the write-off-expense debit and receivable credit for one write-off."""
+    amount = parse_proposal_amount(write_off_amount)
+    return (
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=1,
+            account_role_code=WRITE_OFF_EXPENSE_ACCOUNT_ROLE_CODE,
+            debit_amount=amount,
+            credit_amount=Decimal("0"),
+        ),
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=2,
+            account_role_code=RECEIVABLE_ACCOUNT_ROLE_CODE,
+            debit_amount=Decimal("0"),
+            credit_amount=amount,
+        ),
+    )
 
 
 def _build_cash_proposal_lines(
@@ -712,6 +880,7 @@ def _from_stored(
             for line in stored.proposal_lines
         ),
         payment_receipt_id=stored.payment_receipt_id,
+        collection_write_off_id=stored.collection_write_off_id,
     )
 
 
