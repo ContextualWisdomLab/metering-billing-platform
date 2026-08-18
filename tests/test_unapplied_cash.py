@@ -336,6 +336,40 @@ class UnappliedCashTests(unittest.TestCase):
         )
         self.assertEqual(limit_status, 422)
         self.assertEqual(limit_body["rejection_reason_code"], "request_invalid")
+        unreadable_status, unreadable_body = invoke_http(
+            app,
+            "POST",
+            f"/v1/payment-receipts/{payment_receipt_id}/unapplied-cash",
+            {"tenant_reference": TENANT_ONE, "unapplied_amount": "not-a-decimal"},
+        )
+        self.assertEqual(unreadable_status, 422)
+        self.assertEqual(unreadable_body["rejection_reason_code"], "request_invalid")
+        nested_method_status, _nested_method = invoke_http(
+            app,
+            "PUT",
+            f"/v1/payment-receipts/{payment_receipt_id}/unapplied-cash",
+            {"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(nested_method_status, 422)
+        item_method_status, _item_method = invoke_http(
+            app,
+            "PUT",
+            f"/v1/unapplied-cash/{unapplied_cash_id}",
+            {"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(item_method_status, 422)
+        with mock.patch(
+            "metering_billing.http_app.UnappliedCashPresentmentService.present_unapplied_cash",
+            side_effect=ValueError("boom"),
+        ):
+            get_boom_status, get_boom = invoke_http(
+                app,
+                "GET",
+                f"/v1/unapplied-cash/{unapplied_cash_id}",
+                query={"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(get_boom_status, 422)
+        self.assertEqual(get_boom["rejection_reason_code"], "request_invalid")
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
         self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
         _, issue_body = invoke_http(
@@ -445,6 +479,9 @@ class UnappliedCashTests(unittest.TestCase):
         rejected_legal = rejected.as_contract_dict()
         rejected_legal["legal_invoice_number"] = "INV-1"
         self.assertTrue(validate_unapplied_cash(rejected_legal))
+        rejected_credit = rejected.as_contract_dict()
+        rejected_credit["legal_credit_note_number"] = "CN-1"
+        self.assertTrue(validate_unapplied_cash(rejected_credit))
         rejected_missing = {
             "unapplied_cash_contract_version": 1,
             "unapplied_cash_outcome_code": "rejected",
@@ -473,6 +510,9 @@ class UnappliedCashTests(unittest.TestCase):
         wait_mismatch = dict(presentment)
         wait_mismatch["next_operator_action"] = "apply"
         self.assertTrue(validate_unapplied_cash_presentment(wait_mismatch))
+        apply_forbidden = dict(presentment)
+        apply_forbidden["apply_to_collection_case_id"] = str(uuid4())
+        self.assertTrue(validate_unapplied_cash_presentment(apply_forbidden))
         forbidden = dict(presentment)
         forbidden["card_pan"] = "4111111111111111"
         self.assertTrue(validate_unapplied_cash_presentment(forbidden))
