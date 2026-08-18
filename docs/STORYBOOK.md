@@ -49,6 +49,7 @@ Customer copy on every collection-case settlement: exact-zero remaining and the 
 | LineTable | `src/line_table.js` | `taxed_partial_credit.json`, `untaxed_morning.json`, `settled_statement.json` |
 | StatusChip | `src/status_chip.js` | `taxed_partial_credit.json`, `untaxed_morning.json`, `settled_statement.json` |
 | CollectionCase | `src/collection_case.js` | `open_collection_case.json`, `dunning_collection_case.json`, `settled_collection_case.json` |
+| CollectionAging | `src/collection_aging.js` | `morning_collection_aging.json` |
 | PaymentIntent | `src/payment_intent.js` | `projected_payment_intent.json`, `cancelled_payment_intent.json` |
 | PaymentReceipt | `src/payment_receipt.js` | `applied_full_payment_receipt.json`, `applied_partial_payment_receipt.json` |
 | CreditAdjustment | `src/credit_adjustment.js` | `recorded_morning_credit.json`, `recorded_taxed_credit.json` |
@@ -79,6 +80,7 @@ The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is no
 | `open_collection_case.json` | Open morning case | `collection_outstanding` `0.003705`, action `collect` |
 | `dunning_collection_case.json` | First notice sent | `collection_outstanding` `100.00`, last `first_notice` |
 | `settled_collection_case.json` | Settled case | `collection_outstanding` `0.00`, action `wait` |
+| `morning_collection_aging.json` | Morning USD aging | current `0.003705`, 1-30 `1.25`, 90+ `8.00` |
 | `projected_payment_intent.json` | Projected morning intent | `payment_amount` `0.003705`, action `record_receipt` |
 | `cancelled_payment_intent.json` | Cancelled intent | `payment_amount` `0.003705`, action `wait` |
 | `applied_full_payment_receipt.json` | Full morning receipt | `received_amount` `0.003705`, remaining `0.00`, action `drain_or_wait` |

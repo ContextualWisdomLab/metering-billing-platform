@@ -9,7 +9,7 @@ from a stored draft, present that issued invoice, issue an immutable
 commercial credit-note snapshot from a stored credit adjustment, present
 that issued credit note, publish tax rates, assess tax on a draft, present
 those assessments, present stored posting-receipt observations, emit
-journal proposals, open collection cases, present those cases as statements, present stored dunning events, project provider-neutral payment
+journal proposals, open collection cases, present those cases as statements, present open-case remaining as aging buckets, present stored dunning events, project provider-neutral payment
 intents, present those intents as statements, apply commercial payment receipts, present those receipts as statements, record commercial credits,
 register webhook callbacks for accepted commercial facts, present
 those subscriptions as statements, present stored commercial webhook
@@ -32,6 +32,7 @@ open collection case without inventing a journal, tax unwind, or webhook.
 from metering_billing.ais_outbox_drain import AisOutboxDrainService
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
+from metering_billing.collection_aging_presentment import CollectionAgingPresentmentService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
 from metering_billing.contracts import (
@@ -43,6 +44,7 @@ from metering_billing.contracts import (
     TAX_RATE_SCHEMA_NAME,
     TAX_ASSESSMENT_SCHEMA_NAME,
     INVOICE_DRAFT_SCHEMA_NAME,
+    COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME,
     COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME,
@@ -81,6 +83,7 @@ from metering_billing.contracts import (
     validate_tax_rate,
     validate_tax_assessment,
     validate_invoice_draft,
+    validate_collection_aging_presentment,
     validate_collection_case_presentment,
     validate_payment_intent_presentment,
     validate_payment_receipt_presentment,
@@ -138,6 +141,7 @@ from metering_billing.errors import (
     IngestionOutcomeCode,
     InvoiceDraftOutcomeCode,
     InvoiceDraftRejectionReasonCode,
+    CollectionAgingPresentmentQueryError,
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
     InvoicePresentmentQueryError,
@@ -251,6 +255,7 @@ __all__ = (
     "TAX_RATE_SCHEMA_NAME",
     "TAX_ASSESSMENT_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
+    "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
@@ -283,6 +288,8 @@ __all__ = (
     "AisOutboxDrainRejectionReasonCode",
     "AisOutboxDrainService",
     "AccountingExportService",
+    "CollectionAgingPresentmentQueryError",
+    "CollectionAgingPresentmentService",
     "CollectionCasePresentmentQueryError",
     "CollectionCasePresentmentService",
     "DunningEventPresentmentQueryError",
@@ -407,6 +414,7 @@ __all__ = (
     "validate_tax_rate",
     "validate_tax_assessment",
     "validate_invoice_draft",
+    "validate_collection_aging_presentment",
     "validate_collection_case_presentment",
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",

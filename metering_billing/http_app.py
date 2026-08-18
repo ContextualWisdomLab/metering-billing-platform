@@ -73,7 +73,9 @@ The application is a thin WSGI adapter:
     observations; ``proposal_status`` stays ``validated``.
     13. Let an operator GET a stored collection case as a commercial statement.
     Open the collection case, then collect or credit.  The read does not
-    post, call AIS, capture payment, or start a web UI.  GET one stored
+    post, call AIS, capture payment, or start a web UI.
+    ``GET /v1/collection-aging`` projects open-case remaining into current /
+    1-30 / 31-60 / 61-90 / 90+ buckets grouped by currency.  GET one stored
     ``collection_dunning_event`` or list ``{dunning_events, next_cursor}``.
     ``POST /v1/collection-cases/{collection_case_id}/dunning-events`` stays
     the #10 record.  The read does not send mail or capture payment.
@@ -141,6 +143,7 @@ from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
 from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
+    CollectionAgingPresentmentQueryError,
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
@@ -192,6 +195,10 @@ from metering_billing.collection_write_off_presentment import (
     CollectionWriteOffPresentmentService,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
+from metering_billing.collection_aging_presentment import (
+    Clock,
+    CollectionAgingPresentmentService,
+)
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
@@ -228,6 +235,7 @@ from metering_billing.usage_rating import UsageRatingService
 
 WSGIApp = Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]
 COLLECTION_CASE_COLLECTION_PATH = "/v1/collection-cases"
+COLLECTION_AGING_PATH = "/v1/collection-aging"
 COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36})$")
 COLLECTION_DUNNING_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/dunning-events$"
@@ -359,6 +367,7 @@ def create_http_app(
     *,
     ais_base_url: str | None = None,
     ais_client: AisPostingReceiptClient | None = None,
+    clock: Clock | None = None,
 ) -> WSGIApp:
     """Return a stdlib WSGI app bound to one shared commercial ledger."""
     shared_ledger = MemoryUsageLedger() if ledger is None else ledger
@@ -398,6 +407,7 @@ def create_http_app(
     assessments = TaxAssessmentService(shared_ledger)
     presentments = InvoicePresentmentService(shared_ledger)
     case_presentments = CollectionCasePresentmentService(shared_ledger)
+    aging_presentments = CollectionAgingPresentmentService(shared_ledger, clock=clock)
     dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
@@ -1239,6 +1249,26 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "collection_aging":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                result = aging_presentments.present_collection_aging(tenant_reference)
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except CollectionAgingPresentmentQueryError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {"list_collection_cases", "get_collection_case"}:
             try:
                 query = _read_query(environ)
@@ -1695,6 +1725,10 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
             return "get_dunning_event", {
                 "dunning_event_id": dunning_event_match.group(1)
             }
+        return "method_not_allowed", {}
+    if path == COLLECTION_AGING_PATH:
+        if method == "GET":
+            return "collection_aging", {}
         return "method_not_allowed", {}
     if path == COLLECTION_CASE_COLLECTION_PATH:
         if method == "POST":

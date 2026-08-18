@@ -331,6 +331,15 @@ contextual-orchestrator usage
 - Operators open the collection case, then collect or credit. HTTP presentment does not capture cards or call AIS.
 - `operator_console` Storybook renders that case with tokenized amount due and status chip. Fixtures are open, dunning, and settled.
 
+## Collection-aging-presentment acceptance
+
+- A known tenant presents one aging statement with `current`, `days_1_30`, `days_31_60`, `days_61_90`, and `days_90_plus` buckets grouped by `currency_code`. Each bucket carries case count and exact inclusive outstanding. Currencies are never mixed in one sum.
+- Only stored `open` or `dunning` cases with positive remaining are aged. Settled cases and exact-zero remaining are omitted.
+- Due date is issued-invoice `due_at` when stored, otherwise `collection_case.opened_at`. `current` is not yet due or due today. Positive days are 1-30, 31-60, 61-90, then 90+.
+- `GET /v1/collection-aging` is HTTP 200 for a known tenant. Missing tenant is HTTP 422 with no leak.
+- Operators open the aging statement, then collect or credit. HTTP presentment does not capture cards, write money, or call AIS.
+- `operator_console` Storybook renders those buckets with tokenized amount due. The fixture is morning USD aging.
+
 ## Dunning-event-presentment acceptance
 
 - A known stored `collection_dunning_event` presents one tenant-scoped statement with `dunning_event_id`, `collection_case_id`, `dunning_event_number`, `dunning_notice_code`, `occurred_at`, and `next_operator_action` (`wait` when the parent case is settled, otherwise `collect`).

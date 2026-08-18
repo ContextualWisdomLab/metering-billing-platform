@@ -15,6 +15,7 @@ from unittest import mock
 
 from metering_billing.contracts import (
     validate_ais_outbox_drain,
+    validate_collection_aging_presentment,
     validate_collection_case_presentment,
     validate_payment_intent_presentment,
     validate_payment_receipt_presentment,
@@ -575,6 +576,108 @@ class RepositoryContractTests(unittest.TestCase):
             any(
                 "exact decimal" in error
                 for error in validate_collection_case_presentment(scientific)
+            )
+        )
+
+    def test_collection_aging_presentment_accepts_totals_and_rejects_posted(self) -> None:
+        """Aging totals stay exact, unique by currency, and cannot claim posting."""
+        schema = self._schema("collection-aging-presentment.schema.json")
+        instance = {
+            "collection_aging_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [
+                {
+                    "currency_code": "USD",
+                    "current": {"case_count": 1, "outstanding_amount": "0.003705"},
+                    "days_1_30": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_31_60": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_61_90": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_90_plus": {"case_count": 0, "outstanding_amount": "0"},
+                }
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_collection_aging_presentment(instance), ())
+        posted = dict(instance)
+        posted["proposal_status"] = "posted"
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        negative = {
+            "collection_aging_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [
+                {
+                    "currency_code": "USD",
+                    "current": {"case_count": 1, "outstanding_amount": "-1.00"},
+                    "days_1_30": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_31_60": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_61_90": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_90_plus": {"case_count": 0, "outstanding_amount": "0"},
+                }
+            ],
+        }
+        self.assertIn(
+            "$.currencies[0].current: outstanding_amount must not be negative",
+            validate_collection_aging_presentment(negative),
+        )
+        empty_nonzero = {
+            "collection_aging_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [
+                {
+                    "currency_code": "USD",
+                    "current": {"case_count": 0, "outstanding_amount": "1.00"},
+                    "days_1_30": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_31_60": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_61_90": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_90_plus": {"case_count": 0, "outstanding_amount": "0"},
+                }
+            ],
+        }
+        self.assertIn(
+            "$.currencies[0].current: empty buckets must be exact zero",
+            validate_collection_aging_presentment(empty_nonzero),
+        )
+        duplicate = {
+            "collection_aging_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [
+                instance["currencies"][0],
+                instance["currencies"][0],
+            ],
+        }
+        self.assertIn(
+            "$.currencies[1]: currency_code must be unique",
+            validate_collection_aging_presentment(duplicate),
+        )
+        self.assertNotEqual(validate_collection_aging_presentment([]), ())
+        self.assertNotEqual(validate_collection_aging_presentment({"currencies": "USD"}), ())
+        mixed_rows = {
+            "collection_aging_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "as_of": "2026-08-18T12:00:00Z",
+            "currencies": [
+                "USD",
+                {
+                    "currency_code": 1,
+                    "current": "current",
+                    "days_1_30": {"case_count": 0, "outstanding_amount": 1},
+                    "days_31_60": {"case_count": 0, "outstanding_amount": "not-decimal"},
+                    "days_61_90": {"case_count": 0, "outstanding_amount": "0"},
+                    "days_90_plus": {"case_count": 0, "outstanding_amount": "0"},
+                },
+            ],
+        }
+        self.assertTrue(
+            any(
+                "exact decimal" in error
+                for error in validate_collection_aging_presentment(mixed_rows)
             )
         )
 

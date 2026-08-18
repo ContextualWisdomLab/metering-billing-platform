@@ -20,10 +20,10 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, credit adjustments, credit-adjustment presentment, issued credit notes, issued-credit-note presentment, credit-note applications, credit-note-application presentment, collection-case settlements, collection-case-settlement presentment, rate cards, rate-card presentment, tax rates, tax assessments, tax-assessment presentment, posting-receipt observation presentment, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, collection-aging presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, credit adjustments, credit-adjustment presentment, issued credit notes, issued-credit-note presentment, credit-note applications, credit-note-application presentment, collection-case settlements, collection-case-settlement presentment, rate cards, rate-card presentment, tax rates, tax assessments, tax-assessment presentment, posting-receipt observation presentment, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
 - a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, webhook-outbox, issued-invoice, and issued-credit-note migrations with tenant-scoped attribution constraints;
-- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, issues commercial invoices, issues commercial credit notes, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, drains AIS posting-receipt outbox events, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
-- an importable `operator_console` Storybook that renders the invoice-draft, issued-invoice, issued-credit-note, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, tax-assessment, and posting-receipt-observation presentment contracts with design tokens and exact-decimal fixtures;
+- an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, issues commercial invoices, issues commercial credit notes, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, presents collection aging, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, drains AIS posting-receipt outbox events, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
+- an importable `operator_console` Storybook that renders the invoice-draft, issued-invoice, issued-credit-note, collection-case, collection-aging, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, tax-assessment, and posting-receipt-observation presentment contracts with design tokens and exact-decimal fixtures;
 - explicit billing-versus-accounting boundaries;
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
@@ -264,6 +264,15 @@ python3 -c "from metering_billing import CollectionCasePresentmentService"
 ```
 
 After a `collection_case` exists, `GET /v1/collection-cases/{collection_case_id}` returns the tenant-scoped statement. Open the collection case, then collect or credit.
+
+## Present collection aging
+
+```bash
+python3 -c "from metering_billing import CollectionAgingPresentmentService"
+# GET /v1/collection-aging?tenant_reference=urn:cwl:tenant_001
+```
+
+After open or dunning `collection_case` rows exist, `GET /v1/collection-aging` returns current / 1-30 / 31-60 / 61-90 / 90+ outstanding grouped by `currency_code`. Settled cases and exact-zero remaining are omitted. Open the aging statement, then collect or credit. This path does not invent a journal, write-off, settlement, payment, or AIS call.
 
 ## Present a dunning notice
 

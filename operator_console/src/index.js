@@ -94,3 +94,7 @@ export {
   COLLECTION_CASE_SETTLEMENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionCaseSettlementActionCopy,
 } from "./collection_case_settlement.js";
+export {
+  renderCollectionAging,
+  COLLECTION_AGING_CUSTOMER_COPY,
+} from "./collection_aging.js";

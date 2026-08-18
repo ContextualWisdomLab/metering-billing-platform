@@ -99,6 +99,10 @@ import {
   COLLECTION_CASE_SETTLEMENT_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionCaseSettlementActionCopy,
 } from "../src/collection_case_settlement.js";
+import {
+  renderCollectionAging,
+  COLLECTION_AGING_CUSTOMER_COPY,
+} from "../src/collection_aging.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -577,6 +581,23 @@ test("applied morning credit note shows applied amount and residual wait", () =>
   assert.ok(!("card_pan" in statement));
 });
 
+test("morning aging shows exact USD buckets without mixing currencies", () => {
+  const statement = loadFixture("morning_collection_aging.json");
+  const html = renderCollectionAging(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /1\.25 USD/);
+  assert.match(html, /8\.00 USD/);
+  assert.match(html, /Open the aging statement, then collect or credit/);
+  assert.equal(
+    COLLECTION_AGING_CUSTOMER_COPY,
+    "Open the aging statement, then collect or credit.",
+  );
+  assert.equal(typeof statement.currencies[0].current.outstanding_amount, "string");
+  assert.ok(!("collection_case_id" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("statutory_account_id" in statement));
+});
+
 test("settled morning zero shows exact-zero remaining and wait", () => {
   const statement = loadFixture("settled_morning_zero.json");
   const html = renderCollectionCaseSettlement(statement);
@@ -660,6 +681,13 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderCollectionCaseSettlement({ remaining_outstanding_amount: 0.0 }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderCollectionAging({
+        currencies: [{ currency_code: "USD", current: { outstanding_amount: 1.25 } }],
+      }),
     TypeError,
   );
   assert.throws(

@@ -31,6 +31,7 @@ __all__ = (
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
@@ -64,6 +65,7 @@ __all__ = (
     "validate_invoice_draft",
     "validate_invoice_presentment",
     "validate_collection_case_presentment",
+    "validate_collection_aging_presentment",
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",
     "validate_credit_adjustment_presentment",
@@ -113,6 +115,7 @@ RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
 COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
+COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME = "collection-aging-presentment.schema.json"
 PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json"
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
@@ -381,6 +384,56 @@ def _invoice_draft_total_errors(invoice_draft: Mapping[str, Any]) -> tuple[str, 
     if line_total != Decimal(drafted_total_amount):
         return ("$: invoice draft line totals must equal drafted_total_amount",)
     return ()
+
+
+def validate_collection_aging_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate aging shape plus exact totals and one-currency-per-row."""
+    schema = load_json_schema(COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    currencies = statement.get("currencies")
+    if not isinstance(currencies, list):
+        return tuple(errors)
+    seen_currencies: set[str] = set()
+    for index, row in enumerate(currencies):
+        if not isinstance(row, Mapping):
+            continue
+        currency_code = row.get("currency_code")
+        if isinstance(currency_code, str):
+            if currency_code in seen_currencies:
+                errors.append(f"$.currencies[{index}]: currency_code must be unique")
+            seen_currencies.add(currency_code)
+        for bucket_name in (
+            "current",
+            "days_1_30",
+            "days_31_60",
+            "days_61_90",
+            "days_90_plus",
+        ):
+            bucket = row.get(bucket_name)
+            if not isinstance(bucket, Mapping):
+                continue
+            outstanding = bucket.get("outstanding_amount")
+            case_count = bucket.get("case_count")
+            if isinstance(outstanding, str):
+                try:
+                    parsed = Decimal(outstanding)
+                    if parsed < Decimal("0"):
+                        errors.append(
+                            f"$.currencies[{index}].{bucket_name}: outstanding_amount must not be negative"
+                        )
+                    if case_count == 0 and parsed != Decimal("0"):
+                        errors.append(
+                            f"$.currencies[{index}].{bucket_name}: empty buckets must be exact zero"
+                        )
+                except Exception:
+                    errors.append(
+                        f"$.currencies[{index}].{bucket_name}: outstanding_amount must be an exact decimal"
+                    )
+    return tuple(errors)
 
 
 def validate_collection_case_presentment(
