@@ -574,6 +574,24 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertNotIn("project_reference", payload["products"][0])
         self.assertNotIn("credential_reference", payload["products"][0])
         self.assertNotIn("group_by", payload)
+        ledger.register_billing_account(TENANT_ONE, ACCOUNT_THREE)
+        other = ledger.billing_accounts[ACCOUNT_THREE]
+        source = next(
+            event
+            for event in ledger.usage_events.values()
+            if event.billing_account_id == _account_id(ledger)
+        )
+        foreign_id = generate_record_id()
+        ledger.usage_events[foreign_id] = replace(
+            source,
+            usage_event_id=foreign_id,
+            billing_account_id=other.billing_account_id,
+        )
+        skipped_other = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="principal"
+        )
+        self.assertEqual(skipped_other.products[0].billing_principal_reference, PRINCIPAL_ONE)
+        self.assertEqual(skipped_other.products[0].rated_amount, KNOWN_MORNING_TOTAL)
         mixed = UsageIngestionService(_seed_ledger_with_alt_principal())
         mixed.ingest_usage_batch(
             (
