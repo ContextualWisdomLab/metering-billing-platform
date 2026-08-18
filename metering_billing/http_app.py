@@ -118,6 +118,13 @@ The application is a thin WSGI adapter:
     stored ``proposal_id``.  AIS pulls the validated proposal through
     existing GET journal-proposal routes.  Do not invent a statutory
     account ID, webhook type, PSP, write-off, settlement, or AIS call.
+    ``POST /v1/unapplied-cash/{unapplied_cash_id}/journal-proposals``
+    composes one existing ``accounting_journal_proposal`` from a stored
+    parked leftover.  Replay of the same tenant and leftover returns the
+    stored ``proposal_id``.  AIS pulls the validated proposal through
+    existing GET journal-proposal routes.  Do not invent a statutory
+    account ID, webhook type, PSP, write-off, settlement, refund rewrite,
+    or AIS call.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -131,8 +138,11 @@ The application is a thin WSGI adapter:
     parks leftover remittance against one stored receipt.  Replay of
     the same tenant and receipt returns the stored ``unapplied_cash_id``.
     #12 still rejects overpay.  GET item and list present the parked
-    leftover.  Do not invent a journal, webhook, write-off, settlement,
-    credit note, or AIS call.  Do not auto-apply leftover to another case.
+    leftover.  After leftover exists,
+    ``POST /v1/unapplied-cash/{unapplied_cash_id}/journal-proposals``
+    composes one validated cash/unapplied-cash journal.  Do not invent a
+    webhook, write-off, settlement, credit note, or AIS call.  Do not
+    auto-apply leftover to another case.
     ``POST /v1/collection-cases/{collection_case_id}/unapplied-cash-applications``
     applies one parked leftover onto that open case.  Replay of the same
     tenant and leftover returns the stored
@@ -292,6 +302,9 @@ UNAPPLIED_CASH_NESTED_PATH = re.compile(
 )
 UNAPPLIED_CASH_COLLECTION_PATH = "/v1/unapplied-cash"
 UNAPPLIED_CASH_ITEM_PATH = re.compile(r"^/v1/unapplied-cash/([0-9a-fA-F-]{36})$")
+UNAPPLIED_CASH_JOURNAL_NESTED_PATH = re.compile(
+    r"^/v1/unapplied-cash/([0-9a-fA-F-]{36})/journal-proposals$"
+)
 UNAPPLIED_CASH_REFUND_NESTED_PATH = re.compile(
     r"^/v1/unapplied-cash/([0-9a-fA-F-]{36})/refunds$"
 )
@@ -2075,6 +2088,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "POST":
             return "unapplied_cash", {"payment_receipt_id": unapplied_nested.group(1)}
         return "method_not_allowed", {}
+    leftover_journal_nested = UNAPPLIED_CASH_JOURNAL_NESTED_PATH.fullmatch(path)
+    if leftover_journal_nested is not None:
+        if method == "POST":
+            return "unapplied_cash_journal_proposals", {
+                "unapplied_cash_id": leftover_journal_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
     refund_nested = UNAPPLIED_CASH_REFUND_NESTED_PATH.fullmatch(path)
     if refund_nested is not None:
         if method == "POST":
@@ -2512,6 +2532,18 @@ def _dispatch_write(
         result = exports.propose_refund_journal(
             tenant_reference,
             _parse_uuid(path_values["unapplied_cash_refund_id"], "unapplied_cash_refund_id"),
+            currency_code=currency_code,
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "unapplied_cash_journal_proposals":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
+        currency_code = payload.get("currency_code")
+        if currency_code is not None and not isinstance(currency_code, str):
+            raise HttpRequestError("request_invalid")
+        result = exports.propose_unapplied_cash_journal(
+            tenant_reference,
+            _parse_uuid(path_values["unapplied_cash_id"], "unapplied_cash_id"),
             currency_code=currency_code,
         )
         return result.as_contract_dict(), _status_for_result(result)

@@ -320,7 +320,7 @@ contextual-orchestrator usage
 - `GET /v1/unapplied-cash/{unapplied_cash_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/unapplied-cash` lists summaries as `{unapplied_cash, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{parked_at}|{unapplied_cash_id}`.
 - Missing tenant, illegal cursor, and illegal page_limit fail closed.
-- Operators park leftover against a stored receipt. HTTP does not apply leftover to another case, capture cards, write a journal, or call AIS.
+- Operators park leftover against a stored receipt. HTTP does not apply leftover to another case, capture cards, or call AIS. Journal compose is an explicit later command.
 
 ## Unapplied-cash-application acceptance
 
@@ -353,6 +353,16 @@ contextual-orchestrator usage
 - Leftover and refund rows are not changed. Status stays inside the proposal lifecycle and is never `posted`. AIS pulls validated proposals through existing GET journal-proposal routes.
 - `POST /v1/unapplied-cash-refunds/{unapplied_cash_refund_id}/journal-proposals` is the explicit compose because #57 shipped without compose. PAN, CVC, and provider secrets are refused.
 - Invoice-draft, cash, credit, write-off, payment-receipt, and `refund.recorded` contracts stay unchanged.
+
+## Unapplied-cash-journal acceptance
+
+- A known stored parked leftover produces one balanced exact-decimal `accounting_journal_proposal` that debits `cash_receipt` and credits `unapplied_cash`.
+- A second propose of the same tenant and `unapplied_cash_id` returns the same `proposal_id` as `duplicate_replay` and does not grow the store.
+- Another tenant cannot see or propose from the first tenant's leftover.
+- Missing leftovers, cross-tenant IDs, leftover not parked, currency mismatch, float money, and zero or negative amounts fail closed.
+- Leftover, refund, and payment-receipt rows are not changed. Status stays inside the proposal lifecycle and is never `posted`. AIS pulls validated proposals through existing GET journal-proposal routes.
+- `POST /v1/unapplied-cash/{unapplied_cash_id}/journal-proposals` is the explicit compose because #54 shipped without compose. PAN, CVC, and provider secrets are refused.
+- Invoice-draft, cash, credit, write-off, refund-journal, and payment-receipt contracts stay unchanged.
 
 ## Payment-intent-presentment acceptance
 
