@@ -129,6 +129,7 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
     def test_void_without_collection_case_does_not_invent_one(self) -> None:
         """An unused issued credit note without a case still voids once."""
         ledger, issued, _collection = issue_known_morning_credit_note()
+        prior_outbox = len(ledger.webhook_outbox_events)
         first = IssuedCreditNoteVoidService(
             ledger, clock=lambda: VOIDED_MORNING
         ).void_issued_credit_note(TENANT_ONE, issued.issued_credit_note_id)
@@ -149,7 +150,7 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
         self.assertNotIn("collection_case_id", payload)
         self.assertEqual(validate_issued_credit_note_void(payload), ())
         self.assertEqual(len(ledger.collection_cases), 0)
-        self.assertEqual(len(ledger.webhook_outbox_events), 0)
+        self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
 
     def test_fail_closed_when_applied_or_isolated(self) -> None:
         """Applied notes, missing notes, and tenant isolation refuse the void."""
