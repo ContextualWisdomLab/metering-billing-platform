@@ -89,6 +89,11 @@ import {
   ISSUED_CREDIT_NOTE_CUSTOMER_COPY,
   nextOperatorActionCopy as nextIssuedCreditNoteActionCopy,
 } from "../src/issued_credit_note.js";
+import {
+  renderCreditNoteApplication,
+  CREDIT_NOTE_APPLICATION_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCreditNoteApplicationActionCopy,
+} from "../src/credit_note_application.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -547,6 +552,26 @@ test("issued morning credit note shows wait and known exact product", () => {
   assert.ok(!("card_pan" in statement));
 });
 
+test("applied morning credit note shows applied amount and residual wait", () => {
+  const statement = loadFixture("applied_morning_credit_note.json");
+  const html = renderCreditNoteApplication(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /applied/);
+  assert.match(html, /Apply the issued credit note, then collect the residual/);
+  assert.equal(
+    CREDIT_NOTE_APPLICATION_CUSTOMER_COPY,
+    "Apply the issued credit note, then collect the residual.",
+  );
+  assert.equal(nextCreditNoteApplicationActionCopy("wait"), "Wait");
+  assert.equal(nextCreditNoteApplicationActionCopy("collect"), "Collect");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(typeof statement.applied_amount, "string");
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+  assert.ok(!("legal_credit_note_number" in statement));
+  assert.ok(!("credit_note_application_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+});
+
 test("issued taxed credit note freezes inclusive 11.00", () => {
   const statement = loadFixture("issued_taxed_credit_note.json");
   const html = renderIssuedCreditNote(statement);
@@ -599,6 +624,14 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderIssuedCreditNote({ tax_inclusive_amount: 11.0, currency_code: "USD" }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderCreditNoteApplication({
+        applied_amount: 0.003705,
+        remaining_outstanding_amount: "0",
+      }),
     TypeError,
   );
   assert.throws(

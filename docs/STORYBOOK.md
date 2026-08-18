@@ -36,6 +36,8 @@ Customer copy on every issued invoice: frozen inclusive total and the next opera
 
 Customer copy on every issued credit note: frozen inclusive credit and the next operator action. Issue the credit note; the validated journal remains available for AIS.
 
+Customer copy on every credit-note application: applied amount, remaining outstanding, and the next operator action. Apply the issued credit note, then collect the residual.
+
 ## Stories
 
 | Story | Module | Fixtures |
@@ -60,6 +62,7 @@ Customer copy on every issued credit note: frozen inclusive credit and the next 
 | WebhookOutboxEvent | `src/webhook_outbox_event.js` | `pending_journal_validated.json`, `delivered_receipt_applied.json` |
 | IssuedInvoice | `src/issued_invoice.js` | `issued_untaxed_morning.json`, `issued_taxed_hundred.json` |
 | IssuedCreditNote | `src/issued_credit_note.js` | `issued_morning_credit_note.json`, `issued_taxed_credit_note.json` |
+| CreditNoteApplication | `src/credit_note_application.js` | `applied_morning_credit_note.json` |
 
 The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is not a one-off style.
 
@@ -103,5 +106,6 @@ The tenant pin is a tokenized module composed into `InvoiceStatement`.  It is no
 | `issued_taxed_hundred.json` | Issued taxed snapshot | `tax_inclusive_amount` `110.00`, action `collect` |
 | `issued_morning_credit_note.json` | Issued morning credit note | `tax_inclusive_amount` `0.003705`, action `wait` |
 | `issued_taxed_credit_note.json` | Issued taxed credit note | `tax_inclusive_amount` `11.00`, exclusive `10.00`, tax `1.00`, action `wait` |
+| `applied_morning_credit_note.json` | Applied morning credit note | `applied_amount` `0.003705`, remaining `0`, action `wait` |
 
-Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, `schemas/posting-receipt-observation-presentment.schema.json`, `schemas/webhook-delivery-presentment.schema.json`, `schemas/tenant-api-credential-presentment.schema.json`, `schemas/webhook-subscription-presentment.schema.json`, `schemas/dunning-event-presentment.schema.json`, `schemas/webhook-outbox-event-presentment.schema.json`, `schemas/issued-invoice.schema.json`, `schemas/issued-invoice-presentment.schema.json`, `schemas/issued-credit-note.schema.json`, and `schemas/issued-credit-note-presentment.schema.json`.  They are never IEEE binary floats.
+Amounts are canonical decimal strings from `schemas/invoice-draft-presentment.schema.json`, `schemas/collection-case-presentment.schema.json`, `schemas/payment-intent-presentment.schema.json`, `schemas/payment-receipt-presentment.schema.json`, `schemas/credit-adjustment-presentment.schema.json`, `schemas/rate-card-presentment.schema.json`, `schemas/usage-event-presentment.schema.json`, `schemas/rating-run-presentment.schema.json`, `schemas/tax-assessment-presentment.schema.json`, `schemas/posting-receipt-observation-presentment.schema.json`, `schemas/webhook-delivery-presentment.schema.json`, `schemas/tenant-api-credential-presentment.schema.json`, `schemas/webhook-subscription-presentment.schema.json`, `schemas/dunning-event-presentment.schema.json`, `schemas/webhook-outbox-event-presentment.schema.json`, `schemas/issued-invoice.schema.json`, `schemas/issued-invoice-presentment.schema.json`, `schemas/issued-credit-note.schema.json`, `schemas/issued-credit-note-presentment.schema.json`, `schemas/credit-note-application.schema.json`, and `schemas/credit-note-application-presentment.schema.json`.  They are never IEEE binary floats.

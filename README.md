@@ -20,7 +20,7 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, credit adjustments, credit-adjustment presentment, issued credit notes, issued-credit-note presentment, rate cards, rate-card presentment, tax rates, tax assessments, tax-assessment presentment, posting-receipt observation presentment, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, credit adjustments, credit-adjustment presentment, issued credit notes, issued-credit-note presentment, credit-note applications, credit-note-application presentment, rate cards, rate-card presentment, tax rates, tax assessments, tax-assessment presentment, posting-receipt observation presentment, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
 - a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, webhook-outbox, issued-invoice, and issued-credit-note migrations with tenant-scoped attribution constraints;
 - an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, drafts invoice intent, issues commercial invoices, issues commercial credit notes, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, drains AIS posting-receipt outbox events, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
 - an importable `operator_console` Storybook that renders the invoice-draft, issued-invoice, issued-credit-note, collection-case, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, tax-assessment, and posting-receipt-observation presentment contracts with design tokens and exact-decimal fixtures;
@@ -81,6 +81,8 @@ After an `invoice_draft` exists, call `InvoicePresentmentService.present_invoice
 After an `invoice_draft` exists, call `IssuedInvoiceService.issue_invoice` or `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` with the tenant. Replay of the same tenant and draft returns the same `issued_invoice_id`. Totals freeze the draft or its tax assessment. First successful issue enqueues one existing `invoice.issued` webhook outbox event. `GET /v1/issued-invoices/{issued_invoice_id}` and `GET /v1/issued-invoices` present the snapshot. Issue invoice, then collect or credit. The path does not invent statutory numbering, capture payment, or call AIS.
 
 After a `credit_adjustment` exists, call `IssuedCreditNoteService.issue_credit_note` or `POST /v1/credit-adjustments/{credit_adjustment_id}/issued-credit-notes` with the tenant. Replay of the same tenant and credit returns the same `issued_credit_note_id`. Totals freeze the stored exclusive, tax, and inclusive credit amounts. First successful issue enqueues one existing `credit_note.issued` webhook outbox event. `GET /v1/issued-credit-notes/{issued_credit_note_id}` and `GET /v1/issued-credit-notes` present the snapshot. Issue the credit note; the validated journal remains available for AIS. The path does not invent statutory numbering, capture payment, or call AIS.
+
+After an `issued_credit_note` and an open `collection_case` exist for the same invoice, call `CreditNoteApplicationService.apply_credit_note` or `POST /v1/collection-cases/{collection_case_id}/credit-note-applications` with the tenant and `issued_credit_note_id`. Replay of the same tenant and issued credit note returns the same `credit_note_application_id` and never double-reduces outstanding. `GET /v1/credit-note-applications/{credit_note_application_id}` and `GET /v1/credit-note-applications` present the stored application. Apply the issued credit note, then collect the residual. The path does not invent a journal, tax unwind, webhook event type, statutory numbering, capture payment, or call AIS.
 
 ## Propose a journal
 
@@ -216,6 +218,17 @@ python3 -c "from metering_billing import IssuedCreditNoteService, IssuedCreditNo
 
 After a `credit_adjustment` exists, `POST /v1/credit-adjustments/{credit_adjustment_id}/issued-credit-notes` writes one immutable commercial snapshot. `GET /v1/issued-credit-notes/{issued_credit_note_id}` returns the tenant-scoped statement. Issue the credit note; the validated journal remains available for AIS.
 
+## Apply an issued credit note to a collection case
+
+```bash
+python3 -c "from metering_billing import CreditNoteApplicationService, CreditNoteApplicationPresentmentService"
+# POST /v1/collection-cases/{collection_case_id}/credit-note-applications
+# GET /v1/credit-note-applications/{credit_note_application_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/credit-note-applications?tenant_reference=urn:cwl:tenant_001
+```
+
+After an `issued_credit_note` and an open `collection_case` exist for the same invoice, `POST /v1/collection-cases/{collection_case_id}/credit-note-applications` reduces outstanding by the exact issued inclusive amount. `GET /v1/credit-note-applications/{credit_note_application_id}` returns the tenant-scoped statement. Apply the issued credit note, then collect the residual.
+
 ## Present a collection case
 
 ```bash
@@ -245,7 +258,7 @@ npm install
 npm run storybook
 ```
 
-`operator_console` renders the #21 invoice statement, the issued-invoice statement, the issued-credit-note statement, the collection-case statement, the payment-intent statement, the payment-receipt statement, the credit-adjustment statement, the rate-card statement, the usage-event statement, the rating-run statement, the tax-assessment statement, and the posting-receipt observation statement with tokenized status chip and tenant pin. Amounts stay exact-decimal strings. Customer copy on an issued credit note is: issue the credit note; the validated journal remains available for AIS. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
+`operator_console` renders the #21 invoice statement, the issued-invoice statement, the issued-credit-note statement, the credit-note-application statement, the collection-case statement, the payment-intent statement, the payment-receipt statement, the credit-adjustment statement, the rate-card statement, the usage-event statement, the rating-run statement, the tax-assessment statement, and the posting-receipt observation statement with tokenized status chip and tenant pin. Amounts stay exact-decimal strings. Customer copy on a credit-note application is: apply the issued credit note, then collect the residual. Storybook is the UI surface for this slice. The package is importable and does not replace `metering_billing`.
 
 ## Pull journal proposals
 

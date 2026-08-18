@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/credit-note-application/v1",
+  "title": "Credit Note Application",
+  "description": "Append-only application of one issued commercial credit note onto one open same-tenant collection case. applied_amount is the exact issued tax-inclusive credit. Replays acknowledge the stored credit_note_application_id and never double-reduce outstanding. The document is not a statutory credit note, tax unwind, payment capture, or AIS posting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "credit_note_application_contract_version",
+    "credit_note_application_outcome_code"
+  ],
+  "properties": {
+    "credit_note_application_contract_version": {"type": "integer", "minimum": 1},
+    "credit_note_application_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "credit_note_application_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "issued_credit_note_id": {"type": "string", "format": "uuid"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "issued_invoice_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "applied_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "credit_note_application_status": {"type": "string", "enum": ["applied"]},
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled"]
+    },
+    "applied_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "issued_credit_note_source_payload_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "issued_credit_note_contract_version": {"type": "integer", "minimum": 1},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "issued_credit_note_not_found",
+        "collection_case_not_found",
+        "currency_mismatch",
+        "collection_case_settled",
+        "credit_exceeds_outstanding",
+        "invoice_mismatch",
+        "request_invalid"
+      ]
+    }
+  }
+}

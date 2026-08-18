@@ -77,6 +77,12 @@ The application is a thin WSGI adapter:
     ``collection_dunning_event`` or list ``{dunning_events, next_cursor}``.
     ``POST /v1/collection-cases/{collection_case_id}/dunning-events`` stays
     the #10 record.  The read does not send mail or capture payment.
+    ``POST /v1/collection-cases/{collection_case_id}/credit-note-applications``
+    applies one issued credit note onto that open case.  Replay of the
+    same tenant and issued credit note returns the stored
+    ``credit_note_application_id``.  GET item and list present the
+    stored application.  Do not invent a journal, tax unwind, webhook,
+    statutory numbering, or payment capture.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -125,6 +131,7 @@ from metering_billing.errors import (
     InvoicePresentmentQueryError,
     IssuedInvoicePresentmentQueryError,
     IssuedCreditNotePresentmentQueryError,
+    CreditNoteApplicationPresentmentQueryError,
     TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
@@ -143,6 +150,10 @@ from metering_billing.issued_invoice import IssuedInvoiceService
 from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
 from metering_billing.issued_credit_note import IssuedCreditNoteService
 from metering_billing.issued_credit_note_presentment import IssuedCreditNotePresentmentService
+from metering_billing.credit_note_application import CreditNoteApplicationService
+from metering_billing.credit_note_application_presentment import (
+    CreditNoteApplicationPresentmentService,
+)
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
 from metering_billing.invoice_presentment import InvoicePresentmentService
@@ -237,6 +248,13 @@ ISSUED_CREDIT_NOTE_NESTED_PATH = re.compile(
 )
 ISSUED_CREDIT_NOTE_COLLECTION_PATH = "/v1/issued-credit-notes"
 ISSUED_CREDIT_NOTE_ITEM_PATH = re.compile(r"^/v1/issued-credit-notes/([0-9a-fA-F-]{36})$")
+CREDIT_NOTE_APPLICATION_NESTED_PATH = re.compile(
+    r"^/v1/collection-cases/([0-9a-fA-F-]{36})/credit-note-applications$"
+)
+CREDIT_NOTE_APPLICATION_COLLECTION_PATH = "/v1/credit-note-applications"
+CREDIT_NOTE_APPLICATION_ITEM_PATH = re.compile(
+    r"^/v1/credit-note-applications/([0-9a-fA-F-]{36})$"
+)
 TENANT_API_CREDENTIAL_COLLECTION_PATH = "/v1/tenant-api-credentials"
 TENANT_API_CREDENTIAL_REVOKE_PATH = re.compile(
     r"^/v1/tenant-api-credentials/([0-9a-fA-F-]{36})/revoke$"
@@ -293,6 +311,10 @@ def create_http_app(
     issued_presentments = IssuedInvoicePresentmentService(shared_ledger)
     credit_note_issuers = IssuedCreditNoteService(shared_ledger)
     credit_note_presentments = IssuedCreditNotePresentmentService(shared_ledger)
+    credit_note_applications = CreditNoteApplicationService(shared_ledger)
+    credit_note_application_presentments = CreditNoteApplicationPresentmentService(
+        shared_ledger
+    )
     exports = AccountingExportService(shared_ledger)
     collections = CollectionCaseService(shared_ledger)
     intents = PaymentIntentService(shared_ledger)
@@ -353,6 +375,10 @@ def create_http_app(
             return _send_json(start_response, 404, {"rejection_reason_code": "route_not_found"})
         if route_name == "method_not_allowed":
             return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "http_method_not_allowed":
+            return _send_json(
+                start_response, 405, {"rejection_reason_code": "method_not_allowed"}
+            )
         if route_name == "healthz":
             return _send_json(start_response, 200, {"status": "ok"})
         if route_name in {"list_tenant_api_credentials", "get_tenant_api_credential"}:
@@ -967,6 +993,44 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_credit_note_applications", "get_credit_note_application"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_credit_note_applications":
+                    page = credit_note_application_presentments.list_credit_note_applications(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = credit_note_application_presentments.present_credit_note_application(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["credit_note_application_id"],
+                        "credit_note_application_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except CreditNoteApplicationPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "credit_note_application_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name in {"list_issued_credit_notes", "get_issued_credit_note"}:
             try:
                 query = _read_query(environ)
@@ -1167,6 +1231,28 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "credit_note_applications":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                result = credit_note_applications.apply_credit_note(
+                    tenant_reference,
+                    _parse_uuid(payload.get("issued_credit_note_id"), "issued_credit_note_id"),
+                    _parse_uuid(path_values["collection_case_id"], "collection_case_id"),
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_credit_notes":
             try:
                 payload = _read_json_object(environ)
@@ -1336,6 +1422,24 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if dunning_match is not None:
         if method == "POST":
             return "dunning_events", {"collection_case_id": dunning_match.group(1)}
+        return "method_not_allowed", {}
+    application_nested = CREDIT_NOTE_APPLICATION_NESTED_PATH.fullmatch(path)
+    if application_nested is not None:
+        if method == "POST":
+            return "credit_note_applications", {
+                "collection_case_id": application_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    if path == CREDIT_NOTE_APPLICATION_COLLECTION_PATH:
+        if method == "GET":
+            return "list_credit_note_applications", {}
+        return "method_not_allowed", {}
+    application_match = CREDIT_NOTE_APPLICATION_ITEM_PATH.fullmatch(path)
+    if application_match is not None:
+        if method == "GET":
+            return "get_credit_note_application", {
+                "credit_note_application_id": application_match.group(1)
+            }
         return "method_not_allowed", {}
     if path == DUNNING_EVENT_COLLECTION_PATH:
         if method == "GET":
@@ -1851,7 +1955,12 @@ def _send_json(
     start_response: StartResponse, status_code: int, payload: Mapping[str, object]
 ) -> Iterable[bytes]:
     """Write a JSON response and return the encoded body."""
-    reason = {200: "OK", 404: "Not Found", 422: "Unprocessable Entity"}.get(status_code, "OK")
+    reason = {
+        200: "OK",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        422: "Unprocessable Entity",
+    }.get(status_code, "OK")
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     start_response(
         f"{status_code} {reason}",

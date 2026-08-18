@@ -8,6 +8,9 @@ customer content.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TypeVar
+
+ResolvedValue = TypeVar("ResolvedValue")
 
 
 class IngestionOutcomeCode(StrEnum):
@@ -243,6 +246,46 @@ class IssuedCreditNotePresentmentQueryError(ValueError):
     def __init__(self, rejection_reason_code: str) -> None:
         super().__init__(rejection_reason_code)
         self.rejection_reason_code = rejection_reason_code
+
+
+class CreditNoteApplicationOutcomeCode(StrEnum):
+    """Terminal result of applying one issued credit note to a collection case."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class CreditNoteApplicationRejectionReasonCode(StrEnum):
+    """Why an apply request was refused without reducing outstanding."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    ISSUED_CREDIT_NOTE_NOT_FOUND = "issued_credit_note_not_found"
+    COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    COLLECTION_CASE_SETTLED = "collection_case_settled"
+    CREDIT_EXCEEDS_OUTSTANDING = "credit_exceeds_outstanding"
+    INVOICE_MISMATCH = "invoice_mismatch"
+    REQUEST_INVALID = "request_invalid"
+
+
+class CreditNoteApplicationPresentmentQueryError(ValueError):
+    """Raised when a stored credit-note application cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
+def require_resolved(value: ResolvedValue | None, name: str) -> ResolvedValue:
+    """Return a resolved row or raise when a hollow success leaked through.
+
+    Production paths must not use ``assert`` for this check.  ``-O`` would
+    strip that guard and allow a None tenant or fact to continue.
+    """
+    if value is None:
+        raise ValueError(f"{name} resolution succeeded without a stored {name}")
+    return value
 
 
 class DunningEventPresentmentQueryError(ValueError):

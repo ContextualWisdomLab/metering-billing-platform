@@ -76,7 +76,7 @@ A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id
 
 ## Collection-case identity
 
-A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as `tax_inclusive_amount` when a tax assessment exists, otherwise the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts or commercial credits reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
+A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as `tax_inclusive_amount` when a tax assessment exists, otherwise the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts, commercial credits recorded against an already-open case, or a later `credit_note_application` reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
 
 ## Payment-intent identity
 
@@ -105,6 +105,10 @@ A stored issued invoice is identified by `(tenant_account_id, invoice_draft_id)`
 ## Issued-credit-note identity
 
 A stored issued credit note is identified by `(tenant_account_id, credit_adjustment_id)`.  Internal primary key is the opaque generated `issued_credit_note_id`.  The hash covers the credit, draft, optional issued invoice, versions, currency, exclusive/tax/inclusive credit totals, and the credit source hash.  Status is `issued` only.  `issued_invoice_id` is optional and stored only when already traceable.  The snapshot copies the closed `credit_reason_code` and invents no lines, statutory credit-note number, fiscal signature, or customer PII.  First successful issue appends one `webhook_outbox_event` with `event_type_code` `credit_note.issued` and `source_id` `issued_credit_note_id`.  The outbox `data` is a thin reference plus hash and omits lines.  `GET /v1/issued-credit-notes/{issued_credit_note_id}` projects the stored row.  `GET /v1/issued-credit-notes` lists `{issued_credit_notes, next_cursor}` ordered by `issued_at` then `issued_credit_note_id`.
+
+## Credit-note-application identity
+
+A stored credit-note application is identified by `(tenant_account_id, issued_credit_note_id)`.  Internal primary key is the opaque generated `credit_note_application_id`.  The hash covers the issued note, collection case, invoice draft, optional issued invoice, currency, exact applied amount, and both contract versions.  Status is `applied` only.  Applied amount is the issued tax-inclusive credit.  One issued credit note applies at most once.  The row invents no statutory credit-note number, journal, tax unwind, or webhook event.  `GET /v1/credit-note-applications/{credit_note_application_id}` projects the stored row plus current remaining outstanding.  `GET /v1/credit-note-applications` lists `{credit_note_applications, next_cursor}` ordered by `applied_at` then `credit_note_application_id`.
 
 ## Collection-case-presentment projection
 

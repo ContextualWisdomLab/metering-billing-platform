@@ -398,6 +398,31 @@ class StoredIssuedCreditNote:
 
 
 @dataclass(frozen=True)
+class StoredCreditNoteApplication:
+    """Append-only application of one issued credit note onto one collection case.
+
+    Identity is ``(tenant_account_id, issued_credit_note_id)``.  One issued
+    credit note applies at most once.  ``credit_note_application_id`` is the
+    opaque generated identifier.
+    """
+
+    credit_note_application_id: UUID
+    tenant_account_id: UUID
+    issued_credit_note_id: UUID
+    collection_case_id: UUID
+    invoice_draft_id: UUID
+    issued_invoice_id: UUID | None
+    credit_note_application_contract_version: int
+    issued_credit_note_contract_version: int
+    source_payload_hash: str
+    issued_credit_note_source_payload_hash: str
+    currency_code: str
+    applied_amount: Decimal
+    credit_note_application_status: str
+    applied_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredJournalProposalLine:
     """Append-only proposal line using a semantic account role, not a chart ID."""
 
@@ -729,6 +754,12 @@ class MemoryUsageLedger:
     issued_invoice_lines: list[StoredIssuedInvoiceLine] = field(default_factory=list)
     issued_credit_notes: dict[UUID, StoredIssuedCreditNote] = field(default_factory=dict)
     issued_credit_note_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    credit_note_applications: dict[UUID, StoredCreditNoteApplication] = field(
+        default_factory=dict
+    )
+    credit_note_application_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -1610,6 +1641,78 @@ class MemoryUsageLedger:
         )
         self.issued_credit_notes[persisted.issued_credit_note_id] = persisted
         self.issued_credit_note_index[identity_key] = persisted.issued_credit_note_id
+        return persisted
+
+    def find_credit_note_application(
+        self, tenant_account_id: UUID, issued_credit_note_id: UUID
+    ) -> StoredCreditNoteApplication | None:
+        """Return the application for one tenant issued credit note, if any."""
+        credit_note_application_id = self.credit_note_application_index.get(
+            (tenant_account_id, issued_credit_note_id)
+        )
+        if credit_note_application_id is None:
+            return None
+        return self.credit_note_applications[credit_note_application_id]
+
+    def get_credit_note_application(
+        self, credit_note_application_id: UUID
+    ) -> StoredCreditNoteApplication | None:
+        """Return one credit-note application by internal identifier, if present."""
+        return self.credit_note_applications.get(credit_note_application_id)
+
+    def list_credit_note_applications_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCreditNoteApplication, ...]:
+        """Return credit-note applications limited to one tenant."""
+        return tuple(
+            application
+            for application in self.credit_note_applications.values()
+            if application.tenant_account_id == tenant_account_id
+        )
+
+    def insert_credit_note_application(
+        self, credit_note_application: StoredCreditNoteApplication
+    ) -> StoredCreditNoteApplication:
+        """Append an immutable application.  Existing identity rows are never updated."""
+        if credit_note_application.credit_note_application_status != "applied":
+            raise ValueError("credit_note_application_status must be applied")
+        applied_amount = parse_exact_decimal(
+            format_exact_decimal(credit_note_application.applied_amount)
+        )
+        if applied_amount <= 0:
+            raise ValueError("credit note application amount must be a positive exact decimal")
+        if credit_note_application.credit_note_application_id in self.credit_note_applications:
+            raise ValueError("credit_note_application_id already stored")
+        identity_key = (
+            credit_note_application.tenant_account_id,
+            credit_note_application.issued_credit_note_id,
+        )
+        if identity_key in self.credit_note_application_index:
+            raise ValueError("credit note applications are immutable and cannot be replaced")
+        persisted = StoredCreditNoteApplication(
+            credit_note_application_id=credit_note_application.credit_note_application_id,
+            tenant_account_id=credit_note_application.tenant_account_id,
+            issued_credit_note_id=credit_note_application.issued_credit_note_id,
+            collection_case_id=credit_note_application.collection_case_id,
+            invoice_draft_id=credit_note_application.invoice_draft_id,
+            issued_invoice_id=credit_note_application.issued_invoice_id,
+            credit_note_application_contract_version=(
+                credit_note_application.credit_note_application_contract_version
+            ),
+            issued_credit_note_contract_version=(
+                credit_note_application.issued_credit_note_contract_version
+            ),
+            source_payload_hash=credit_note_application.source_payload_hash,
+            issued_credit_note_source_payload_hash=(
+                credit_note_application.issued_credit_note_source_payload_hash
+            ),
+            currency_code=credit_note_application.currency_code,
+            applied_amount=applied_amount,
+            credit_note_application_status=credit_note_application.credit_note_application_status,
+            applied_at=credit_note_application.applied_at,
+        )
+        self.credit_note_applications[persisted.credit_note_application_id] = persisted
+        self.credit_note_application_index[identity_key] = persisted.credit_note_application_id
         return persisted
 
     def find_credit_adjustment(

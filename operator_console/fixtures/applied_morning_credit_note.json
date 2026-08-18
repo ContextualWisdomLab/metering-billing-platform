@@ -1,0 +1,18 @@
+{
+  "credit_note_application_presentment_contract_version": 1,
+  "credit_note_application_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd40",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "issued_credit_note_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd20",
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd21",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+  "currency_code": "USD",
+  "applied_amount": "0.003705",
+  "remaining_outstanding_amount": "0",
+  "credit_note_application_status": "applied",
+  "collection_case_status": "settled",
+  "applied_at": "2026-08-18T09:00:00Z",
+  "source_payload_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "issued_credit_note_source_payload_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "issued_credit_note_contract_version": 1,
+  "next_operator_action": "wait"
+}

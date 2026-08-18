@@ -25,7 +25,8 @@ status.  Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
 Payment receipts stay ``applied`` and do not post to AIS.  AIS posting
 receipts are stored as observations and never flip ``proposal_status``.
 Commercial credits stay ``recorded`` and emit a validated journal proposal
-that AIS later pulls.
+that AIS later pulls.  Issued credit notes may be applied once onto an
+open collection case without inventing a journal, tax unwind, or webhook.
 """
 
 from metering_billing.ais_outbox_drain import AisOutboxDrainService
@@ -61,6 +62,8 @@ from metering_billing.contracts import (
     WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME,
     ISSUED_CREDIT_NOTE_SCHEMA_NAME,
     ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME,
+    CREDIT_NOTE_APPLICATION_SCHEMA_NAME,
+    CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME,
     ISSUED_INVOICE_SCHEMA_NAME,
     ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
@@ -93,6 +96,8 @@ from metering_billing.contracts import (
     validate_webhook_outbox_event_presentment,
     validate_issued_credit_note,
     validate_issued_credit_note_presentment,
+    validate_credit_note_application,
+    validate_credit_note_application_presentment,
     validate_issued_invoice,
     validate_issued_invoice_presentment,
     validate_invoice_presentment,
@@ -135,6 +140,9 @@ from metering_billing.errors import (
     IssuedCreditNoteOutcomeCode,
     IssuedCreditNotePresentmentQueryError,
     IssuedCreditNoteRejectionReasonCode,
+    CreditNoteApplicationOutcomeCode,
+    CreditNoteApplicationPresentmentQueryError,
+    CreditNoteApplicationRejectionReasonCode,
     IssuedInvoiceOutcomeCode,
     IssuedInvoicePresentmentQueryError,
     IssuedInvoiceRejectionReasonCode,
@@ -179,6 +187,10 @@ from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.issued_credit_note import IssuedCreditNoteService
 from metering_billing.issued_credit_note_presentment import IssuedCreditNotePresentmentService
+from metering_billing.credit_note_application import CreditNoteApplicationService
+from metering_billing.credit_note_application_presentment import (
+    CreditNoteApplicationPresentmentService,
+)
 from metering_billing.issued_invoice import IssuedInvoiceService
 from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
 from metering_billing.tenant_api_credential import TenantApiCredentialService
@@ -240,6 +252,8 @@ __all__ = (
     "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME",
+    "CREDIT_NOTE_APPLICATION_SCHEMA_NAME",
+    "CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_INVOICE_SCHEMA_NAME",
     "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
@@ -307,6 +321,11 @@ __all__ = (
     "IssuedCreditNotePresentmentService",
     "IssuedCreditNoteRejectionReasonCode",
     "IssuedCreditNoteService",
+    "CreditNoteApplicationOutcomeCode",
+    "CreditNoteApplicationPresentmentQueryError",
+    "CreditNoteApplicationPresentmentService",
+    "CreditNoteApplicationRejectionReasonCode",
+    "CreditNoteApplicationService",
     "IssuedInvoiceOutcomeCode",
     "IssuedInvoicePresentmentQueryError",
     "IssuedInvoicePresentmentService",
@@ -375,6 +394,8 @@ __all__ = (
     "validate_webhook_outbox_event_presentment",
     "validate_issued_credit_note",
     "validate_issued_credit_note_presentment",
+    "validate_credit_note_application",
+    "validate_credit_note_application_presentment",
     "validate_issued_invoice",
     "validate_issued_invoice_presentment",
     "validate_invoice_presentment",

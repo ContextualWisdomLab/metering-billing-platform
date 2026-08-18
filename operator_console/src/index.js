@@ -84,3 +84,8 @@ export {
   ISSUED_CREDIT_NOTE_CUSTOMER_COPY,
   nextOperatorActionCopy as nextIssuedCreditNoteActionCopy,
 } from "./issued_credit_note.js";
+export {
+  renderCreditNoteApplication,
+  CREDIT_NOTE_APPLICATION_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCreditNoteApplicationActionCopy,
+} from "./credit_note_application.js";

@@ -24,6 +24,7 @@ from metering_billing.contracts import (
     validate_dunning_event_presentment,
     validate_webhook_outbox_event_presentment,
     validate_issued_credit_note_presentment,
+    validate_credit_note_application_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -96,6 +97,7 @@ ISSUED_CREDIT_NOTE_FIXTURE_NAMES = (
     "issued_morning_credit_note.json",
     "issued_taxed_credit_note.json",
 )
+CREDIT_NOTE_APPLICATION_FIXTURE_NAMES = ("applied_morning_credit_note.json",)
 MONEY_FIELDS = (
     "tax_exclusive_amount",
     "tax_amount",
@@ -349,6 +351,21 @@ class OperatorConsoleTests(unittest.TestCase):
             "wait",
         )
         self.assertEqual(self._fixture("issued_taxed_credit_note.json")["tax_inclusive_amount"], "11.00")
+        for fixture_name in CREDIT_NOTE_APPLICATION_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_credit_note_application_presentment(payload), ())
+            for field_name in ("applied_amount", "remaining_outstanding_amount"):
+                value = payload[field_name]
+                self.assertIsInstance(value, str)
+                self.assertNotIsInstance(value, float)
+                parse_exact_decimal(value)
+            self.assertEqual(payload["credit_note_application_status"], "applied")
+            self.assertNotIn("legal_credit_note_number", payload)
+            self.assertNotIn("credit_note_application_outcome_code", payload)
+        self.assertEqual(
+            self._fixture("applied_morning_credit_note.json")["next_operator_action"],
+            "wait",
+        )
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -388,6 +405,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "WebhookOutboxEvent",
             "IssuedInvoice",
             "IssuedCreditNote",
+            "CreditNoteApplication",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -407,6 +425,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + DUNNING_NOTICE_FIXTURE_NAMES
             + WEBHOOK_OUTBOX_EVENT_FIXTURE_NAMES
             + ISSUED_CREDIT_NOTE_FIXTURE_NAMES
+            + CREDIT_NOTE_APPLICATION_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -437,6 +456,10 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Issue invoice, then collect or credit", inventory)
         self.assertIn(
             "Issue the credit note; the validated journal remains available for AIS",
+            inventory,
+        )
+        self.assertIn(
+            "Apply the issued credit note, then collect the residual",
             inventory,
         )
 

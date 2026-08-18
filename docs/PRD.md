@@ -191,6 +191,19 @@ contextual-orchestrator usage
 - Credit-adjustment, tax-unwind, journal-proposal, invoice, collection, payment, and AIS contracts stay unchanged. `credit_adjustment` stays `recorded`. `proposal_status` stays `validated`. First successful issue enqueues one existing #24 `credit_note.issued` outbox event. No payment capture or AIS call is added. HMAC, SSRF, and delivery contracts stay unchanged.
 - Operators issue the credit note; the validated journal remains available for AIS. `operator_console` Storybook adds one `IssuedCreditNote` story. There is no login wall, Stripe, AIS call, or production SPA.
 
+## Credit-note-application acceptance
+
+- A known stored issued credit note applies once onto one open same-tenant collection case and reduces `collection_outstanding` by the exact issued tax-inclusive amount.
+- A second apply of the same tenant and `issued_credit_note_id` returns the same `credit_note_application_id` as `duplicate_replay` and never double-reduces.
+- `credit_note_application_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment capture, AIS call, or a new webhook event type.
+- Currency mismatch, settled case, remaining that would go negative, and invoice mismatch (draft, or issued invoice when stored) fail closed.
+- `POST /v1/collection-cases/{collection_case_id}/credit-note-applications` is the nested apply command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
+- A known stored application presents one tenant-scoped statement with identity, applied amount, remaining outstanding, `applied_at`, and `next_operator_action` (`collect` or `wait`).
+- `GET /v1/credit-note-applications/{credit_note_application_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/credit-note-applications` lists summaries as `{credit_note_applications, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{applied_at}|{credit_note_application_id}`.
+- Issued-credit-note, credit-adjustment, collection, payment, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. Payment receipts stay unchanged.
+- Operators apply the issued credit note, then collect the residual. `operator_console` Storybook adds one `CreditNoteApplication` story. There is no login wall, Stripe, AIS call, or production SPA.
+
 ## Tenant-API-credential acceptance
 
 - An operator can issue one append-only `tenant_api_credential` for a known tenant. The secret is returned once (prefix plus secret). The ledger stores only a keyed HMAC.
