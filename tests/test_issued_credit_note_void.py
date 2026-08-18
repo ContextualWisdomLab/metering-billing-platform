@@ -474,6 +474,13 @@ class IssuedCreditNoteVoidTests(unittest.TestCase):
             "legal_credit_note_number": "CN-1",
         }
         self.assertTrue(validate_issued_credit_note_void(rejected_legal))
+        rejected_invoice_number = {
+            "issued_credit_note_void_contract_version": 1,
+            "issued_credit_note_void_outcome_code": "rejected",
+            "rejection_reason_code": "issued_credit_note_not_found",
+            "legal_invoice_number": "INV-1",
+        }
+        self.assertTrue(validate_issued_credit_note_void(rejected_invoice_number))
         rejected_missing_reason = {
             "issued_credit_note_void_contract_version": 1,
             "issued_credit_note_void_outcome_code": "rejected",
