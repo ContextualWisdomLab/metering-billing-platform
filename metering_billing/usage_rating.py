@@ -23,7 +23,11 @@ from decimal import Decimal
 from typing import Callable
 from uuid import UUID
 
-from metering_billing.errors import RatingOutcomeCode, RatingRejectionReasonCode
+from metering_billing.errors import (
+    RatingOutcomeCode,
+    RatingRejectionReasonCode,
+    require_resolved,
+)
 from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_ledger import (
@@ -145,7 +149,7 @@ class UsageRatingService:
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
             return _rejected(RatingRejectionReasonCode.TENANT_NOT_FOUND)
-        assert tenant is not None
+        tenant = require_resolved(tenant, "tenant")
 
         window_started_at = time_window.window_started_at.astimezone(UTC)
         window_ended_at = time_window.window_ended_at.astimezone(UTC)
@@ -154,7 +158,7 @@ class UsageRatingService:
         )
         if rate_card_error is not None:
             return _rejected(rate_card_error)
-        assert rate_card is not None
+        rate_card = require_resolved(rate_card, "rate_card")
 
         events = self.ledger.list_usage_events_in_window(
             tenant.tenant_account_id, window_started_at, window_ended_at

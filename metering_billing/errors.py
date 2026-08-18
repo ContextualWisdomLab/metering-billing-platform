@@ -8,6 +8,9 @@ customer content.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TypeVar
+
+ResolvedT = TypeVar("ResolvedT")
 
 
 class IngestionOutcomeCode(StrEnum):
@@ -58,6 +61,17 @@ class RatingRejectionReasonCode(StrEnum):
     RATE_CARD_NOT_EFFECTIVE = "rate_card_not_effective"
     METER_PRICE_MISSING = "meter_price_missing"
     BILLING_DISPOSITION_UNKNOWN = "billing_disposition_unknown"
+
+
+def require_resolved(value: ResolvedT | None, fact_name: str) -> ResolvedT:
+    """Return a resolved row or raise when a resolver reported success without one.
+
+    Production paths must not use ``assert`` for this check.  Python strips
+    ``assert`` under ``-O``, which would let a broken resolver continue.
+    """
+    if value is None:
+        raise ValueError(f"{fact_name} resolution succeeded without a stored row")
+    return value
 
 
 class ExactDecimalError(ValueError):

@@ -16,6 +16,7 @@
 ## Development
 
 - Write a failing test before behavior code.
+- Do not use `assert` for production validation. Raise `ValueError` so optimized Python cannot strip the check.
 - Require production statement and branch coverage of 100%.
 - Document every public API and every accounting or monetary invariant.
 - Update architecture, ADRs, and CHANGELOG when authority or behavior changes.

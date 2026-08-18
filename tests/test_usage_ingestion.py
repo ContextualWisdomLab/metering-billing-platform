@@ -34,7 +34,7 @@ from metering_billing.contracts import (
     validate_schema_instance,
     validate_usage_ingestion_receipt,
 )
-from metering_billing.errors import ExactDecimalError, TimeWindowError
+from metering_billing.errors import ExactDecimalError, TimeWindowError, require_resolved
 from metering_billing.exact_decimal import require_decimal_quantity
 from metering_billing.payload_integrity import (
     canonical_source_payload,
@@ -247,6 +247,45 @@ class UsageIngestionTests(unittest.TestCase):
         tenant_two = service.ledger.require_tenant(TENANT_TWO)
         self.assertEqual(len(service.ledger.stored_usage_set(tenant_one.tenant_account_id)), 3)
         self.assertEqual(len(service.ledger.stored_usage_set(tenant_two.tenant_account_id)), 1)
+
+    def test_require_resolved_raises_value_error_not_assert(self) -> None:
+        """A resolver that reports success without a row must raise ValueError."""
+        self.assertEqual(require_resolved("stored_row", "tenant"), "stored_row")
+        with self.assertRaisesRegex(ValueError, "tenant resolution succeeded without a stored row"):
+            require_resolved(None, "tenant")
+
+    def test_ingest_fails_closed_when_resolvers_return_no_row(self) -> None:
+        """Broken resolvers must raise ValueError, which -O cannot strip."""
+        service = UsageIngestionService(seed_ledger())
+        with mock.patch.object(service.ledger, "resolve_tenant", return_value=(None, None)):
+            with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
+                service.ingest_usage_event(make_event())
+        with mock.patch.object(
+            service.ledger, "resolve_billing_account", return_value=(None, None)
+        ):
+            with self.assertRaisesRegex(ValueError, "billing_account resolution succeeded"):
+                service.ingest_usage_event(make_event())
+        with mock.patch.object(
+            service.ledger, "resolve_billing_principal", return_value=(None, None)
+        ):
+            with self.assertRaisesRegex(ValueError, "billing_principal resolution succeeded"):
+                service.ingest_usage_event(make_event())
+        with mock.patch.object(service.ledger, "resolve_credential", return_value=(None, None)):
+            with self.assertRaisesRegex(ValueError, "credential resolution succeeded"):
+                service.ingest_usage_event(make_event())
+        with mock.patch.object(service.ledger, "resolve_meter", return_value=(None, None)):
+            with self.assertRaisesRegex(ValueError, "meter resolution succeeded"):
+                service.ingest_usage_event(make_event())
+
+    def test_usage_queries_fail_closed_when_tenant_row_is_missing(self) -> None:
+        """Window and receipt queries must not continue after a hollow tenant resolve."""
+        service = UsageIngestionService(seed_ledger())
+        window = TimeWindow.from_iso8601("2026-08-16T10:00:00Z", "2026-08-16T11:00:00Z")
+        with mock.patch.object(service.ledger, "resolve_tenant", return_value=(None, None)):
+            with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
+                service.query_usage_window(TENANT_ONE, window)
+            with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
+                service.query_ingestion_receipts(TENANT_ONE)
 
     def test_same_key_with_mutated_payload_is_a_conflict(self) -> None:
         """A retry that changes the commercial fact must not overwrite history."""

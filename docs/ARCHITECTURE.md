@@ -67,6 +67,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 - A source-event key replay with a different payload hash or contract version is a conflict.
 - Attribution URNs that leave the event tenant are rejected.
 - Invalid quality or meter configuration fails closed.
+- A resolver that reports success without a stored row raises `ValueError`. Production paths do not use `assert`, which Python strips under `-O`.
 - Provider timeouts retain internal facts and retry idempotently.
 - Existing provider objects never fail over automatically to a different provider.
 - Accounting rejection does not rewrite billing facts; it creates a reconciliation exception.

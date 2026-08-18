@@ -26,5 +26,6 @@
 
 ### Security
 
+- Replaced production `assert` narrowing after tenant and catalog resolution with explicit `ValueError` so optimized Python (`-O`) cannot strip fail-closed checks.
 - Excluded prompt, response, credential plaintext, provider secrets, and card data from initial contracts.
 - Required commit-pinned GitHub Actions.

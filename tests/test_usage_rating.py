@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest import mock
 from uuid import UUID
 
 from metering_billing import (
@@ -109,6 +110,17 @@ class UsageRatingTests(unittest.TestCase):
         self.assertEqual(len(ingest.ledger.rating_lines), 1)
         self.assertEqual(len(ingest.ledger.accounting_export_records), 0)
         self.assertFalse(hasattr(ingest.ledger, "invoice_drafts"))
+
+    def test_rating_fails_closed_when_resolvers_return_no_row(self) -> None:
+        """Broken tenant or rate-card resolvers must raise ValueError, not assert."""
+        ingest = ingest_known_batch()
+        rating = UsageRatingService(ingest.ledger)
+        with mock.patch.object(rating.ledger, "resolve_tenant", return_value=(None, None)):
+            with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
+                rating.rate_usage_window(TENANT_ONE, MORNING_WINDOW, 1)
+        with mock.patch.object(rating.ledger, "resolve_rate_card", return_value=(None, None)):
+            with self.assertRaisesRegex(ValueError, "rate_card resolution succeeded"):
+                rating.rate_usage_window(TENANT_ONE, MORNING_WINDOW, 1)
 
     def test_equivalent_decimal_and_utc_spellings_rate_as_one_fact(self) -> None:
         """Ingested ``1``/``1.0`` and ``Z``/``+00:00`` remain one fact and one money total."""

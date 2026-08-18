@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import shutil
@@ -660,6 +661,16 @@ class RepositoryContractTests(unittest.TestCase):
             find_placeholder_tokens("Complete text.\nTODO: decide later.\n"),
             ("TODO",),
         )
+
+    def test_production_modules_do_not_use_assert_for_validation(self) -> None:
+        """Optimized Python strips assert; production fail-closed checks must raise."""
+        offenders: list[str] = []
+        for path in sorted((ROOT / "metering_billing").rglob("*.py")):
+            module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(module):
+                if isinstance(node, ast.Assert):
+                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        self.assertEqual(offenders, [])
 
     def _schema(self, schema_name: str) -> dict[str, object]:
         return json.loads((ROOT / "schemas" / schema_name).read_text(encoding="utf-8"))

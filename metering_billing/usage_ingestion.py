@@ -30,6 +30,7 @@ from metering_billing.errors import (
     IngestionOutcomeCode,
     RejectionReasonCode,
     TimeWindowError,
+    require_resolved,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 from metering_billing.payload_integrity import source_payload_hash_errors
@@ -187,7 +188,7 @@ class UsageIngestionService:
                 tenant_reference,
                 tenant_error,
             )
-        assert tenant is not None
+        tenant = require_resolved(tenant, "tenant")
 
         existing = self.ledger.find_by_source_event_key(
             tenant.tenant_account_id, event["source_event_key"]
@@ -244,7 +245,7 @@ class UsageIngestionService:
                 tenant_reference,
                 account_error,
             )
-        assert account is not None
+        account = require_resolved(account, "billing_account")
 
         principal, principal_error = self.ledger.resolve_billing_principal(
             tenant, event["billing_principal_reference"], occurred_at
@@ -257,7 +258,7 @@ class UsageIngestionService:
                 tenant_reference,
                 principal_error,
             )
-        assert principal is not None
+        principal = require_resolved(principal, "billing_principal")
 
         credential_record_id = None
         if "credential_reference" in event:
@@ -276,7 +277,7 @@ class UsageIngestionService:
                     tenant_reference,
                     credential_error,
                 )
-            assert credential is not None
+            credential = require_resolved(credential, "credential")
             credential_record_id = credential.credential_record_id
 
         usage_event_id = generate_record_id()
@@ -351,7 +352,7 @@ class UsageIngestionService:
         tenant, error = self.ledger.resolve_tenant(tenant_reference)
         if error is not None:
             return ()
-        assert tenant is not None
+        tenant = require_resolved(tenant, "tenant")
         return self.ledger.list_usage_events_in_window(
             tenant.tenant_account_id,
             time_window.window_started_at,
@@ -367,7 +368,7 @@ class UsageIngestionService:
         tenant, error = self.ledger.resolve_tenant(tenant_reference)
         if error is not None:
             return ()
-        assert tenant is not None
+        tenant = require_resolved(tenant, "tenant")
         return self.ledger.list_ingestion_receipts(tenant.tenant_account_id)
 
     def _persist_ingestion_receipt(self, receipt: EventIngestionReceipt) -> StoredIngestionReceipt:
@@ -417,7 +418,7 @@ class UsageIngestionService:
             )
             if meter_error is not None:
                 raise _MeasurementRejected(meter_error)
-            assert definition is not None
+            definition = require_resolved(definition, "meter")
             if definition.meter_definition_id in seen_meter_ids:
                 raise _MeasurementRejected(RejectionReasonCode.MEASUREMENT_METER_DUPLICATE)
             seen_meter_ids.add(definition.meter_definition_id)
