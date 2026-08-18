@@ -484,7 +484,7 @@ class StoredJournalProposalLine:
 
 @dataclass(frozen=True)
 class StoredJournalProposal:
-    """Append-only balanced journal proposal for one tenant draft, receipt, credit, or write-off."""
+    """Append-only balanced journal proposal for one tenant draft, receipt, credit, write-off, or leftover refund."""
 
     journal_proposal_id: UUID
     tenant_account_id: UUID
@@ -504,6 +504,7 @@ class StoredJournalProposal:
     payment_receipt_id: UUID | None = None
     credit_adjustment_id: UUID | None = None
     collection_write_off_id: UUID | None = None
+    unapplied_cash_refund_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -827,6 +828,9 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     write_off_journal_proposal_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    refund_journal_proposal_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
     credit_adjustments: dict[UUID, StoredCreditAdjustment] = field(default_factory=dict)
@@ -2491,6 +2495,19 @@ class MemoryUsageLedger:
             return None
         return self.journal_proposals[journal_proposal_id]
 
+    def find_journal_proposal_for_refund(
+        self,
+        tenant_account_id: UUID,
+        unapplied_cash_refund_id: UUID,
+    ) -> StoredJournalProposal | None:
+        """Return the refund proposal for one tenant-scoped leftover refund, if it exists."""
+        journal_proposal_id = self.refund_journal_proposal_index.get(
+            (tenant_account_id, unapplied_cash_refund_id)
+        )
+        if journal_proposal_id is None:
+            return None
+        return self.journal_proposals[journal_proposal_id]
+
     def insert_journal_proposal(
         self,
         journal_proposal: StoredJournalProposal,
@@ -2556,6 +2573,12 @@ class MemoryUsageLedger:
                 journal_proposal.tenant_account_id,
                 journal_proposal.collection_write_off_id,
             )
+        refund_identity_key = None
+        if journal_proposal.unapplied_cash_refund_id is not None:
+            refund_identity_key = (
+                journal_proposal.tenant_account_id,
+                journal_proposal.unapplied_cash_refund_id,
+            )
         if journal_proposal.journal_proposal_id in self.journal_proposals:
             raise ValueError("journal proposals are immutable and cannot be replaced")
         if identity_key in self.journal_proposal_index:
@@ -2577,6 +2600,11 @@ class MemoryUsageLedger:
             and write_off_identity_key in self.write_off_journal_proposal_index
         ):
             raise ValueError("journal proposals are immutable and cannot be replaced")
+        if (
+            refund_identity_key is not None
+            and refund_identity_key in self.refund_journal_proposal_index
+        ):
+            raise ValueError("journal proposals are immutable and cannot be replaced")
         persisted = StoredJournalProposal(
             journal_proposal_id=journal_proposal.journal_proposal_id,
             tenant_account_id=journal_proposal.tenant_account_id,
@@ -2596,6 +2624,7 @@ class MemoryUsageLedger:
             payment_receipt_id=journal_proposal.payment_receipt_id,
             credit_adjustment_id=journal_proposal.credit_adjustment_id,
             collection_write_off_id=journal_proposal.collection_write_off_id,
+            unapplied_cash_refund_id=journal_proposal.unapplied_cash_refund_id,
         )
         self.journal_proposals[persisted.journal_proposal_id] = persisted
         self.journal_proposal_index[identity_key] = persisted.journal_proposal_id
@@ -2609,6 +2638,10 @@ class MemoryUsageLedger:
             )
         if write_off_identity_key is not None:
             self.write_off_journal_proposal_index[write_off_identity_key] = (
+                persisted.journal_proposal_id
+            )
+        if refund_identity_key is not None:
+            self.refund_journal_proposal_index[refund_identity_key] = (
                 persisted.journal_proposal_id
             )
         self.journal_proposal_lines.extend(parsed_lines)

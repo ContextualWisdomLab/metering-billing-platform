@@ -342,7 +342,17 @@ contextual-orchestrator usage
 - `GET /v1/unapplied-cash-refunds/{unapplied_cash_refund_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/unapplied-cash-refunds` lists summaries as `{unapplied_cash_refunds, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{refunded_at}|{unapplied_cash_refund_id}`.
 - Missing tenant, leftover already applied, leftover not parked, currency mismatch, zero/negative leftover, mismatched amount, IEEE leftover, illegal cursor, and illegal page_limit fail closed.
-- Operators refund unused parked leftover as a commercial fact. First successful refund enqueues one existing #24 `refund.recorded` outbox event. HTTP does not capture cards, call a PSP, write a journal, or call AIS.
+- Operators refund unused parked leftover as a commercial fact. First successful refund enqueues one existing #24 `refund.recorded` outbox event. HTTP does not capture cards, call a PSP, or call AIS. Journal compose is an explicit later command.
+
+## Refund-journal acceptance
+
+- A known stored leftover refund produces one balanced exact-decimal `accounting_journal_proposal` that debits `unapplied_cash` and credits `cash_receipt`.
+- A second propose of the same tenant and `unapplied_cash_refund_id` returns the same `proposal_id` as `duplicate_replay` and does not grow the store.
+- Another tenant cannot see or propose from the first tenant's refund.
+- Missing refunds, cross-tenant IDs, currency mismatch, float money, and zero or negative amounts fail closed.
+- Leftover and refund rows are not changed. Status stays inside the proposal lifecycle and is never `posted`. AIS pulls validated proposals through existing GET journal-proposal routes.
+- `POST /v1/unapplied-cash-refunds/{unapplied_cash_refund_id}/journal-proposals` is the explicit compose because #57 shipped without compose. PAN, CVC, and provider secrets are refused.
+- Invoice-draft, cash, credit, write-off, payment-receipt, and `refund.recorded` contracts stay unchanged.
 
 ## Payment-intent-presentment acceptance
 

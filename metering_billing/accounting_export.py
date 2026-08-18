@@ -1,10 +1,11 @@
-"""Accounting journal proposals produced from stored drafts, receipts, credits, and write-offs.
+"""Accounting journal proposals produced from stored drafts, receipts, credits, write-offs, and leftover refunds.
 
 The service is the buyer-facing export path:
 
 1. Resolve the tenant.
 2. Load that tenant's stored ``invoice_draft``, ``payment_receipt``,
-   ``credit_adjustment``, or ``collection_write_off``.
+   ``credit_adjustment``, ``collection_write_off``, or
+   ``unapplied_cash_refund``.
 3. Copy the exact commercial amount into one balanced debit and credit pair.
 4. Replay the same tenant, source identity, payload hash, and contract version.
 
@@ -42,6 +43,7 @@ from metering_billing.usage_ledger import (
     StoredJournalProposalLine,
     StoredPaymentReceipt,
     StoredTaxAssessment,
+    StoredUnappliedCashRefund,
     generate_record_id,
 )
 from metering_billing.webhook_outbox import (
@@ -59,6 +61,7 @@ REVENUE_ACCOUNT_ROLE_CODE = "usage_revenue"
 CASH_RECEIPT_ACCOUNT_ROLE_CODE = "cash_receipt"
 TAX_PAYABLE_ACCOUNT_ROLE_CODE = "tax_payable"
 WRITE_OFF_EXPENSE_ACCOUNT_ROLE_CODE = "write_off_expense"
+UNAPPLIED_CASH_ACCOUNT_ROLE_CODE = "unapplied_cash"
 ALLOWED_PROPOSAL_STATUSES = frozenset({"draft", "validated", "exported", "rejected"})
 DEFAULT_PAGE_LIMIT = 50
 MAXIMUM_PAGE_LIMIT = 100
@@ -130,6 +133,7 @@ class JournalProposalResult:
     payment_receipt_id: UUID | None = None
     collection_write_off_id: UUID | None = None
     credit_adjustment_id: UUID | None = None
+    unapplied_cash_refund_id: UUID | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the published proposal, or a sparse rejected operational result."""
@@ -484,6 +488,107 @@ class AccountingExportService:
         )
         return result
 
+    def propose_refund_journal(
+        self,
+        tenant_reference: str,
+        unapplied_cash_refund_id: UUID,
+        currency_code: str | None = None,
+    ) -> JournalProposalResult:
+        """Propose one balanced unapplied-cash/cash journal from a stored refund.
+
+        A replay of the same tenant and ``unapplied_cash_refund_id`` returns
+        the stored ``proposal_id``.  Another tenant cannot see or propose
+        from that refund.  Refund, leftover, and cash facts are not changed.
+        AIS next pulls validated proposals; this service never posts.
+        """
+        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
+        if tenant_error is not None:
+            return _rejected(JournalProposalRejectionReasonCode.TENANT_NOT_FOUND)
+        tenant = require_resolved(tenant, "tenant")
+
+        existing = self.ledger.find_journal_proposal_for_refund(
+            tenant.tenant_account_id, unapplied_cash_refund_id
+        )
+        if existing is not None:
+            return _from_stored(
+                existing, tenant.tenant_reference, JournalProposalOutcomeCode.DUPLICATE_REPLAY
+            )
+
+        refund = self.ledger.get_unapplied_cash_refund(unapplied_cash_refund_id)
+        if refund is None or refund.tenant_account_id != tenant.tenant_account_id:
+            return _rejected(JournalProposalRejectionReasonCode.UNAPPLIED_CASH_REFUND_NOT_FOUND)
+        collection_case = self.ledger.get_collection_case(refund.collection_case_id)
+        if (
+            collection_case is None
+            or collection_case.tenant_account_id != tenant.tenant_account_id
+        ):
+            return _rejected(JournalProposalRejectionReasonCode.UNAPPLIED_CASH_REFUND_NOT_FOUND)
+        if currency_code is not None and currency_code != refund.currency_code:
+            return _rejected(JournalProposalRejectionReasonCode.CURRENCY_MISMATCH)
+
+        try:
+            refund_amount = parse_proposal_amount(refund.refund_amount)
+        except ExactDecimalError:
+            return _rejected(JournalProposalRejectionReasonCode.REFUND_AMOUNT_INVALID)
+        if refund_amount <= 0:
+            return _rejected(JournalProposalRejectionReasonCode.REFUND_AMOUNT_INVALID)
+
+        commercial_date = refund.refunded_at.astimezone(UTC).date().isoformat()
+        legal_entity_reference = f"{tenant.tenant_reference}:legal_entity:commercial"
+        source_event_reference = (
+            f"{tenant.tenant_reference}:unapplied_cash_refund:{refund.unapplied_cash_refund_id}"
+        )
+        canonical_payload = _canonical_refund_proposal_payload(
+            tenant_reference=tenant.tenant_reference,
+            refund=refund,
+            refund_amount=refund_amount,
+            commercial_date=commercial_date,
+            legal_entity_reference=legal_entity_reference,
+            source_event_reference=source_event_reference,
+        )
+        source_payload_hash = compute_proposal_payload_hash(canonical_payload)
+        journal_proposal_id = generate_record_id()
+        stored_lines = _build_refund_proposal_lines(
+            journal_proposal_id,
+            tenant.tenant_account_id,
+            refund_amount,
+        )
+        stored = self.ledger.insert_journal_proposal(
+            StoredJournalProposal(
+                journal_proposal_id=journal_proposal_id,
+                tenant_account_id=tenant.tenant_account_id,
+                invoice_draft_id=collection_case.invoice_draft_id,
+                proposal_contract_version=PROPOSAL_CONTRACT_VERSION,
+                idempotency_key=(
+                    f"{tenant.tenant_reference}:unapplied_cash_refund:"
+                    f"{refund.unapplied_cash_refund_id}"
+                    f":{source_payload_hash}:v{PROPOSAL_CONTRACT_VERSION}"
+                ),
+                legal_entity_reference=legal_entity_reference,
+                intended_book_role_code=INTENDED_BOOK_ROLE_CODE,
+                transaction_currency=refund.currency_code,
+                transaction_date=commercial_date,
+                accounting_date=commercial_date,
+                source_payload_hash=source_payload_hash,
+                proposed_at=self._clock(),
+                proposal_status=PROPOSAL_STATUS,
+                source_event_reference=source_event_reference,
+                proposal_lines=stored_lines,
+                unapplied_cash_refund_id=refund.unapplied_cash_refund_id,
+            ),
+            stored_lines,
+        )
+        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant.tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            stored.journal_proposal_id,
+            result.as_contract_dict(),
+            stored.proposed_at,
+        )
+        return result
+
     def propose_credit_journal(
         self,
         tenant_reference: str,
@@ -757,6 +862,73 @@ def _canonical_write_off_proposal_payload(
     }
 
 
+def _canonical_refund_proposal_payload(
+    tenant_reference: str,
+    refund: StoredUnappliedCashRefund,
+    refund_amount: Decimal,
+    commercial_date: str,
+    legal_entity_reference: str,
+    source_event_reference: str,
+) -> dict[str, object]:
+    """Return refund-proposal facts excluding identifiers and timestamps."""
+    amount_text = format_exact_decimal(refund_amount)
+    return {
+        "proposal_contract_version": PROPOSAL_CONTRACT_VERSION,
+        "tenant_reference": tenant_reference,
+        "unapplied_cash_refund_id": str(refund.unapplied_cash_refund_id),
+        "legal_entity_reference": legal_entity_reference,
+        "intended_book_role_code": INTENDED_BOOK_ROLE_CODE,
+        "transaction_currency": refund.currency_code,
+        "transaction_date": commercial_date,
+        "accounting_date": commercial_date,
+        "proposal_status": PROPOSAL_STATUS,
+        "source_event_references": [source_event_reference],
+        "lines": [
+            {
+                "line_number": 1,
+                "account_role_code": UNAPPLIED_CASH_ACCOUNT_ROLE_CODE,
+                "debit_amount": amount_text,
+                "credit_amount": "0",
+            },
+            {
+                "line_number": 2,
+                "account_role_code": CASH_RECEIPT_ACCOUNT_ROLE_CODE,
+                "debit_amount": "0",
+                "credit_amount": amount_text,
+            },
+        ],
+    }
+
+
+def _build_refund_proposal_lines(
+    journal_proposal_id: UUID,
+    tenant_account_id: UUID,
+    refund_amount: Decimal,
+) -> tuple[StoredJournalProposalLine, ...]:
+    """Build the unapplied-cash debit and cash-receipt credit for one refund."""
+    amount = parse_proposal_amount(refund_amount)
+    return (
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=1,
+            account_role_code=UNAPPLIED_CASH_ACCOUNT_ROLE_CODE,
+            debit_amount=amount,
+            credit_amount=Decimal("0"),
+        ),
+        StoredJournalProposalLine(
+            journal_proposal_line_id=generate_record_id(),
+            journal_proposal_id=journal_proposal_id,
+            tenant_account_id=tenant_account_id,
+            line_number=2,
+            account_role_code=CASH_RECEIPT_ACCOUNT_ROLE_CODE,
+            debit_amount=Decimal("0"),
+            credit_amount=amount,
+        ),
+    )
+
+
 def _build_write_off_proposal_lines(
     journal_proposal_id: UUID,
     tenant_account_id: UUID,
@@ -946,6 +1118,7 @@ def _from_stored(
         payment_receipt_id=stored.payment_receipt_id,
         collection_write_off_id=stored.collection_write_off_id,
         credit_adjustment_id=stored.credit_adjustment_id,
+        unapplied_cash_refund_id=stored.unapplied_cash_refund_id,
     )
 
 

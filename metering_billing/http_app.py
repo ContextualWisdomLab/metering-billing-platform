@@ -112,6 +112,12 @@ The application is a thin WSGI adapter:
     and credit returns the stored ``proposal_id``.  AIS pulls through
     existing GET journal-proposal routes.  Do not invent a second journal
     store, tax unwind, webhook, statutory numbering, or AIS call.
+    ``POST /v1/unapplied-cash-refunds/{unapplied_cash_refund_id}/journal-proposals``
+    composes one existing ``accounting_journal_proposal`` from a stored
+    leftover refund.  Replay of the same tenant and refund returns the
+    stored ``proposal_id``.  AIS pulls the validated proposal through
+    existing GET journal-proposal routes.  Do not invent a statutory
+    account ID, webhook type, PSP, write-off, settlement, or AIS call.
 14. Let an operator POST a projected payment intent and GET the stored
     intent as a commercial statement.  Create a projected payment intent,
     then record the receipt.  The write refuses PAN and provider secrets.
@@ -292,6 +298,9 @@ UNAPPLIED_CASH_REFUND_NESTED_PATH = re.compile(
 UNAPPLIED_CASH_REFUND_COLLECTION_PATH = "/v1/unapplied-cash-refunds"
 UNAPPLIED_CASH_REFUND_ITEM_PATH = re.compile(
     r"^/v1/unapplied-cash-refunds/([0-9a-fA-F-]{36})$"
+)
+REFUND_JOURNAL_NESTED_PATH = re.compile(
+    r"^/v1/unapplied-cash-refunds/([0-9a-fA-F-]{36})/journal-proposals$"
 )
 UNAPPLIED_CASH_APPLICATION_NESTED_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/unapplied-cash-applications$"
@@ -2077,6 +2086,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "list_unapplied_cash_refunds", {}
         return "method_not_allowed", {}
+    refund_journal_nested = REFUND_JOURNAL_NESTED_PATH.fullmatch(path)
+    if refund_journal_nested is not None:
+        if method == "POST":
+            return "refund_journal_proposals", {
+                "unapplied_cash_refund_id": refund_journal_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
     refund_match = UNAPPLIED_CASH_REFUND_ITEM_PATH.fullmatch(path)
     if refund_match is not None:
         if method == "GET":
@@ -2484,6 +2500,18 @@ def _dispatch_write(
         result = exports.propose_write_off_journal(
             tenant_reference,
             _parse_uuid(path_values["collection_write_off_id"], "collection_write_off_id"),
+            currency_code=currency_code,
+        )
+        return result.as_contract_dict(), _status_for_result(result)
+    if route_name == "refund_journal_proposals":
+        if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+            raise HttpRequestError("request_invalid")
+        currency_code = payload.get("currency_code")
+        if currency_code is not None and not isinstance(currency_code, str):
+            raise HttpRequestError("request_invalid")
+        result = exports.propose_refund_journal(
+            tenant_reference,
+            _parse_uuid(path_values["unapplied_cash_refund_id"], "unapplied_cash_refund_id"),
             currency_code=currency_code,
         )
         return result.as_contract_dict(), _status_for_result(result)
