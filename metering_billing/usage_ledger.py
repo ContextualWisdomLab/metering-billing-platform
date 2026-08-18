@@ -398,6 +398,33 @@ class StoredIssuedCreditNote:
 
 
 @dataclass(frozen=True)
+class StoredIssuedCreditNoteVoid:
+    """Append-only commercial void of one unused issued credit note.
+
+    Identity is ``(tenant_account_id, issued_credit_note_id)``.  One issued
+    credit note voids at most once through this command.
+    ``issued_credit_note_void_id`` is the opaque generated identifier.  The
+    void does not change remaining outstanding on any collection case
+    because the note cannot have been applied.  This is not a journal,
+    webhook, refund, write-off, settlement, statutory credit note, or AIS
+    posting.
+    """
+
+    issued_credit_note_void_id: UUID
+    tenant_account_id: UUID
+    issued_credit_note_id: UUID
+    credit_adjustment_id: UUID
+    invoice_draft_id: UUID
+    issued_invoice_id: UUID | None
+    issued_credit_note_void_contract_version: int
+    source_payload_hash: str
+    currency_code: str
+    voided_amount: Decimal
+    issued_credit_note_void_status: str
+    voided_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredCreditNoteApplication:
     """Append-only application of one issued credit note onto one collection case.
 
@@ -946,6 +973,12 @@ class MemoryUsageLedger:
     issued_invoice_lines: list[StoredIssuedInvoiceLine] = field(default_factory=list)
     issued_credit_notes: dict[UUID, StoredIssuedCreditNote] = field(default_factory=dict)
     issued_credit_note_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    issued_credit_note_voids: dict[UUID, StoredIssuedCreditNoteVoid] = field(
+        default_factory=dict
+    )
+    issued_credit_note_void_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
     credit_note_applications: dict[UUID, StoredCreditNoteApplication] = field(
         default_factory=dict
     )
@@ -2274,6 +2307,80 @@ class MemoryUsageLedger:
         )
         self.issued_invoice_voids[persisted.issued_invoice_void_id] = persisted
         self.issued_invoice_void_index[identity_key] = persisted.issued_invoice_void_id
+        return persisted
+
+    def find_issued_credit_note_void(
+        self, tenant_account_id: UUID, issued_credit_note_id: UUID
+    ) -> StoredIssuedCreditNoteVoid | None:
+        """Return the void row for one tenant issued credit note, if any."""
+        issued_credit_note_void_id = self.issued_credit_note_void_index.get(
+            (tenant_account_id, issued_credit_note_id)
+        )
+        if issued_credit_note_void_id is None:
+            return None
+        return self.issued_credit_note_voids[issued_credit_note_void_id]
+
+    def get_issued_credit_note_void(
+        self, issued_credit_note_void_id: UUID
+    ) -> StoredIssuedCreditNoteVoid | None:
+        """Return one issued-credit-note void by internal identifier, if present."""
+        return self.issued_credit_note_voids.get(issued_credit_note_void_id)
+
+    def list_issued_credit_note_voids_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredIssuedCreditNoteVoid, ...]:
+        """Return issued-credit-note voids limited to one tenant."""
+        return tuple(
+            void_row
+            for void_row in self.issued_credit_note_voids.values()
+            if void_row.tenant_account_id == tenant_account_id
+        )
+
+    def insert_issued_credit_note_void(
+        self, issued_credit_note_void: StoredIssuedCreditNoteVoid
+    ) -> StoredIssuedCreditNoteVoid:
+        """Append an immutable void row.  Existing identity rows stay."""
+        if issued_credit_note_void.issued_credit_note_void_status != "recorded":
+            raise ValueError("issued_credit_note_void_status must be recorded")
+        voided_amount = parse_exact_decimal(
+            format_exact_decimal(issued_credit_note_void.voided_amount)
+        )
+        if voided_amount <= 0:
+            raise ValueError(
+                "issued-credit-note void amount must be a positive exact decimal"
+            )
+        if issued_credit_note_void.issued_credit_note_void_id in self.issued_credit_note_voids:
+            raise ValueError("issued_credit_note_void_id already stored")
+        identity_key = (
+            issued_credit_note_void.tenant_account_id,
+            issued_credit_note_void.issued_credit_note_id,
+        )
+        if identity_key in self.issued_credit_note_void_index:
+            raise ValueError(
+                "issued-credit-note voids are immutable and cannot be replaced"
+            )
+        persisted = StoredIssuedCreditNoteVoid(
+            issued_credit_note_void_id=issued_credit_note_void.issued_credit_note_void_id,
+            tenant_account_id=issued_credit_note_void.tenant_account_id,
+            issued_credit_note_id=issued_credit_note_void.issued_credit_note_id,
+            credit_adjustment_id=issued_credit_note_void.credit_adjustment_id,
+            invoice_draft_id=issued_credit_note_void.invoice_draft_id,
+            issued_invoice_id=issued_credit_note_void.issued_invoice_id,
+            issued_credit_note_void_contract_version=(
+                issued_credit_note_void.issued_credit_note_void_contract_version
+            ),
+            source_payload_hash=issued_credit_note_void.source_payload_hash,
+            currency_code=issued_credit_note_void.currency_code,
+            voided_amount=voided_amount,
+            issued_credit_note_void_status=(
+                issued_credit_note_void.issued_credit_note_void_status
+            ),
+            voided_at=issued_credit_note_void.voided_at,
+        )
+        self.issued_credit_note_voids[persisted.issued_credit_note_void_id] = persisted
+        self.issued_credit_note_void_index[identity_key] = (
+            persisted.issued_credit_note_void_id
+        )
         return persisted
 
     def find_unapplied_cash(

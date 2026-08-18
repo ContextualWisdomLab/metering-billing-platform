@@ -7,7 +7,7 @@ windows against a persisted version, present those rating runs, draft invoice-in
 those drafts as statements, issue an immutable commercial invoice snapshot
 from a stored draft, present that issued invoice, issue an immutable
 commercial credit-note snapshot from a stored credit adjustment, present
-that issued credit note, publish tax rates, assess tax on a draft, present
+that issued credit note, void one unused issued credit note, publish tax rates, assess tax on a draft, present
 those assessments, present stored posting-receipt observations, emit
 journal proposals, open collection cases, present those cases as statements, present open-case remaining as aging buckets, present a billing-account statement from stored commercial facts, present stored dunning events, project provider-neutral payment
 intents, present those intents as statements, apply commercial payment receipts, park leftover remittance as unapplied cash, present those receipts and parked leftovers as statements, apply parked leftover onto another open collection case, refund unused parked leftover, record commercial credits,
@@ -26,7 +26,8 @@ Payment receipts stay ``applied`` and do not post to AIS.  AIS posting
 receipts are stored as observations and never flip ``proposal_status``.
 Commercial credits stay ``recorded`` and emit a validated journal proposal
 that AIS later pulls.  Issued credit notes may be applied once onto an
-open collection case without inventing a journal, tax unwind, or webhook.
+open collection case, or voided once while unused, without inventing a
+journal, tax unwind, or webhook.
 """
 
 from metering_billing.ais_outbox_drain import AisOutboxDrainService
@@ -78,6 +79,8 @@ from metering_billing.contracts import (
     ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME,
     ISSUED_INVOICE_VOID_SCHEMA_NAME,
     ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME,
+    ISSUED_CREDIT_NOTE_VOID_SCHEMA_NAME,
+    ISSUED_CREDIT_NOTE_VOID_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
     RATING_RUN_SCHEMA_NAME,
@@ -128,6 +131,8 @@ from metering_billing.contracts import (
     validate_issued_invoice_presentment,
     validate_issued_invoice_void,
     validate_issued_invoice_void_presentment,
+    validate_issued_credit_note_void,
+    validate_issued_credit_note_void_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_tenant_api_credential_presentment,
@@ -200,6 +205,9 @@ from metering_billing.errors import (
     IssuedInvoiceVoidOutcomeCode,
     IssuedInvoiceVoidPresentmentQueryError,
     IssuedInvoiceVoidRejectionReasonCode,
+    IssuedCreditNoteVoidOutcomeCode,
+    IssuedCreditNoteVoidPresentmentQueryError,
+    IssuedCreditNoteVoidRejectionReasonCode,
     PaymentIntentPresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
     RateCardPresentmentQueryError,
@@ -241,6 +249,10 @@ from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.issued_credit_note import IssuedCreditNoteService
 from metering_billing.issued_credit_note_presentment import IssuedCreditNotePresentmentService
+from metering_billing.issued_credit_note_void import IssuedCreditNoteVoidService
+from metering_billing.issued_credit_note_void_presentment import (
+    IssuedCreditNoteVoidPresentmentService,
+)
 from metering_billing.credit_note_application import CreditNoteApplicationService
 from metering_billing.credit_note_application_presentment import (
     CreditNoteApplicationPresentmentService,
@@ -348,6 +360,8 @@ __all__ = (
     "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_INVOICE_VOID_SCHEMA_NAME",
     "ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_CREDIT_NOTE_VOID_SCHEMA_NAME",
+    "ISSUED_CREDIT_NOTE_VOID_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -467,6 +481,11 @@ __all__ = (
     "IssuedInvoiceVoidPresentmentService",
     "IssuedInvoiceVoidRejectionReasonCode",
     "IssuedInvoiceVoidService",
+    "IssuedCreditNoteVoidOutcomeCode",
+    "IssuedCreditNoteVoidPresentmentQueryError",
+    "IssuedCreditNoteVoidPresentmentService",
+    "IssuedCreditNoteVoidRejectionReasonCode",
+    "IssuedCreditNoteVoidService",
     "TenantApiCredentialOutcomeCode",
     "TenantApiCredentialPresentmentQueryError",
     "TenantApiCredentialPresentmentService",
@@ -550,6 +569,8 @@ __all__ = (
     "validate_issued_invoice_presentment",
     "validate_issued_invoice_void",
     "validate_issued_invoice_void_presentment",
+    "validate_issued_credit_note_void",
+    "validate_issued_credit_note_void_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_tenant_api_credential_presentment",

@@ -51,9 +51,16 @@ The application is a thin WSGI adapter:
     a stored credit adjustment, then GET that snapshot.  Replay of the
     same tenant and credit returns the stored ``issued_credit_note_id``.
     Refuse PAN, CVC, and provider secrets.  First successful issue
-    enqueues one existing ``credit_note.issued`` outbox event.  Issue
+    enqueues one existing ``credit_note.issued`` outbox event.      Issue
     the credit note; the validated journal remains available for AIS.
     Do not invent statutory numbering, capture payment, or call AIS.
+    ``POST /v1/issued-credit-notes/{issued_credit_note_id}/voids`` records
+    one commercial void of an unused issued credit note.  Replay of the
+    same tenant and issued credit note returns the stored
+    ``issued_credit_note_void_id``.  Collection remaining is unchanged
+    because the note was never applied.  GET item and list present the
+    stored void.  The void write does not compose a journal, enqueue a
+    webhook, or call AIS.
     10. Let an operator issue a tenant API credential.  After one active key
     exists, every ``/v1`` call except credential issue requires that key.
     GET one stored credential or list ``{tenant_api_credentials,
@@ -241,6 +248,7 @@ from metering_billing.errors import (
     IssuedInvoicePresentmentQueryError,
     IssuedInvoiceVoidPresentmentQueryError,
     IssuedCreditNotePresentmentQueryError,
+    IssuedCreditNoteVoidPresentmentQueryError,
     CreditNoteApplicationPresentmentQueryError,
     CollectionCaseSettlementPresentmentQueryError,
     CollectionWriteOffPresentmentQueryError,
@@ -271,6 +279,10 @@ from metering_billing.issued_invoice_void_presentment import (
 )
 from metering_billing.issued_credit_note import IssuedCreditNoteService
 from metering_billing.issued_credit_note_presentment import IssuedCreditNotePresentmentService
+from metering_billing.issued_credit_note_void import IssuedCreditNoteVoidService
+from metering_billing.issued_credit_note_void_presentment import (
+    IssuedCreditNoteVoidPresentmentService,
+)
 from metering_billing.credit_note_application import CreditNoteApplicationService
 from metering_billing.credit_note_application_presentment import (
     CreditNoteApplicationPresentmentService,
@@ -448,6 +460,13 @@ CREDIT_JOURNAL_NESTED_PATH = re.compile(
 )
 ISSUED_CREDIT_NOTE_COLLECTION_PATH = "/v1/issued-credit-notes"
 ISSUED_CREDIT_NOTE_ITEM_PATH = re.compile(r"^/v1/issued-credit-notes/([0-9a-fA-F-]{36})$")
+ISSUED_CREDIT_NOTE_VOID_NESTED_PATH = re.compile(
+    r"^/v1/issued-credit-notes/([0-9a-fA-F-]{36})/voids$"
+)
+ISSUED_CREDIT_NOTE_VOID_COLLECTION_PATH = "/v1/issued-credit-note-voids"
+ISSUED_CREDIT_NOTE_VOID_ITEM_PATH = re.compile(
+    r"^/v1/issued-credit-note-voids/([0-9a-fA-F-]{36})$"
+)
 CREDIT_NOTE_APPLICATION_NESTED_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/credit-note-applications$"
 )
@@ -547,6 +566,10 @@ def create_http_app(
     )
     credit_note_issuers = IssuedCreditNoteService(shared_ledger)
     credit_note_presentments = IssuedCreditNotePresentmentService(shared_ledger)
+    issued_credit_note_voids = IssuedCreditNoteVoidService(shared_ledger)
+    issued_credit_note_void_presentments = IssuedCreditNoteVoidPresentmentService(
+        shared_ledger
+    )
     credit_note_applications = CreditNoteApplicationService(shared_ledger)
     credit_note_application_presentments = CreditNoteApplicationPresentmentService(
         shared_ledger
@@ -2117,6 +2140,47 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_issued_credit_note_voids",
+            "get_issued_credit_note_void",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_issued_credit_note_voids":
+                    page = issued_credit_note_void_presentments.list_issued_credit_note_voids(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = issued_credit_note_void_presentments.present_issued_credit_note_void(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["issued_credit_note_void_id"],
+                        "issued_credit_note_void_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except IssuedCreditNoteVoidPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "issued_credit_note_void_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_invoice_voids":
             try:
                 payload = _read_json_object(environ)
@@ -2129,6 +2193,33 @@ def create_http_app(
                 result = issued_invoice_voids.void_issued_invoice(
                     tenant_reference,
                     _parse_uuid(path_values["issued_invoice_id"], "issued_invoice_id"),
+                    currency_code=currency_code,
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "issued_credit_note_voids":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                currency_code = payload.get("currency_code")
+                if currency_code is not None and not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                result = issued_credit_note_voids.void_issued_credit_note(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["issued_credit_note_id"], "issued_credit_note_id"
+                    ),
                     currency_code=currency_code,
                 )
                 return _send_json(
@@ -2659,6 +2750,24 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == ISSUED_CREDIT_NOTE_COLLECTION_PATH:
         if method == "GET":
             return "list_issued_credit_notes", {}
+        return "method_not_allowed", {}
+    credit_note_void_nested = ISSUED_CREDIT_NOTE_VOID_NESTED_PATH.fullmatch(path)
+    if credit_note_void_nested is not None:
+        if method == "POST":
+            return "issued_credit_note_voids", {
+                "issued_credit_note_id": credit_note_void_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    if path == ISSUED_CREDIT_NOTE_VOID_COLLECTION_PATH:
+        if method == "GET":
+            return "list_issued_credit_note_voids", {}
+        return "method_not_allowed", {}
+    credit_note_void_match = ISSUED_CREDIT_NOTE_VOID_ITEM_PATH.fullmatch(path)
+    if credit_note_void_match is not None:
+        if method == "GET":
+            return "get_issued_credit_note_void", {
+                "issued_credit_note_void_id": credit_note_void_match.group(1)
+            }
         return "method_not_allowed", {}
     credit_note_match = ISSUED_CREDIT_NOTE_ITEM_PATH.fullmatch(path)
     if credit_note_match is not None:

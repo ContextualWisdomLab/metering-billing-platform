@@ -280,6 +280,32 @@ class IssuedCreditNotePresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class IssuedCreditNoteVoidOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one commercial credit-note void."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class IssuedCreditNoteVoidRejectionReasonCode(StrEnum):
+    """Why a void request was refused without writing a commercial void."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    ISSUED_CREDIT_NOTE_NOT_FOUND = "issued_credit_note_not_found"
+    CREDIT_NOTE_ALREADY_APPLIED = "credit_note_already_applied"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    REQUEST_INVALID = "request_invalid"
+
+
+class IssuedCreditNoteVoidPresentmentQueryError(ValueError):
+    """Raised when a stored issued-credit-note void cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class CreditNoteApplicationOutcomeCode(StrEnum):
     """Terminal result of applying one issued credit note to a collection case."""
 
@@ -299,6 +325,7 @@ class CreditNoteApplicationRejectionReasonCode(StrEnum):
     COLLECTION_CASE_DISPUTED = "collection_case_disputed"
     CREDIT_EXCEEDS_OUTSTANDING = "credit_exceeds_outstanding"
     INVOICE_MISMATCH = "invoice_mismatch"
+    ISSUED_CREDIT_NOTE_VOIDED = "issued_credit_note_voided"
     REQUEST_INVALID = "request_invalid"
 
 

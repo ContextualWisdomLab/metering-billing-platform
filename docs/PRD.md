@@ -206,12 +206,26 @@ contextual-orchestrator usage
 - Credit-adjustment, tax-unwind, journal-proposal, invoice, collection, payment, and AIS contracts stay unchanged. `credit_adjustment` stays `recorded`. `proposal_status` stays `validated`. First successful issue enqueues one existing #24 `credit_note.issued` outbox event. No payment capture or AIS call is added. HMAC, SSRF, and delivery contracts stay unchanged.
 - Operators issue the credit note; the validated journal remains available for AIS. `operator_console` Storybook adds one `IssuedCreditNote` story. There is no login wall, Stripe, AIS call, or production SPA.
 
+## Issued-credit-note-void acceptance
+
+- A known unused same-tenant issued credit note voids once. `voided_amount` is the issued tax-inclusive credit in the same currency. Status is `recorded`. The issued snapshot stays `issued`.
+- A second void of the same tenant and `issued_credit_note_id` returns the same `issued_credit_note_void_id` as `duplicate_replay`.
+- `issued_credit_note_void_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, a journal, webhook, VAT register, NTS filing, 연말정산, statutory account, negative invoice, or AIS call.
+- Fail closed when the note has already been applied; the note is missing or cross-tenant; currency mismatches; or the tenant is missing.
+- Collection remaining is unchanged because the note cannot have been applied. After a void exists, apply fail-closes as `issued_credit_note_voided`.
+- `POST /v1/issued-credit-notes/{issued_credit_note_id}/voids` is the nested void command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
+- A known stored void presents one tenant-scoped statement with identity, voided amount, `voided_at`, and `next_operator_action` (`wait`).
+- `GET /v1/issued-credit-note-voids/{issued_credit_note_void_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/issued-credit-note-voids` lists summaries as `{issued_credit_note_voids, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{voided_at}|{issued_credit_note_void_id}`.
+- Issued-credit-note, credit-note-application, collection, payment, and AIS contracts stay unchanged except the additive apply fail-closed on a voided unused note.
+- Operators void an unused issued credit note. There is no login wall, Stripe, AIS call, journal, webhook, or production SPA.
+
 ## Credit-note-application acceptance
 
 - A known stored issued credit note applies once onto one open same-tenant collection case and reduces `collection_outstanding` by the exact issued tax-inclusive amount.
 - A second apply of the same tenant and `issued_credit_note_id` returns the same `credit_note_application_id` as `duplicate_replay` and never double-reduces.
 - `credit_note_application_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment capture, AIS call, write-off, or settlement.
-- Currency mismatch, settled case, remaining that would go negative, and invoice mismatch (draft, or issued invoice when stored) fail closed.
+- Currency mismatch, settled case, remaining that would go negative, invoice mismatch (draft, or issued invoice when stored), and a voided unused note fail closed.
 - `POST /v1/collection-cases/{collection_case_id}/credit-note-applications` is the nested apply command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
 - A known stored application presents one tenant-scoped statement with identity, applied amount, remaining outstanding, `applied_at`, and `next_operator_action` (`collect` or `wait`).
 - `GET /v1/credit-note-applications/{credit_note_application_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.

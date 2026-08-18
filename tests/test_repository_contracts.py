@@ -38,6 +38,8 @@ from metering_billing.contracts import (
     validate_issued_invoice_void_presentment,
     validate_issued_credit_note,
     validate_issued_credit_note_presentment,
+    validate_issued_credit_note_void,
+    validate_issued_credit_note_void_presentment,
     validate_webhook_delivery,
     validate_webhook_subscription,
 )
@@ -2616,6 +2618,62 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
         self.assertNotIn("legal_invoice_number", sql)
+
+    def test_issued_credit_note_void_accepts_recorded_void_and_rejects_numbering(self) -> None:
+        """A credit-note void contract records exact amount and cannot invent a legal number."""
+        schema = self._schema("issued-credit-note-void.schema.json")
+        instance = {
+            "issued_credit_note_void_contract_version": 1,
+            "issued_credit_note_void_outcome_code": "accepted",
+            "issued_credit_note_void_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd90",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "issued_credit_note_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd91",
+            "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd92",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+            "currency_code": "USD",
+            "voided_amount": "0.003705",
+            "issued_credit_note_void_status": "recorded",
+            "voided_at": "2026-08-18T12:00:00Z",
+            "source_payload_hash": "sha256:" + ("e" * 64),
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_issued_credit_note_void(instance), ())
+        presentment = {
+            "issued_credit_note_void_presentment_contract_version": 1,
+            "issued_credit_note_void_id": instance["issued_credit_note_void_id"],
+            "tenant_reference": instance["tenant_reference"],
+            "issued_credit_note_id": instance["issued_credit_note_id"],
+            "credit_adjustment_id": instance["credit_adjustment_id"],
+            "invoice_draft_id": instance["invoice_draft_id"],
+            "currency_code": "USD",
+            "voided_amount": "0.003705",
+            "issued_credit_note_void_status": "recorded",
+            "voided_at": "2026-08-18T12:00:00Z",
+            "source_payload_hash": instance["source_payload_hash"],
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_issued_credit_note_void_presentment(presentment), ())
+        numbered = dict(instance)
+        numbered["legal_credit_note_number"] = "CN-1"
+        self.assertTrue(validate_issued_credit_note_void(numbered))
+
+    def test_issued_credit_note_void_migration_persists_append_only_voids(self) -> None:
+        """The credit-note void migration must stay tenant-scoped and unused-only."""
+        sql = (ROOT / "database/migrations/0033_issued_credit_note_void.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.issued_credit_note_void",
+            "UNIQUE (tenant_account_id, issued_credit_note_id)",
+            "UNIQUE (tenant_account_id, issued_credit_note_void_id)",
+            "FOREIGN KEY (tenant_account_id, issued_credit_note_id)",
+            "issued_credit_note_void_status text NOT NULL CHECK (\n        issued_credit_note_void_status IN ('recorded')",
+            "CHECK (voided_amount > 0)",
+        ):
+            self.assertIn(expected_fragment, sql)
+        self.assertNotIn("legal_credit_note_number", sql)
+        self.assertNotIn("remaining_outstanding_amount", sql)
 
     def test_invoice_draft_migration_persists_append_only_drafts(self) -> None:
         """The invoice-draft migration must keep identity tenant-scoped and draft-only."""

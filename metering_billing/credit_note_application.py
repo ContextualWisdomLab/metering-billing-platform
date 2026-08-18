@@ -8,7 +8,8 @@ The service is the buyer-facing apply path:
 4. Persist one append-only ``credit_note_application`` per issued note.
 
 Replay of the same tenant and ``issued_credit_note_id`` returns the stored
-application and never double-reduces.  First successful apply enqueues
+application and never double-reduces.  A voided unused note fail-closes
+as ``issued_credit_note_voided``.  First successful apply enqueues
 one existing ``credit_note.applied`` outbox event; replay of the same
 application does not enqueue a second row.  The path does not emit a
 journal, unwind tax, capture payment, call AIS, or invent a settlement.
@@ -223,6 +224,15 @@ class CreditNoteApplicationService:
             )
             _enqueue_credit_note_applied(self.ledger, tenant.tenant_reference, result)
             return result
+        if (
+            self.ledger.find_issued_credit_note_void(
+                tenant.tenant_account_id, issued.issued_credit_note_id
+            )
+            is not None
+        ):
+            return _rejected(
+                CreditNoteApplicationRejectionReasonCode.ISSUED_CREDIT_NOTE_VOIDED
+            )
         collection_case = self.ledger.get_collection_case(collection_case_id)
         if (
             collection_case is None
