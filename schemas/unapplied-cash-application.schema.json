@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/unapplied-cash-application/v1",
+  "title": "Unapplied Cash Application",
+  "description": "Append-only application of one parked unapplied_cash leftover onto one open same-tenant collection case. applied_amount is the exact parked leftover. Replays acknowledge the stored unapplied_cash_application_id and never double-reduce outstanding. Remaining zero does not settle the case. The document is not a journal, webhook, write-off, settlement, credit note, or AIS posting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "unapplied_cash_application_contract_version",
+    "unapplied_cash_application_outcome_code"
+  ],
+  "properties": {
+    "unapplied_cash_application_contract_version": {"type": "integer", "minimum": 1},
+    "unapplied_cash_application_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "unapplied_cash_application_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "unapplied_cash_id": {"type": "string", "format": "uuid"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "payment_receipt_id": {"type": "string", "format": "uuid"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "applied_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "unapplied_cash_application_status": {"type": "string", "enum": ["applied"]},
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled"]
+    },
+    "applied_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "unapplied_cash_not_found",
+        "collection_case_not_found",
+        "collection_case_settled",
+        "currency_mismatch",
+        "applied_amount_zero",
+        "applied_amount_negative",
+        "applied_amount_mismatch",
+        "applied_amount_exceeds_parked",
+        "applied_amount_exceeds_outstanding",
+        "outstanding_negative",
+        "request_invalid"
+      ]
+    }
+  }
+}

@@ -580,6 +580,30 @@ class StoredUnappliedCash:
 
 
 @dataclass(frozen=True)
+class StoredUnappliedCashApplication:
+    """Append-only apply of one parked leftover onto one collection case.
+
+    Identity is ``(tenant_account_id, unapplied_cash_id)``.  One parked
+    leftover applies at most once.  ``unapplied_cash_application_id`` is
+    the opaque generated identifier.  This is not a journal, webhook,
+    write-off, settlement, credit note, or AIS posting.
+    """
+
+    unapplied_cash_application_id: UUID
+    tenant_account_id: UUID
+    unapplied_cash_id: UUID
+    collection_case_id: UUID
+    payment_receipt_id: UUID
+    invoice_draft_id: UUID
+    unapplied_cash_application_contract_version: int
+    source_payload_hash: str
+    currency_code: str
+    applied_amount: Decimal
+    unapplied_cash_application_status: str
+    applied_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredPaymentReceipt:
     """Append-only commercial receipt applied against one projected intent."""
 
@@ -849,6 +873,12 @@ class MemoryUsageLedger:
     collection_write_off_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     unapplied_cash: dict[UUID, StoredUnappliedCash] = field(default_factory=dict)
     unapplied_cash_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    unapplied_cash_applications: dict[UUID, StoredUnappliedCashApplication] = field(
+        default_factory=dict
+    )
+    unapplied_cash_application_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -2011,6 +2041,110 @@ class MemoryUsageLedger:
         self.unapplied_cash[persisted.unapplied_cash_id] = persisted
         self.unapplied_cash_index[identity_key] = persisted.unapplied_cash_id
         return persisted
+
+    def find_unapplied_cash_application(
+        self, tenant_account_id: UUID, unapplied_cash_id: UUID
+    ) -> StoredUnappliedCashApplication | None:
+        """Return the application for one tenant parked leftover, if any."""
+        unapplied_cash_application_id = self.unapplied_cash_application_index.get(
+            (tenant_account_id, unapplied_cash_id)
+        )
+        if unapplied_cash_application_id is None:
+            return None
+        return self.unapplied_cash_applications[unapplied_cash_application_id]
+
+    def get_unapplied_cash_application(
+        self, unapplied_cash_application_id: UUID
+    ) -> StoredUnappliedCashApplication | None:
+        """Return one leftover application by internal identifier, if present."""
+        return self.unapplied_cash_applications.get(unapplied_cash_application_id)
+
+    def list_unapplied_cash_applications_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredUnappliedCashApplication, ...]:
+        """Return leftover applications limited to one tenant."""
+        return tuple(
+            application
+            for application in self.unapplied_cash_applications.values()
+            if application.tenant_account_id == tenant_account_id
+        )
+
+    def insert_unapplied_cash_application(
+        self, unapplied_cash_application: StoredUnappliedCashApplication
+    ) -> StoredUnappliedCashApplication:
+        """Append an immutable leftover application.  Existing identity stays."""
+        if unapplied_cash_application.unapplied_cash_application_status != "applied":
+            raise ValueError("unapplied_cash_application_status must be applied")
+        applied_amount = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash_application.applied_amount)
+        )
+        if applied_amount <= 0:
+            raise ValueError("unapplied cash application amount must be a positive exact decimal")
+        if (
+            unapplied_cash_application.unapplied_cash_application_id
+            in self.unapplied_cash_applications
+        ):
+            raise ValueError("unapplied_cash_application_id already stored")
+        identity_key = (
+            unapplied_cash_application.tenant_account_id,
+            unapplied_cash_application.unapplied_cash_id,
+        )
+        if identity_key in self.unapplied_cash_application_index:
+            raise ValueError("unapplied cash applications are immutable and cannot be replaced")
+        persisted = StoredUnappliedCashApplication(
+            unapplied_cash_application_id=unapplied_cash_application.unapplied_cash_application_id,
+            tenant_account_id=unapplied_cash_application.tenant_account_id,
+            unapplied_cash_id=unapplied_cash_application.unapplied_cash_id,
+            collection_case_id=unapplied_cash_application.collection_case_id,
+            payment_receipt_id=unapplied_cash_application.payment_receipt_id,
+            invoice_draft_id=unapplied_cash_application.invoice_draft_id,
+            unapplied_cash_application_contract_version=(
+                unapplied_cash_application.unapplied_cash_application_contract_version
+            ),
+            source_payload_hash=unapplied_cash_application.source_payload_hash,
+            currency_code=unapplied_cash_application.currency_code,
+            applied_amount=applied_amount,
+            unapplied_cash_application_status=(
+                unapplied_cash_application.unapplied_cash_application_status
+            ),
+            applied_at=unapplied_cash_application.applied_at,
+        )
+        self.unapplied_cash_applications[persisted.unapplied_cash_application_id] = persisted
+        self.unapplied_cash_application_index[identity_key] = (
+            persisted.unapplied_cash_application_id
+        )
+        return persisted
+
+    def apply_unapplied_cash_to_collection_case(
+        self, collection_case_id: UUID, applied_amount: Decimal
+    ) -> StoredCollectionCase:
+        """Reduce outstanding by parked leftover without flipping to settled.
+
+        #46 remains the explicit settle-when-zero command.  Status stays
+        ``open`` or ``dunning`` even when remaining becomes exact zero.
+        """
+        stored = self.collection_cases.get(collection_case_id)
+        if stored is None:
+            raise ValueError("unapplied cash apply requires a stored collection case")
+        amount = parse_exact_decimal(format_exact_decimal(applied_amount))
+        if amount <= 0:
+            raise ValueError("unapplied cash apply amount must be a positive exact decimal")
+        if stored.collection_case_status == "settled":
+            raise ValueError("settled collection cases cannot accept unapplied cash")
+        remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+        if amount > remaining:
+            raise ValueError("unapplied cash apply amount cannot exceed outstanding")
+        updated = StoredCollectionCase(
+            collection_case_id=stored.collection_case_id,
+            tenant_account_id=stored.tenant_account_id,
+            invoice_draft_id=stored.invoice_draft_id,
+            currency_code=stored.currency_code,
+            collection_case_status=stored.collection_case_status,
+            outstanding_amount=remaining - amount,
+            opened_at=stored.opened_at,
+        )
+        self.collection_cases[updated.collection_case_id] = updated
+        return updated
 
     def apply_collection_write_off(
         self, collection_case_id: UUID, write_off_amount: Decimal

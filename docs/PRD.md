@@ -322,6 +322,17 @@ contextual-orchestrator usage
 - Missing tenant, illegal cursor, and illegal page_limit fail closed.
 - Operators park leftover against a stored receipt. HTTP does not apply leftover to another case, capture cards, write a journal, or call AIS.
 
+## Unapplied-cash-application acceptance
+
+- `POST /v1/collection-cases/{collection_case_id}/unapplied-cash-applications` applies one parked leftover onto one same-tenant open collection case. Replay of the same tenant and leftover returns the same `unapplied_cash_application_id`. PAN, CVC, and provider secrets are refused.
+- The apply uses the full parked amount. Omitting `applied_amount` uses the parked leftover. A supplied amount must equal the parked leftover.
+- Outstanding is reduced by the exact applied inclusive amount. Remaining zero does not settle the case. Next operator action is `collect`, `settle`, or `wait`.
+- A known stored application presents one tenant-scoped statement with `applied_amount`, current remaining, `unapplied_cash_application_status` (`applied`), and `next_operator_action`.
+- `GET /v1/unapplied-cash-applications/{unapplied_cash_application_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/unapplied-cash-applications` lists summaries as `{unapplied_cash_applications, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{applied_at}|{unapplied_cash_application_id}`.
+- Missing tenant, illegal cursor, and illegal page_limit fail closed.
+- Operators apply parked leftover, then collect the residual or settle at exact zero. HTTP does not auto-settle, capture cards, write a journal, or call AIS.
+
 ## Payment-intent-presentment acceptance
 
 - `POST /v1/payment-intents` projects one #11 intent from a stored `collection_case_id`. Amount and currency come from the case. Replay of the same tenant, case snapshot, and contract version returns the same `payment_intent_id`. PAN, CVC, and provider secrets are refused.

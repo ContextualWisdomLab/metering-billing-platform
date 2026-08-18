@@ -55,6 +55,8 @@ __all__ = (
     "COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME",
     "UNAPPLIED_CASH_SCHEMA_NAME",
     "UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME",
+    "UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME",
+    "UNAPPLIED_CASH_APPLICATION_PRESENTMENT_SCHEMA_NAME",
     "WEBHOOK_DELIVERY_SCHEMA_NAME",
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -96,6 +98,8 @@ __all__ = (
     "validate_collection_write_off_presentment",
     "validate_unapplied_cash",
     "validate_unapplied_cash_presentment",
+    "validate_unapplied_cash_application",
+    "validate_unapplied_cash_application_presentment",
     "validate_ais_outbox_drain",
     "validate_payment_intent",
     "validate_payment_receipt",
@@ -162,6 +166,10 @@ COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME = (
 )
 UNAPPLIED_CASH_SCHEMA_NAME = "unapplied-cash.schema.json"
 UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME = "unapplied-cash-presentment.schema.json"
+UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME = "unapplied-cash-application.schema.json"
+UNAPPLIED_CASH_APPLICATION_PRESENTMENT_SCHEMA_NAME = (
+    "unapplied-cash-application-presentment.schema.json"
+)
 WEBHOOK_DELIVERY_SCHEMA_NAME = "webhook-delivery.schema.json"
 WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME = "webhook-delivery-presentment.schema.json"
 AIS_OUTBOX_DRAIN_SCHEMA_NAME = "ais-outbox-drain.schema.json"
@@ -1818,6 +1826,115 @@ def validate_unapplied_cash(
     else:
         if outcome is not None:
             errors.append("$: unknown unapplied_cash_outcome_code")
+    return tuple(errors)
+
+
+def validate_unapplied_cash_application(
+    application: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate leftover-apply shape plus exact applied-amount invariants.
+
+    Accepted and replayed applications must carry leftover, case, receipt,
+    invoice draft, currency, exact applied amount, remaining, and applied
+    timestamp. Rejections must carry a closed reason and must not invent
+    a legal number.
+    """
+    schema = load_json_schema(UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, application))
+    if not isinstance(application, Mapping):
+        return tuple(errors)
+    outcome = application.get("unapplied_cash_application_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        for field_name in (
+            "unapplied_cash_application_id",
+            "unapplied_cash_id",
+            "collection_case_id",
+            "payment_receipt_id",
+            "invoice_draft_id",
+            "currency_code",
+            "applied_amount",
+            "remaining_outstanding_amount",
+            "applied_at",
+        ):
+            if field_name not in application:
+                errors.append(f"$: {outcome} applications must include {field_name}")
+        applied_amount = application.get("applied_amount")
+        if isinstance(applied_amount, str):
+            try:
+                if Decimal(applied_amount) <= Decimal("0"):
+                    errors.append("$: applied_amount must be a positive exact decimal")
+            except Exception:
+                errors.append("$: applied_amount must be an exact decimal")
+        elif applied_amount is not None:
+            errors.append("$: applied_amount must be an exact decimal")
+        for forbidden_name in (
+            "legal_credit_note_number",
+            "legal_invoice_number",
+            "card_pan",
+        ):
+            if forbidden_name in application:
+                errors.append(f"$: applications must not include {forbidden_name}")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in application:
+            errors.append("$: rejected applications must include rejection_reason_code")
+        if "legal_invoice_number" in application:
+            errors.append("$: rejected applications must not invent legal numbers")
+        if "legal_credit_note_number" in application:
+            errors.append("$: rejected applications must not invent legal numbers")
+    else:
+        if outcome is not None:
+            errors.append("$: unknown unapplied_cash_application_outcome_code")
+    return tuple(errors)
+
+
+def validate_unapplied_cash_application_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate leftover-apply presentment plus remaining-outstanding invariants."""
+    schema = load_json_schema(
+        UNAPPLIED_CASH_APPLICATION_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    applied_amount = statement.get("applied_amount")
+    remaining = statement.get("remaining_outstanding_amount")
+    action = statement.get("next_operator_action")
+    if applied_amount is None:
+        errors.append("$: applied_amount is required")
+    elif isinstance(applied_amount, str):
+        try:
+            if Decimal(applied_amount) <= Decimal("0"):
+                errors.append("$: applied_amount must be a positive exact decimal")
+        except Exception:
+            errors.append("$: applied_amount must be an exact decimal")
+    else:
+        errors.append("$: applied_amount must be an exact decimal")
+    if remaining is None:
+        errors.append("$: remaining_outstanding_amount is required")
+    elif isinstance(remaining, str):
+        try:
+            parsed_remaining = Decimal(remaining)
+            if parsed_remaining < Decimal("0"):
+                errors.append("$: remaining_outstanding_amount must not be negative")
+            if parsed_remaining == Decimal("0") and action not in ("settle", "wait"):
+                errors.append("$: zero remaining applications must settle or wait")
+            if parsed_remaining > Decimal("0") and action != "collect":
+                errors.append("$: residual applications must collect")
+        except Exception:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    else:
+        errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    for forbidden_name in (
+        "legal_credit_note_number",
+        "legal_invoice_number",
+        "unapplied_cash_application_outcome_code",
+        "card_pan",
+    ):
+        if forbidden_name in statement:
+            errors.append(
+                f"$: unapplied cash application presentment must not include {forbidden_name}"
+            )
     return tuple(errors)
 
 

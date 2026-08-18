@@ -353,6 +353,39 @@ class UnappliedCashPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class UnappliedCashApplicationOutcomeCode(StrEnum):
+    """Terminal result of applying parked leftover to one collection case."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class UnappliedCashApplicationRejectionReasonCode(StrEnum):
+    """Why leftover apply was refused without reducing outstanding."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    UNAPPLIED_CASH_NOT_FOUND = "unapplied_cash_not_found"
+    COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
+    COLLECTION_CASE_SETTLED = "collection_case_settled"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    APPLIED_AMOUNT_ZERO = "applied_amount_zero"
+    APPLIED_AMOUNT_NEGATIVE = "applied_amount_negative"
+    APPLIED_AMOUNT_MISMATCH = "applied_amount_mismatch"
+    APPLIED_AMOUNT_EXCEEDS_PARKED = "applied_amount_exceeds_parked"
+    APPLIED_AMOUNT_EXCEEDS_OUTSTANDING = "applied_amount_exceeds_outstanding"
+    OUTSTANDING_NEGATIVE = "outstanding_negative"
+    REQUEST_INVALID = "request_invalid"
+
+
+class UnappliedCashApplicationPresentmentQueryError(ValueError):
+    """Raised when a stored leftover application cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class CreditNoteApplicationPresentmentQueryError(ValueError):
     """Raised when a stored credit-note application cannot be authorized or presented."""
 

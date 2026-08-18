@@ -127,6 +127,13 @@ The application is a thin WSGI adapter:
     #12 still rejects overpay.  GET item and list present the parked
     leftover.  Do not invent a journal, webhook, write-off, settlement,
     credit note, or AIS call.  Do not auto-apply leftover to another case.
+    ``POST /v1/collection-cases/{collection_case_id}/unapplied-cash-applications``
+    applies one parked leftover onto that open case.  Replay of the same
+    tenant and leftover returns the stored
+    ``unapplied_cash_application_id``.  Remaining zero does not settle.
+    GET item and list present the stored application.  Do not invent a
+    journal, webhook, write-off, credit note, AIS call, or settlement
+    command.
 
 Money stays exact-decimal strings.  The adapter never posts a journal, never
 stores a card PAN, and never calls a named payment provider.  AIS pulls
@@ -171,6 +178,7 @@ from metering_billing.errors import (
     CollectionCaseSettlementPresentmentQueryError,
     CollectionWriteOffPresentmentQueryError,
     UnappliedCashPresentmentQueryError,
+    UnappliedCashApplicationPresentmentQueryError,
     TenantApiCredentialPresentmentQueryError,
     TenantApiCredentialQueryError,
     TaxAssessmentQueryError,
@@ -203,6 +211,10 @@ from metering_billing.collection_write_off_presentment import (
 )
 from metering_billing.unapplied_cash import UnappliedCashService
 from metering_billing.unapplied_cash_presentment import UnappliedCashPresentmentService
+from metering_billing.unapplied_cash_application import UnappliedCashApplicationService
+from metering_billing.unapplied_cash_application_presentment import (
+    UnappliedCashApplicationPresentmentService,
+)
 from metering_billing.exact_decimal import parse_exact_decimal
 from metering_billing.collection_aging_presentment import (
     Clock,
@@ -261,6 +273,13 @@ UNAPPLIED_CASH_NESTED_PATH = re.compile(
 )
 UNAPPLIED_CASH_COLLECTION_PATH = "/v1/unapplied-cash"
 UNAPPLIED_CASH_ITEM_PATH = re.compile(r"^/v1/unapplied-cash/([0-9a-fA-F-]{36})$")
+UNAPPLIED_CASH_APPLICATION_NESTED_PATH = re.compile(
+    r"^/v1/collection-cases/([0-9a-fA-F-]{36})/unapplied-cash-applications$"
+)
+UNAPPLIED_CASH_APPLICATION_COLLECTION_PATH = "/v1/unapplied-cash-applications"
+UNAPPLIED_CASH_APPLICATION_ITEM_PATH = re.compile(
+    r"^/v1/unapplied-cash-applications/([0-9a-fA-F-]{36})$"
+)
 FORBIDDEN_PAYMENT_INTENT_KEYS = frozenset(
     {
         "card_pan",
@@ -406,6 +425,10 @@ def create_http_app(
     )
     unapplied_cash = UnappliedCashService(shared_ledger)
     unapplied_cash_presentments = UnappliedCashPresentmentService(shared_ledger)
+    unapplied_cash_applications = UnappliedCashApplicationService(shared_ledger)
+    unapplied_cash_application_presentments = UnappliedCashApplicationPresentmentService(
+        shared_ledger
+    )
     exports = AccountingExportService(shared_ledger)
     collections = CollectionCaseService(shared_ledger)
     intents = PaymentIntentService(shared_ledger)
@@ -1422,6 +1445,47 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_unapplied_cash_applications",
+            "get_unapplied_cash_application",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_unapplied_cash_applications":
+                    page = unapplied_cash_application_presentments.list_unapplied_cash_applications(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = unapplied_cash_application_presentments.present_unapplied_cash_application(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["unapplied_cash_application_id"],
+                        "unapplied_cash_application_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except UnappliedCashApplicationPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "unapplied_cash_application_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "unapplied_cash":
             try:
                 payload = _read_json_object(environ)
@@ -1441,6 +1505,39 @@ def create_http_app(
                     tenant_reference,
                     _parse_uuid(path_values["payment_receipt_id"], "payment_receipt_id"),
                     unapplied_amount=parsed_amount,
+                    currency_code=currency_code,
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "unapplied_cash_applications":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                raw_amount = payload.get("applied_amount")
+                parsed_amount = None
+                if raw_amount is not None:
+                    if not isinstance(raw_amount, str):
+                        raise HttpRequestError("request_invalid")
+                    parsed_amount = parse_exact_decimal(raw_amount)
+                currency_code = payload.get("currency_code")
+                if currency_code is not None and not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                result = unapplied_cash_applications.apply_unapplied_cash(
+                    tenant_reference,
+                    _parse_uuid(payload.get("unapplied_cash_id"), "unapplied_cash_id"),
+                    _parse_uuid(path_values["collection_case_id"], "collection_case_id"),
+                    applied_amount=parsed_amount,
                     currency_code=currency_code,
                 )
                 return _send_json(
@@ -1747,6 +1844,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
                 "collection_case_id": application_nested.group(1)
             }
         return "http_method_not_allowed", {}
+    unapplied_application_nested = UNAPPLIED_CASH_APPLICATION_NESTED_PATH.fullmatch(path)
+    if unapplied_application_nested is not None:
+        if method == "POST":
+            return "unapplied_cash_applications", {
+                "collection_case_id": unapplied_application_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
     settlement_nested = COLLECTION_CASE_SETTLEMENT_NESTED_PATH.fullmatch(path)
     if settlement_nested is not None:
         if method == "POST":
@@ -1799,6 +1903,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "get_credit_note_application", {
                 "credit_note_application_id": application_match.group(1)
+            }
+        return "method_not_allowed", {}
+    if path == UNAPPLIED_CASH_APPLICATION_COLLECTION_PATH:
+        if method == "GET":
+            return "list_unapplied_cash_applications", {}
+        return "method_not_allowed", {}
+    unapplied_application_match = UNAPPLIED_CASH_APPLICATION_ITEM_PATH.fullmatch(path)
+    if unapplied_application_match is not None:
+        if method == "GET":
+            return "get_unapplied_cash_application", {
+                "unapplied_cash_application_id": unapplied_application_match.group(1)
             }
         return "method_not_allowed", {}
     if path == DUNNING_EVENT_COLLECTION_PATH:
