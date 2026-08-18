@@ -470,6 +470,31 @@ class StoredCollectionWriteOff:
 
 
 @dataclass(frozen=True)
+class StoredIssuedInvoiceVoid:
+    """Append-only commercial void of one issued invoice.
+
+    Identity is ``(tenant_account_id, issued_invoice_id)``.  One issued
+    invoice voids at most once through this command.
+    ``issued_invoice_void_id`` is the opaque generated identifier.  This
+    is not a journal, webhook, payment receipt, credit note, write-off,
+    refund, settlement, or AIS posting.
+    """
+
+    issued_invoice_void_id: UUID
+    tenant_account_id: UUID
+    issued_invoice_id: UUID
+    invoice_draft_id: UUID
+    collection_case_id: UUID | None
+    issued_invoice_void_contract_version: int
+    source_payload_hash: str
+    currency_code: str
+    voided_amount: Decimal
+    remaining_outstanding_amount: Decimal
+    issued_invoice_void_status: str
+    voided_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredJournalProposalLine:
     """Append-only proposal line using a semantic account role, not a chart ID."""
 
@@ -908,6 +933,8 @@ class MemoryUsageLedger:
     )
     collection_write_offs: dict[UUID, StoredCollectionWriteOff] = field(default_factory=dict)
     collection_write_off_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
+    issued_invoice_voids: dict[UUID, StoredIssuedInvoiceVoid] = field(default_factory=dict)
+    issued_invoice_void_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     unapplied_cash: dict[UUID, StoredUnappliedCash] = field(default_factory=dict)
     unapplied_cash_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
     unapplied_cash_applications: dict[UUID, StoredUnappliedCashApplication] = field(
@@ -2020,6 +2047,77 @@ class MemoryUsageLedger:
         self.collection_write_off_index[identity_key] = persisted.collection_write_off_id
         return persisted
 
+    def find_issued_invoice_void(
+        self, tenant_account_id: UUID, issued_invoice_id: UUID
+    ) -> StoredIssuedInvoiceVoid | None:
+        """Return the void row for one tenant issued invoice, if any."""
+        issued_invoice_void_id = self.issued_invoice_void_index.get(
+            (tenant_account_id, issued_invoice_id)
+        )
+        if issued_invoice_void_id is None:
+            return None
+        return self.issued_invoice_voids[issued_invoice_void_id]
+
+    def get_issued_invoice_void(
+        self, issued_invoice_void_id: UUID
+    ) -> StoredIssuedInvoiceVoid | None:
+        """Return one issued-invoice void by internal identifier, if present."""
+        return self.issued_invoice_voids.get(issued_invoice_void_id)
+
+    def list_issued_invoice_voids_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredIssuedInvoiceVoid, ...]:
+        """Return issued-invoice voids limited to one tenant."""
+        return tuple(
+            void_row
+            for void_row in self.issued_invoice_voids.values()
+            if void_row.tenant_account_id == tenant_account_id
+        )
+
+    def insert_issued_invoice_void(
+        self, issued_invoice_void: StoredIssuedInvoiceVoid
+    ) -> StoredIssuedInvoiceVoid:
+        """Append an immutable void row.  Existing identity rows stay."""
+        if issued_invoice_void.issued_invoice_void_status != "recorded":
+            raise ValueError("issued_invoice_void_status must be recorded")
+        remaining = parse_exact_decimal(
+            format_exact_decimal(issued_invoice_void.remaining_outstanding_amount)
+        )
+        if remaining != 0:
+            raise ValueError("issued-invoice void remaining must be exact zero")
+        voided_amount = parse_exact_decimal(
+            format_exact_decimal(issued_invoice_void.voided_amount)
+        )
+        if voided_amount <= 0:
+            raise ValueError("issued-invoice void amount must be a positive exact decimal")
+        if issued_invoice_void.issued_invoice_void_id in self.issued_invoice_voids:
+            raise ValueError("issued_invoice_void_id already stored")
+        identity_key = (
+            issued_invoice_void.tenant_account_id,
+            issued_invoice_void.issued_invoice_id,
+        )
+        if identity_key in self.issued_invoice_void_index:
+            raise ValueError("issued-invoice voids are immutable and cannot be replaced")
+        persisted = StoredIssuedInvoiceVoid(
+            issued_invoice_void_id=issued_invoice_void.issued_invoice_void_id,
+            tenant_account_id=issued_invoice_void.tenant_account_id,
+            issued_invoice_id=issued_invoice_void.issued_invoice_id,
+            invoice_draft_id=issued_invoice_void.invoice_draft_id,
+            collection_case_id=issued_invoice_void.collection_case_id,
+            issued_invoice_void_contract_version=(
+                issued_invoice_void.issued_invoice_void_contract_version
+            ),
+            source_payload_hash=issued_invoice_void.source_payload_hash,
+            currency_code=issued_invoice_void.currency_code,
+            voided_amount=voided_amount,
+            remaining_outstanding_amount=remaining,
+            issued_invoice_void_status=issued_invoice_void.issued_invoice_void_status,
+            voided_at=issued_invoice_void.voided_at,
+        )
+        self.issued_invoice_voids[persisted.issued_invoice_void_id] = persisted
+        self.issued_invoice_void_index[identity_key] = persisted.issued_invoice_void_id
+        return persisted
+
     def find_unapplied_cash(
         self, tenant_account_id: UUID, payment_receipt_id: UUID
     ) -> StoredUnappliedCash | None:
@@ -2244,7 +2342,7 @@ class MemoryUsageLedger:
         amount = parse_exact_decimal(format_exact_decimal(applied_amount))
         if amount <= 0:
             raise ValueError("unapplied cash apply amount must be a positive exact decimal")
-        if stored.collection_case_status == "settled":
+        if stored.collection_case_status in {"settled", "voided"}:
             raise ValueError("settled collection cases cannot accept unapplied cash")
         remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
         if amount > remaining:
@@ -2276,7 +2374,7 @@ class MemoryUsageLedger:
         amount = parse_exact_decimal(format_exact_decimal(write_off_amount))
         if amount <= 0:
             raise ValueError("collection write-off amount must be a positive exact decimal")
-        if stored.collection_case_status == "settled":
+        if stored.collection_case_status in {"settled", "voided"}:
             raise ValueError("settled collection cases cannot accept a write-off")
         remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
         if remaining != amount:
@@ -2307,12 +2405,46 @@ class MemoryUsageLedger:
             raise ValueError("collection case outstanding must be exact zero to settle")
         if stored.collection_case_status == "settled":
             return stored
+        if stored.collection_case_status == "voided":
+            raise ValueError("voided collection cases cannot settle")
         updated = StoredCollectionCase(
             collection_case_id=stored.collection_case_id,
             tenant_account_id=stored.tenant_account_id,
             invoice_draft_id=stored.invoice_draft_id,
             currency_code=stored.currency_code,
             collection_case_status="settled",
+            outstanding_amount=Decimal("0"),
+            opened_at=stored.opened_at,
+        )
+        self.collection_cases[updated.collection_case_id] = updated
+        return updated
+
+    def mark_collection_case_voided(
+        self, collection_case_id: UUID, expected_outstanding: Decimal
+    ) -> StoredCollectionCase:
+        """Close an unused open or dunning case as ``voided`` at exact zero.
+
+        Replay of an already-voided case returns the stored row.  Settled
+        cases and remaining that does not equal the issued amount fail
+        closed.  This is not a settlement.
+        """
+        stored = self.collection_cases.get(collection_case_id)
+        if stored is None:
+            raise ValueError("collection void requires a stored collection case")
+        if stored.collection_case_status == "voided":
+            return stored
+        if stored.collection_case_status not in {"open", "dunning"}:
+            raise ValueError("only open or dunning collection cases can void")
+        remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+        expected = parse_exact_decimal(format_exact_decimal(expected_outstanding))
+        if remaining != expected:
+            raise ValueError("collection void remaining must equal the issued amount")
+        updated = StoredCollectionCase(
+            collection_case_id=stored.collection_case_id,
+            tenant_account_id=stored.tenant_account_id,
+            invoice_draft_id=stored.invoice_draft_id,
+            currency_code=stored.currency_code,
+            collection_case_status="voided",
             outstanding_amount=Decimal("0"),
             opened_at=stored.opened_at,
         )
@@ -2916,6 +3048,8 @@ class MemoryUsageLedger:
         applied = parse_exact_decimal(format_exact_decimal(applied_amount))
         if applied <= 0:
             raise ValueError("collection settlement amount must be a positive exact decimal")
+        if stored.collection_case_status == "voided":
+            raise ValueError("voided collection cases cannot accept a settlement apply")
         if applied > stored.outstanding_amount:
             raise ValueError("collection settlement amount cannot exceed outstanding")
         remaining_amount = stored.outstanding_amount - applied

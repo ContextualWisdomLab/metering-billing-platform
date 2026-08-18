@@ -21,9 +21,10 @@
 - `invoice_draft_line`: append-only draft line copied from a rating line.
 - `issued_invoice`: append-only commercial invoice snapshot issued from one tenant draft. Identity is `(tenant_account_id, invoice_draft_id)`. `issued_invoice_id` is the opaque generated invoice identifier, not a statutory number.
 - `issued_invoice_line`: append-only commercial line frozen from one invoice-draft line.
+- `issued_invoice_void`: append-only commercial void of one unused issued invoice. Identity is `(tenant_account_id, issued_invoice_id)`. `issued_invoice_void_id` is the opaque generated identifier, not a statutory number.
 - `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft, payment receipt, credit adjustment, collection write-off, or leftover refund. AIS pulls these rows; query does not add a second table.
 - `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
-- `collection_case`: commercial collection case for one tenant invoice draft; receipts update outstanding and may mark the case settled.
+- `collection_case`: commercial collection case for one tenant invoice draft; receipts update outstanding and may mark the case settled; an unused issued-invoice void may mark the case `voided`.
 - `collection_dunning_event`: append-only commercial reminder that does not capture money.
 - `payment_intent`: provider-neutral payment initiation projection for one collection case; cancellation updates current status.
 - `payment_receipt`: append-only commercial receipt applied against one projected payment intent.
@@ -76,7 +77,7 @@ A stored journal proposal is identified by `(tenant_account_id, invoice_draft_id
 
 ## Collection-case identity
 
-A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as `tax_inclusive_amount` when a tax assessment exists, otherwise the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts, commercial credits recorded against an already-open case, a later `credit_note_application`, or an explicit `collection_case_settlement` reduce outstanding to zero and mark the case `settled`.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
+A stored collection case is identified by `(tenant_account_id, invoice_draft_id)`.  Outstanding starts as `tax_inclusive_amount` when a tax assessment exists, otherwise the exact invoice-draft total.  Status is `open` or `dunning` until applied receipts, commercial credits recorded against an already-open case, a later `credit_note_application`, or an explicit `collection_case_settlement` reduce outstanding to zero and mark the case `settled`.  An unused issued-invoice void may close the case as `voided` at exact-zero remaining; `settled` is not reused.  Dunning events reference the case and tenant, carry unique notice codes and event numbers, and never capture payment or post journals.
 
 ## Payment-intent identity
 
@@ -101,6 +102,10 @@ Presentment does not add a table.  `GET /v1/invoice-drafts/{invoice_draft_id}` p
 ## Issued-invoice identity
 
 A stored issued invoice is identified by `(tenant_account_id, invoice_draft_id)`.  Internal primary key is the opaque generated `issued_invoice_id`.  The hash covers the draft, contract version, rating run, usage snapshot, currency, exclusive/tax/inclusive totals, and issued lines.  Status is `issued` only.  `due_at` is optional.  The snapshot does not store a statutory invoice number, fiscal signature, or customer PII.  First successful issue appends one `webhook_outbox_event` with `event_type_code` `invoice.issued` and `source_id` `issued_invoice_id`.  The outbox `data` is a thin reference plus hash and omits issued lines.  `GET /v1/issued-invoices/{issued_invoice_id}` projects the stored row.  `GET /v1/issued-invoices` lists `{issued_invoices, next_cursor}` ordered by `issued_at` then `issued_invoice_id`.
+
+## Issued-invoice-void identity
+
+A stored issued-invoice void is identified by `(tenant_account_id, issued_invoice_id)`.  Internal primary key is the opaque generated `issued_invoice_void_id`.  The hash covers the issued invoice, draft, currency, inclusive amount, and contract version.  Status is `recorded` only.  Voided amount is the issued tax-inclusive amount.  Remaining outstanding after accept is exact zero.  One issued invoice voids at most once.  The issued snapshot stays `issued`.  The void row invents no journal, webhook, payment receipt, credit note, write-off, refund, settlement, or statutory number.  An unused open or dunning case closes as `voided`.  `GET /v1/issued-invoice-voids/{issued_invoice_void_id}` projects the stored row plus current remaining outstanding.  `GET /v1/issued-invoice-voids` lists `{issued_invoice_voids, next_cursor}` ordered by `voided_at` then `issued_invoice_void_id`.
 
 ## Issued-credit-note identity
 
@@ -132,7 +137,7 @@ A stored unapplied-cash refund is identified by `(tenant_account_id, unapplied_c
 
 ## Collection-case-presentment projection
 
-Collection presentment does not add a table.  `GET /v1/collection-cases/{collection_case_id}` projects stored `collection_case` and `collection_dunning_event` rows plus accepted credits on the same draft.  `collection_outstanding` is the exact stored outstanding.  `collection_case_status` stays `open`, `dunning`, or `settled`.  Next operator action is `collect`, `credit`, or `wait`.  Collection aging presentment also does not add a table.  `GET /v1/collection-aging` projects stored `collection_case` remaining into current / 1-30 / 31-60 / 61-90 / 90+ buckets grouped by `currency_code`.  Due date is issued-invoice `due_at` when stored, otherwise `collection_case.opened_at`.  Settled cases and exact-zero remaining are omitted.  Account-statement presentment also does not add a table.  `GET /v1/billing-accounts/{billing_account_id}/statement` projects stored issued-invoice totals, open collection remaining, applied credit-note amounts, write-offs, unused parked leftover, and leftover refunds grouped by `currency_code`.  Attribution uses invoice-draft lines exclusive to that billing account.  Dunning-event presentment also does not add a table.  `GET /v1/dunning-events/{dunning_event_id}` projects one stored `collection_dunning_event`.  `GET /v1/dunning-events` lists `{dunning_events, next_cursor}` ordered by `occurred_at` then `collection_dunning_event_id`.
+Collection presentment does not add a table.  `GET /v1/collection-cases/{collection_case_id}` projects stored `collection_case` and `collection_dunning_event` rows plus accepted credits on the same draft.  `collection_outstanding` is the exact stored outstanding.  `collection_case_status` stays `open`, `dunning`, `settled`, or `voided`.  Next operator action is `collect`, `credit`, or `wait`.  Collection aging presentment also does not add a table.  `GET /v1/collection-aging` projects stored `collection_case` remaining into current / 1-30 / 31-60 / 61-90 / 90+ buckets grouped by `currency_code`.  Due date is issued-invoice `due_at` when stored, otherwise `collection_case.opened_at`.  Settled cases and exact-zero remaining are omitted.  Account-statement presentment also does not add a table.  `GET /v1/billing-accounts/{billing_account_id}/statement` projects stored issued-invoice totals, open collection remaining, applied credit-note amounts, write-offs, unused parked leftover, and leftover refunds grouped by `currency_code`.  Attribution uses invoice-draft lines exclusive to that billing account.  Dunning-event presentment also does not add a table.  `GET /v1/dunning-events/{dunning_event_id}` projects one stored `collection_dunning_event`.  `GET /v1/dunning-events` lists `{dunning_events, next_cursor}` ordered by `occurred_at` then `collection_dunning_event_id`.
 
 ## Payment-intent-presentment projection
 

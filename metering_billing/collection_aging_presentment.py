@@ -28,6 +28,7 @@ from uuid import UUID
 
 from metering_billing.collection_case import (
     COLLECTION_CASE_SETTLED_STATUS,
+    COLLECTION_CASE_VOIDED_STATUS,
     parse_collection_amount,
 )
 from metering_billing.errors import CollectionAgingPresentmentQueryError, require_resolved
@@ -194,7 +195,10 @@ class CollectionAgingPresentmentService:
 
 def _is_ageable(stored: StoredCollectionCase) -> bool:
     """Return whether the case is commercially open or in dunning."""
-    return stored.collection_case_status != COLLECTION_CASE_SETTLED_STATUS
+    return stored.collection_case_status not in {
+        COLLECTION_CASE_SETTLED_STATUS,
+        COLLECTION_CASE_VOIDED_STATUS,
+    }
 
 
 def _empty_currency_buckets() -> dict[str, CollectionAgingBucketResult]:

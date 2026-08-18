@@ -177,6 +177,20 @@ contextual-orchestrator usage
 - Invoice-draft, tax-assessment, journal-proposal, collection, payment, and AIS contracts stay unchanged. `invoice_draft_status` stays `draft`. `proposal_status` stays `validated`. First successful issue enqueues one existing #24 `invoice.issued` outbox event. No payment capture or AIS call is added. HMAC, SSRF, and delivery contracts stay unchanged.
 - Operators issue invoice, then collect or credit. `operator_console` Storybook adds one `IssuedInvoice` story. There is no login wall, Stripe, AIS call, or production SPA.
 
+## Issued-invoice-void acceptance
+
+- A known unused same-tenant issued invoice voids once. `voided_amount` is the issued tax-inclusive amount in the same currency. Status is `recorded`. The issued snapshot stays `issued`.
+- A second void of the same tenant and `issued_invoice_id` returns the same `issued_invoice_void_id` as `duplicate_replay` and never re-closes a collection case.
+- `issued_invoice_void_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, a journal, webhook, refund, write-off rewrite, statement rewrite, or AIS call.
+- Fail closed when the related collection case has a payment receipt, credit-note apply, unapplied-cash apply, or write-off; remaining no longer equals the issued amount; the case is already settled; currency mismatches; the invoice is missing or cross-tenant; or the tenant is missing.
+- An unused open or dunning case closes as `voided` at exact-zero remaining. `settled` is not reused. Settle-when-zero then fail-closes as `collection_case_voided`.
+- `POST /v1/issued-invoices/{issued_invoice_id}/voids` is the nested void command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
+- A known stored void presents one tenant-scoped statement with identity, voided amount, remaining outstanding, `voided_at`, and `next_operator_action` (`wait`).
+- `GET /v1/issued-invoice-voids/{issued_invoice_void_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/issued-invoice-voids` lists summaries as `{issued_invoice_voids, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{voided_at}|{issued_invoice_void_id}`.
+- Issued-invoice, collection, payment, credit, write-off, leftover, settlement, statement, and AIS contracts stay unchanged except the additive `voided` collection-case status and settle fail-closed on that status.
+- Operators void an unused issue. There is no login wall, Stripe, AIS call, journal, webhook, or production SPA.
+
 ## Issued-credit-note acceptance
 
 - A known stored credit adjustment issues one append-only commercial `issued_credit_note` whose currency and tax-exclusive/tax/inclusive totals match the stored credit.
@@ -209,7 +223,7 @@ contextual-orchestrator usage
 - A known stored open collection case whose remaining outstanding is exact zero settles once and flips status to `settled`.
 - A second settle of the same tenant and `collection_case_id` returns the same `collection_case_settlement_id` as `duplicate_replay` and never double-settles.
 - `collection_case_settlement_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment receipt, write-off, AIS call, or a new webhook event type.
-- Outstanding that is not zero, an already-settled case, and a tenant mismatch fail closed.
+- Outstanding that is not zero, an already-settled case, a voided case, and a tenant mismatch fail closed.
 - `POST /v1/collection-cases/{collection_case_id}/settlements` is the nested settle command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
 - A known stored settlement presents one tenant-scoped statement with identity, exact-zero remaining, `settled_at`, and `next_operator_action` (`wait`).
 - `GET /v1/collection-case-settlements/{collection_case_settlement_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.

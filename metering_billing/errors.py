@@ -224,6 +224,37 @@ class IssuedInvoicePresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class IssuedInvoiceVoidOutcomeCode(StrEnum):
+    """Terminal result of attempting to persist one commercial issued-invoice void."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class IssuedInvoiceVoidRejectionReasonCode(StrEnum):
+    """Why a void request was refused without writing a commercial void."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    ISSUED_INVOICE_NOT_FOUND = "issued_invoice_not_found"
+    PAYMENT_RECEIPT_EXISTS = "payment_receipt_exists"
+    CREDIT_NOTE_ALREADY_APPLIED = "credit_note_already_applied"
+    COLLECTION_WRITE_OFF_EXISTS = "collection_write_off_exists"
+    UNAPPLIED_CASH_ALREADY_APPLIED = "unapplied_cash_already_applied"
+    COLLECTION_CASE_SETTLED = "collection_case_settled"
+    OUTSTANDING_MISMATCH = "outstanding_mismatch"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    REQUEST_INVALID = "request_invalid"
+
+
+class IssuedInvoiceVoidPresentmentQueryError(ValueError):
+    """Raised when a stored issued-invoice void cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class IssuedCreditNoteOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one commercial issued credit note."""
 
@@ -284,6 +315,7 @@ class CollectionCaseSettlementRejectionReasonCode(StrEnum):
     COLLECTION_CASE_NOT_FOUND = "collection_case_not_found"
     OUTSTANDING_NOT_ZERO = "outstanding_not_zero"
     COLLECTION_CASE_SETTLED = "collection_case_settled"
+    COLLECTION_CASE_VOIDED = "collection_case_voided"
     REQUEST_INVALID = "request_invalid"
 
 

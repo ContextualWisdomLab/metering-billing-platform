@@ -24,7 +24,10 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
-from metering_billing.collection_case import COLLECTION_CASE_SETTLED_STATUS
+from metering_billing.collection_case import (
+    COLLECTION_CASE_SETTLED_STATUS,
+    COLLECTION_CASE_VOIDED_STATUS,
+)
 from metering_billing.errors import (
     CollectionCaseSettlementOutcomeCode,
     CollectionCaseSettlementRejectionReasonCode,
@@ -210,6 +213,10 @@ class CollectionCaseSettlementService:
         if collection_case.collection_case_status == COLLECTION_CASE_SETTLED_STATUS:
             return _rejected(
                 CollectionCaseSettlementRejectionReasonCode.COLLECTION_CASE_SETTLED
+            )
+        if collection_case.collection_case_status == COLLECTION_CASE_VOIDED_STATUS:
+            return _rejected(
+                CollectionCaseSettlementRejectionReasonCode.COLLECTION_CASE_VOIDED
             )
         remaining = collection_case.outstanding_amount
         if remaining == 0:

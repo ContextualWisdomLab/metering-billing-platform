@@ -39,6 +39,7 @@ COLLECTION_CASE_CONTRACT_VERSION = 1
 COLLECTION_CASE_OPEN_STATUS = "open"
 COLLECTION_CASE_DUNNING_STATUS = "dunning"
 COLLECTION_CASE_SETTLED_STATUS = "settled"
+COLLECTION_CASE_VOIDED_STATUS = "voided"
 DUNNING_NOTICE_CODES = frozenset({"first_notice", "overdue_notice"})
 
 
@@ -291,9 +292,11 @@ def _derived_collection_case_status(
     stored: StoredCollectionCase,
     dunning_events: tuple[StoredCollectionDunningEvent, ...],
 ) -> str:
-    """Prefer ``settled`` over dunning so a paid case does not reopen as a reminder."""
+    """Prefer ``settled`` or ``voided`` over dunning so a closed case does not reopen."""
     if stored.collection_case_status == COLLECTION_CASE_SETTLED_STATUS:
         return COLLECTION_CASE_SETTLED_STATUS
+    if stored.collection_case_status == COLLECTION_CASE_VOIDED_STATUS:
+        return COLLECTION_CASE_VOIDED_STATUS
     if dunning_events:
         return COLLECTION_CASE_DUNNING_STATUS
     return stored.collection_case_status

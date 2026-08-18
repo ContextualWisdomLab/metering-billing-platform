@@ -78,7 +78,7 @@ After a `rating_run` exists, call `InvoiceDraftService.draft_invoice` with the t
 
 After an `invoice_draft` exists, call `InvoicePresentmentService.present_invoice_draft` or `GET /v1/invoice-drafts/{invoice_draft_id}` with the tenant. The statement shows exclusive, tax, inclusive, credited, and amount due as exact-decimal strings. Tax is zero when no assessment exists. Amount due is inclusive minus accepted credits and never below zero. `GET /v1/invoice-drafts` lists summaries. Open the draft statement, then collect or credit. The read does not post or call AIS.
 
-After an `invoice_draft` exists, call `IssuedInvoiceService.issue_invoice` or `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` with the tenant. Replay of the same tenant and draft returns the same `issued_invoice_id`. Totals freeze the draft or its tax assessment. First successful issue enqueues one existing `invoice.issued` webhook outbox event. `GET /v1/issued-invoices/{issued_invoice_id}` and `GET /v1/issued-invoices` present the snapshot. Issue invoice, then collect or credit. The path does not invent statutory numbering, capture payment, or call AIS.
+After an `invoice_draft` exists, call `IssuedInvoiceService.issue_invoice` or `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` with the tenant. Replay of the same tenant and draft returns the same `issued_invoice_id`. Totals freeze the draft or its tax assessment. First successful issue enqueues one existing `invoice.issued` webhook outbox event. `GET /v1/issued-invoices/{issued_invoice_id}` and `GET /v1/issued-invoices` present the snapshot. Issue invoice, then collect or credit. An unused issue may later be voided through `IssuedInvoiceVoidService.void_issued_invoice`. The path does not invent statutory numbering, capture payment, or call AIS.
 
 After a `credit_adjustment` exists, call `IssuedCreditNoteService.issue_credit_note` or `POST /v1/credit-adjustments/{credit_adjustment_id}/issued-credit-notes` with the tenant. Replay of the same tenant and credit returns the same `issued_credit_note_id`. Totals freeze the stored exclusive, tax, and inclusive credit amounts. First successful issue enqueues one existing `credit_note.issued` webhook outbox event. `GET /v1/issued-credit-notes/{issued_credit_note_id}` and `GET /v1/issued-credit-notes` present the snapshot. Issue the credit note; the validated journal remains available for AIS. The path does not invent statutory numbering, capture payment, or call AIS.
 
@@ -227,6 +227,17 @@ python3 -c "from metering_billing import IssuedInvoiceService, IssuedInvoicePres
 ```
 
 After an `invoice_draft` exists, `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` writes one immutable commercial snapshot. `GET /v1/issued-invoices/{issued_invoice_id}` returns the tenant-scoped statement. Issue invoice, then collect or credit.
+
+## Void an unused issued invoice
+
+```bash
+python3 -c "from metering_billing import IssuedInvoiceVoidService, IssuedInvoiceVoidPresentmentService"
+# POST /v1/issued-invoices/{issued_invoice_id}/voids
+# GET /v1/issued-invoice-voids/{issued_invoice_void_id}?tenant_reference=urn:cwl:tenant_001
+# GET /v1/issued-invoice-voids?tenant_reference=urn:cwl:tenant_001
+```
+
+After an unused `issued_invoice` exists, `POST /v1/issued-invoices/{issued_invoice_id}/voids` records one commercial void. Replay of the same tenant and issued invoice returns the stored `issued_invoice_void_id`. An unused open or dunning collection case closes as `voided`. `GET /v1/issued-invoice-voids/{issued_invoice_void_id}` returns the tenant-scoped statement. This path does not invent a journal, webhook, AIS call, or statutory identifier.
 
 ## Issue a commercial credit note
 

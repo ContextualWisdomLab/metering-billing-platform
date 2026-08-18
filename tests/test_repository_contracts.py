@@ -34,6 +34,8 @@ from metering_billing.contracts import (
     validate_webhook_outbox_event_presentment,
     validate_issued_invoice,
     validate_issued_invoice_presentment,
+    validate_issued_invoice_void,
+    validate_issued_invoice_void_presentment,
     validate_issued_credit_note,
     validate_issued_credit_note_presentment,
     validate_webhook_delivery,
@@ -2553,6 +2555,68 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("invoice_number", sql)
         self.assertNotIn("legal_invoice_number", sql)
 
+    def test_issued_invoice_void_accepts_recorded_void_and_rejects_numbering(self) -> None:
+        """A void contract records exact amount and cannot invent a legal number."""
+        schema = self._schema("issued-invoice-void.schema.json")
+        instance = {
+            "issued_invoice_void_contract_version": 1,
+            "issued_invoice_void_outcome_code": "accepted",
+            "issued_invoice_void_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd80",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
+            "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+            "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd21",
+            "currency_code": "USD",
+            "voided_amount": "0.003705",
+            "remaining_outstanding_amount": "0",
+            "issued_invoice_void_status": "recorded",
+            "collection_case_status": "voided",
+            "voided_at": "2026-08-18T12:00:00Z",
+            "source_payload_hash": "sha256:" + ("d" * 64),
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_issued_invoice_void(instance), ())
+        presentment = {
+            "issued_invoice_void_presentment_contract_version": 1,
+            "issued_invoice_void_id": instance["issued_invoice_void_id"],
+            "tenant_reference": instance["tenant_reference"],
+            "issued_invoice_id": instance["issued_invoice_id"],
+            "invoice_draft_id": instance["invoice_draft_id"],
+            "collection_case_id": instance["collection_case_id"],
+            "currency_code": "USD",
+            "voided_amount": "0.003705",
+            "remaining_outstanding_amount": "0",
+            "issued_invoice_void_status": "recorded",
+            "collection_case_status": "voided",
+            "voided_at": "2026-08-18T12:00:00Z",
+            "source_payload_hash": instance["source_payload_hash"],
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_issued_invoice_void_presentment(presentment), ())
+        numbered = dict(instance)
+        numbered["legal_invoice_number"] = "INV-1"
+        self.assertTrue(validate_issued_invoice_void(numbered))
+
+    def test_issued_invoice_void_migration_persists_append_only_voids(self) -> None:
+        """The void migration must stay tenant-scoped and must not reuse settled."""
+        sql = (ROOT / "database/migrations/0029_issued_invoice_void.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.issued_invoice_void",
+            "UNIQUE (tenant_account_id, issued_invoice_id)",
+            "UNIQUE (tenant_account_id, issued_invoice_void_id)",
+            "FOREIGN KEY (tenant_account_id, issued_invoice_id)",
+            "issued_invoice_void_status text NOT NULL CHECK (\n        issued_invoice_void_status IN ('recorded')",
+            "CHECK (collection_case_status IN ('open', 'dunning', 'settled', 'voided'))",
+            "collection_case_status IN ('settled', 'voided')",
+            "CHECK (remaining_outstanding_amount = 0)",
+            "CHECK (voided_amount > 0)",
+        ):
+            self.assertIn(expected_fragment, sql)
+        self.assertNotIn("legal_invoice_number", sql)
+
     def test_invoice_draft_migration_persists_append_only_drafts(self) -> None:
         """The invoice-draft migration must keep identity tenant-scoped and draft-only."""
         sql = (ROOT / "database/migrations/0004_invoice_draft.sql").read_text(encoding="utf-8")
@@ -2612,6 +2676,8 @@ class RepositoryContractTests(unittest.TestCase):
         )
         settled = dict(instance, collection_case_status="settled", outstanding_amount="0")
         self.assertEqual(validate_schema_instance(schema, settled), ())
+        voided = dict(instance, collection_case_status="voided", outstanding_amount="0")
+        self.assertEqual(validate_schema_instance(schema, voided), ())
 
     def test_collection_case_migration_persists_append_only_cases_and_notices(self) -> None:
         """The collection-case migration must stay tenant-scoped and commercial-only."""

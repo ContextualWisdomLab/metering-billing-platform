@@ -21,6 +21,7 @@ from uuid import UUID
 
 from metering_billing.collection_case import (
     COLLECTION_CASE_SETTLED_STATUS,
+    COLLECTION_CASE_VOIDED_STATUS,
     CollectionDunningEventResult,
     _derived_collection_case_status,
 )
@@ -51,7 +52,10 @@ def next_operator_action(
     accepted credit still has adjustable consideration, so the next action is
     credit.  Otherwise the operator collects.
     """
-    if collection_case_status == COLLECTION_CASE_SETTLED_STATUS or outstanding <= ZERO:
+    if collection_case_status in {
+        COLLECTION_CASE_SETTLED_STATUS,
+        COLLECTION_CASE_VOIDED_STATUS,
+    } or outstanding <= ZERO:
         return OPERATOR_ACTION_WAIT
     if collection_case_status == "open" and credited_amount > ZERO:
         return OPERATOR_ACTION_CREDIT
@@ -241,7 +245,10 @@ class CollectionCasePresentmentService:
 
 def _next_dunning_notice_code(collection_case_status: str, last_notice: str | None) -> str | None:
     """Return the next stored notice code, or ``None`` when no further notice exists."""
-    if collection_case_status == COLLECTION_CASE_SETTLED_STATUS:
+    if collection_case_status in {
+        COLLECTION_CASE_SETTLED_STATUS,
+        COLLECTION_CASE_VOIDED_STATUS,
+    }:
         return None
     if last_notice is None:
         return FIRST_NOTICE_CODE

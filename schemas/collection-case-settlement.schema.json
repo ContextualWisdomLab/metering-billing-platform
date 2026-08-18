@@ -41,6 +41,7 @@
         "collection_case_not_found",
         "outstanding_not_zero",
         "collection_case_settled",
+        "collection_case_voided",
         "request_invalid"
       ]
     }

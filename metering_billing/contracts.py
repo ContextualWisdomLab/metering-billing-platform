@@ -54,6 +54,8 @@ __all__ = (
     "COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_WRITE_OFF_SCHEMA_NAME",
     "COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_INVOICE_VOID_SCHEMA_NAME",
+    "ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME",
     "UNAPPLIED_CASH_SCHEMA_NAME",
     "UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME",
     "UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME",
@@ -99,6 +101,8 @@ __all__ = (
     "validate_collection_case_settlement_presentment",
     "validate_collection_write_off",
     "validate_collection_write_off_presentment",
+    "validate_issued_invoice_void",
+    "validate_issued_invoice_void_presentment",
     "validate_unapplied_cash",
     "validate_unapplied_cash_presentment",
     "validate_unapplied_cash_application",
@@ -169,6 +173,10 @@ COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME = (
 COLLECTION_WRITE_OFF_SCHEMA_NAME = "collection-write-off.schema.json"
 COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME = (
     "collection-write-off-presentment.schema.json"
+)
+ISSUED_INVOICE_VOID_SCHEMA_NAME = "issued-invoice-void.schema.json"
+ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME = (
+    "issued-invoice-void-presentment.schema.json"
 )
 UNAPPLIED_CASH_SCHEMA_NAME = "unapplied-cash.schema.json"
 UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME = "unapplied-cash-presentment.schema.json"
@@ -1820,6 +1828,115 @@ def validate_collection_write_off_presentment(
         if forbidden_name in statement:
             errors.append(
                 f"$: collection write-off presentment must not include {forbidden_name}"
+            )
+    return tuple(errors)
+
+
+def validate_issued_invoice_void(
+    void_row: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate void shape plus exact voided-amount invariants.
+
+    Accepted and replayed voids must carry the issued invoice, draft,
+    currency, positive voided amount, and voided timestamp. Rejections
+    must carry a closed reason and must not invent a legal number.
+    """
+    schema = load_json_schema(ISSUED_INVOICE_VOID_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, void_row))
+    if not isinstance(void_row, Mapping):
+        return tuple(errors)
+    outcome = void_row.get("issued_invoice_void_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        for field_name in (
+            "issued_invoice_void_id",
+            "issued_invoice_id",
+            "invoice_draft_id",
+            "currency_code",
+            "voided_amount",
+            "voided_at",
+        ):
+            if field_name not in void_row:
+                errors.append(f"$: {outcome} voids must include {field_name}")
+        remaining = void_row.get("remaining_outstanding_amount")
+        if isinstance(remaining, str):
+            try:
+                if Decimal(remaining) != Decimal("0"):
+                    errors.append("$: remaining_outstanding_amount must be exact zero")
+            except Exception:
+                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+        elif remaining is not None:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+        voided_amount = void_row.get("voided_amount")
+        if isinstance(voided_amount, str):
+            try:
+                if Decimal(voided_amount) <= Decimal("0"):
+                    errors.append("$: voided_amount must be a positive exact decimal")
+            except Exception:
+                errors.append("$: voided_amount must be an exact decimal")
+        elif voided_amount is not None:
+            errors.append("$: voided_amount must be an exact decimal")
+        for forbidden_name in (
+            "legal_credit_note_number",
+            "legal_invoice_number",
+            "card_pan",
+        ):
+            if forbidden_name in void_row:
+                errors.append(f"$: voids must not include {forbidden_name}")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in void_row:
+            errors.append("$: rejected voids must include rejection_reason_code")
+        if "legal_invoice_number" in void_row:
+            errors.append("$: rejected voids must not invent legal numbers")
+        if "legal_credit_note_number" in void_row:
+            errors.append("$: rejected voids must not invent legal numbers")
+    else:
+        if outcome is not None:
+            errors.append("$: unknown issued_invoice_void_outcome_code")
+    return tuple(errors)
+
+
+def validate_issued_invoice_void_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate void presentment plus exact voided-amount invariants."""
+    schema = load_json_schema(
+        ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    remaining = statement.get("remaining_outstanding_amount")
+    action = statement.get("next_operator_action")
+    if isinstance(remaining, str):
+        try:
+            if Decimal(remaining) != Decimal("0"):
+                errors.append("$: remaining_outstanding_amount must be exact zero")
+            if Decimal(remaining) == Decimal("0") and action != "wait":
+                errors.append("$: issued-invoice void presentment must wait")
+        except Exception:
+            errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    elif remaining is not None:
+        errors.append("$: remaining_outstanding_amount must be an exact decimal")
+    voided_amount = statement.get("voided_amount")
+    if voided_amount is None:
+        errors.append("$: voided_amount is required")
+    elif isinstance(voided_amount, str):
+        try:
+            if Decimal(voided_amount) <= Decimal("0"):
+                errors.append("$: voided_amount must be a positive exact decimal")
+        except Exception:
+            errors.append("$: voided_amount must be an exact decimal")
+    else:
+        errors.append("$: voided_amount must be an exact decimal")
+    for forbidden_name in (
+        "legal_credit_note_number",
+        "legal_invoice_number",
+        "issued_invoice_void_outcome_code",
+        "card_pan",
+    ):
+        if forbidden_name in statement:
+            errors.append(
+                f"$: issued-invoice void presentment must not include {forbidden_name}"
             )
     return tuple(errors)
 

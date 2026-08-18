@@ -80,6 +80,13 @@ The application is a thin WSGI adapter:
     stored issued-invoice totals, open collection remaining, applied
     credits, write-offs, parked leftover, and refunded leftover for one
     billing account, grouped by currency.  Missing account is HTTP 404.
+    ``POST /v1/issued-invoices/{issued_invoice_id}/voids`` records one
+    commercial void of an unused issued invoice.  Replay of the same
+    tenant and issued invoice returns the stored
+    ``issued_invoice_void_id``.  An unused open or dunning collection
+    case closes as ``voided``.  GET item and list present the stored
+    void.  Do not invent a journal, webhook, refund, write-off rewrite,
+    settlement, statutory numbering, or AIS call.
     Cross-tenant account is HTTP 403.  GET one stored
     ``collection_dunning_event`` or list ``{dunning_events, next_cursor}``.
     ``POST /v1/collection-cases/{collection_case_id}/dunning-events`` stays
@@ -213,6 +220,7 @@ from metering_billing.errors import (
     RateCardQueryError,
     InvoicePresentmentQueryError,
     IssuedInvoicePresentmentQueryError,
+    IssuedInvoiceVoidPresentmentQueryError,
     IssuedCreditNotePresentmentQueryError,
     CreditNoteApplicationPresentmentQueryError,
     CollectionCaseSettlementPresentmentQueryError,
@@ -236,6 +244,10 @@ from metering_billing.tax_rate import TaxRateService
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.issued_invoice import IssuedInvoiceService
 from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
+from metering_billing.issued_invoice_void import IssuedInvoiceVoidService
+from metering_billing.issued_invoice_void_presentment import (
+    IssuedInvoiceVoidPresentmentService,
+)
 from metering_billing.issued_credit_note import IssuedCreditNoteService
 from metering_billing.issued_credit_note_presentment import IssuedCreditNotePresentmentService
 from metering_billing.credit_note_application import CreditNoteApplicationService
@@ -389,6 +401,13 @@ ISSUED_INVOICE_NESTED_PATH = re.compile(
 )
 ISSUED_INVOICE_COLLECTION_PATH = "/v1/issued-invoices"
 ISSUED_INVOICE_ITEM_PATH = re.compile(r"^/v1/issued-invoices/([0-9a-fA-F-]{36})$")
+ISSUED_INVOICE_VOID_NESTED_PATH = re.compile(
+    r"^/v1/issued-invoices/([0-9a-fA-F-]{36})/voids$"
+)
+ISSUED_INVOICE_VOID_COLLECTION_PATH = "/v1/issued-invoice-voids"
+ISSUED_INVOICE_VOID_ITEM_PATH = re.compile(
+    r"^/v1/issued-invoice-voids/([0-9a-fA-F-]{36})$"
+)
 ISSUED_CREDIT_NOTE_NESTED_PATH = re.compile(
     r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})/issued-credit-notes$"
 )
@@ -476,6 +495,10 @@ def create_http_app(
     drafts = InvoiceDraftService(shared_ledger)
     issuers = IssuedInvoiceService(shared_ledger)
     issued_presentments = IssuedInvoicePresentmentService(shared_ledger)
+    issued_invoice_voids = IssuedInvoiceVoidService(shared_ledger)
+    issued_invoice_void_presentments = IssuedInvoiceVoidPresentmentService(
+        shared_ledger
+    )
     credit_note_issuers = IssuedCreditNoteService(shared_ledger)
     credit_note_presentments = IssuedCreditNotePresentmentService(shared_ledger)
     credit_note_applications = CreditNoteApplicationService(shared_ledger)
@@ -1864,6 +1887,72 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "list_issued_invoice_voids",
+            "get_issued_invoice_void",
+        }:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_issued_invoice_voids":
+                    page = issued_invoice_void_presentments.list_issued_invoice_voids(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = issued_invoice_void_presentments.present_issued_invoice_void(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["issued_invoice_void_id"],
+                        "issued_invoice_void_id",
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except IssuedInvoiceVoidPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "issued_invoice_void_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "issued_invoice_voids":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                currency_code = payload.get("currency_code")
+                if currency_code is not None and not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                result = issued_invoice_voids.void_issued_invoice(
+                    tenant_reference,
+                    _parse_uuid(path_values["issued_invoice_id"], "issued_invoice_id"),
+                    currency_code=currency_code,
+                )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_invoices":
             try:
                 payload = _read_json_object(environ)
@@ -2217,6 +2306,24 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == ISSUED_INVOICE_COLLECTION_PATH:
         if method == "GET":
             return "list_issued_invoices", {}
+        return "method_not_allowed", {}
+    issued_void_nested = ISSUED_INVOICE_VOID_NESTED_PATH.fullmatch(path)
+    if issued_void_nested is not None:
+        if method == "POST":
+            return "issued_invoice_voids", {
+                "issued_invoice_id": issued_void_nested.group(1)
+            }
+        return "http_method_not_allowed", {}
+    if path == ISSUED_INVOICE_VOID_COLLECTION_PATH:
+        if method == "GET":
+            return "list_issued_invoice_voids", {}
+        return "method_not_allowed", {}
+    issued_void_match = ISSUED_INVOICE_VOID_ITEM_PATH.fullmatch(path)
+    if issued_void_match is not None:
+        if method == "GET":
+            return "get_issued_invoice_void", {
+                "issued_invoice_void_id": issued_void_match.group(1)
+            }
         return "method_not_allowed", {}
     issued_match = ISSUED_INVOICE_ITEM_PATH.fullmatch(path)
     if issued_match is not None:

@@ -20,8 +20,8 @@ payment-provider dependency.
 
 The package never posts statutory journals.  Accounting exports remain
 ``accounting_journal_proposal`` documents with proposal-only statuses.
-Collection cases stay in commercial ``open``, ``dunning``, or ``settled``
-status.  Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
+Collection cases stay in commercial ``open``, ``dunning``, ``settled``, or
+``voided`` status.  Payment intents stay ``projected``, ``cancelled``, or ``rejected``.
 Payment receipts stay ``applied`` and do not post to AIS.  AIS posting
 receipts are stored as observations and never flip ``proposal_status``.
 Commercial credits stay ``recorded`` and emit a validated journal proposal
@@ -76,6 +76,8 @@ from metering_billing.contracts import (
     CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME,
     ISSUED_INVOICE_SCHEMA_NAME,
     ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME,
+    ISSUED_INVOICE_VOID_SCHEMA_NAME,
+    ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME,
     PAYMENT_INTENT_SCHEMA_NAME,
     PAYMENT_RECEIPT_SCHEMA_NAME,
     RATING_RUN_SCHEMA_NAME,
@@ -122,6 +124,8 @@ from metering_billing.contracts import (
     validate_unapplied_cash_refund_presentment,
     validate_issued_invoice,
     validate_issued_invoice_presentment,
+    validate_issued_invoice_void,
+    validate_issued_invoice_void_presentment,
     validate_invoice_presentment,
     validate_tenant_api_credential,
     validate_tenant_api_credential_presentment,
@@ -185,6 +189,9 @@ from metering_billing.errors import (
     IssuedInvoiceOutcomeCode,
     IssuedInvoicePresentmentQueryError,
     IssuedInvoiceRejectionReasonCode,
+    IssuedInvoiceVoidOutcomeCode,
+    IssuedInvoiceVoidPresentmentQueryError,
+    IssuedInvoiceVoidRejectionReasonCode,
     PaymentIntentPresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
     RateCardPresentmentQueryError,
@@ -250,6 +257,10 @@ from metering_billing.unapplied_cash_refund_presentment import (
 )
 from metering_billing.issued_invoice import IssuedInvoiceService
 from metering_billing.issued_invoice_presentment import IssuedInvoicePresentmentService
+from metering_billing.issued_invoice_void import IssuedInvoiceVoidService
+from metering_billing.issued_invoice_void_presentment import (
+    IssuedInvoiceVoidPresentmentService,
+)
 from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.tenant_api_credential_presentment import (
     TenantApiCredentialPresentmentService,
@@ -319,6 +330,8 @@ __all__ = (
     "CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_INVOICE_SCHEMA_NAME",
     "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_INVOICE_VOID_SCHEMA_NAME",
+    "ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
@@ -423,6 +436,11 @@ __all__ = (
     "IssuedInvoicePresentmentService",
     "IssuedInvoiceRejectionReasonCode",
     "IssuedInvoiceService",
+    "IssuedInvoiceVoidOutcomeCode",
+    "IssuedInvoiceVoidPresentmentQueryError",
+    "IssuedInvoiceVoidPresentmentService",
+    "IssuedInvoiceVoidRejectionReasonCode",
+    "IssuedInvoiceVoidService",
     "TenantApiCredentialOutcomeCode",
     "TenantApiCredentialPresentmentQueryError",
     "TenantApiCredentialPresentmentService",
@@ -502,6 +520,8 @@ __all__ = (
     "validate_unapplied_cash_refund_presentment",
     "validate_issued_invoice",
     "validate_issued_invoice_presentment",
+    "validate_issued_invoice_void",
+    "validate_issued_invoice_void_presentment",
     "validate_invoice_presentment",
     "validate_tenant_api_credential",
     "validate_tenant_api_credential_presentment",

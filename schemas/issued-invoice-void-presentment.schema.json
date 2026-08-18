@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/issued-invoice-void-presentment/v1",
+  "title": "Issued Invoice Void Presentment",
+  "description": "Tenant-scoped commercial statement projected from a stored issued_invoice_void and the current collection_case when one exists. voided_amount is the issued tax-inclusive amount. Remaining outstanding is exact-zero after a void that closed a case. Next operator action is wait. The document is not a journal, webhook event, payment receipt, credit note, write-off, refund, settlement, or AIS posting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issued_invoice_void_presentment_contract_version",
+    "issued_invoice_void_id",
+    "tenant_reference",
+    "issued_invoice_id",
+    "invoice_draft_id",
+    "currency_code",
+    "voided_amount",
+    "issued_invoice_void_status",
+    "voided_at",
+    "source_payload_hash",
+    "next_operator_action"
+  ],
+  "properties": {
+    "issued_invoice_void_presentment_contract_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "issued_invoice_void_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "issued_invoice_id": {"type": "string", "format": "uuid"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "voided_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "issued_invoice_void_status": {"type": "string", "enum": ["recorded"]},
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled", "voided"]
+    },
+    "voided_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}
