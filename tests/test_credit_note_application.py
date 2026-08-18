@@ -410,6 +410,20 @@ class CreditNoteApplicationTests(unittest.TestCase):
             {"tenant_reference": TENANT_ONE},
         )
         self.assertEqual(method_status, 405)
+        collection_method_status, _collection_method = invoke_http(
+            app,
+            "POST",
+            "/v1/credit-note-applications",
+            {"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(collection_method_status, 422)
+        item_method_status, _item_method = invoke_http(
+            app,
+            "PUT",
+            f"/v1/credit-note-applications/{application_id}",
+            {"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(item_method_status, 422)
         self.assertEqual(len(ledger.webhook_outbox_events), prior_outbox)
         self.assertEqual(len(ledger.journal_proposals), prior_journals)
         self.assertEqual(len(ledger.payment_receipts), 0)
@@ -564,6 +578,15 @@ class CreditNoteApplicationTests(unittest.TestCase):
         unreadable_amount = json.loads(json.dumps(valid))
         unreadable_amount["applied_amount"] = "not-decimal"
         self.assertTrue(validate_credit_note_application(unreadable_amount))
+        missing_amount = json.loads(json.dumps(valid))
+        del missing_amount["applied_amount"]
+        self.assertTrue(validate_credit_note_application(missing_amount))
+        unknown_outcome = {
+            "credit_note_application_contract_version": 1,
+            "credit_note_application_outcome_code": "accepted",
+        }
+        unknown_outcome["credit_note_application_outcome_code"] = "unknown"
+        self.assertTrue(validate_credit_note_application(unknown_outcome))
 
     def test_coverage_guards_for_apply_and_presentment_edges(self) -> None:
         """Closed branches stay explicit: replay, invoice, presentment, and HTTP."""
@@ -720,6 +743,12 @@ class CreditNoteApplicationTests(unittest.TestCase):
         unreadable_applied = json.loads(json.dumps(presentment_payload))
         unreadable_applied["applied_amount"] = "nope"
         self.assertTrue(validate_credit_note_application_presentment(unreadable_applied))
+        missing_applied = json.loads(json.dumps(presentment_payload))
+        del missing_applied["applied_amount"]
+        self.assertTrue(validate_credit_note_application_presentment(missing_applied))
+        missing_remaining = json.loads(json.dumps(presentment_payload))
+        del missing_remaining["remaining_outstanding_amount"]
+        self.assertTrue(validate_credit_note_application_presentment(missing_remaining))
 
 
 if __name__ == "__main__":
