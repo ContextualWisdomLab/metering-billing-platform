@@ -5,7 +5,7 @@ Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
 those drafts as statements, present already-rated spend for one billing
-account and window grouped by product, issue an immutable commercial invoice snapshot
+account and window grouped by product, optional project, or optional credential, issue an immutable commercial invoice snapshot
 from a stored draft, present that issued invoice, issue an immutable
 commercial credit-note snapshot from a stored credit adjustment, present
 that issued credit note, void one unused issued credit note, publish tax rates, assess tax on a draft, present

@@ -17,7 +17,11 @@ The service is a read path:
    ``project_reference`` on exclusive-account usage that already has a
    project URN.  Usage without ``project_reference`` is omitted from that
    grouping.  Mixed projects omit the run so the read cannot invent a
-   split or a sentinel project.
+   split or a sentinel project.  Optional ``group_by=credential`` further
+   keys rows by the one stored exclusive-account credential URN.  Usage
+   without ``credential_reference`` is omitted from that grouping.
+   Mixed credentials omit the run so the read cannot invent a split or a
+   sentinel credential.
 6. Return one presentment document.  Do not re-rate, invent a unit price,
    include unrated usage, capture, post, or call AIS.
 
@@ -50,7 +54,10 @@ RATED_SPEND_PRESENTMENT_CONTRACT_VERSION = 1
 ZERO = Decimal("0")
 GROUP_BY_PRODUCT = "product"
 GROUP_BY_PROJECT = "project"
-ALLOWED_GROUP_BY = frozenset({GROUP_BY_PRODUCT, GROUP_BY_PROJECT})
+GROUP_BY_CREDENTIAL = "credential"
+ALLOWED_GROUP_BY = frozenset(
+    {GROUP_BY_PRODUCT, GROUP_BY_PROJECT, GROUP_BY_CREDENTIAL}
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,7 @@ class RatedSpendProductResult:
     product_code: str
     rated_amount: Decimal
     project_reference: str | None = None
+    credential_reference: str | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the closed JSON object published for one product row."""
@@ -71,6 +79,8 @@ class RatedSpendProductResult:
         }
         if self.project_reference is not None:
             payload["project_reference"] = self.project_reference
+        if self.credential_reference is not None:
+            payload["credential_reference"] = self.credential_reference
         return payload
 
 
@@ -141,7 +151,7 @@ class RatedSpendPresentmentService:
         events = self.ledger.list_usage_events_in_window(
             tenant.tenant_account_id, started, ended
         )
-        totals: dict[tuple[str, str, str | None], Decimal] = {}
+        totals: dict[tuple[str, str, str | None, str | None], Decimal] = {}
         for rating_run in self.ledger.list_rating_runs(tenant.tenant_account_id):
             if rating_run.window_started_at.astimezone(UTC) != started:
                 continue
@@ -158,13 +168,25 @@ class RatedSpendPresentmentService:
             if product_code is None:
                 continue
             project_reference = None
+            credential_reference = None
             if group_by == GROUP_BY_PROJECT:
                 project_reference = _exclusive_project_reference(
                     events, account.billing_account_id
                 )
                 if project_reference is None:
                     continue
-            key = (rating_run.currency_code, product_code, project_reference)
+            elif group_by == GROUP_BY_CREDENTIAL:
+                credential_reference = _exclusive_credential_reference(
+                    self.ledger, events, account.billing_account_id
+                )
+                if credential_reference is None:
+                    continue
+            key = (
+                rating_run.currency_code,
+                product_code,
+                project_reference,
+                credential_reference,
+            )
             totals[key] = totals.get(key, ZERO) + amount
         products = tuple(
             RatedSpendProductResult(
@@ -172,10 +194,14 @@ class RatedSpendPresentmentService:
                 product_code=product_code,
                 rated_amount=rated_amount,
                 project_reference=project_reference,
+                credential_reference=credential_reference,
             )
-            for (currency_code, product_code, project_reference), rated_amount in sorted(
-                totals.items()
-            )
+            for (
+                currency_code,
+                product_code,
+                project_reference,
+                credential_reference,
+            ), rated_amount in sorted(totals.items())
         )
         return RatedSpendPresentmentResult(
             tenant_reference=tenant.tenant_reference,
@@ -246,6 +272,27 @@ def _exclusive_project_reference(
     if len(project_references) != 1:
         return None
     return next(iter(project_references))
+
+
+def _exclusive_credential_reference(
+    ledger: MemoryUsageLedger,
+    events: tuple[StoredUsageEvent, ...],
+    billing_account_id: UUID,
+) -> str | None:
+    """Return the one stored credential URN on exclusive-account usage, or None."""
+    records_by_id = {
+        record.credential_record_id: record.credential_reference
+        for record in ledger.credential_records.values()
+    }
+    credential_references = {
+        records_by_id[event.credential_record_id]
+        for event in events
+        if event.billing_account_id == billing_account_id
+        and event.credential_record_id is not None
+    }
+    if len(credential_references) != 1:
+        return None
+    return next(iter(credential_references))
 
 
 def _format_instant(instant: datetime) -> str:

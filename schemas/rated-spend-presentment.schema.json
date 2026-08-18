@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.contextualwisdomlab.org/metering-billing/rated-spend-presentment/v1",
   "title": "Rated Spend Presentment",
-  "description": "Billing-account-scoped already-rated spend projected from stored rating_run and exclusive invoice-draft lines inside one half-open ISO 8601 window. Default rows are grouped by currency_code and product_code. Optional group_by=project adds project_reference from stored exclusive-account usage and never invents a project. Currencies stay unmixed. rated_amount is the stored rated or draft line amount as an exact-decimal string. The document is not a re-rate, budget, journal, webhook, or statutory ledger.",
+  "description": "Billing-account-scoped already-rated spend projected from stored rating_run and exclusive invoice-draft lines inside one half-open ISO 8601 window. Default rows are grouped by currency_code and product_code. Optional group_by=project adds project_reference from stored exclusive-account usage and never invents a project. Optional group_by=credential adds credential_reference from stored exclusive-account usage and never invents a credential. Currencies stay unmixed. rated_amount is the stored rated or draft line amount as an exact-decimal string. The document is not a re-rate, budget, journal, webhook, or statutory ledger.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -45,6 +45,7 @@
         "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
         "product_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
         "project_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "credential_reference": {"type": "string", "pattern": "^urn:cwl:"},
         "rated_amount": {"$ref": "#/$defs/exact_amount"}
       }
     }

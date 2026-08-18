@@ -96,8 +96,10 @@ The application is a thin WSGI adapter:
     already-stored rating-run and exclusive invoice-draft line amounts
     for one billing account and half-open window, grouped by
     ``product_code``.  Optional ``group_by=project`` adds
-    ``project_reference`` from stored exclusive-account usage.  The read
-    does not re-rate or write money.
+    ``project_reference`` from stored exclusive-account usage.
+    Optional ``group_by=credential`` adds ``credential_reference`` from
+    stored exclusive-account usage.  The read does not re-rate or write
+    money.
     ``POST /v1/issued-invoices/{issued_invoice_id}/voids`` records one
     commercial void of an unused issued invoice.  Replay of the same
     tenant and issued invoice returns the stored

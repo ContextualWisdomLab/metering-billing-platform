@@ -105,6 +105,7 @@ REQUIRED_FILES = (
     "docs/adr/0073-operator-account-statement-storybook.md",
     "docs/adr/0074-rated-spend-presentment.md",
     "docs/adr/0075-rated-spend-group-by-project.md",
+    "docs/adr/0076-rated-spend-group-by-credential.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

@@ -907,6 +907,45 @@ class RepositoryContractTests(unittest.TestCase):
             "$.products[1]: currency_code, product_code, and project_reference must be unique",
             validate_rated_spend_presentment(duplicate_project),
         )
+        credential_row = {
+            "currency_code": "USD",
+            "product_code": "contextual_orchestrator",
+            "credential_reference": "urn:cwl:tenant_001:credential_record:019d7003",
+            "rated_amount": "0.003705",
+        }
+        credential_instance = {
+            "rated_spend_presentment_contract_version": 1,
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+            "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "products": [credential_row],
+        }
+        self.assertEqual(validate_schema_instance(schema, credential_instance), ())
+        self.assertEqual(validate_rated_spend_presentment(credential_instance), ())
+        split_credentials = {
+            **credential_instance,
+            "products": [
+                credential_row,
+                {
+                    "currency_code": "USD",
+                    "product_code": "contextual_orchestrator",
+                    "credential_reference": "urn:cwl:tenant_001:credential_record:019d7004",
+                    "rated_amount": "0.000085",
+                },
+            ],
+        }
+        self.assertEqual(validate_schema_instance(schema, split_credentials), ())
+        self.assertEqual(validate_rated_spend_presentment(split_credentials), ())
+        duplicate_credential = {
+            **credential_instance,
+            "products": [credential_row, credential_row],
+        }
+        self.assertIn(
+            "$.products[1]: currency_code, product_code, and credential_reference must be unique",
+            validate_rated_spend_presentment(duplicate_credential),
+        )
 
     def test_payment_intent_presentment_accepts_amount_and_rejects_captured(self) -> None:
         """A payment-intent statement records exact amount and cannot claim capture."""

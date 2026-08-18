@@ -504,18 +504,28 @@ def validate_rated_spend_presentment(
     products = statement.get("products")
     if not isinstance(products, list):
         return tuple(errors)
-    seen_keys: set[tuple[str, str, str | None]] = set()
+    seen_keys: set[tuple[str, str, str | None, str | None]] = set()
     for index, row in enumerate(products):
         if not isinstance(row, Mapping):
             continue
         currency_code = row.get("currency_code")
         product_code = row.get("product_code")
         project_reference = row.get("project_reference")
+        credential_reference = row.get("credential_reference")
         if isinstance(currency_code, str) and isinstance(product_code, str):
             project_key = project_reference if isinstance(project_reference, str) else None
-            key = (currency_code, product_code, project_key)
+            credential_key = (
+                credential_reference if isinstance(credential_reference, str) else None
+            )
+            key = (currency_code, product_code, project_key, credential_key)
             if key in seen_keys:
-                if project_key is None:
+                if credential_key is not None:
+                    errors.append(
+                        "$."
+                        f"products[{index}]: currency_code, product_code, and "
+                        "credential_reference must be unique"
+                    )
+                elif project_key is None:
                     errors.append(
                         f"$.products[{index}]: currency_code and product_code must be unique"
                     )

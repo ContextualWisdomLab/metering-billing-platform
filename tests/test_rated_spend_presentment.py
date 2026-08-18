@@ -14,6 +14,7 @@ from metering_billing import (
     RatedSpendPresentmentService,
     UsageIngestionService,
     UsageRatingService,
+    compute_source_payload_hash,
     create_http_app,
     format_exact_decimal,
 )
@@ -27,7 +28,15 @@ from metering_billing.usage_ledger import (
 )
 from test_account_statement_presentment import ACCOUNT_THREE, _account_id
 from test_http_app import invoke_http
-from test_usage_ingestion import ACCOUNT_ONE, TENANT_ONE, TENANT_TWO, make_event
+from test_usage_ingestion import (
+    ACCOUNT_ONE,
+    CATALOG_START,
+    CREDENTIAL_ONE,
+    PRINCIPAL_ONE,
+    TENANT_ONE,
+    TENANT_TWO,
+    make_event,
+)
 from test_usage_rating import (
     DAY_WINDOW,
     KNOWN_MORNING_TOTAL,
@@ -42,6 +51,7 @@ PRODUCT_ONE = "contextual_orchestrator"
 PRODUCT_TWO = "contextual_memory"
 PROJECT_ONE = "urn:cwl:tenant_001:project:metering"
 PROJECT_TWO = "urn:cwl:tenant_001:project:memory"
+CREDENTIAL_ALT = "urn:cwl:tenant_001:credential_record:019d7004"
 
 
 def _rate_known_morning():
@@ -102,6 +112,24 @@ def _known_morning_event(
     )
 
 
+def _event_without_credential(**kwargs: object) -> dict[str, object]:
+    """Return one morning event with credential_reference omitted, not a sentinel."""
+    event = _known_morning_event(**kwargs)
+    event.pop("credential_reference", None)
+    event["source_payload_hash"] = compute_source_payload_hash(event)
+    return event
+
+
+def _seed_ledger_with_alt_credential():
+    """Register a second same-tenant credential so mixed-credential spend can fail closed."""
+    ledger = seed_rated_ledger()
+    ledger.register_credential_record(TENANT_ONE, CREDENTIAL_ALT, "api_key", "fingerprint-alt")
+    ledger.register_credential_assignment(
+        TENANT_ONE, CREDENTIAL_ALT, PRINCIPAL_ONE, ACCOUNT_ONE, CATALOG_START
+    )
+    return ledger
+
+
 class RatedSpendPresentmentTests(unittest.TestCase):
     """Verify already-rated spend stays exact, product-grouped, and read-only."""
 
@@ -135,6 +163,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertNotIsInstance(payload["products"][0]["rated_amount"], float)
         self.assertNotIn("group_by", payload)
         self.assertNotIn("project_reference", payload["products"][0])
+        self.assertNotIn("credential_reference", payload["products"][0])
         self.assertNotIn("card_pan", payload)
         self.assertNotIn("statutory_account_id", payload)
         by_product = RatedSpendPresentmentService(ledger).present_rated_spend(
@@ -142,6 +171,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         )
         self.assertEqual(presented.as_contract_dict(), by_product.as_contract_dict())
         self.assertNotIn("project_reference", by_product.as_contract_dict()["products"][0])
+        self.assertNotIn("credential_reference", by_product.as_contract_dict()["products"][0])
         self.assertEqual(len(ledger.rating_runs), prior_runs)
         self.assertEqual(len(ledger.invoice_drafts), prior_drafts)
         self.assertEqual(len(ledger.journal_proposals), 0)
@@ -313,6 +343,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(payload["products"][0]["project_reference"], PROJECT_ONE)
         self.assertEqual(payload["products"][0]["rated_amount"], format_exact_decimal(KNOWN_MORNING_TOTAL))
         self.assertNotIn("group_by", payload)
+        self.assertNotIn("credential_reference", payload["products"][0])
         mixed_ledger, mixed = _rate_morning_events(
             _known_morning_event(
                 event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf712",
@@ -364,9 +395,114 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(len(attributed_ledger.journal_proposals), 0)
         with self.assertRaises(RatedSpendPresentmentQueryError) as unknown_group:
             RatedSpendPresentmentService(ledger).present_rated_spend(
-                TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="credential"
+                TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="principal"
             )
         self.assertEqual(unknown_group.exception.rejection_reason_code, "request_invalid")
+
+    def test_group_by_credential_uses_usage_credential_and_omits_unattributed(self) -> None:
+        """Credential grouping reads usage URNs and never invents a credential or split."""
+        ledger, rated = _rate_known_morning()
+        by_product = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="product"
+        )
+        by_project = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="project"
+        )
+        by_credential = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="credential"
+        )
+        replay = RatedSpendPresentmentService(ledger).present_rated_spend(
+            TENANT_ONE, _account_id(ledger), MORNING_WINDOW, group_by="credential"
+        )
+        self.assertEqual(by_credential.as_contract_dict(), replay.as_contract_dict())
+        self.assertEqual(len(by_product.products), 1)
+        self.assertNotIn("credential_reference", by_product.as_contract_dict()["products"][0])
+        self.assertNotIn("project_reference", by_product.as_contract_dict()["products"][0])
+        self.assertEqual(by_project.products, ())
+        self.assertEqual(len(by_credential.products), 1)
+        row = by_credential.products[0]
+        self.assertEqual(row.currency_code, "USD")
+        self.assertEqual(row.product_code, PRODUCT_ONE)
+        self.assertEqual(row.credential_reference, CREDENTIAL_ONE)
+        self.assertIsNone(row.project_reference)
+        self.assertEqual(row.rated_amount, rated.rated_total_amount)
+        self.assertEqual(row.rated_amount, KNOWN_MORNING_TOTAL)
+        payload = by_credential.as_contract_dict()
+        self.assertEqual(validate_rated_spend_presentment(payload), ())
+        self.assertEqual(payload["products"][0]["credential_reference"], CREDENTIAL_ONE)
+        self.assertNotIn("project_reference", payload["products"][0])
+        self.assertNotIn("group_by", payload)
+        unattributed_ledger, _unattributed = _rate_morning_events(
+            _event_without_credential(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf720",
+                source_event_key="credential_morning_plain_output",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+            ),
+            _event_without_credential(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf721",
+                source_event_key="credential_morning_plain_followup",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+            ),
+        )
+        unattributed = RatedSpendPresentmentService(unattributed_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(unattributed_ledger), MORNING_WINDOW, group_by="credential"
+        )
+        self.assertEqual(unattributed.products, ())
+        mixed = UsageIngestionService(_seed_ledger_with_alt_credential())
+        mixed.ingest_usage_batch(
+            (
+                _known_morning_event(
+                    event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf722",
+                    source_event_key="credential_mixed_one",
+                    occurred_at="2026-08-16T10:27:42.482Z",
+                    quantity="1810",
+                ),
+                _known_morning_event(
+                    event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf723",
+                    source_event_key="credential_mixed_alt",
+                    occurred_at="2026-08-16T10:28:10.000Z",
+                    quantity="42.5",
+                    credential_reference=CREDENTIAL_ALT,
+                ),
+            )
+        )
+        mixed_rated = UsageRatingService(mixed.ledger, clock=lambda: AS_OF).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+        )
+        mixed_product = RatedSpendPresentmentService(mixed.ledger).present_rated_spend(
+            TENANT_ONE, _account_id(mixed.ledger), MORNING_WINDOW, group_by="product"
+        )
+        mixed_credential = RatedSpendPresentmentService(mixed.ledger).present_rated_spend(
+            TENANT_ONE, _account_id(mixed.ledger), MORNING_WINDOW, group_by="credential"
+        )
+        self.assertEqual(mixed_product.products[0].rated_amount, mixed_rated.rated_total_amount)
+        self.assertNotIn("credential_reference", mixed_product.as_contract_dict()["products"][0])
+        self.assertEqual(mixed_credential.products, ())
+        partial_ledger, partial = _rate_morning_events(
+            _known_morning_event(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf724",
+                source_event_key="credential_partial_attributed",
+                occurred_at="2026-08-16T10:27:42.482Z",
+                quantity="1810",
+            ),
+            _event_without_credential(
+                event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf725",
+                source_event_key="credential_partial_plain",
+                occurred_at="2026-08-16T10:28:10.000Z",
+                quantity="42.5",
+            ),
+        )
+        partial_credential = RatedSpendPresentmentService(partial_ledger).present_rated_spend(
+            TENANT_ONE, _account_id(partial_ledger), MORNING_WINDOW, group_by="credential"
+        )
+        self.assertEqual(len(partial_credential.products), 1)
+        self.assertEqual(partial_credential.products[0].credential_reference, CREDENTIAL_ONE)
+        self.assertEqual(partial_credential.products[0].rated_amount, partial.rated_total_amount)
+        self.assertEqual(len(ledger.rating_runs), 1)
+        self.assertEqual(len(ledger.invoice_drafts), 0)
+        self.assertEqual(len(ledger.journal_proposals), 0)
 
     def test_http_reads_rated_spend_without_writing_money(self) -> None:
         """GET /v1/billing-accounts/{id}/rated-spend is a tenant-scoped read."""
@@ -502,6 +638,7 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(product_status, 200)
         self.assertEqual(product_body, keyed_body)
         self.assertNotIn("project_reference", product_body["products"][0])
+        self.assertNotIn("credential_reference", product_body["products"][0])
         project_status, project_body = invoke_http(
             app,
             "GET",
@@ -515,11 +652,29 @@ class RatedSpendPresentmentTests(unittest.TestCase):
         self.assertEqual(project_status, 200)
         self.assertEqual(validate_rated_spend_presentment(project_body), ())
         self.assertEqual(project_body["products"], [])
-        unknown_group_status, unknown_group_body = invoke_http(
+        credential_status, credential_body = invoke_http(
             app,
             "GET",
             _spend_path(billing_account_id),
             query=_morning_query(group_by="credential"),
+            headers={
+                "X-CWL-Tenant-Reference": TENANT_ONE,
+                "Authorization": f"Bearer {issue_body['api_credential_secret']}",
+            },
+        )
+        self.assertEqual(credential_status, 200)
+        self.assertEqual(validate_rated_spend_presentment(credential_body), ())
+        self.assertEqual(credential_body["products"][0]["credential_reference"], CREDENTIAL_ONE)
+        self.assertNotIn("project_reference", credential_body["products"][0])
+        self.assertEqual(
+            credential_body["products"][0]["rated_amount"],
+            format_exact_decimal(KNOWN_MORNING_TOTAL),
+        )
+        unknown_group_status, unknown_group_body = invoke_http(
+            app,
+            "GET",
+            _spend_path(billing_account_id),
+            query=_morning_query(group_by="principal"),
             headers={
                 "X-CWL-Tenant-Reference": TENANT_ONE,
                 "Authorization": f"Bearer {issue_body['api_credential_secret']}",
