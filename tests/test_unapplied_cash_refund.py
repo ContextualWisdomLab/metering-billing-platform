@@ -377,6 +377,56 @@ class UnappliedCashRefundTests(unittest.TestCase):
         )
         self.assertEqual(cursor_status, 422)
         self.assertEqual(cursor_body["rejection_reason_code"], "request_invalid")
+        missing_tenant_status, missing_tenant_body = invoke_http(
+            app,
+            "GET",
+            f"/v1/unapplied-cash-refunds/{refund_id}",
+        )
+        self.assertEqual(missing_tenant_status, 422)
+        self.assertEqual(missing_tenant_body["rejection_reason_code"], "tenant_not_found")
+        unreadable_status, unreadable_body = invoke_http(
+            app,
+            "POST",
+            f"/v1/unapplied-cash/{parked.unapplied_cash_id}/refunds",
+            {"tenant_reference": TENANT_ONE, "refund_amount": "not-a-decimal"},
+        )
+        self.assertEqual(unreadable_status, 422)
+        self.assertEqual(unreadable_body["rejection_reason_code"], "request_invalid")
+        nested_method_status, nested_method_body = invoke_http(
+            app,
+            "GET",
+            f"/v1/unapplied-cash/{parked.unapplied_cash_id}/refunds",
+            query={"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(nested_method_status, 405)
+        self.assertEqual(nested_method_body["rejection_reason_code"], "method_not_allowed")
+        item_method_status, _item_method = invoke_http(
+            app,
+            "PUT",
+            f"/v1/unapplied-cash-refunds/{refund_id}",
+            {"tenant_reference": TENANT_ONE},
+        )
+        self.assertEqual(item_method_status, 422)
+        with mock.patch(
+            "metering_billing.http_app.UnappliedCashRefundPresentmentService.present_unapplied_cash_refund",
+            side_effect=ValueError("boom"),
+        ):
+            get_boom_status, get_boom = invoke_http(
+                app,
+                "GET",
+                f"/v1/unapplied-cash-refunds/{refund_id}",
+                query={"tenant_reference": TENANT_ONE},
+            )
+        self.assertEqual(get_boom_status, 422)
+        self.assertEqual(get_boom["rejection_reason_code"], "request_invalid")
+        page_status, page_body = invoke_http(
+            app,
+            "GET",
+            "/v1/unapplied-cash-refunds",
+            query={"tenant_reference": TENANT_ONE, "page_limit": "1"},
+        )
+        self.assertEqual(page_status, 200)
+        self.assertEqual(len(page_body["unapplied_cash_refunds"]), 1)
 
     def test_presentment_list_and_query_fail_closed(self) -> None:
         """List pages stay tenant-scoped; illegal cursor and hollow resolve fail."""
@@ -426,6 +476,10 @@ class UnappliedCashRefundTests(unittest.TestCase):
         self.assertEqual(
             len(service.list_unapplied_cash_refunds(TENANT_ONE, page_limit="").unapplied_cash_refunds),
             2,
+        )
+        self.assertEqual(
+            len(service.list_unapplied_cash_refunds(TENANT_ONE, page_limit="1").unapplied_cash_refunds),
+            1,
         )
         with self.assertRaises(UnappliedCashRefundPresentmentQueryError):
             service.list_unapplied_cash_refunds(TENANT_ONE, page_limit=True)
