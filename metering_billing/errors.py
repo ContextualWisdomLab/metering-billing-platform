@@ -888,6 +888,42 @@ class CreditAdjustmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class SpendBudgetOutcomeCode(StrEnum):
+    """Terminal result of publishing one commercial spend budget."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class SpendBudgetRejectionReasonCode(StrEnum):
+    """Why a spend-budget publish was refused without writing a budget."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    BILLING_ACCOUNT_NOT_FOUND = "billing_account_not_found"
+    BILLING_ACCOUNT_FORBIDDEN = "billing_account_forbidden"
+    BUDGET_AMOUNT_INVALID = "budget_amount_invalid"
+    CURRENCY_INVALID = "currency_invalid"
+    REQUEST_INVALID = "request_invalid"
+    SPEND_BUDGET_NOT_FOUND = "spend_budget_not_found"
+
+
+class SpendBudgetQueryError(ValueError):
+    """Raised when a stored spend budget cannot be authorized or decoded."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
+class SpendBudgetPresentmentQueryError(ValueError):
+    """Raised when a stored spend budget cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class PaymentSettlementRejectionReasonCode(StrEnum):
     """Why a settlement request was refused without capturing money or posting."""
 

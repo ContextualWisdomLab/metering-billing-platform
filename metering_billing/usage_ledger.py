@@ -11,6 +11,7 @@ Python 3.12 and CI Python 3.13 behave identically at the API boundary.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -24,6 +25,8 @@ from metering_billing.exact_decimal import format_exact_decimal, parse_exact_dec
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
 TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
+CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
+SOURCE_PAYLOAD_HASH_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def generate_record_id(uuid_module: ModuleType = uuid) -> UUID:
@@ -750,6 +753,29 @@ class StoredCreditAdjustment:
 
 
 @dataclass(frozen=True)
+class StoredSpendBudget:
+    """Persisted commercial spend budget for one billing-account window.
+
+    Identity is tenant-scoped
+    ``(billing_account_id, window_started_at, window_ended_at, currency_code,
+    source_payload_hash, spend_budget_contract_version)``.  The internal
+    primary key is ``spend_budget_id``, never a provider object identifier
+    and never a statutory number.
+    """
+
+    spend_budget_id: UUID
+    tenant_account_id: UUID
+    billing_account_id: UUID
+    spend_budget_contract_version: int
+    currency_code: str
+    budget_amount: Decimal
+    window_started_at: datetime
+    window_ended_at: datetime
+    source_payload_hash: str
+    published_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredPostingReceiptObservation:
     """Append-only commercial observation of one AIS posting receipt.
 
@@ -928,6 +954,10 @@ class MemoryUsageLedger:
     credit_adjustment_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
         default_factory=dict
     )
+    spend_budgets: dict[UUID, StoredSpendBudget] = field(default_factory=dict)
+    spend_budget_index: dict[
+        tuple[UUID, UUID, datetime, datetime, str, str, int], UUID
+    ] = field(default_factory=dict)
     journal_proposal_lines: list[StoredJournalProposalLine] = field(default_factory=list)
     collection_cases: dict[UUID, StoredCollectionCase] = field(default_factory=dict)
     collection_case_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
@@ -2844,6 +2874,105 @@ class MemoryUsageLedger:
             credit
             for credit in credits
             if credit.tenant_account_id == tenant_account_id
+        )
+
+    def find_spend_budget(
+        self,
+        tenant_account_id: UUID,
+        billing_account_id: UUID,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+        currency_code: str,
+        source_payload_hash: str,
+        spend_budget_contract_version: int,
+    ) -> StoredSpendBudget | None:
+        """Return the spend budget for one tenant-scoped identity, if any."""
+        spend_budget_id = self.spend_budget_index.get(
+            (
+                tenant_account_id,
+                billing_account_id,
+                window_started_at,
+                window_ended_at,
+                currency_code,
+                source_payload_hash,
+                spend_budget_contract_version,
+            )
+        )
+        if spend_budget_id is None:
+            return None
+        return self.spend_budgets[spend_budget_id]
+
+    def get_spend_budget(self, spend_budget_id: UUID) -> StoredSpendBudget | None:
+        """Return one spend budget by internal identifier, if present."""
+        return self.spend_budgets.get(spend_budget_id)
+
+    def insert_spend_budget(self, budget: StoredSpendBudget) -> StoredSpendBudget:
+        """Persist one spend budget or return the existing identity row.
+
+        The same tenant-scoped identity is a duplicate replay.  Reusing
+        ``spend_budget_id`` for a different identity is rejected so a
+        provider or AIS identifier cannot become the internal key.
+        """
+        if CURRENCY_CODE_PATTERN.fullmatch(budget.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(budget.source_payload_hash) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        budget_amount = parse_exact_decimal(format_exact_decimal(budget.budget_amount))
+        if budget_amount <= 0:
+            raise ValueError("budget amount must be a positive exact decimal")
+        existing_by_id = self.spend_budgets.get(budget.spend_budget_id)
+        if existing_by_id is not None:
+            if (
+                existing_by_id.tenant_account_id != budget.tenant_account_id
+                or existing_by_id.billing_account_id != budget.billing_account_id
+                or existing_by_id.window_started_at != budget.window_started_at
+                or existing_by_id.window_ended_at != budget.window_ended_at
+                or existing_by_id.currency_code != budget.currency_code
+                or existing_by_id.source_payload_hash != budget.source_payload_hash
+                or existing_by_id.spend_budget_contract_version
+                != budget.spend_budget_contract_version
+            ):
+                raise ValueError("spend_budget_id already stored for a different identity")
+            return existing_by_id
+        identity = (
+            budget.tenant_account_id,
+            budget.billing_account_id,
+            budget.window_started_at,
+            budget.window_ended_at,
+            budget.currency_code,
+            budget.source_payload_hash,
+            budget.spend_budget_contract_version,
+        )
+        existing_id = self.spend_budget_index.get(identity)
+        if existing_id is not None:
+            return self.spend_budgets[existing_id]
+        persisted = StoredSpendBudget(
+            spend_budget_id=budget.spend_budget_id,
+            tenant_account_id=budget.tenant_account_id,
+            billing_account_id=budget.billing_account_id,
+            spend_budget_contract_version=budget.spend_budget_contract_version,
+            currency_code=budget.currency_code,
+            budget_amount=budget_amount,
+            window_started_at=budget.window_started_at,
+            window_ended_at=budget.window_ended_at,
+            source_payload_hash=budget.source_payload_hash,
+            published_at=budget.published_at,
+        )
+        self.spend_budgets[persisted.spend_budget_id] = persisted
+        self.spend_budget_index[identity] = persisted.spend_budget_id
+        return persisted
+
+    def list_spend_budgets(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredSpendBudget, ...]:
+        """Return stored spend budgets, optionally filtered by tenant."""
+        budgets = tuple(self.spend_budgets.values())
+        if tenant_account_id is None:
+            return budgets
+        return tuple(
+            budget
+            for budget in budgets
+            if budget.tenant_account_id == tenant_account_id
         )
 
     def find_journal_proposal(

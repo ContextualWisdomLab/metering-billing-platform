@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/spend-budget/v1",
+  "title": "Spend Budget",
+  "description": "Commercial spend budget published against one tenant billing account and half-open window. budget_amount is an exact-decimal string greater than zero. Status stays published. Replays acknowledge the stored spend_budget_id. The document is not a rated-spend comparison, journal, or statutory identifier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spend_budget_contract_version",
+    "spend_budget_outcome_code"
+  ],
+  "properties": {
+    "spend_budget_contract_version": {"type": "integer", "minimum": 1},
+    "spend_budget_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "spend_budget_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "billing_account_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "budget_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "window_started_at": {"type": "string", "format": "date-time"},
+    "window_ended_at": {"type": "string", "format": "date-time"},
+    "spend_budget_status": {"type": "string", "enum": ["published"]},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "published_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "billing_account_not_found",
+        "billing_account_forbidden",
+        "budget_amount_invalid",
+        "currency_invalid",
+        "request_invalid",
+        "spend_budget_not_found"
+      ]
+    }
+  }
+}

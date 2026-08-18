@@ -103,6 +103,12 @@ The application is a thin WSGI adapter:
     usage.  Optional ``group_by=cost_center`` adds
     ``cost_center_reference`` from stored exclusive-account usage.  The
     read does not re-rate or write money.
+    ``POST /v1/billing-accounts/{billing_account_id}/spend-budgets``
+    publishes one append-only commercial ``spend_budget`` for that
+    same-tenant account and half-open window.  Replay of the same
+    identity returns the stored ``spend_budget_id``.  GET item and list
+    present the stored row.  The write does not compare rated spend,
+    stop rating, or compose a journal.
     ``POST /v1/issued-invoices/{issued_invoice_id}/voids`` records one
     commercial void of an unused issued invoice.  Replay of the same
     tenant and issued invoice returns the stored
@@ -246,6 +252,7 @@ from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
     AccountStatementPresentmentQueryError,
     RatedSpendPresentmentQueryError,
+    SpendBudgetPresentmentQueryError,
     CollectionAgingPresentmentQueryError,
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
@@ -335,6 +342,8 @@ from metering_billing.account_statement_presentment import (
     AccountStatementPresentmentService,
 )
 from metering_billing.rated_spend_presentment import RatedSpendPresentmentService
+from metering_billing.spend_budget import SpendBudgetService
+from metering_billing.spend_budget_presentment import SpendBudgetPresentmentService
 from metering_billing.collection_aging_presentment import (
     Clock,
     CollectionAgingPresentmentService,
@@ -382,6 +391,11 @@ BILLING_ACCOUNT_STATEMENT_PATH = re.compile(
 BILLING_ACCOUNT_RATED_SPEND_PATH = re.compile(
     r"^/v1/billing-accounts/([0-9a-fA-F-]{36})/rated-spend$"
 )
+BILLING_ACCOUNT_SPEND_BUDGETS_PATH = re.compile(
+    r"^/v1/billing-accounts/([0-9a-fA-F-]{36})/spend-budgets$"
+)
+SPEND_BUDGET_COLLECTION_PATH = "/v1/spend-budgets"
+SPEND_BUDGET_ITEM_PATH = re.compile(r"^/v1/spend-budgets/([0-9a-fA-F-]{36})$")
 COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36})$")
 COLLECTION_DUNNING_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/dunning-events$"
@@ -646,6 +660,8 @@ def create_http_app(
         shared_ledger, clock=clock
     )
     rated_spend_presentments = RatedSpendPresentmentService(shared_ledger)
+    spend_budgets = SpendBudgetService(shared_ledger, clock=clock)
+    spend_budget_presentments = SpendBudgetPresentmentService(shared_ledger)
     dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
@@ -1551,6 +1567,39 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_spend_budgets", "get_spend_budget"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_spend_budgets":
+                    page = spend_budget_presentments.list_spend_budgets(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = spend_budget_presentments.present_spend_budget(
+                    tenant_reference,
+                    _parse_uuid(path_values["spend_budget_id"], "spend_budget_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except SpendBudgetPresentmentQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "spend_budget_not_found" else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "collection_aging":
             try:
                 query = _read_query(environ)
@@ -2293,6 +2342,59 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "spend_budgets":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                currency_code = payload.get("currency_code")
+                window_started_at = payload.get("window_started_at")
+                window_ended_at = payload.get("window_ended_at")
+                source_payload_hash = payload.get("source_payload_hash")
+                if not isinstance(currency_code, str):
+                    raise HttpRequestError("request_invalid")
+                if not isinstance(window_started_at, str) or not isinstance(window_ended_at, str):
+                    raise HttpRequestError("request_invalid")
+                if source_payload_hash is not None and not isinstance(source_payload_hash, str):
+                    raise HttpRequestError("request_invalid")
+                window = TimeWindow.from_iso8601(window_started_at, window_ended_at)
+                result = spend_budgets.publish_spend_budget(
+                    tenant_reference,
+                    _parse_uuid(path_values["billing_account_id"], "billing_account_id"),
+                    currency_code,
+                    payload.get("budget_amount"),
+                    window,
+                    source_payload_hash=source_payload_hash,
+                )
+                if result.spend_budget_outcome_code.value == "rejected":
+                    reason = (
+                        result.rejection_reason_code.value
+                        if result.rejection_reason_code is not None
+                        else "request_invalid"
+                    )
+                    if reason == "billing_account_not_found":
+                        status_code = 404
+                    elif reason == "billing_account_forbidden":
+                        status_code = 403
+                    else:
+                        status_code = 422
+                    return _send_json(
+                        start_response,
+                        status_code,
+                        result.as_contract_dict(),
+                    )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_invoices":
             try:
                 payload = _read_json_object(environ)
@@ -2584,6 +2686,20 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if spend_match is not None:
         if method == "GET":
             return "rated_spend", {"billing_account_id": spend_match.group(1)}
+        return "method_not_allowed", {}
+    budget_nested = BILLING_ACCOUNT_SPEND_BUDGETS_PATH.fullmatch(path)
+    if budget_nested is not None:
+        if method == "POST":
+            return "spend_budgets", {"billing_account_id": budget_nested.group(1)}
+        return "method_not_allowed", {}
+    if path == SPEND_BUDGET_COLLECTION_PATH:
+        if method == "GET":
+            return "list_spend_budgets", {}
+        return "method_not_allowed", {}
+    budget_match = SPEND_BUDGET_ITEM_PATH.fullmatch(path)
+    if budget_match is not None:
+        if method == "GET":
+            return "get_spend_budget", {"spend_budget_id": budget_match.group(1)}
         return "method_not_allowed", {}
     if path == COLLECTION_AGING_PATH:
         if method == "GET":

@@ -22,6 +22,8 @@ from metering_billing.contracts import (
     validate_payment_intent_presentment,
     validate_payment_receipt_presentment,
     validate_credit_adjustment_presentment,
+    validate_spend_budget,
+    validate_spend_budget_presentment,
     validate_rate_card_presentment,
     validate_usage_event_presentment,
     validate_rating_run_presentment,
@@ -1291,6 +1293,183 @@ class RepositoryContractTests(unittest.TestCase):
             "$: tax_amount must not be negative",
             validate_credit_adjustment_presentment(negative_tax),
         )
+
+    def test_spend_budget_accepts_published_amount_and_closed_codes(self) -> None:
+        """A spend-budget contract records an exact amount and published status."""
+        schema = self._schema("spend-budget.schema.json")
+        instance = {
+            "spend_budget_contract_version": 1,
+            "spend_budget_outcome_code": "accepted",
+            "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf681",
+            "currency_code": "USD",
+            "budget_amount": "100.00",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "spend_budget_status": "published",
+            "source_payload_hash": "sha256:" + "6" * 64,
+            "published_at": "2026-08-18T15:00:00Z",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_spend_budget(instance), ())
+        floated = dict(instance, budget_amount=100.00)
+        self.assertTrue(validate_schema_instance(schema, floated))
+        extra = dict(instance, group_by="product")
+        self.assertIn(
+            "$: additional property is not allowed: group_by",
+            validate_schema_instance(schema, extra),
+        )
+        items = dict(instance, items=[])
+        self.assertIn(
+            "$: additional property is not allowed: items",
+            validate_schema_instance(schema, items),
+        )
+        cursor = dict(instance, cursor="x")
+        self.assertIn(
+            "$: additional property is not allowed: cursor",
+            validate_schema_instance(schema, cursor),
+        )
+        posted = dict(instance, proposal_status="posted")
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        earnings = dict(instance, retained_earnings="1")
+        self.assertIn(
+            "$: additional property is not allowed: retained_earnings",
+            validate_schema_instance(schema, earnings),
+        )
+        zeroed = dict(instance, budget_amount="0")
+        self.assertIn("$: budget_amount must be greater than zero", validate_spend_budget(zeroed))
+        bad_amount = dict(instance, budget_amount="not-decimal")
+        self.assertTrue(
+            any(
+                "budget_amount must be an exact decimal" in error
+                for error in validate_spend_budget(bad_amount)
+            )
+        )
+        waiting = dict(instance, next_operator_action="collect")
+        self.assertIn("$: published spend budgets must wait", validate_spend_budget(waiting))
+        rejected = {
+            "spend_budget_contract_version": 1,
+            "spend_budget_outcome_code": "rejected",
+        }
+        self.assertIn(
+            "$: rejected spend budgets must include rejection_reason_code",
+            validate_spend_budget(rejected),
+        )
+        self.assertNotEqual(validate_spend_budget([]), ())
+        missing_id = dict(instance)
+        del missing_id["spend_budget_id"]
+        self.assertIn(
+            "$: accepted spend budgets must include spend_budget_id",
+            validate_spend_budget(missing_id),
+        )
+        pan = dict(instance, card_pan="4111111111111111")
+        self.assertIn("$: spend budget must not include card_pan", validate_spend_budget(pan))
+        earnings_semantic = dict(instance, retained_earnings="1")
+        self.assertIn(
+            "$: spend budget must not include retained_earnings",
+            validate_spend_budget(earnings_semantic),
+        )
+        unknown_reason = {
+            "spend_budget_contract_version": 1,
+            "spend_budget_outcome_code": "rejected",
+            "rejection_reason_code": "tax_exempt",
+        }
+        self.assertIn(
+            "$.rejection_reason_code: value is not in the allowed enumeration",
+            validate_schema_instance(schema, unknown_reason),
+        )
+
+    def test_spend_budget_presentment_accepts_published_row_and_rejects_posted(self) -> None:
+        """A spend-budget statement records exact amounts and cannot claim posting."""
+        schema = self._schema("spend-budget-presentment.schema.json")
+        instance = {
+            "spend_budget_presentment_contract_version": 1,
+            "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf681",
+            "currency_code": "USD",
+            "budget_amount": "100.00",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "spend_budget_status": "published",
+            "source_payload_hash": "sha256:" + "6" * 64,
+            "published_at": "2026-08-18T15:00:00Z",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_spend_budget_presentment(instance), ())
+        posted = dict(instance, proposal_status="posted")
+        self.assertIn(
+            "$: additional property is not allowed: proposal_status",
+            validate_schema_instance(schema, posted),
+        )
+        captured = dict(instance, spend_budget_status="posted")
+        self.assertIn(
+            "$.spend_budget_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, captured),
+        )
+        zeroed = dict(instance, budget_amount="0")
+        self.assertIn(
+            "$: budget_amount must be greater than zero",
+            validate_spend_budget_presentment(zeroed),
+        )
+        waiting = dict(instance, next_operator_action="collect")
+        self.assertIn(
+            "$.next_operator_action: value is not in the allowed enumeration",
+            validate_schema_instance(schema, waiting),
+        )
+        collect = dict(instance)
+        collect["next_operator_action"] = "wait"
+        collect["spend_budget_status"] = "published"
+        self.assertEqual(validate_spend_budget_presentment(collect), ())
+        self.assertNotEqual(validate_spend_budget_presentment([]), ())
+        bad_amount = dict(instance, budget_amount="not-decimal")
+        self.assertTrue(
+            any(
+                "budget_amount must be an exact decimal" in error
+                for error in validate_spend_budget_presentment(bad_amount)
+            )
+        )
+        extra = dict(instance, items=[])
+        self.assertIn(
+            "$: additional property is not allowed: items",
+            validate_schema_instance(schema, extra),
+        )
+        waiting_presentment = dict(instance, next_operator_action="collect")
+        self.assertIn(
+            "$: published spend budgets must wait",
+            validate_spend_budget_presentment(waiting_presentment),
+        )
+        pan_presentment = dict(instance, card_pan="4111111111111111")
+        self.assertIn(
+            "$: spend budget presentment must not include card_pan",
+            validate_spend_budget_presentment(pan_presentment),
+        )
+
+    def test_spend_budget_migration_is_tenant_scoped_and_append_only(self) -> None:
+        """Spend-budget rows stay tenant-scoped and append-only."""
+        sql = (ROOT / "database/migrations/0035_spend_budget.sql").read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE TABLE billing_core.spend_budget",
+            "UNIQUE (",
+            "tenant_account_id",
+            "billing_account_id",
+            "window_started_at",
+            "window_ended_at",
+            "currency_code",
+            "source_payload_hash",
+            "spend_budget_contract_version",
+            "UNIQUE (tenant_account_id, spend_budget_id)",
+            "FOREIGN KEY (tenant_account_id, billing_account_id)",
+            "budget_amount numeric(38, 12) NOT NULL CHECK (budget_amount > 0)",
+            "CHECK (window_ended_at > window_started_at)",
+        ):
+            self.assertIn(expected_fragment, sql)
 
     def test_rate_card_presentment_accepts_lines_and_rejects_outcome(self) -> None:
         """A rate-card statement records exact unit prices and cannot claim a write outcome."""

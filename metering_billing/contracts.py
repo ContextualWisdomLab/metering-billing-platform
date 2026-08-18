@@ -25,6 +25,8 @@ __all__ = (
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
+    "SPEND_BUDGET_SCHEMA_NAME",
+    "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
     "TAX_RATE_SCHEMA_NAME",
     "TAX_ASSESSMENT_SCHEMA_NAME",
@@ -87,6 +89,7 @@ __all__ = (
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",
     "validate_credit_adjustment_presentment",
+    "validate_spend_budget_presentment",
     "validate_rate_card_presentment",
     "validate_usage_event_presentment",
     "validate_rating_run_presentment",
@@ -128,6 +131,7 @@ __all__ = (
     "validate_payment_intent",
     "validate_payment_receipt",
     "validate_credit_adjustment",
+    "validate_spend_budget",
     "validate_rate_card",
     "validate_tax_rate",
     "validate_tax_assessment",
@@ -153,6 +157,8 @@ RATED_SPEND_PRESENTMENT_SCHEMA_NAME = "rated-spend-presentment.schema.json"
 PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json"
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
+SPEND_BUDGET_SCHEMA_NAME = "spend-budget.schema.json"
+SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME = "spend-budget-presentment.schema.json"
 RATE_CARD_PRESENTMENT_SCHEMA_NAME = "rate-card-presentment.schema.json"
 USAGE_EVENT_PRESENTMENT_SCHEMA_NAME = "usage-event-presentment.schema.json"
 RATING_RUN_PRESENTMENT_SCHEMA_NAME = "rating-run-presentment.schema.json"
@@ -1320,6 +1326,84 @@ def _missing_success_payment_receipt_fields(
     for field_name in required_fields:
         if field_name not in payment_receipt:
             missing.append(f"$: {outcome} payment receipts must include {field_name}")
+    return tuple(missing)
+
+
+def validate_spend_budget_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate spend-budget presentment shape plus amount invariants."""
+    schema = load_json_schema(SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    budget_amount = statement.get("budget_amount")
+    action = statement.get("next_operator_action")
+    status = statement.get("spend_budget_status")
+    if isinstance(budget_amount, str):
+        try:
+            parsed = Decimal(budget_amount)
+            if parsed <= Decimal("0"):
+                errors.append("$: budget_amount must be greater than zero")
+        except Exception:
+            errors.append("$: budget_amount must be an exact decimal")
+    if status == "published" and action != "wait":
+        errors.append("$: published spend budgets must wait")
+    if "card_pan" in statement:
+        errors.append("$: spend budget presentment must not include card_pan")
+    return tuple(errors)
+
+
+def validate_spend_budget(
+    spend_budget: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate spend-budget shape plus identity and published amount."""
+    schema = load_json_schema(SPEND_BUDGET_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, spend_budget))
+    if not isinstance(spend_budget, Mapping):
+        return tuple(errors)
+    outcome = spend_budget.get("spend_budget_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_spend_budget_fields(spend_budget, str(outcome)))
+        budget_amount = spend_budget.get("budget_amount")
+        if isinstance(budget_amount, str):
+            try:
+                if Decimal(budget_amount) <= Decimal("0"):
+                    errors.append("$: budget_amount must be greater than zero")
+            except Exception:
+                errors.append("$: budget_amount must be an exact decimal")
+        if spend_budget.get("spend_budget_status") == "published":
+            if spend_budget.get("next_operator_action") != "wait":
+                errors.append("$: published spend budgets must wait")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in spend_budget:
+            errors.append("$: rejected spend budgets must include rejection_reason_code")
+    if "card_pan" in spend_budget:
+        errors.append("$: spend budget must not include card_pan")
+    if "retained_earnings" in spend_budget:
+        errors.append("$: spend budget must not include retained_earnings")
+    return tuple(errors)
+
+
+def _missing_success_spend_budget_fields(
+    spend_budget: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay budget lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "spend_budget_id",
+        "tenant_reference",
+        "billing_account_id",
+        "currency_code",
+        "budget_amount",
+        "window_started_at",
+        "window_ended_at",
+        "spend_budget_status",
+        "source_payload_hash",
+        "published_at",
+    ):
+        if field_name not in spend_budget:
+            missing.append(f"$: {outcome} spend budgets must include {field_name}")
     return tuple(missing)
 
 
