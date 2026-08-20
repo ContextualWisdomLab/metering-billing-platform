@@ -109,8 +109,8 @@ that the existing implementation cannot safely satisfy.
 The following inventory was obtained from the repository's open PR list on
 2026-08-20 after removing superseded cumulative snapshots. Every item remains
 an open candidate until its current head has a review, terminal Checks, and a
-recorded merge result. PR #3 targets the foundation branch; the other listed
-PRs target `develop`.
+recorded merge result. PR #3 targets the foundation branch; PR #92 stacks on
+PR #82; the other listed PRs target `develop`.
 
 | PRs | Scope |
 | --- | --- |
@@ -118,6 +118,7 @@ PRs target `develop`.
 | #3 | Expand operator README, ADRs, APA references, and validation documentation on the foundation branch |
 | #4 | Buyer/operator README and contributor documentation |
 | #82 | Cumulative commercial lifecycle and spend-budget publication, including current security hardening |
+| #92 | Draft product and technical gap baseline stacked on the current PR #82 head |
 
 PRs #5–#81 are closed as superseded snapshots. Their code ancestry is
 contained in #82 except for #7's resolver-hardening commit; that behavior was
@@ -127,9 +128,11 @@ closure reason is recorded on each PR; no closed snapshot is treated as a
 merge or production evidence.
 
 The grouped entries above preserve the current PR scope while keeping the
-merge loop reviewable. The authoritative titles, head SHAs, base SHAs, review
-states, and Checks are the GitHub records at review time; this file must be
-updated whenever that inventory or the merge order changes.
+merge loop reviewable. PR #92 is the current detailed baseline candidate and
+remains draft until its stacked base and release topology are settled. The
+authoritative titles, head SHAs, base SHAs, review states, and Checks are the
+GitHub records at review time; this file must be updated whenever that
+inventory or the merge order changes.
 
 ## Merge and development loop
 
