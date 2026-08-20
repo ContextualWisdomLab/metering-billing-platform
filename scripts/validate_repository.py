@@ -19,6 +19,7 @@ from uuid import UUID
 
 
 DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
+SchemaNode = Mapping[str, Any] | bool
 REQUIRED_FILES = (
     "README.md",
     "AGENTS.md",
@@ -236,11 +237,15 @@ def _resolve_reference(root_schema: Mapping[str, Any], reference: str) -> Mappin
 
 def _validate_node(
     root_schema: Mapping[str, Any],
-    schema: Mapping[str, Any],
+    schema: SchemaNode,
     instance: Any,
     path: str,
 ) -> list[str]:
     """Validate one node and return stable path-qualified error messages."""
+    if schema is True:
+        return []
+    if schema is False:
+        return [f"{path}: schema is false"]
     if "$ref" in schema:
         resolved = _resolve_reference(root_schema, str(schema["$ref"]))
         return _validate_node(root_schema, resolved, instance, path)
@@ -343,7 +348,7 @@ def _validate_array(
     if schema.get("uniqueItems") and len({_canonical_value(item) for item in instance}) != len(instance):
         errors.append(f"{path}: array items must be unique")
     item_schema = schema.get("items")
-    if isinstance(item_schema, Mapping):
+    if isinstance(item_schema, (Mapping, bool)):
         for index, item in enumerate(instance):
             errors.extend(_validate_node(root_schema, item_schema, item, f"{path}[{index}]"))
     return errors
