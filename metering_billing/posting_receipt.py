@@ -223,7 +223,7 @@ class AisPostingReceiptClient:
             if error.code in {403, 404}:
                 return AisLookupResult(status_code=error.code, raw_body=b"")
             raise AisTransportError("transport_failure") from error
-        except (URLError, TimeoutError, OSError) as error:
+        except (URLError, TimeoutError, OSError, ValueError) as error:
             raise AisTransportError("transport_failure") from error
         if status_code != 200:
             raise AisTransportError("transport_failure")
@@ -272,7 +272,7 @@ class AisPostingReceiptClient:
             if error.code in {403, 404}:
                 return AisOutboxPage(status_code=error.code, outbox_events=(), next_cursor=None)
             raise AisTransportError("transport_failure") from error
-        except (URLError, TimeoutError, OSError) as error:
+        except (URLError, TimeoutError, OSError, ValueError) as error:
             raise AisTransportError("transport_failure") from error
         if status_code != 200:
             raise AisTransportError("transport_failure")
@@ -299,7 +299,7 @@ class AisPostingReceiptClient:
             if error.code in {403, 404}:
                 return AisLookupResult(status_code=error.code, raw_body=b"")
             raise AisTransportError("transport_failure") from error
-        except (URLError, TimeoutError, OSError) as error:
+        except (URLError, TimeoutError, OSError, ValueError) as error:
             raise AisTransportError("transport_failure") from error
         if status_code not in {200, 204}:
             raise AisTransportError("transport_failure")
@@ -342,7 +342,13 @@ def _parse_outbox_page(raw_body: bytes) -> AisOutboxPage:
 
 def urlopen_default(request: Request, timeout: float | None = None) -> Any:
     """Call stdlib ``urllib.request.urlopen`` so tests can replace the client hook."""
-    return urlopen(request, timeout=timeout)
+    request_url = getattr(request, "full_url", None)
+    if not isinstance(request_url, str) or not ais_base_url_is_allowed(request_url):
+        raise ValueError("ais endpoint is insecure")
+    # URL is constrained to https or local HTTP immediately above.
+    return urlopen(  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+        request, timeout=timeout
+    )
 
 
 class PostingReceiptPullService:

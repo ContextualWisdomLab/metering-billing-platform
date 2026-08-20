@@ -166,7 +166,10 @@ def post_signed_webhook(
     for header_name, header_value in headers.items():
         request.add_header(header_name, header_value)
     try:
-        with urlopen(request, timeout=5) as response:
+        # URL is constrained to https or local HTTP before constructing the request.
+        with urlopen(  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+            request, timeout=5
+        ) as response:
             return int(response.getcode()), None
     except HTTPError as error:
         return int(error.code), "webhook_http_error"

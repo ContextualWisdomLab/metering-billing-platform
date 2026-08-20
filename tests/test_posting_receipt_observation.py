@@ -507,6 +507,10 @@ class PostingReceiptObservationTests(unittest.TestCase):
         )
         self.assertEqual(len(ledger.posting_receipt_observations), 0)
 
+        invalid_endpoint = AisPostingReceiptClient("file:///tmp/ais")
+        with self.assertRaises(AisTransportError):
+            invalid_endpoint.get_posting_receipt(TENANT_ONE, key)
+
         def raise_http(request: object, timeout: object = None) -> object:
             del request, timeout
             raise HTTPError("http://ais.test/posting-receipts", 500, "error", None, io.BytesIO(b""))
