@@ -11,9 +11,10 @@ currently open pull requests are merged or production-ready.
 | Evidence | Observed state |
 | --- | --- |
 | `develop` | Bootstrap commit `17e1408`; the checked-out branch has no implementation before the pull-request chain is merged. |
-| Foundation candidate | PR #1, `agent/initial-billing-foundation`; current head is tracked in GitHub and its exact-head repository-contract check is the first gate. |
-| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, and tests. |
-| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. Hosted checks remain authoritative for the pushed head. |
+| Foundation candidate | PR #1, `agent/initial-billing-foundation`, current head `1925873`; its exact-head repository-contract check is the first gate. |
+| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, current head `adea8cc`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, and tests. |
+| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 579 Python tests at 100% coverage, 42 operator-console tests, lint, Storybook build, Semgrep with zero findings, and production-dependency audit with zero vulnerabilities. Hosted Checks remain authoritative for the pushed heads. |
+| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades, outbound URL revalidation, and regression tests; its new hosted Checks are pending. |
 | Authority documents | `docs/PRD.md`, `docs/TRD.md`, `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`, `docs/ACCOUNTING_BOUNDARY.md`, `docs/SECURITY.md`, `docs/STORYBOOK.md`, ADRs, and `docs/doctoring/*`. |
 | External boundary | Accounting Information Platform, Keyverse, contextual-orchestrator, payment/MoR providers, tax services, and bank/treasury systems are described as replaceable or authoritative external systems; their production integration is not inferred from a local merge. |
 
