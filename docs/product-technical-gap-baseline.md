@@ -11,10 +11,10 @@ currently open pull requests are merged or production-ready.
 | Evidence | Observed state |
 | --- | --- |
 | `develop` | Bootstrap commit `17e1408`; the checked-out branch has no implementation before the pull-request chain is merged. |
-| Foundation candidate | PR #1, `agent/initial-billing-foundation`, current head `1925873`; its exact-head repository-contract check is the first gate. |
-| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, current head `adea8cc`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, and tests. |
-| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 579 Python tests at 100% coverage, 42 operator-console tests, lint, Storybook build, Semgrep with zero findings, and production-dependency audit with zero vulnerabilities. Hosted Checks remain authoritative for the pushed heads. |
-| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades, outbound URL revalidation, and regression tests; its new hosted Checks are pending. |
+| Foundation candidate | PR #1, `agent/initial-billing-foundation`, current head `db7895a`; its exact-head repository-contract check is the first gate. |
+| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, current head `ac592d9`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, tests, dependency repairs, outbound URL validation, and hollow-resolver hardening. |
+| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 583 Python tests at 100% coverage, optimized-Python resolver tests, 42 operator-console tests, lint, Storybook build, local Semgrep with zero findings, and production-dependency audit with zero vulnerabilities. Hosted Checks remain authoritative for the pushed heads. |
+| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades and outbound URL revalidation; head `ac592d9` additionally replaces production `assert` resolver guards with `require_resolved` and adds hollow-success regression tests. Its new hosted Checks are pending. |
 | Authority documents | `docs/PRD.md`, `docs/TRD.md`, `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`, `docs/ACCOUNTING_BOUNDARY.md`, `docs/SECURITY.md`, `docs/STORYBOOK.md`, ADRs, and `docs/doctoring/*`. |
 | External boundary | Accounting Information Platform, Keyverse, contextual-orchestrator, payment/MoR providers, tax services, and bank/treasury systems are described as replaceable or authoritative external systems; their production integration is not inferred from a local merge. |
 
@@ -52,7 +52,7 @@ provider identifier an internal authority. The main buyer outcomes are:
 | --- | --- | --- | --- |
 | Contract plane | Draft 2020-12 schemas, exact decimal strings, semantic journal validation, and repository validator | Implemented in the PR chain | Schemas need published versioning and compatibility policy. |
 | Usage and rating | `metering_billing/usage_ingestion.py`, `usage_rating.py`, migrations `0002` and `0003`, idempotent replay tests | Implemented as an in-memory service slice | No production PostgreSQL repository or concurrent-ingest acceptance test. |
-| Commercial lifecycle | Invoice draft, journal proposal, collection, payment intent/receipt, credit, tax, issue/void, dispute, write-off, unapplied cash, and account statement modules | Broad functional slice in PRs #8-#82 | No production provider execution, reconciliation worker, or operational recovery path. |
+| Commercial lifecycle | Invoice draft, journal proposal, collection, payment intent/receipt, credit, tax, issue/void, dispute, write-off, unapplied cash, account statement, and spend-budget modules | Broad functional slice in current PR #82 | No production provider execution, reconciliation worker, or operational recovery path. |
 | HTTP presentment | `metering_billing/http_app.py` and GET/POST contracts for stored facts | Local stdlib adapter | No deployed server contract, rate limiting, request tracing, OpenAPI publication, or authenticated operator portal. |
 | Accounting boundary | Proposal-only statuses, AIS pull/drain, posting-receipt observation, ADRs and traceability | Boundary is explicit | No live Accounting Information Platform connector or end-to-end posting-receipt run. |
 | Operator UI | `operator_console`, Storybook, tokenized fixtures, exact-decimal render tests | Presentment prototype | Storybook is not a customer/operator release: no login, browser E2E, accessibility gate, i18n gate, or deployment proof. |
@@ -107,91 +107,24 @@ that the existing implementation cannot safely satisfy.
 ## Open pull-request inventory
 
 The following inventory was obtained from the repository's open PR list on
-2026-08-20. Every item remains an open candidate until its current head has a
-review, terminal Checks, and a recorded merge result. PR #3 targets the
-foundation branch; the other listed PRs target `develop`.
+2026-08-20 after removing superseded cumulative snapshots. Every item remains
+an open candidate until its current head has a review, terminal Checks, and a
+recorded merge result. PR #3 targets the foundation branch; the other listed
+PRs target `develop`.
 
 | PRs | Scope |
 | --- | --- |
 | #1 | Establish provider-neutral billing foundation |
-| #3–#4 | Operator ADR/README documentation and buyer/operator README |
-| #5 | Immutable usage ingestion and idempotent deduplication |
-| #6–#7 | Deterministic time-windowed usage rating |
-| #8 | Invoice draft from rated usage |
-| #9 | Journal proposal from invoice draft |
-| #10 | Collection case and dunning from invoice draft |
-| #11 | Payment intent from collection case |
-| #12 | Payment receipt and settlement from payment intent |
-| #13 | Cash journal proposal from payment receipt |
-| #14 | Standard-library HTTP accept surface |
-| #15 | Journal proposal query HTTP for AIS pull |
-| #16 | AIS posting receipt observation |
-| #17 | Credit adjustment from invoice draft |
-| #18 | Versioned rate-card catalog |
-| #19 | Tax assessment on invoice draft |
-| #20 | Tax-payable unwind on credit adjustment |
-| #21 | Invoice draft presentment HTTP |
-| #22 | Tenant API credentials for HTTP |
-| #23 | Operator presentment Storybook |
-| #24 | Commercial webhook outbox |
-| #25 | AIS outbox drain |
-| #26 | Collection-case presentment |
-| #27 | Payment-intent HTTP |
-| #28 | Payment-receipt HTTP |
-| #29 | Cash journal on receipt accept |
-| #30 | Credit-adjustment HTTP presentment |
-| #31 | Rate-card HTTP presentment |
-| #32 | Usage-event HTTP presentment |
-| #33 | Rating-run HTTP presentment |
-| #34 | Tax-assessment HTTP presentment |
-| #35 | Posting-receipt observation HTTP presentment |
-| #36 | Webhook-delivery HTTP presentment |
-| #37 | Tenant API credential presentment |
-| #38 | Webhook-subscription presentment |
-| #39 | Dunning-event presentment |
-| #40 | Webhook-outbox-event presentment |
-| #41 | Issued invoice from invoice draft |
-| #42 | Invoice-issued webhook |
-| #43 | Issued credit note from credit adjustment |
-| #44 | Credit-note-issued webhook |
-| #45 | Credit-note application to collection case |
-| #46 | Collection-case settlement when zero |
-| #47 | Collection-settled webhook |
-| #48 | Credit-note-applied webhook |
-| #49 | Collection write-off |
-| #50 | Write-off-recorded webhook |
-| #51 | Write-off journal proposal |
-| #52 | Credit journal proposal |
-| #53 | Collection aging presentment |
-| #54 | Unapplied cash from payment receipt |
-| #55 | Unapplied-cash application |
-| #56 | Unapplied-cash-applied webhook |
-| #57 | Unapplied-cash refund |
-| #58 | Refund-recorded webhook |
-| #59 | Refund journal proposal |
-| #60 | Unapplied-cash journal proposal |
-| #61 | Unapplied-cash application journal |
-| #62 | Billing-account statement presentment |
-| #63 | Commercial issued-invoice void |
-| #64 | Invoice-voided webhook |
-| #65 | Void journal proposal |
-| #66 | Collection-dispute hold |
-| #67 | Collection-dispute release |
-| #68 | Dispute-held webhook |
-| #69 | Dispute-released webhook |
-| #70 | Issued-invoice tax-assessment presentment |
-| #71 | Issued-credit-note tax-assessment presentment |
-| #72 | Issued-credit-note void |
-| #73 | Credit-note-voided webhook |
-| #74 | Credit-note-void journal proposal |
-| #75 | Account-statement void totals |
-| #76 | Operator account-statement Storybook |
-| #77 | Rated spend by product |
-| #78 | Rated spend grouped by project |
-| #79 | Rated spend grouped by credential |
-| #80 | Rated spend grouped by principal |
-| #81 | Rated spend grouped by cost center |
-| #82 | Commercial spend budget publication |
+| #3 | Expand operator README, ADRs, APA references, and validation documentation on the foundation branch |
+| #4 | Buyer/operator README and contributor documentation |
+| #82 | Cumulative commercial lifecycle and spend-budget publication, including current security hardening |
+
+PRs #5–#81 are closed as superseded snapshots. Their code ancestry is
+contained in #82 except for #7's resolver-hardening commit; that behavior was
+reapplied directly to #82 at `ac592d9` with optimized-Python regression tests.
+PR #6 was separately superseded by #7 before the cumulative cleanup. The
+closure reason is recorded on each PR; no closed snapshot is treated as a
+merge or production evidence.
 
 The grouped entries above preserve the current PR scope while keeping the
 merge loop reviewable. The authoritative titles, head SHAs, base SHAs, review
