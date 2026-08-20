@@ -31,12 +31,16 @@ The current milestone contains:
 ## Run validation
 
 ```bash
-python3 -m pip install --only-binary=:all: --require-hashes -r requirements-quality.txt
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m coverage run --branch -m unittest discover -s tests -p 'test_*.py'
-python3 -m coverage report --fail-under=100 --show-missing
-python3 scripts/validate_repository.py
+uv sync --group dev
+uv run --locked --group dev python -m unittest discover -s tests -p 'test_*.py'
+uv run --locked --group dev python -m coverage run --branch -m unittest discover -s tests -p 'test_*.py'
+uv run --locked --group dev python -m coverage report --fail-under=100 --show-missing
+uv run --locked --group dev python scripts/validate_repository.py
 ```
+
+The repository uses a project-local `.venv` managed by `uv`; the checked-in
+`uv.lock` pins the development toolchain.  PostgreSQL migrations are a schema
+boundary, while the current standalone runtime still uses `MemoryUsageLedger`.
 
 ## Ingest usage
 

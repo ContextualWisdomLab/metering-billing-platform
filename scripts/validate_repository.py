@@ -275,6 +275,8 @@ REQUIRED_FILES = (
     "operator_console/tokens/design_tokens.json",
     "operator_console/fixtures/taxed_partial_credit.json",
     "requirements-quality.txt",
+    "pyproject.toml",
+    "uv.lock",
     ".github/workflows/ci.yml",
 )
 ACTION_REFERENCE_PATTERN = re.compile(
@@ -431,7 +433,14 @@ def _iter_contract_files(root: Path) -> tuple[Path, ...]:
         if not file_path.is_file() or file_path.suffix not in included_suffixes:
             continue
         if any(
-            part in {".git", "__pycache__", "tests", "node_modules", "storybook-static"}
+            part in {
+                ".git",
+                ".venv",
+                "__pycache__",
+                "tests",
+                "node_modules",
+                "storybook-static",
+            }
             for part in relative_parts
         ):
             continue
