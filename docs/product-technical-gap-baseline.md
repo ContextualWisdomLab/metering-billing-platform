@@ -14,7 +14,7 @@ The strongest existing work is the explicit separation of usage, rating, commerc
 
 Completion is blocked by nine product-level gaps:
 
-1. the implemented product is not on the default branch and is distributed across an 80-PR cumulative stack;
+1. the implemented product is not on the default branch and the current release train still has multiple open, stacked candidates;
 2. the exercised runtime is still centered on an in-memory reference ledger rather than a durable PostgreSQL production path;
 3. published spend budgets do not authorize, reserve, commit, release, or deny work;
 4. no live commerce adapter currently collects money or imports authoritative provider settlement evidence;
@@ -52,21 +52,19 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 At assessment time:
 
-- ordinary open issues before this assessment: **0**;
-- open pull requests: **80**;
+- ordinary open issues before this assessment: **9** (`#83`–`#91`), all completion-gap issues;
+- open pull requests: **5** (`#1`, `#3`, `#4`, `#82`, and draft `#92`);
 - current cumulative tip: PR #82;
 - PR #82 at the assessed head: **125 commits**, **428 changed files**, about **89.5k additions**;
 - PR #82 targets `develop` directly.
 
-The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head:
+The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `ac592d95b2818c6ddf763580a70af0c36fe0232e`:
 
-- Foundation CI: queued;
-- Security Scan: queued;
-- SAST Semgrep: queued;
-- independent approval: absent;
+- Foundation CI, Security Scan, SAST Semgrep, and the required OpenCode/Noema/scheduler jobs: pending;
+- independent approval: required and absent;
 - unresolved review threads: none observed, but the only formal review was a commented automated security review.
 
-PR #82 reports 579 local tests, 100% statement/branch coverage for the declared Python scope, and a green repository validator. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
+PR #82 has 583 local Python tests, 100% statement/branch coverage for the declared Python scope, a green repository validator, optimized-Python resolver checks, local Semgrep with zero findings, and a production-dependency audit with zero vulnerabilities. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
 
 ### Candidate capabilities already present
 
@@ -114,7 +112,7 @@ The assessment produced the following issues. Their acceptance criteria constitu
 
 | Priority | Issue | Completion outcome |
 |---:|---|---|
-| P0 | [#83 — Collapse the 80-PR cumulative stack into a verified release train](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/83) | Product baseline is merged, traceable, independently approved, and exact-head verified |
+| P0 | [#83 — Collapse the superseded snapshot PRs into a verified release train](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/83) | Product baseline is merged, traceable, independently approved, and exact-head verified |
 | P0 | [#84 — Replace the in-memory reference ledger with a durable PostgreSQL production path](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/84) | Production commands survive restart, concurrency, failover, backup, restore, and hot partitions |
 | P0 | [#85 — Enforce spend budgets with atomic authorization, quotas, and entitlements](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/85) | Pre-execution reserve/commit/release control and effective-dated entitlements work safely |
 | P0 | [#86 — Ship capability-based provider adapters and first production collection channels](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/86) | Lemon Squeezy MoR plus manual invoice/wire collect money without owning the core ledger |
@@ -150,6 +148,24 @@ M6  GA evidence and release
 ```
 
 Work can be stacked when public contracts are stable, but each PR must remain independently reviewable. A new cumulative mega-PR must not recreate the current integration problem.
+
+## Open pull-request inventory
+
+The current repository inventory on 2026-08-20 contains five open candidates:
+
+| PR | Scope | Base | Current evidence |
+|---:|---|---|---|
+| #1 | Provider-neutral billing foundation | `develop` | Checks pending; no formal approval |
+| #3 | Operator README, ADR, APA references, and validation documentation | PR #1 | Draft; repository contracts pending |
+| #4 | Buyer/operator README and contributor documentation | `develop` | Historical Checks passed; no formal approval |
+| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `ac592d9`; review required; required Checks pending |
+| #92 | This product and technical gap baseline | PR #82 | Draft; repository contracts pending |
+
+PRs #5–#81 are closed as superseded snapshots. Their closure is not merge or
+production evidence. PR #92 is the current detailed baseline candidate and
+must remain synchronized with the open-PR list, issue backlog, exact heads,
+review decisions, and hosted Checks. The GitHub records are authoritative for
+live status; this table is the reviewable product snapshot.
 
 ## Target commercial vertical
 
