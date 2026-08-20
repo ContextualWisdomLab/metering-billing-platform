@@ -73,6 +73,24 @@ class RepositoryContractTests(unittest.TestCase):
             errors = validate_repository(Path(temporary_directory))
         self.assertIn("missing required file: README.md", errors)
 
+    def test_boolean_json_schema_nodes_are_supported(self) -> None:
+        """Draft 2020-12 boolean schemas must accept true and reject false."""
+        schema = {
+            "type": "object",
+            "properties": {"accepted_value": True, "forbidden_value": False},
+            "additionalProperties": False,
+        }
+        self.assertEqual(validate_schema_instance(schema, {"accepted_value": "ok"}), ())
+        self.assertEqual(
+            validate_schema_instance(schema, {"forbidden_value": "blocked"}),
+            ("$.forbidden_value: schema is false",),
+        )
+        self.assertEqual(validate_schema_instance({"type": "array"}, []), ())
+        self.assertEqual(
+            validate_schema_instance({"type": "array", "items": False}, ["blocked"]),
+            ("$[0]: schema is false",),
+        )
+
     def test_node_modules_placeholders_are_ignored(self) -> None:
         """Storybook install trees must not fail repository contract scans."""
         with tempfile.TemporaryDirectory() as temporary_directory:
