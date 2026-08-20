@@ -2,7 +2,7 @@
 
 **Status:** Proposed completion baseline  
 **Assessment date:** 2026-08-20  
-**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `5c64f9d197d6f69358bbdcdea497325c9ccc65a1`
+**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `205a1906f1ea238f3e0411ba14f17a7a829b224c`
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
 
@@ -55,10 +55,10 @@ At assessment time:
 - ordinary open issues before this assessment: **9** (`#83`–`#91`), all completion-gap issues;
 - open pull requests: **5** (`#1`, `#3`, `#4`, `#82`, and draft `#92`);
 - current cumulative tip: PR #82;
-- PR #82 at the assessed head: **130 commits**, **431 changed files**, about **89.8k additions**;
+- PR #82 at the assessed head: **131 commits**, **432 changed files**, about **89.9k additions**;
 - PR #82 targets `develop` directly.
 
-The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `5c64f9d197d6f69358bbdcdea497325c9ccc65a1`:
+The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `205a1906f1ea238f3e0411ba14f17a7a829b224c`:
 
 - Foundation CI, Security Scan, SAST Semgrep, and the required OpenCode/Noema/scheduler jobs: pending;
 - independent approval: required and absent;
@@ -79,7 +79,7 @@ The cumulative candidate provides meaningful foundations:
 | Accounting boundary | Balanced proposal-only journals and AIS posting-receipt observations | Correctly does not own statutory books; end-to-end released AIS integration still requires operational proof |
 | Webhooks and API | Tenant-scoped HTTP adapter, HMAC webhook outbox, AIS outbox drain, local API credentials, bounded URL controls | Production identity, KMS, egress gateway, durable queue, and provider webhook normalization are incomplete |
 | Presentment | Storybook components for many exact-decimal commercial statements | No production SPA, customer portal, login, workflow queue, or full accessibility evidence |
-| Database design | PostgreSQL 18 migrations and normalized constraints exist; migration `0036` adds tenant proposal-reference uniqueness and non-overlapping credential intervals | The TRD explicitly describes the first runtime as in-memory, with persistent adapter work left for a later milestone; CI still lacks migration/locking/upgrade tests and hot partitioning |
+| Database design | PostgreSQL 18 migrations and normalized constraints exist; migrations `0036` and `0037` add tenant proposal-reference uniqueness, non-overlapping credential intervals, and durable tenant/credential URN identity | The TRD explicitly describes the first runtime as in-memory, with persistent adapter work left for a later milestone; CI still lacks migration/locking/upgrade tests and hot partitioning |
 | Quality policy | Extensive schemas, ADRs, docs, local 100% coverage claim, commit-pinned Actions | Candidate remains unmerged; exact-head hosted and release-artifact evidence is incomplete |
 | Spend visibility | Rated-spend views by product/project/credential/principal/cost center and an append-only spend budget | Budget publication does not reserve, enforce, deny, or grant entitlement |
 
@@ -158,7 +158,7 @@ The current repository inventory on 2026-08-20 contains five open candidates:
 | #1 | Provider-neutral billing foundation | `develop` | Checks pending; no formal approval |
 | #3 | Operator README, ADR, APA references, and validation documentation | PR #1 | Draft; repository contracts pending |
 | #4 | Buyer/operator README and contributor documentation | `develop` | Historical Checks passed; no formal approval |
-| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `5c64f9d`; review required; required Checks pending |
+| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `205a190`; review required; required Checks pending |
 | #92 | This product and technical gap baseline | PR #82 | Draft; repository contracts pending |
 
 PRs #5–#81 are closed as superseded snapshots. Their closure is not merge or
