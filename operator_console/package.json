@@ -22,10 +22,13 @@
     "lint": "node scripts/lint_console.mjs"
   },
   "devDependencies": {
-    "@storybook/addon-essentials": "8.6.14",
-    "@storybook/html": "8.6.14",
-    "@storybook/html-vite": "8.6.14",
-    "storybook": "8.6.14",
-    "vite": "6.3.5"
+    "@storybook/addon-essentials": "8.6.17",
+    "@storybook/html": "8.6.17",
+    "@storybook/html-vite": "8.6.17",
+    "storybook": "8.6.17",
+    "vite": "6.4.3"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
   }
 }

@@ -1878,6 +1878,11 @@ class WebhookOutboxTests(unittest.TestCase):
         )
         self.assertIsNone(refused_status)
         self.assertEqual(refused_failure, "webhook_transport_failure")
+        file_status, file_failure = post_signed_webhook(
+            "file:///etc/passwd", b"{}", {"Content-Type": "application/json"}
+        )
+        self.assertIsNone(file_status)
+        self.assertEqual(file_failure, "webhook_transport_failure")
         with mock.patch(
             "metering_billing.webhook_outbox.urlopen",
             side_effect=URLError("closed"),

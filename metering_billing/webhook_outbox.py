@@ -160,6 +160,8 @@ def post_signed_webhook(
     callback_url: str, raw_body: bytes, headers: Mapping[str, str]
 ) -> tuple[int | None, str | None]:
     """POST *raw_body* to *callback_url* and return ``(http_status, failure)``."""
+    if not callback_url_is_allowed(callback_url):
+        return None, "webhook_transport_failure"
     request = Request(callback_url, data=raw_body, method="POST")
     for header_name, header_value in headers.items():
         request.add_header(header_name, header_value)
