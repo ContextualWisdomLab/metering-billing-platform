@@ -91,6 +91,19 @@ class RepositoryContractTests(unittest.TestCase):
             ("$[0]: schema is false",),
         )
 
+    def test_reusable_workflow_action_refs_are_pinned(self) -> None:
+        """Reusable workflow paths must obey the same immutable-ref policy."""
+        mutable = "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@main"
+        pinned = (
+            "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@"
+            + "a" * 40
+        )
+        self.assertEqual(
+            find_mutable_action_references(mutable),
+            ("ContextualWisdomLab/.github/.github/workflows/reusable.yml@main",),
+        )
+        self.assertEqual(find_mutable_action_references(pinned), ())
+
     def test_node_modules_placeholders_are_ignored(self) -> None:
         """Storybook install trees must not fail repository contract scans."""
         with tempfile.TemporaryDirectory() as temporary_directory:
