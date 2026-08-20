@@ -64,7 +64,7 @@ The top PR is mergeable at the Git graph level, but that is not release evidence
 - independent approval: required and absent;
 - unresolved review threads: none observed, but the only formal review was a commented automated security review.
 
-PR #82 has 587 local Python tests, 100% statement/branch coverage for the declared Python scope, a green repository validator, optimized-Python resolver checks, local Semgrep with zero findings, a real PostgreSQL 18 migration/constraint smoke run, and a production-dependency audit with zero vulnerabilities. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
+PR #82 has 588 local Python tests, 100% statement/branch coverage for the declared Python scope, a green repository validator, optimized-Python resolver checks, local Semgrep with zero findings, a real PostgreSQL 18 migration/constraint smoke run, and a production-dependency audit with zero vulnerabilities. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
 
 ### Candidate capabilities already present
 
