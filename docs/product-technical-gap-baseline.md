@@ -11,10 +11,10 @@ currently open pull requests are merged or production-ready.
 | Evidence | Observed state |
 | --- | --- |
 | `develop` | Bootstrap commit `17e1408`; the checked-out branch has no implementation before the pull-request chain is merged. |
-| Foundation candidate | PR #1, `agent/initial-billing-foundation`, last verified code head `db7895a` (the current branch also carries the baseline refresh); its exact-head repository-contract check is the first gate. |
-| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, last verified head `72003a0`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, tests, dependency repairs, outbound URL validation, hollow-resolver hardening, boolean JSON Schema validator support, and reusable-workflow reference validation. |
-| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 585 Python tests at 100% coverage, optimized-Python resolver tests, 42 operator-console tests, lint, Storybook build, local Semgrep with zero findings, and production-dependency audit with zero vulnerabilities. Hosted Checks remain authoritative for the pushed heads. |
-| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades and outbound URL revalidation; head `ac592d9` additionally replaces production `assert` resolver guards with `require_resolved` and adds hollow-success regression tests; head `34e3c2a` adds boolean JSON Schema support and edge tests; head `72003a0` adds reusable-workflow reference validation. Its new hosted Checks are pending. |
+| Foundation candidate | PR #1, `agent/initial-billing-foundation`, last verified code head `69b3d36`; its exact-head repository-contract check is the first gate. |
+| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, last verified head `0faa5c9`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, tests, dependency repairs, outbound URL validation, hollow-resolver hardening, boolean JSON Schema validator support, reusable-workflow reference validation, and persistence attribution constraints. |
+| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 587 Python tests at 100% coverage, optimized-Python resolver tests, 42 operator-console tests, lint, Storybook build, local Semgrep with zero findings, real PostgreSQL migration and constraint smoke checks, and production-dependency audit with zero vulnerabilities. Hosted Checks remain authoritative for the pushed heads. |
+| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades and outbound URL revalidation; head `ac592d9` additionally replaces production `assert` resolver guards with `require_resolved` and adds hollow-success regression tests; head `34e3c2a` adds boolean JSON Schema support and edge tests; head `72003a0` adds reusable-workflow reference validation; head `0faa5c9` adds tenant proposal-reference uniqueness, non-overlapping credential intervals, and matching in-memory validation. Its new hosted Checks are pending. |
 | Authority documents | `docs/PRD.md`, `docs/TRD.md`, `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`, `docs/ACCOUNTING_BOUNDARY.md`, `docs/SECURITY.md`, `docs/STORYBOOK.md`, ADRs, and `docs/doctoring/*`. |
 | External boundary | Accounting Information Platform, Keyverse, contextual-orchestrator, payment/MoR providers, tax services, and bank/treasury systems are described as replaceable or authoritative external systems; their production integration is not inferred from a local merge. |
 
@@ -57,7 +57,7 @@ provider identifier an internal authority. The main buyer outcomes are:
 | Accounting boundary | Proposal-only statuses, AIS pull/drain, posting-receipt observation, ADRs and traceability | Boundary is explicit | No live Accounting Information Platform connector or end-to-end posting-receipt run. |
 | Operator UI | `operator_console`, Storybook, tokenized fixtures, exact-decimal render tests | Presentment prototype | Storybook is not a customer/operator release: no login, browser E2E, accessibility gate, i18n gate, or deployment proof. |
 | Security | Tenant API credentials are HMAC-verified and revocable; secrets are not returned from presentment | Local contract behavior | No Keyverse/OIDC trust integration, role/permission model, audit trail, key rotation policy, or production secret-management evidence. |
-| Persistence | 35 normalized migration files with tenant-scoped foreign keys | SQL design exists | CI does not execute migrations against PostgreSQL, test locking/isolation, or verify rollback and upgrade behavior. |
+| Persistence | 36 normalized migration files with tenant-scoped foreign keys, proposal-reference uniqueness, and credential-interval exclusion | SQL design and a local PostgreSQL smoke run exist | CI does not execute migrations against PostgreSQL, test locking/isolation, or verify rollback and upgrade behavior; hot partitioning remains unimplemented. |
 | Operations | Commit-pinned GitHub Actions and repository quality checks | Source-quality gate exists | No SLOs, metrics, traces, alerts, dead-letter/runbook flow, backup/restore test, or incident evidence. |
 | Ecosystem | Provider-neutral contracts and references to CWL systems | Ports are documented | No verified contextual-orchestrator usage connector, Keyverse integration, or reusable package contract consumed by another CWL repository. |
 
@@ -122,7 +122,8 @@ PR #82; the other listed PRs target `develop`.
 
 PRs #5–#81 are closed as superseded snapshots. Their code ancestry is
 contained in #82 except for #7's resolver-hardening commit; that behavior was
-reapplied directly to #82 at `ac592d9` with optimized-Python regression tests; the current #82 head is `72003a0`.
+reapplied directly to #82 at `ac592d9` with optimized-Python regression tests;
+the current #82 head is `0faa5c9`.
 PR #6 was separately superseded by #7 before the cumulative cleanup. The
 closure reason is recorded on each PR; no closed snapshot is treated as a
 merge or production evidence.
