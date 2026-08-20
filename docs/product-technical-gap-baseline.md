@@ -2,7 +2,7 @@
 
 **Status:** Proposed completion baseline  
 **Assessment date:** 2026-08-20  
-**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `72003a0c9da5d1c3f13f59c9cef5f0ed3dc94f48`
+**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `0faa5c9fbc608000b29692b8419c9839abae36fb`
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
 
@@ -55,16 +55,16 @@ At assessment time:
 - ordinary open issues before this assessment: **9** (`#83`–`#91`), all completion-gap issues;
 - open pull requests: **5** (`#1`, `#3`, `#4`, `#82`, and draft `#92`);
 - current cumulative tip: PR #82;
-- PR #82 at the assessed head: **127 commits**, **428 changed files**, about **89.5k additions**;
+- PR #82 at the assessed head: **128 commits**, **433 changed files**, about **89.6k additions**;
 - PR #82 targets `develop` directly.
 
-The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `72003a0c9da5d1c3f13f59c9cef5f0ed3dc94f48`:
+The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `0faa5c9fbc608000b29692b8419c9839abae36fb`:
 
 - Foundation CI, Security Scan, SAST Semgrep, and the required OpenCode/Noema/scheduler jobs: pending;
 - independent approval: required and absent;
 - unresolved review threads: none observed, but the only formal review was a commented automated security review.
 
-PR #82 has 585 local Python tests, 100% statement/branch coverage for the declared Python scope, a green repository validator, optimized-Python resolver checks, local Semgrep with zero findings, and a production-dependency audit with zero vulnerabilities. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
+PR #82 has 587 local Python tests, 100% statement/branch coverage for the declared Python scope, a green repository validator, optimized-Python resolver checks, local Semgrep with zero findings, a real PostgreSQL 18 migration/constraint smoke run, and a production-dependency audit with zero vulnerabilities. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
 
 ### Candidate capabilities already present
 
@@ -79,7 +79,7 @@ The cumulative candidate provides meaningful foundations:
 | Accounting boundary | Balanced proposal-only journals and AIS posting-receipt observations | Correctly does not own statutory books; end-to-end released AIS integration still requires operational proof |
 | Webhooks and API | Tenant-scoped HTTP adapter, HMAC webhook outbox, AIS outbox drain, local API credentials, bounded URL controls | Production identity, KMS, egress gateway, durable queue, and provider webhook normalization are incomplete |
 | Presentment | Storybook components for many exact-decimal commercial statements | No production SPA, customer portal, login, workflow queue, or full accessibility evidence |
-| Database design | PostgreSQL 18 migrations and normalized constraints exist | The TRD explicitly describes the first runtime as in-memory, with persistent adapter work left for a later milestone |
+| Database design | PostgreSQL 18 migrations and normalized constraints exist; migration `0036` adds tenant proposal-reference uniqueness and non-overlapping credential intervals | The TRD explicitly describes the first runtime as in-memory, with persistent adapter work left for a later milestone; CI still lacks migration/locking/upgrade tests and hot partitioning |
 | Quality policy | Extensive schemas, ADRs, docs, local 100% coverage claim, commit-pinned Actions | Candidate remains unmerged; exact-head hosted and release-artifact evidence is incomplete |
 | Spend visibility | Rated-spend views by product/project/credential/principal/cost center and an append-only spend budget | Budget publication does not reserve, enforce, deny, or grant entitlement |
 
@@ -158,7 +158,7 @@ The current repository inventory on 2026-08-20 contains five open candidates:
 | #1 | Provider-neutral billing foundation | `develop` | Checks pending; no formal approval |
 | #3 | Operator README, ADR, APA references, and validation documentation | PR #1 | Draft; repository contracts pending |
 | #4 | Buyer/operator README and contributor documentation | `develop` | Historical Checks passed; no formal approval |
-| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `72003a0`; review required; required Checks pending |
+| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `0faa5c9`; review required; required Checks pending |
 | #92 | This product and technical gap baseline | PR #82 | Draft; repository contracts pending |
 
 PRs #5–#81 are closed as superseded snapshots. Their closure is not merge or
