@@ -41,7 +41,7 @@ The foundation branch defines a repository-local workflow (`.github/workflows/ci
 
 That workflow is not on the default branch until the foundation merges. Mutable GitHub Action tags (`@v4`, `@main`) are rejected by the foundation validator.
 
-On PR #1 head `cded38a`, the documented offline block succeeds on the foundation branch. Those files are not on `develop` until the foundation merges.
+On PR #1 head `bd87bde`, the documented offline block succeeds on the foundation branch. Those files are not on `develop` until the foundation merges.
 
 Organization required workflows from `ContextualWisdomLab/.github` (OpenCode, Strix, merge scheduler, and related jobs) may also run on pull requests. Those jobs judge the current head SHA. A cancelled or superseded check is a queue or evidence blocker, not a source-code finding.
 
