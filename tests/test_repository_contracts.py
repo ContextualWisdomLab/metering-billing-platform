@@ -379,6 +379,22 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_catalog_reference_migration_preserves_resolver_identity(self) -> None:
+        """Catalog rows must retain the URNs used by the in-memory resolver."""
+        sql = (ROOT / "database/migrations/0037_catalog_reference_identity.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ADD COLUMN tenant_reference text",
+            "SET tenant_reference = 'urn:cwl:' || tenant_account_code",
+            "tenant_account_tenant_reference_key",
+            "ADD COLUMN credential_reference text",
+            "credential_record_id::text",
+            "credential_record_tenant_reference_key",
+            "ALTER COLUMN credential_reference SET NOT NULL",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_usage_idempotency_migration_binds_hash_and_contract_version(self) -> None:
         """The follow-up migration must keep hash-version identity tenant-scoped."""
         sql = (ROOT / "database/migrations/0002_usage_event_idempotency.sql").read_text(

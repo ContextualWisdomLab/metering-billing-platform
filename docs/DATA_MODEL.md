@@ -46,7 +46,7 @@
 
 ## Temporal rule
 
-Assignments and capabilities use `valid_from`, `valid_to`, and `recorded_at`. Closing an interval supersedes a fact; it does not erase history. Composite foreign keys bind credentials, principals, billing accounts, and usage to the same tenant. PostgreSQL migration `0036` enforces the credential half-open non-overlap rule with an exclusion constraint and keeps proposal references unique per tenant.
+Assignments and capabilities use `valid_from`, `valid_to`, and `recorded_at`. Closing an interval supersedes a fact; it does not erase history. Composite foreign keys bind credentials, principals, billing accounts, and usage to the same tenant. PostgreSQL migration `0036` enforces the credential half-open non-overlap rule with an exclusion constraint and keeps proposal references unique per tenant. Migration `0037` stores tenant and credential URNs so a future durable resolver can preserve the same identity as the reference ledger; existing rows are backfilled deterministically.
 
 ## Monetary rule
 
