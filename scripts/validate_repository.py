@@ -189,7 +189,10 @@ def _iter_contract_files(root: Path) -> tuple[Path, ...]:
         relative_parts = file_path.relative_to(root).parts
         if not file_path.is_file() or file_path.suffix not in included_suffixes:
             continue
-        if any(part in {".git", "__pycache__", "tests"} for part in relative_parts):
+        if any(
+            part in {".git", ".venv", "__pycache__", "tests"}
+            for part in relative_parts
+        ):
             continue
         files.append(file_path)
     return tuple(sorted(files))
