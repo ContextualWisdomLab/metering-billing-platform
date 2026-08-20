@@ -53,6 +53,24 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(schema, {"forbidden_value": "blocked"}),
             ("$.forbidden_value: schema is false",),
         )
+        self.assertEqual(validate_schema_instance({"type": "array"}, []), ())
+        self.assertEqual(
+            validate_schema_instance({"type": "array", "items": False}, ["blocked"]),
+            ("$[0]: schema is false",),
+        )
+
+    def test_reusable_workflow_action_refs_are_pinned(self) -> None:
+        """Reusable workflow paths must obey the same immutable-ref policy."""
+        mutable = "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@main"
+        pinned = (
+            "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@"
+            + "a" * 40
+        )
+        self.assertEqual(
+            find_mutable_action_references(mutable),
+            ("ContextualWisdomLab/.github/.github/workflows/reusable.yml@main",),
+        )
+        self.assertEqual(find_mutable_action_references(pinned), ())
 
     def test_local_virtual_environment_is_not_a_contract_input(self) -> None:
         """Installed dependency sources must not change repository diagnostics."""
