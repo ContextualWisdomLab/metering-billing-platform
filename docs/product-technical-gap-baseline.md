@@ -55,7 +55,7 @@ At assessment time:
 - ordinary open issues before this assessment: **9** (`#83`–`#91`), all completion-gap issues;
 - open pull requests: **5** (`#1`, `#3`, `#4`, `#82`, and draft `#92`);
 - current cumulative tip: PR #82;
-- PR #82 at the assessed head: **128 commits**, **433 changed files**, about **89.6k additions**;
+- PR #82 at the assessed head: **128 commits**, **429 changed files**, about **89.6k additions**;
 - PR #82 targets `develop` directly.
 
 The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `0faa5c9fbc608000b29692b8419c9839abae36fb`:
