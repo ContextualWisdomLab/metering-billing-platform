@@ -44,6 +44,18 @@ def _is_effective(valid_from: datetime, valid_to: datetime | None, occurred_at: 
     return occurred_at < valid_to
 
 
+def _intervals_overlap(
+    first_from: datetime,
+    first_to: datetime | None,
+    second_from: datetime,
+    second_to: datetime | None,
+) -> bool:
+    """Return whether two half-open effective intervals overlap."""
+    return (first_to is None or second_from < first_to) and (
+        second_to is None or first_from < second_to
+    )
+
+
 @dataclass(frozen=True)
 class TenantAccount:
     """Tenant authority boundary."""
@@ -1156,6 +1168,19 @@ class MemoryUsageLedger:
             account.tenant_account_id,
         } != {tenant.tenant_account_id}:
             raise ValueError("credential assignment cannot cross tenants")
+        if valid_to is not None and valid_to <= valid_from:
+            raise ValueError("credential assignment interval must be positive")
+        if any(
+            existing.credential_record_id == credential.credential_record_id
+            and _intervals_overlap(
+                existing.valid_from,
+                existing.valid_to,
+                valid_from,
+                valid_to,
+            )
+            for existing in self.credential_assignments
+        ):
+            raise ValueError("credential assignment intervals cannot overlap")
         assignment = CredentialAssignment(
             credential_assignment_id=generate_record_id(),
             tenant_account_id=tenant.tenant_account_id,

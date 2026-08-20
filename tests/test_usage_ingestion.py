@@ -7,7 +7,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -720,6 +720,49 @@ class LedgerAndContractUnitTests(unittest.TestCase):
             ledger.register_credential_assignment(
                 TENANT_ONE, CREDENTIAL_ONE, PRINCIPAL_ONE, ACCOUNT_ONE, CATALOG_START
             )
+
+    def test_credential_assignments_are_positive_and_non_overlapping(self) -> None:
+        """Credential attribution accepts adjacent windows and rejects conflicts."""
+        ledger = seed_ledger()
+        credential_reference = "urn:cwl:tenant_001:credential_record:019d7004"
+        ledger.register_credential_record(
+            TENANT_ONE, credential_reference, "api_key", "fingerprint-adjacent"
+        )
+        window_end = CATALOG_START + timedelta(days=1)
+        ledger.register_credential_assignment(
+            TENANT_ONE,
+            credential_reference,
+            PRINCIPAL_ONE,
+            ACCOUNT_ONE,
+            CATALOG_START,
+            window_end,
+        )
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            ledger.register_credential_assignment(
+                TENANT_ONE,
+                credential_reference,
+                PRINCIPAL_ONE,
+                ACCOUNT_ONE,
+                window_end,
+                window_end,
+            )
+        with self.assertRaisesRegex(ValueError, "cannot overlap"):
+            ledger.register_credential_assignment(
+                TENANT_ONE,
+                credential_reference,
+                PRINCIPAL_ONE,
+                ACCOUNT_ONE,
+                CATALOG_START + timedelta(hours=1),
+                window_end + timedelta(hours=1),
+            )
+        adjacent = ledger.register_credential_assignment(
+            TENANT_ONE,
+            credential_reference,
+            PRINCIPAL_ONE,
+            ACCOUNT_ONE,
+            window_end,
+        )
+        self.assertEqual(adjacent.valid_from, window_end)
 
     def test_resolve_methods_detect_corrupted_tenant_bindings(self) -> None:
         """Composite tenant checks still fire if a row is moved after registration."""

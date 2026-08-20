@@ -365,6 +365,20 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_persistence_integrity_migration_protects_references_and_intervals(self) -> None:
+        """Database constraints preserve proposal identity and half-open assignments."""
+        sql = (
+            ROOT / "database/migrations/0036_persistence_integrity_constraints.sql"
+        ).read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE EXTENSION IF NOT EXISTS btree_gist",
+            "accounting_export_record_tenant_proposal_reference_key",
+            "UNIQUE (tenant_account_id, proposal_reference)",
+            "credential_assignment_no_overlap",
+            "tstzrange(valid_from, COALESCE(valid_to, 'infinity'::timestamptz), '[)')",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_usage_idempotency_migration_binds_hash_and_contract_version(self) -> None:
         """The follow-up migration must keep hash-version identity tenant-scoped."""
         sql = (ROOT / "database/migrations/0002_usage_event_idempotency.sql").read_text(

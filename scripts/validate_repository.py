@@ -212,6 +212,7 @@ REQUIRED_FILES = (
     "database/migrations/0033_issued_credit_note_void.sql",
     "database/migrations/0034_credit_note_void_journal_proposal.sql",
     "database/migrations/0035_spend_budget.sql",
+    "database/migrations/0036_persistence_integrity_constraints.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
