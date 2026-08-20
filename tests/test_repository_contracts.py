@@ -21,6 +21,7 @@ from scripts.validate_repository import (
     validate_repository,
     validate_schema_instance,
     validate_sql_object_names,
+    _iter_contract_files,
 )
 
 
@@ -39,6 +40,19 @@ class RepositoryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             errors = validate_repository(Path(temporary_directory))
         self.assertIn("missing required file: README.md", errors)
+
+    def test_local_virtual_environment_is_not_a_contract_input(self) -> None:
+        """Installed dependency sources must not change repository diagnostics."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "README.md").write_text("TODO in a contract file", encoding="utf-8")
+            ignored = root / ".venv/lib/python3.13/site-packages/dependency.py"
+            ignored.parent.mkdir(parents=True)
+            ignored.write_text("TODO from dependency", encoding="utf-8")
+            files = tuple(
+                path.relative_to(root) for path in _iter_contract_files(root)
+            )
+        self.assertEqual(files, (Path("README.md"),))
 
     def test_usage_event_accepts_reported_usage(self) -> None:
         """Provider-reported usage with an idempotency key is contract-valid."""
