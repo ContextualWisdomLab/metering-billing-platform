@@ -123,7 +123,7 @@ PR #82; the other listed PRs target `develop`.
 PRs #5–#81 are closed as superseded snapshots. Their code ancestry is
 contained in #82 except for #7's resolver-hardening commit; that behavior was
 reapplied directly to #82 at `ac592d9` with optimized-Python regression tests;
-the current #82 head is `5c64f9d`.
+the current #82 head is `205a190`.
 PR #6 was separately superseded by #7 before the cumulative cleanup. The
 closure reason is recorded on each PR; no closed snapshot is treated as a
 merge or production evidence.
