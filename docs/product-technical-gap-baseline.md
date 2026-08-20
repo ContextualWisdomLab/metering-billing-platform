@@ -2,7 +2,7 @@
 
 **Status:** Proposed completion baseline  
 **Assessment date:** 2026-08-20  
-**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `0faa5c9fbc608000b29692b8419c9839abae36fb`
+**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `1fc169dab78b7229d061b4946d755b8ff5893084`
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
 
@@ -58,7 +58,7 @@ At assessment time:
 - PR #82 at the assessed head: **128 commits**, **429 changed files**, about **89.6k additions**;
 - PR #82 targets `develop` directly.
 
-The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `0faa5c9fbc608000b29692b8419c9839abae36fb`:
+The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `1fc169dab78b7229d061b4946d755b8ff5893084`:
 
 - Foundation CI, Security Scan, SAST Semgrep, and the required OpenCode/Noema/scheduler jobs: pending;
 - independent approval: required and absent;
@@ -158,7 +158,7 @@ The current repository inventory on 2026-08-20 contains five open candidates:
 | #1 | Provider-neutral billing foundation | `develop` | Checks pending; no formal approval |
 | #3 | Operator README, ADR, APA references, and validation documentation | PR #1 | Draft; repository contracts pending |
 | #4 | Buyer/operator README and contributor documentation | `develop` | Historical Checks passed; no formal approval |
-| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `0faa5c9`; review required; required Checks pending |
+| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `1fc169d`; review required; required Checks pending |
 | #92 | This product and technical gap baseline | PR #82 | Draft; repository contracts pending |
 
 PRs #5–#81 are closed as superseded snapshots. Their closure is not merge or
