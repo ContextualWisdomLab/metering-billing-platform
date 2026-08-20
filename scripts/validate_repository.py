@@ -277,7 +277,7 @@ REQUIRED_FILES = (
     ".github/workflows/ci.yml",
 )
 ACTION_REFERENCE_PATTERN = re.compile(
-    r"\buses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([^\s#]+)"
+    r"\buses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)@([^\s#]+)"
 )
 FULL_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 PLACEHOLDER_PATTERN = re.compile(
