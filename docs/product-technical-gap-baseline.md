@@ -12,9 +12,9 @@ currently open pull requests are merged or production-ready.
 | --- | --- |
 | `develop` | Bootstrap commit `17e1408`; the checked-out branch has no implementation before the pull-request chain is merged. |
 | Foundation candidate | PR #1, `agent/initial-billing-foundation`, last verified code head `db7895a` (the current branch also carries the baseline refresh); its exact-head repository-contract check is the first gate. |
-| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, last verified head `ac592d9`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, tests, dependency repairs, outbound URL validation, and hollow-resolver hardening. |
-| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 583 Python tests at 100% coverage, optimized-Python resolver tests, 42 operator-console tests, lint, Storybook build, local Semgrep with zero findings, and production-dependency audit with zero vulnerabilities. Hosted Checks remain authoritative for the pushed heads. |
-| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades and outbound URL revalidation; head `ac592d9` additionally replaces production `assert` resolver guards with `require_resolved` and adds hollow-success regression tests. Its new hosted Checks are pending. |
+| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, last verified head `34e3c2a`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, tests, dependency repairs, outbound URL validation, hollow-resolver hardening, and boolean JSON Schema validator support. |
+| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 584 Python tests at 100% coverage, optimized-Python resolver tests, 42 operator-console tests, lint, Storybook build, local Semgrep with zero findings, and production-dependency audit with zero vulnerabilities. Hosted Checks remain authoritative for the pushed heads. |
+| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades and outbound URL revalidation; head `ac592d9` additionally replaces production `assert` resolver guards with `require_resolved` and adds hollow-success regression tests; head `34e3c2a` adds boolean JSON Schema support and edge tests. Its new hosted Checks are pending. |
 | Authority documents | `docs/PRD.md`, `docs/TRD.md`, `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`, `docs/ACCOUNTING_BOUNDARY.md`, `docs/SECURITY.md`, `docs/STORYBOOK.md`, ADRs, and `docs/doctoring/*`. |
 | External boundary | Accounting Information Platform, Keyverse, contextual-orchestrator, payment/MoR providers, tax services, and bank/treasury systems are described as replaceable or authoritative external systems; their production integration is not inferred from a local merge. |
 
@@ -122,7 +122,7 @@ PR #82; the other listed PRs target `develop`.
 
 PRs #5–#81 are closed as superseded snapshots. Their code ancestry is
 contained in #82 except for #7's resolver-hardening commit; that behavior was
-reapplied directly to #82 at `ac592d9` with optimized-Python regression tests.
+reapplied directly to #82 at `ac592d9` with optimized-Python regression tests; the current #82 head is `34e3c2a`.
 PR #6 was separately superseded by #7 before the cumulative cleanup. The
 closure reason is recorded on each PR; no closed snapshot is treated as a
 merge or production evidence.
