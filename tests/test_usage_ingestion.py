@@ -34,7 +34,7 @@ from metering_billing.contracts import (
     validate_schema_instance,
     validate_usage_ingestion_receipt,
 )
-from metering_billing.errors import ExactDecimalError, TimeWindowError
+from metering_billing.errors import ExactDecimalError, TimeWindowError, require_resolved
 from metering_billing.exact_decimal import require_decimal_quantity
 from metering_billing.payload_integrity import (
     canonical_source_payload,
@@ -170,6 +170,40 @@ def seed_ledger() -> MemoryUsageLedger:
 
 class UsageIngestionTests(unittest.TestCase):
     """Verify buyer-facing ingest, replay, isolation, and decimal behavior."""
+
+    def test_require_resolved_fails_closed_for_hollow_success(self) -> None:
+        """A resolver that reports success without a row must raise ValueError."""
+        self.assertEqual(require_resolved("stored_row", "tenant"), "stored_row")
+        with self.assertRaisesRegex(ValueError, "tenant resolution succeeded without a stored tenant"):
+            require_resolved(None, "tenant")
+
+    def test_ingestion_fails_closed_when_resolvers_return_no_row(self) -> None:
+        """Production checks must survive optimized Python execution."""
+        service = UsageIngestionService(seed_ledger())
+        resolver_cases = (
+            ("resolve_tenant", "tenant"),
+            ("resolve_billing_account", "billing_account"),
+            ("resolve_billing_principal", "billing_principal"),
+            ("resolve_credential", "credential"),
+            ("resolve_meter", "meter"),
+        )
+        for resolver_name, fact_name in resolver_cases:
+            with self.subTest(resolver_name=resolver_name):
+                with mock.patch.object(
+                    service.ledger, resolver_name, return_value=(None, None)
+                ):
+                    with self.assertRaisesRegex(ValueError, f"{fact_name} resolution succeeded"):
+                        service.ingest_usage_event(make_event())
+
+    def test_usage_queries_fail_closed_when_tenant_row_is_missing(self) -> None:
+        """Tenant-scoped reads must not continue after a hollow resolution."""
+        service = UsageIngestionService(seed_ledger())
+        window = TimeWindow.from_iso8601("2026-08-16T10:00:00Z", "2026-08-16T11:00:00Z")
+        with mock.patch.object(service.ledger, "resolve_tenant", return_value=(None, None)):
+            with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
+                service.query_usage_window(TENANT_ONE, window)
+            with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
+                service.query_ingestion_receipts(TENANT_ONE)
 
     def test_known_batch_reproduces_stored_usage_and_rejects_replays(self) -> None:
         """The same batch must store one usage set and then only acknowledge replays."""

@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest import mock
 from uuid import UUID
 
 from metering_billing import (
@@ -88,6 +89,14 @@ def ingest_known_batch(ledger: MemoryUsageLedger | None = None) -> UsageIngestio
 
 class UsageRatingTests(unittest.TestCase):
     """Verify buyer-facing windowed rating, replay, isolation, and quality filters."""
+
+    def test_rating_fails_closed_when_tenant_resolution_is_hollow(self) -> None:
+        """A hollow tenant resolution must raise ValueError instead of using assert."""
+        ingest = ingest_known_batch()
+        rating = UsageRatingService(ingest.ledger)
+        with mock.patch.object(rating.ledger, "resolve_tenant", return_value=(None, None)):
+            with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
+                rating.rate_usage_window(TENANT_ONE, MORNING_WINDOW, 1)
 
     def test_known_window_produces_exact_invoice_intent_total(self) -> None:
         """Known stored usage in a half-open window must rate to one exact money total."""
