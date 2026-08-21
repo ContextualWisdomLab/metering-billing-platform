@@ -2,7 +2,7 @@
 
 **Status:** Proposed completion baseline  
 **Assessment date:** 2026-08-21
-**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `59051d4cdd14bebbfbc8ec5abbde180e1b17e0f6`
+**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `1356b3e148715a568f035608462f55e509374aa0`
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
 
@@ -55,16 +55,16 @@ At assessment time:
 - ordinary open issues before this assessment: **9** (`#83`–`#91`), all completion-gap issues;
 - open pull requests: **5** (`#1`, `#3`, `#4`, `#82`, and draft `#92`);
 - current cumulative tip: PR #82;
-- PR #82 at the assessed head: **132 commits**, **436 changed files**, about **91.7k additions**;
+- PR #82 at the assessed head: **133 commits**, **437 changed files**, about **91.9k additions**;
 - PR #82 targets `develop` directly.
 
-The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `59051d4cdd14bebbfbc8ec5abbde180e1b17e0f6`:
+The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `1356b3e148715a568f035608462f55e509374aa0`:
 
 - Foundation CI, Security Scan, SAST Semgrep, and the required OpenCode/Noema/scheduler jobs: pending;
 - independent approval: required and absent;
 - unresolved review threads: none observed, but the only formal review was a commented automated security review.
 
-PR #82 has 597 local Python tests, 100% statement/branch coverage for the declared Python scope including a dedicated PostgreSQL 18 integration database, a green repository validator, optimized-Python resolver checks, local Semgrep with zero findings, a real PostgreSQL 18 migration/constraint smoke run, and a hash-locked runtime dependency export. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
+PR #82 has 599 local Python tests, 100% statement/branch coverage for the declared Python scope including a dedicated PostgreSQL 18 integration database, a green repository validator, optimized-Python resolver checks, local Semgrep with zero findings, a real PostgreSQL 18 migration/constraint smoke run, an advisory-locking checksum/drift-detecting migration runner, and a hash-locked runtime dependency export. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
 
 ### Candidate capabilities already present
 
@@ -79,7 +79,7 @@ The cumulative candidate provides meaningful foundations:
 | Accounting boundary | Balanced proposal-only journals and AIS posting-receipt observations | Correctly does not own statutory books; end-to-end released AIS integration still requires operational proof |
 | Webhooks and API | Tenant-scoped HTTP adapter, HMAC webhook outbox, AIS outbox drain, local API credentials, bounded URL controls | Production identity, KMS, egress gateway, durable queue, and provider webhook normalization are incomplete |
 | Presentment | Storybook components for many exact-decimal commercial statements | No production SPA, customer portal, login, workflow queue, or full accessibility evidence |
-| Database design | PostgreSQL 18 migrations and normalized constraints exist; migrations `0036` and `0037` add tenant proposal-reference uniqueness, non-overlapping credential intervals, and durable tenant/credential URN identity; `PostgresUsageLedger` now runs durable catalog, usage, measurement, and receipt writes with atomic replay/conflict handling, and CI exercises the migration set | The broader commercial services still use the in-memory reference ledger; upgrade/locking/recovery tests, raw-payload storage, backup/restore, and hot partitioning remain open |
+| Database design | PostgreSQL 18 migrations and normalized constraints exist; migrations `0036` and `0037` add tenant proposal-reference uniqueness, non-overlapping credential intervals, and durable tenant/credential URN identity; `PostgresUsageLedger` now runs durable catalog, usage, measurement, and receipt writes with atomic replay/conflict handling; CI applies the migration set through an advisory-locking, checksum/drift-detecting runner | The broader commercial services still use the in-memory reference ledger; rollback/recovery tests, raw-payload storage, backup/restore, and hot partitioning remain open |
 | Quality policy | Extensive schemas, ADRs, docs, local 100% coverage claim, commit-pinned Actions | Candidate remains unmerged; exact-head hosted and release-artifact evidence is incomplete |
 | Spend visibility | Rated-spend views by product/project/credential/principal/cost center and an append-only spend budget | Budget publication does not reserve, enforce, deny, or grant entitlement |
 
