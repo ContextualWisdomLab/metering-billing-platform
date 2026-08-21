@@ -193,6 +193,26 @@ class UsageRatingTests(unittest.TestCase):
         self.assertEqual(second.usage_snapshot_hash, first.usage_snapshot_hash)
         self.assertEqual(second.rated_total_amount, KNOWN_DAY_TOTAL)
         self.assertEqual(first.rated_total_amount, KNOWN_DAY_TOTAL)
+        stored = ingest.ledger.rating_runs[first.rating_run_id]
+        self.assertEqual(
+            ingest.ledger.find_rating_run(
+                stored.tenant_account_id,
+                stored.window_started_at,
+                stored.window_ended_at,
+                stored.rate_card_id,
+                stored.usage_snapshot_hash,
+            ),
+            stored,
+        )
+        self.assertIsNone(
+            ingest.ledger.find_rating_run(
+                stored.tenant_account_id,
+                stored.window_started_at,
+                stored.window_ended_at,
+                stored.rate_card_id,
+                "sha256:" + "0" * 64,
+            )
+        )
         self.assertEqual(len(ingest.ledger.rating_runs), 1)
         self.assertEqual(len(ingest.ledger.rating_lines), 1)
 

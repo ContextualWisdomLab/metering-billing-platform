@@ -137,6 +137,16 @@ class InvoiceDraftService:
     def draft_invoice(
         self, tenant_reference: str, rating_run_id: UUID
     ) -> InvoiceDraftResult:
+        """Draft one invoice intent inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._draft_invoice(tenant_reference, rating_run_id)
+        with transaction():
+            return self._draft_invoice(tenant_reference, rating_run_id)
+
+    def _draft_invoice(
+        self, tenant_reference: str, rating_run_id: UUID
+    ) -> InvoiceDraftResult:
         """Draft invoice intent for one tenant and one stored rating run.
 
         A replay of the same tenant and rating-run identity returns the stored

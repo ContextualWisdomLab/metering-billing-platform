@@ -1,11 +1,11 @@
 # Changelog
 
-- Added the first real PostgreSQL runtime slice for usage ingestion: durable
-  tenant/catalog resolution, normalized measurements, atomic receipts,
-  database-arbitrated replay/conflict handling, PostgreSQL 18 integration
-  tests, a checksum/drift-detecting advisory-lock migration runner, and CI
-  coverage against a PostgreSQL service. The broader commercial persistence
-  and GA recovery backlog remains open under issue #84.
+- Extended the real PostgreSQL runtime slice through tenant-scoped rate-card
+  publish, rating, invoice drafting, issued-invoice snapshots, optional tax
+  reads, and an atomic `invoice.issued` webhook outbox replay path. The
+  dedicated PostgreSQL suite now passes 601 tests at 100% statement/branch
+  coverage. The broader commercial persistence and GA recovery backlog remains
+  open under issue #84.
 
 ## [Unreleased]
 

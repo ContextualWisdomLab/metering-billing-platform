@@ -218,6 +218,19 @@ class IssuedInvoiceService:
         First successful issue enqueues one ``invoice.issued`` outbox event.
         Replay of that snapshot does not enqueue a second row.
         """
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._issue_invoice(tenant_reference, invoice_draft_id, due_at)
+        with transaction():
+            return self._issue_invoice(tenant_reference, invoice_draft_id, due_at)
+
+    def _issue_invoice(
+        self,
+        tenant_reference: str,
+        invoice_draft_id: UUID,
+        due_at: object | None,
+    ) -> IssuedInvoiceResult:
+        """Issue one snapshot inside the caller's transaction boundary."""
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
             return _rejected(IssuedInvoiceRejectionReasonCode.TENANT_NOT_FOUND)

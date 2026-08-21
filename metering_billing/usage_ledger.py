@@ -928,7 +928,7 @@ class MemoryUsageLedger:
     )
     rate_card_lines: list[StoredRateCardLine] = field(default_factory=list)
     rating_runs: dict[UUID, StoredRatingRun] = field(default_factory=dict)
-    rating_run_index: dict[tuple[UUID, datetime, datetime, UUID, str], UUID] = field(
+    rating_run_index: dict[tuple[UUID, datetime, datetime, UUID, int, str], UUID] = field(
         default_factory=dict
     )
     rating_lines: list[StoredRatingLine] = field(default_factory=list)
@@ -1707,14 +1707,27 @@ class MemoryUsageLedger:
         window_ended_at: datetime,
         rate_card_id: UUID,
         usage_snapshot_hash: str,
+        rate_card_version: int | None = None,
     ) -> StoredRatingRun | None:
         """Return the append-only run for one rating identity, if it exists."""
+        if rate_card_version is None:
+            matches = tuple(
+                run
+                for run in self.rating_runs.values()
+                if run.tenant_account_id == tenant_account_id
+                and run.window_started_at == window_started_at
+                and run.window_ended_at == window_ended_at
+                and run.rate_card_id == rate_card_id
+                and run.usage_snapshot_hash == usage_snapshot_hash
+            )
+            return matches[0] if len(matches) == 1 else None
         rating_run_id = self.rating_run_index.get(
             (
                 tenant_account_id,
                 window_started_at,
                 window_ended_at,
                 rate_card_id,
+                rate_card_version,
                 usage_snapshot_hash,
             )
         )
@@ -1733,6 +1746,7 @@ class MemoryUsageLedger:
             rating_run.window_started_at,
             rating_run.window_ended_at,
             rating_run.rate_card_id,
+            rating_run.rate_card_version,
             rating_run.usage_snapshot_hash,
         )
         if rating_run.rating_run_id in self.rating_runs:

@@ -202,6 +202,20 @@ class RateCardService:
         currency_code: str,
         lines: Sequence[Mapping[str, Any]],
     ) -> RateCardResult:
+        """Publish a price book inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._publish_rate_card(tenant_reference, rate_card_name, currency_code, lines)
+        with transaction():
+            return self._publish_rate_card(tenant_reference, rate_card_name, currency_code, lines)
+
+    def _publish_rate_card(
+        self,
+        tenant_reference: str,
+        rate_card_name: str,
+        currency_code: str,
+        lines: Sequence[Mapping[str, Any]],
+    ) -> RateCardResult:
         """Publish one immutable rate-card version for a tenant.
 
         A replay of the same tenant, card name, canonical line hash, and

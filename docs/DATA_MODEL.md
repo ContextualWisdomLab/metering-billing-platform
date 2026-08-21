@@ -15,7 +15,7 @@
 - `rate_card`: tenant-scoped commercial price-book header identified by `(tenant_account_id, rate_card_name)`.
 - `rate_card_version`: append-only published price list for one card. Identity is `(tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version)`.
 - `rate_card_line`: exact flat `unit_amount` for one `metric_code` on one published version. Currency must match the version.
-- `rating_run`: append-only invoice-intent total for one tenant, half-open window, rate card, and usage snapshot. Presentment projects a statement from this row; it does not add a snapshot table.
+- `rating_run`: append-only invoice-intent total for one tenant, half-open window, rate-card header plus pinned version number, and usage snapshot. Presentment projects a statement from this row; it does not add a snapshot table.
 - `rating_line`: append-only invoice-intent line for one billing account and meter inside a rating run.
 - `invoice_draft`: append-only draft-only commercial document for one tenant and rating run. Presentment projects a statement from this row plus tax, credit, and collection facts; it does not add a snapshot table. Draft status stays `draft` after commercial issue.
 - `invoice_draft_line`: append-only draft line copied from a rating line.
@@ -46,7 +46,7 @@
 
 ## Temporal rule
 
-Assignments and capabilities use `valid_from`, `valid_to`, and `recorded_at`. Closing an interval supersedes a fact; it does not erase history. Composite foreign keys bind credentials, principals, billing accounts, and usage to the same tenant. PostgreSQL migration `0036` enforces the credential half-open non-overlap rule with an exclusion constraint and keeps proposal references unique per tenant. Migration `0037` stores tenant and credential URNs so a future durable resolver can preserve the same identity as the reference ledger; existing rows are backfilled deterministically.
+Assignments and capabilities use `valid_from`, `valid_to`, and `recorded_at`. Closing an interval supersedes a fact; it does not erase history. Composite foreign keys bind credentials, principals, billing accounts, and usage to the same tenant. PostgreSQL migration `0036` enforces the credential half-open non-overlap rule with an exclusion constraint and keeps proposal references unique per tenant. Migration `0037` stores tenant and credential URNs so a future durable resolver can preserve the same identity as the reference ledger; existing rows are backfilled deterministically. Migration `0038` adds canonical billing-account and meter references to rating and invoice lines, pins rating-run version numbers, and prepares the durable usage-to-issued-invoice path.
 
 ## Monetary rule
 
@@ -62,7 +62,7 @@ A stored usage row is identified twice: by `(tenant_account_id, source_event_key
 
 ## Rating identity
 
-A stored rating run is identified by `(tenant_account_id, window_started_at, window_ended_at, rate_card_version_id, usage_snapshot_hash)`.  The run pins the published version so a later catalog publish cannot rewrite earlier invoice-intent money.  Lines reference the run, tenant, billing account, and meter definition.  Money columns use exact `numeric` types.
+A stored rating run is identified by `(tenant_account_id, window_started_at, window_ended_at, rate_card_id, rate_card_version, usage_snapshot_hash)`.  The run pins the published version so a later catalog publish cannot rewrite earlier invoice-intent money.  Lines reference the run, tenant, billing account, canonical billing-account reference, and meter definition/code/unit.  Money columns use exact `numeric` types.
 
 ## Rate-card identity
 

@@ -140,6 +140,24 @@ class UsageRatingService:
         rate_card_version: int,
         rate_card_code: str | None = None,
     ) -> RatingRunResult:
+        """Rate one window inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._rate_usage_window(
+                tenant_reference, time_window, rate_card_version, rate_card_code
+            )
+        with transaction():
+            return self._rate_usage_window(
+                tenant_reference, time_window, rate_card_version, rate_card_code
+            )
+
+    def _rate_usage_window(
+        self,
+        tenant_reference: str,
+        time_window: TimeWindow,
+        rate_card_version: int,
+        rate_card_code: str | None = None,
+    ) -> RatingRunResult:
         """Rate already-stored usage for one tenant inside a half-open window.
 
         A replay of the same tenant, normalized window, rate-card version, and
@@ -176,8 +194,9 @@ class UsageRatingService:
             tenant.tenant_account_id,
             window_started_at,
             window_ended_at,
-            rate_card_version_row.rate_card_version_id,
+            rate_card_version_row.rate_card_id,
             usage_snapshot_hash,
+            rate_card_version_row.version_number,
         )
         if existing is not None:
             return _from_stored(
@@ -214,7 +233,7 @@ class UsageRatingService:
             StoredRatingRun(
                 rating_run_id=rating_run_id,
                 tenant_account_id=tenant.tenant_account_id,
-                rate_card_id=rate_card_version_row.rate_card_version_id,
+                rate_card_id=rate_card_version_row.rate_card_id,
                 rate_card_code=rate_card.rate_card_name,
                 rate_card_version=rate_card_version_row.version_number,
                 window_started_at=window_started_at,
@@ -239,8 +258,13 @@ class UsageRatingService:
         for event in events:
             account_reference = self.ledger.billing_account_reference_for(event.billing_account_id)
             for measurement in event.measurements:
-                rule = self.ledger.meter_quality_rules.get(
-                    (measurement.meter_definition_id, measurement.quality_code)
+                find_rule = getattr(self.ledger, "find_meter_quality_rule", None)
+                rule = (
+                    find_rule(measurement.meter_definition_id, measurement.quality_code)
+                    if find_rule is not None
+                    else self.ledger.meter_quality_rules.get(
+                        (measurement.meter_definition_id, measurement.quality_code)
+                    )
                 )
                 if rule is None:
                     continue

@@ -8,14 +8,23 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import psycopg
 
-from metering_billing import PostgresUsageLedger, UsageIngestionService
+from metering_billing import (
+    InvoiceDraftService,
+    IssuedInvoiceService,
+    PostgresUsageLedger,
+    UsageIngestionService,
+)
 from metering_billing.errors import RejectionReasonCode, UsageEventConflict
+from metering_billing.rate_card import RateCardService
+from metering_billing.time_window import TimeWindow
+from metering_billing.usage_rating import UsageRatingService
 from scripts.migrate_postgres import (
     MIGRATION_HISTORY_TABLE,
     MigrationDriftError,
@@ -59,8 +68,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 37:
-            raise AssertionError(f"expected 37 migrations, got {len(applied)}")
+        if len(applied) != 38:
+            raise AssertionError(f"expected 38 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -72,6 +81,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.webhook_outbox_event,
+                billing_core.issued_invoice_line,
+                billing_core.issued_invoice,
+                billing_core.invoice_draft_line,
+                billing_core.invoice_draft,
+                billing_core.rating_line,
+                billing_core.rating_run,
+                billing_core.rate_card_line,
+                billing_core.rate_card_version,
+                billing_core.rate_card,
                 billing_core.usage_ingestion_receipt,
                 billing_core.usage_measurement,
                 billing_core.usage_event,
@@ -330,6 +349,216 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "gen_ai_output_token", 1, "token", "sum", CATALOG_START
         )
         self.assertEqual(meter, self.meter)
+
+    def test_rate_card_and_rating_are_durable_and_tenant_scoped(self) -> None:
+        """The first usage-to-rating path survives reload and exact replay."""
+        ingest = UsageIngestionService(self.ledger)
+        accepted = ingest.ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card_lines = (
+            {
+                "metric_code": "gen_ai_output_token",
+                "unit_amount": "0.000002",
+                "currency_code": "USD",
+            },
+        )
+        first_card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE, "cwl_standard", "USD", card_lines
+        )
+        second_card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_TWO, "cwl_standard", "USD", card_lines
+        )
+        self.assertNotEqual(first_card.rate_card_id, second_card.rate_card_id)
+        tenant_one_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+        self.assertEqual(len(self.ledger.list_rate_cards(tenant_one_id)), 1)
+        first_version = self.ledger.get_rate_card_version(first_card.rate_card_version_id)
+        self.assertIsNotNone(first_version)
+        assert first_version is not None
+        self.assertEqual(
+            self.ledger.find_rate_card_version_by_identity(
+                tenant_one_id,
+                first_card.rate_card_id,
+                first_version.source_payload_hash,
+                first_version.rate_card_contract_version,
+            ),
+            first_version,
+        )
+        self.assertEqual(
+            self.ledger.find_rate_card_version(tenant_one_id, 1, "cwl_standard"),
+            first_version,
+        )
+        self.assertIsNone(self.ledger.find_rate_card_version(tenant_one_id, 99))
+        self.assertIsNone(self.ledger.get_rate_card_version(uuid4()))
+        self.assertEqual(
+            self.ledger.list_rate_card_versions(tenant_one_id), (first_version,)
+        )
+        self.assertEqual(
+            self.ledger.list_rate_card_versions(tenant_one_id, first_card.rate_card_id),
+            (first_version,),
+        )
+        self.assertEqual(self.ledger.insert_rate_card_version(first_version), first_version)
+        stored_card = self.ledger.get_rate_card(first_card.rate_card_id)
+        self.assertIsNotNone(stored_card)
+        assert stored_card is not None
+        with self.assertRaises(ValueError):
+            self.ledger.insert_rate_card(replace(stored_card, currency_code="EUR"))
+        with self.ledger.transaction():
+            with self.ledger.transaction():
+                pass
+        self.assertIsNone(self.ledger.find_meter_quality_rule(self.meter.meter_definition_id, "missing"))
+        with self.assertRaises(KeyError):
+            self.ledger.billing_account_reference_for(uuid4())
+        window = TimeWindow(
+            datetime(2026, 8, 16, 10, tzinfo=UTC),
+            datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, window, 1, rate_card_code="cwl_standard"
+        )
+        self.assertEqual(rating.rating_outcome_code.value, "accepted")
+        self.assertEqual(rating.rated_total_amount, Decimal("0.003620"))
+        replay = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, window, 1, rate_card_code="cwl_standard"
+        )
+        self.assertEqual(replay.rating_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.rating_run_id, rating.rating_run_id)
+        stored = self.ledger.get_rating_run(rating.rating_run_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(self.ledger.list_rating_runs(), (stored,))
+        self.assertEqual(
+            self.ledger.find_rating_run(
+                tenant_one_id,
+                stored.window_started_at,
+                stored.window_ended_at,
+                stored.rate_card_id,
+                stored.usage_snapshot_hash,
+            ),
+            stored,
+        )
+        self.assertEqual(self.ledger.insert_rating_run(stored, stored.rating_lines), stored)
+        self.assertEqual(stored.rate_card_id, first_card.rate_card_id)
+        self.assertEqual(stored.rating_lines[0].billing_account_reference, ACCOUNT_ONE)
+        self.assertEqual(stored.rating_lines[0].meter_code, "gen_ai_output_token")
+        self.assertEqual(self.ledger.find_rate_card_line(first_card.rate_card_version_id, "missing"), None)
+        self.assertEqual(len(self.ledger.list_rating_runs(self.ledger.require_tenant(TENANT_ONE).tenant_account_id)), 1)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        self.assertEqual(draft.invoice_draft_outcome_code.value, "accepted")
+        draft_replay = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        self.assertEqual(draft_replay.invoice_draft_outcome_code.value, "duplicate_replay")
+        self.assertEqual(draft_replay.invoice_draft_id, draft.invoice_draft_id)
+        self.assertEqual(draft.drafted_total_amount, Decimal("0.003620"))
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        self.assertIsNotNone(stored_draft)
+        assert stored_draft is not None
+        self.assertEqual(
+            self.ledger.insert_invoice_draft(stored_draft, stored_draft.invoice_draft_lines),
+            stored_draft,
+        )
+        self.assertEqual(stored_draft.invoice_draft_lines[0].billing_account_reference, ACCOUNT_ONE)
+        self.assertEqual(
+            InvoiceDraftService(self.ledger).draft_invoice(TENANT_TWO, rating.rating_run_id).invoice_draft_outcome_code.value,
+            "rejected",
+        )
+        self.assertEqual(len(self.ledger.list_invoice_drafts(self.ledger.require_tenant(TENANT_ONE).tenant_account_id)), 1)
+        issued = IssuedInvoiceService(self.ledger, clock=lambda: datetime(2026, 8, 17, tzinfo=UTC)).issue_invoice(
+            TENANT_ONE, draft.invoice_draft_id, "2026-08-31T00:00:00Z"
+        )
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        issued_replay = IssuedInvoiceService(self.ledger).issue_invoice(
+            TENANT_ONE, draft.invoice_draft_id, "2026-09-30T00:00:00Z"
+        )
+        self.assertEqual(issued_replay.issued_invoice_outcome_code.value, "duplicate_replay")
+        self.assertEqual(issued_replay.issued_invoice_id, issued.issued_invoice_id)
+        self.assertEqual(issued.tax_inclusive_amount, Decimal("0.003620"))
+        stored_issued = self.ledger.get_issued_invoice(issued.issued_invoice_id)
+        self.assertIsNotNone(stored_issued)
+        assert stored_issued is not None
+        self.assertEqual(
+            self.ledger.list_issued_invoices_for_tenant(tenant_one_id), (stored_issued,)
+        )
+        self.assertEqual(
+            self.ledger.insert_issued_invoice(
+                stored_issued, stored_issued.issued_invoice_lines
+            ),
+            stored_issued,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_invoice(
+                replace(stored_issued, invoice_draft_id=uuid4()), ()
+            )
+        self.assertEqual(stored_issued.issued_invoice_lines[0].billing_account_reference, ACCOUNT_ONE)
+        outbox_events = self.ledger.list_webhook_outbox_events_for_tenant(tenant_one_id)
+        self.assertEqual(len(outbox_events), 1)
+        self.assertEqual(self.ledger.get_webhook_outbox_event(outbox_events[0].outbox_event_id), outbox_events[0])
+        self.assertEqual(self.ledger.list_pending_webhook_outbox_events(tenant_one_id), outbox_events)
+        self.assertEqual(self.ledger.insert_webhook_outbox_event(outbox_events[0]), outbox_events[0])
+        with self.assertRaises(ValueError):
+            self.ledger.insert_webhook_outbox_event(
+                replace(outbox_events[0], payload_hash="sha256:" + "2" * 64)
+            )
+        self.assertEqual(
+            IssuedInvoiceService(self.ledger).issue_invoice(TENANT_TWO, draft.invoice_draft_id).issued_invoice_outcome_code.value,
+            "rejected",
+        )
+
+    def test_issued_invoice_reads_a_durable_tax_snapshot(self) -> None:
+        """Issued totals use the same tenant-scoped PostgreSQL tax snapshot."""
+        ingest = UsageIngestionService(self.ledger)
+        self.assertEqual(ingest.ingest_usage_event(make_event()).ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE,
+            TimeWindow(datetime(2026, 8, 16, 10, tzinfo=UTC), datetime(2026, 8, 16, 12, tzinfo=UTC)),
+            1,
+            rate_card_code="cwl_standard",
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        tenant_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+        schedule_id, version_id, assessment_id = uuid4(), uuid4(), uuid4()
+        snapshot_hash = "sha256:" + "1" * 64
+        self.connection.execute(
+            """
+            INSERT INTO billing_core.tax_rate_schedule
+                (tax_rate_schedule_id, tenant_account_id, tax_code)
+            VALUES (%s, %s, 'vat')
+            """,
+            (schedule_id, tenant_id),
+        )
+        self.connection.execute(
+            """
+            INSERT INTO billing_core.tax_rate_version
+                (tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
+                 version_number, tax_rate_contract_version, tax_code, tax_rate,
+                 source_payload_hash)
+            VALUES (%s, %s, %s, 1, 1, 'vat', 0.1, %s)
+            """,
+            (version_id, tenant_id, schedule_id, snapshot_hash),
+        )
+        self.connection.execute(
+            """
+            INSERT INTO billing_core.tax_assessment
+                (tax_assessment_id, tenant_account_id, invoice_draft_id,
+                 tax_rate_version_id, tax_assessment_contract_version, tax_code,
+                 tax_rate, currency_code, tax_exclusive_amount, tax_amount,
+                 tax_inclusive_amount, source_payload_hash)
+            VALUES (%s, %s, %s, %s, 1, 'vat', 0.1, 'USD', 0.003620, 0.000362, 0.003982, %s)
+            """,
+            (assessment_id, tenant_id, draft.invoice_draft_id, version_id, snapshot_hash),
+        )
+        self.connection.commit()
+        issued = IssuedInvoiceService(self.ledger).issue_invoice(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        self.assertEqual(issued.tax_exclusive_amount, Decimal("0.003620"))
+        self.assertEqual(issued.tax_amount, Decimal("0.000362"))
+        self.assertEqual(issued.tax_inclusive_amount, Decimal("0.003982"))
 
     def test_ingestion_is_atomic_replay_safe_and_tenant_scoped(self) -> None:
         """A restart-safe repository keeps one event, normalized measurements, and receipts."""

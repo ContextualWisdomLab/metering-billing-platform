@@ -20,7 +20,10 @@ ingest can run against `MemoryUsageLedger` for isolated reference tests or
 against `PostgresUsageLedger` for the durable usage, measurement, catalog, and
 receipt slice.  Both paths use the same hash, tenant, decimal, and
 rating-identity rules; the PostgreSQL path owns the event and receipt write in
-one transaction.  The broader commercial services still use the in-memory
+one transaction.  The PostgreSQL commercial vertical now continues through
+rate-card publish, rating, invoice draft, issued-invoice snapshot, optional tax
+read, and atomic `invoice.issued` outbox enqueue.  The broader collection,
+payment, provider, accounting, and lifecycle services still use the in-memory
 reference ledger until their own durable repositories land.  Canonical
 source-payload hashing excludes envelope identifiers (`event_id`,
 `source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest,
@@ -36,7 +39,12 @@ draft an invoice.
 
 ## Persistence plane
 
-PostgreSQL is the authoritative store for normalized records. Raw webhook and usage payloads will be stored immutably in S3-compatible object storage in a later milestone; relational records retain hashes and references.
+PostgreSQL is the authoritative store for normalized records in the durable
+usage-to-issued-invoice vertical. Raw webhook and usage payloads will be
+stored immutably in S3-compatible object storage in a later milestone;
+relational records retain hashes and references. The broader commercial
+repository, production-default, readiness, recovery, HA, and telemetry
+requirements remain tracked by issue #84.
 
 ## Provider plane
 
