@@ -18,7 +18,8 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 The importable `metering_billing` package is the first runtime module.  Usage
 ingest can run against `MemoryUsageLedger` for isolated reference tests or
 against `PostgresUsageLedger` for the durable usage, measurement, catalog,
-invoice, collection, payment, credit, cash-journal, and webhook-delivery slice. Both
+invoice, collection, payment, credit, cash-journal, write-off, settle-when-zero,
+and webhook-delivery slice. Both
 paths use the same hash, tenant, decimal, and
 rating-identity rules; the PostgreSQL path owns the event and receipt write in
 one transaction.  The PostgreSQL commercial vertical now continues through
@@ -26,6 +27,7 @@ rate-card publish, rating, invoice draft, issued-invoice snapshot, tenant-scoped
 tax-rate publish, tax assessment, collection case/dunning, payment intent,
 applied payment receipt, row-locked settlement, balanced cash journal proposal,
 credit adjustment with collection reduction, balanced credit journal proposal,
+collection write-off with exact-zero outstanding, explicit collection settlement,
 and atomic commercial outbox enqueue. Provider capture and the remaining
 commercial exception services still use the in-memory reference ledger until
 their own durable repositories land. Canonical
@@ -44,7 +46,8 @@ draft an invoice.
 ## Persistence plane
 
 PostgreSQL is the authoritative store for normalized records in the durable
-usage-to-issued-invoice, collection, payment, credit, cash-journal, and webhook-delivery vertical. Raw webhook and usage
+usage-to-issued-invoice, collection, payment, credit, cash-journal, write-off,
+settle-when-zero, and webhook-delivery vertical. Raw webhook and usage
 payloads will be stored immutably in S3-compatible object storage in a later
 milestone; relational records retain hashes and references. PostgreSQL stores
 subscription metadata, delivery attempts, and outbox delivered status, while

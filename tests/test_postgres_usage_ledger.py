@@ -17,6 +17,7 @@ import psycopg
 
 from metering_billing import (
     CollectionCaseService,
+    CollectionCaseSettlementService,
     CreditAdjustmentService,
     InvoiceDraftService,
     IssuedInvoiceService,
@@ -29,6 +30,7 @@ from metering_billing import (
     WebhookSubscriptionService,
 )
 from metering_billing.accounting_export import AccountingExportService
+from metering_billing.collection_write_off import CollectionWriteOffService
 from metering_billing.errors import RejectionReasonCode, UsageEventConflict
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.rate_card import RateCardService
@@ -97,6 +99,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             TRUNCATE TABLE
                 billing_core.journal_proposal_line,
                 billing_core.journal_proposal,
+                billing_core.collection_case_settlement,
+                billing_core.collection_write_off,
                 billing_core.webhook_delivery_attempt,
                 billing_core.webhook_outbox_event,
                 billing_core.webhook_subscription,
@@ -1278,6 +1282,169 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.insert_credit_adjustment(
                 replace(stored, tax_exclusive_amount=Decimal("-1"))
             )
+
+    def test_collection_write_off_and_settlement_are_durable(self) -> None:
+        """Persist a zeroing write-off and the explicit settlement fact."""
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        self.assertIsNotNone(card.rate_card_version_id)
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE,
+            TimeWindow(
+                datetime(2026, 8, 16, 10, tzinfo=UTC),
+                datetime(2026, 8, 16, 12, tzinfo=UTC),
+            ),
+            1,
+            rate_card_code="cwl_standard",
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        assert opened.collection_case_id is not None
+        case = self.ledger.get_collection_case(opened.collection_case_id)
+        assert case is not None
+        write_off = CollectionWriteOffService(self.ledger, clock=lambda: CATALOG_START).write_off_collection_case(
+            TENANT_ONE, case.collection_case_id
+        )
+        self.assertEqual(write_off.collection_write_off_outcome_code.value, "accepted")
+        assert write_off.collection_write_off_id is not None
+        stored_write_off = self.ledger.get_collection_write_off(write_off.collection_write_off_id)
+        self.assertIsNotNone(stored_write_off)
+        assert stored_write_off is not None
+        self.assertEqual(
+            self.ledger.find_collection_write_off(case.tenant_account_id, case.collection_case_id),
+            stored_write_off,
+        )
+        self.assertEqual(
+            self.ledger.list_collection_write_offs_for_tenant(case.tenant_account_id),
+            (stored_write_off,),
+        )
+        self.assertEqual(
+            self.ledger.insert_collection_write_off(stored_write_off), stored_write_off
+        )
+        tenant_two_id = self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_write_off(
+                replace(stored_write_off, tenant_account_id=tenant_two_id)
+            )
+        zero_case = self.ledger.get_collection_case(case.collection_case_id)
+        self.assertIsNotNone(zero_case)
+        assert zero_case is not None
+        self.assertEqual(zero_case.collection_case_status, "open")
+        self.assertEqual(zero_case.outstanding_amount, Decimal("0.000000000000"))
+        settled = CollectionCaseSettlementService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).settle_collection_case(TENANT_ONE, case.collection_case_id)
+        self.assertEqual(settled.collection_case_settlement_outcome_code.value, "accepted")
+        assert settled.collection_case_settlement_id is not None
+        stored_settlement = self.ledger.get_collection_case_settlement(
+            settled.collection_case_settlement_id
+        )
+        self.assertIsNotNone(stored_settlement)
+        assert stored_settlement is not None
+        self.assertEqual(
+            self.ledger.find_collection_case_settlement(
+                case.tenant_account_id, case.collection_case_id
+            ),
+            stored_settlement,
+        )
+        self.assertEqual(
+            self.ledger.list_collection_case_settlements_for_tenant(case.tenant_account_id),
+            (stored_settlement,),
+        )
+        self.assertEqual(
+            CollectionWriteOffService(self.ledger).write_off_collection_case(
+                TENANT_ONE, case.collection_case_id
+            ).collection_write_off_outcome_code.value,
+            "duplicate_replay",
+        )
+        self.assertEqual(
+            CollectionCaseSettlementService(self.ledger).settle_collection_case(
+                TENANT_ONE, case.collection_case_id
+            ).collection_case_settlement_outcome_code.value,
+            "duplicate_replay",
+        )
+        self.assertEqual(
+            self.ledger.insert_collection_case_settlement(stored_settlement), stored_settlement
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_case_settlement(
+                replace(stored_settlement, tenant_account_id=tenant_two_id)
+            )
+        self.assertIsNone(self.ledger.get_collection_write_off(uuid4()))
+        self.assertIsNone(self.ledger.get_collection_case_settlement(uuid4()))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_write_off(
+                replace(stored_write_off, remaining_outstanding_amount=Decimal("1"))
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_write_off(
+                replace(stored_write_off, collection_write_off_status="invalid")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_write_off(
+                replace(stored_write_off, write_off_amount=Decimal("0"))
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_case_settlement(
+                replace(stored_settlement, collection_case_settlement_status="invalid")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_case_settlement(
+                replace(stored_settlement, remaining_outstanding_amount=Decimal("1"))
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_write_off(case.collection_case_id, Decimal("0"))
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_write_off(uuid4(), Decimal("1"))
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_settled(uuid4())
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_write_off(case.collection_case_id, Decimal("1"))
+        self.assertEqual(
+            self.ledger.mark_collection_case_settled(case.collection_case_id),
+            self.ledger.get_collection_case(case.collection_case_id),
+        )
+        self.connection.execute(
+            "UPDATE billing_core.collection_case SET collection_case_status = 'open' "
+            "WHERE collection_case_id = %s",
+            (case.collection_case_id,),
+        )
+        self.connection.commit()
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_write_off(case.collection_case_id, Decimal("1"))
+        self.connection.execute(
+            "UPDATE billing_core.collection_case SET outstanding_amount = 1 "
+            "WHERE collection_case_id = %s",
+            (case.collection_case_id,),
+        )
+        self.connection.commit()
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_settled(case.collection_case_id)
+        self.connection.execute(
+            "UPDATE billing_core.collection_case SET collection_case_status = 'voided', "
+            "outstanding_amount = 0 WHERE collection_case_id = %s",
+            (case.collection_case_id,),
+        )
+        self.connection.commit()
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_settled(case.collection_case_id)
+        self.connection.execute(
+            "UPDATE billing_core.collection_case SET collection_case_status = 'disputed' "
+            "WHERE collection_case_id = %s",
+            (case.collection_case_id,),
+        )
+        self.connection.commit()
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_settled(case.collection_case_id)
 
     def test_webhook_subscription_outbox_and_delivery_are_durable(self) -> None:
         """Persist subscription metadata, attempts, and delivery status in PostgreSQL."""

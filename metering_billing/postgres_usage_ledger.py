@@ -1,11 +1,12 @@
 """PostgreSQL repository for the durable usage-to-invoice vertical slice.
 
 The repository owns catalog rows, immutable usage facts, rating runs, invoice
-drafts, issued invoices, and the atomic webhook outbox used by the first
-commercial path. Every public operation uses the supplied PostgreSQL
-connection; the implementation never falls back to an in-memory copy. The
-broader collection, provider, and settlement repositories remain subsequent
-slices of the persistence port.
+drafts, issued invoices, collection cases, payment and credit facts, journal
+proposals, and the atomic webhook outbox used by the first commercial path.
+Every public operation uses the supplied PostgreSQL connection; the
+implementation never falls back to an in-memory copy. Provider capture and
+remaining exception repositories remain subsequent slices of the persistence
+port.
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ from metering_billing.usage_ledger import (
     StoredCollectionCase,
     StoredCollectionDunningEvent,
     StoredCreditAdjustment,
+    StoredCollectionCaseSettlement,
+    StoredCollectionWriteOff,
     StoredInvoiceDraft,
     StoredInvoiceDraftLine,
     StoredIngestionReceipt,
@@ -2266,6 +2269,308 @@ class PostgresUsageLedger:
                 raise ValueError("collection settlement requires a stored collection case")
             return self._fetch_collection_case(cursor, UUID(str(row[0])))
 
+    def find_collection_write_off(
+        self, tenant_account_id: UUID, collection_case_id: UUID
+    ) -> StoredCollectionWriteOff | None:
+        """Return one tenant-scoped collection write-off identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_write_off_id
+                FROM billing_core.collection_write_off
+                WHERE tenant_account_id = %s AND collection_case_id = %s
+                """,
+                (tenant_account_id, collection_case_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_write_off(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_collection_write_off(
+        self, collection_write_off_id: UUID
+    ) -> StoredCollectionWriteOff | None:
+        """Return one collection write-off by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_write_off_id
+                FROM billing_core.collection_write_off
+                WHERE collection_write_off_id = %s
+                """,
+                (collection_write_off_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_write_off(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_collection_write_offs_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionWriteOff, ...]:
+        """Return collection write-offs limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_write_off_id
+                FROM billing_core.collection_write_off
+                WHERE tenant_account_id = %s
+                ORDER BY written_off_at, collection_write_off_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_collection_write_off(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_collection_write_off(
+        self, write_off: StoredCollectionWriteOff
+    ) -> StoredCollectionWriteOff:
+        """Persist one exact-zero commercial write-off or replay it."""
+        if write_off.collection_write_off_status != "recorded":
+            raise ValueError("collection_write_off_status must be recorded")
+        write_off_amount = parse_exact_decimal(format_exact_decimal(write_off.write_off_amount))
+        remaining = parse_exact_decimal(
+            format_exact_decimal(write_off.remaining_outstanding_amount)
+        )
+        if write_off_amount <= 0:
+            raise ValueError("collection write-off amount must be a positive exact decimal")
+        if remaining != 0:
+            raise ValueError("collection write-off remaining must be exact zero")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.collection_write_off
+                    (collection_write_off_id, tenant_account_id, collection_case_id,
+                     invoice_draft_id, issued_invoice_id,
+                     collection_write_off_contract_version, source_payload_hash,
+                     currency_code, write_off_amount, remaining_outstanding_amount,
+                     collection_write_off_status, written_off_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING collection_write_off_id
+                """,
+                (
+                    write_off.collection_write_off_id,
+                    write_off.tenant_account_id,
+                    write_off.collection_case_id,
+                    write_off.invoice_draft_id,
+                    write_off.issued_invoice_id,
+                    write_off.collection_write_off_contract_version,
+                    write_off.source_payload_hash,
+                    write_off.currency_code,
+                    write_off_amount,
+                    remaining,
+                    write_off.collection_write_off_status,
+                    write_off.written_off_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT collection_write_off_id
+                    FROM billing_core.collection_write_off
+                    WHERE tenant_account_id = %s AND collection_case_id = %s
+                    """,
+                    (write_off.tenant_account_id, write_off.collection_case_id),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("collection write-off identity conflicts with an existing row")
+            return self._fetch_collection_write_off(cursor, UUID(str(row[0])))
+
+    def apply_collection_write_off(
+        self, collection_case_id: UUID, write_off_amount: Any
+    ) -> StoredCollectionCase:
+        """Zero one open collection case without marking it settled."""
+        amount = parse_exact_decimal(format_exact_decimal(write_off_amount))
+        if amount <= 0:
+            raise ValueError("collection write-off amount must be a positive exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
+                       currency_code, collection_case_status, outstanding_amount, opened_at
+                FROM billing_core.collection_case
+                WHERE collection_case_id = %s
+                FOR UPDATE
+                """,
+                (collection_case_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("collection write-off requires a stored collection case")
+            stored = self._collection_case_from_row(row)
+            if stored.collection_case_status in {"settled", "voided", "disputed"}:
+                raise ValueError("settled collection cases cannot accept a write-off")
+            if amount != stored.outstanding_amount:
+                raise ValueError("collection write-off amount must equal remaining outstanding")
+            cursor.execute(
+                """
+                UPDATE billing_core.collection_case
+                SET outstanding_amount = 0
+                WHERE collection_case_id = %s
+                RETURNING collection_case_id
+                """,
+                (collection_case_id,),
+            )
+            updated = cursor.fetchone()
+            if updated is None:  # pragma: no cover - the row is locked above
+                raise ValueError("collection write-off requires a stored collection case")
+            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
+
+    def find_collection_case_settlement(
+        self, tenant_account_id: UUID, collection_case_id: UUID
+    ) -> StoredCollectionCaseSettlement | None:
+        """Return one tenant-scoped settle-when-zero identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_settlement_id
+                FROM billing_core.collection_case_settlement
+                WHERE tenant_account_id = %s AND collection_case_id = %s
+                """,
+                (tenant_account_id, collection_case_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_case_settlement(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_collection_case_settlement(
+        self, collection_case_settlement_id: UUID
+    ) -> StoredCollectionCaseSettlement | None:
+        """Return one collection-case settlement by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_settlement_id
+                FROM billing_core.collection_case_settlement
+                WHERE collection_case_settlement_id = %s
+                """,
+                (collection_case_settlement_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_case_settlement(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_collection_case_settlements_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionCaseSettlement, ...]:
+        """Return collection-case settlements limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_settlement_id
+                FROM billing_core.collection_case_settlement
+                WHERE tenant_account_id = %s
+                ORDER BY settled_at, collection_case_settlement_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_collection_case_settlement(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_collection_case_settlement(
+        self, settlement: StoredCollectionCaseSettlement
+    ) -> StoredCollectionCaseSettlement:
+        """Persist one exact-zero settlement or return its identity replay."""
+        if settlement.collection_case_settlement_status != "settled":
+            raise ValueError("collection_case_settlement_status must be settled")
+        remaining = parse_exact_decimal(
+            format_exact_decimal(settlement.remaining_outstanding_amount)
+        )
+        if remaining != 0:
+            raise ValueError("collection case settlement remaining must be exact zero")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.collection_case_settlement
+                    (collection_case_settlement_id, tenant_account_id,
+                     collection_case_id, invoice_draft_id, issued_invoice_id,
+                     collection_case_settlement_contract_version, source_payload_hash,
+                     currency_code, remaining_outstanding_amount,
+                     collection_case_settlement_status, settled_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING collection_case_settlement_id
+                """,
+                (
+                    settlement.collection_case_settlement_id,
+                    settlement.tenant_account_id,
+                    settlement.collection_case_id,
+                    settlement.invoice_draft_id,
+                    settlement.issued_invoice_id,
+                    settlement.collection_case_settlement_contract_version,
+                    settlement.source_payload_hash,
+                    settlement.currency_code,
+                    remaining,
+                    settlement.collection_case_settlement_status,
+                    settlement.settled_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT collection_case_settlement_id
+                    FROM billing_core.collection_case_settlement
+                    WHERE tenant_account_id = %s AND collection_case_id = %s
+                    """,
+                    (settlement.tenant_account_id, settlement.collection_case_id),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("collection settlement identity conflicts with an existing row")
+            return self._fetch_collection_case_settlement(cursor, UUID(str(row[0])))
+
+    def mark_collection_case_settled(
+        self, collection_case_id: UUID
+    ) -> StoredCollectionCase:
+        """Mark one exact-zero open case settled under a row lock."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
+                       currency_code, collection_case_status, outstanding_amount, opened_at
+                FROM billing_core.collection_case
+                WHERE collection_case_id = %s
+                FOR UPDATE
+                """,
+                (collection_case_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("collection settlement requires a stored collection case")
+            stored = self._collection_case_from_row(row)
+            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+            if remaining != 0:
+                raise ValueError("collection case outstanding must be exact zero to settle")
+            if stored.collection_case_status == "settled":
+                return stored
+            if stored.collection_case_status == "voided":
+                raise ValueError("voided collection cases cannot settle")
+            if stored.collection_case_status == "disputed":
+                raise ValueError("disputed collection cases cannot settle")
+            cursor.execute(
+                """
+                UPDATE billing_core.collection_case
+                SET collection_case_status = 'settled'
+                WHERE collection_case_id = %s
+                RETURNING collection_case_id
+                """,
+                (collection_case_id,),
+            )
+            updated = cursor.fetchone()
+            if updated is None:  # pragma: no cover - the row is locked above
+                raise ValueError("collection settlement requires a stored collection case")
+            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
+
     def get_payment_intent(self, payment_intent_id: UUID) -> StoredPaymentIntent | None:
         """Return one payment intent by opaque identifier."""
         with self._cursor() as cursor:
@@ -4008,6 +4313,85 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(credit_adjustment_id)
         return self._credit_adjustment_from_row(row)
+
+    @staticmethod
+    def _collection_write_off_from_row(row: tuple[Any, ...]) -> StoredCollectionWriteOff:
+        """Decode one normalized collection write-off row."""
+        return StoredCollectionWriteOff(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            None if row[4] is None else UUID(str(row[4])),
+            row[5],
+            row[6],
+            row[7],
+            parse_exact_decimal(format_exact_decimal(row[8])),
+            parse_exact_decimal(format_exact_decimal(row[9])),
+            row[10],
+            row[11],
+        )
+
+    def _fetch_collection_write_off(
+        self, cursor: Any, collection_write_off_id: UUID
+    ) -> StoredCollectionWriteOff:
+        """Hydrate one collection write-off."""
+        cursor.execute(
+            """
+            SELECT collection_write_off_id, tenant_account_id, collection_case_id,
+                   invoice_draft_id, issued_invoice_id,
+                   collection_write_off_contract_version, source_payload_hash,
+                   currency_code, write_off_amount, remaining_outstanding_amount,
+                   collection_write_off_status, written_off_at
+            FROM billing_core.collection_write_off
+            WHERE collection_write_off_id = %s
+            """,
+            (collection_write_off_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(collection_write_off_id)
+        return self._collection_write_off_from_row(row)
+
+    @staticmethod
+    def _collection_case_settlement_from_row(
+        row: tuple[Any, ...]
+    ) -> StoredCollectionCaseSettlement:
+        """Decode one normalized collection settlement row."""
+        return StoredCollectionCaseSettlement(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            None if row[4] is None else UUID(str(row[4])),
+            row[5],
+            row[6],
+            row[7],
+            parse_exact_decimal(format_exact_decimal(row[8])),
+            row[9],
+            row[10],
+        )
+
+    def _fetch_collection_case_settlement(
+        self, cursor: Any, collection_case_settlement_id: UUID
+    ) -> StoredCollectionCaseSettlement:
+        """Hydrate one collection-case settlement."""
+        cursor.execute(
+            """
+            SELECT collection_case_settlement_id, tenant_account_id,
+                   collection_case_id, invoice_draft_id, issued_invoice_id,
+                   collection_case_settlement_contract_version, source_payload_hash,
+                   currency_code, remaining_outstanding_amount,
+                   collection_case_settlement_status, settled_at
+            FROM billing_core.collection_case_settlement
+            WHERE collection_case_settlement_id = %s
+            """,
+            (collection_case_settlement_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(collection_case_settlement_id)
+        return self._collection_case_settlement_from_row(row)
 
     @staticmethod
     def _journal_proposal_from_row(

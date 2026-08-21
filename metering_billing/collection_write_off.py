@@ -181,6 +181,24 @@ class CollectionWriteOffService:
         write_off_amount: Decimal | None = None,
         currency_code: str | None = None,
     ) -> CollectionWriteOffResult:
+        """Write off one case inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._write_off_collection_case(
+                tenant_reference, collection_case_id, write_off_amount, currency_code
+            )
+        with transaction():
+            return self._write_off_collection_case(
+                tenant_reference, collection_case_id, write_off_amount, currency_code
+            )
+
+    def _write_off_collection_case(
+        self,
+        tenant_reference: str,
+        collection_case_id: UUID,
+        write_off_amount: Decimal | None = None,
+        currency_code: str | None = None,
+    ) -> CollectionWriteOffResult:
         """Write off remaining outstanding on one same-tenant collection case.
 
         Replay of the same tenant and ``collection_case_id`` returns the

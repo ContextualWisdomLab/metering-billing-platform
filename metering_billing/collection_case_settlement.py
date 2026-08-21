@@ -174,6 +174,16 @@ class CollectionCaseSettlementService:
     def settle_collection_case(
         self, tenant_reference: str, collection_case_id: UUID
     ) -> CollectionCaseSettlementResult:
+        """Settle one case inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._settle_collection_case(tenant_reference, collection_case_id)
+        with transaction():
+            return self._settle_collection_case(tenant_reference, collection_case_id)
+
+    def _settle_collection_case(
+        self, tenant_reference: str, collection_case_id: UUID
+    ) -> CollectionCaseSettlementResult:
         """Settle one same-tenant collection case at exact-zero outstanding.
 
         Replay of the same tenant and ``collection_case_id`` returns the

@@ -3,13 +3,14 @@
 - Extended the real PostgreSQL runtime slice through tenant-scoped rate-card
   publish, rating, invoice drafting, issued-invoice snapshots, tax-rate
   publish, tax assessments, collection cases and dunning events, payment
-  intents, applied payment receipts, row-locked collection settlement, cash
-  journal proposals, tenant-scoped webhook subscriptions, delivery attempts,
-  delivered outbox status, and atomic commercial outbox replay paths. The
-  dedicated PostgreSQL suite now passes 605 tests at 100% statement/branch
-  coverage (15,241 statements and 5,200 branches). Webhook secrets remain
-  process-local until a secure secret provider is added. The broader
-  commercial persistence and GA recovery backlog remains open under issue #84.
+  intents, applied payment receipts, row-locked collection settlement, exact-
+  zero write-offs and explicit collection settlements, cash journal proposals,
+  tenant-scoped webhook subscriptions, delivery attempts, delivered outbox
+  status, and atomic commercial outbox replay paths. The dedicated PostgreSQL
+  suite now passes 606 tests at 100% statement/branch coverage (15,364
+  statements and 5,240 branches). Webhook secrets remain process-local until
+  a secure secret provider is added. The broader commercial persistence and GA
+  recovery backlog remains open under issue #84.
 
 ## [Unreleased]
 
