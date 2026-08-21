@@ -29,6 +29,7 @@ from metering_billing.usage_ledger import (
     MeterQualityRule,
     StoredCollectionCase,
     StoredCollectionDunningEvent,
+    StoredCreditAdjustment,
     StoredInvoiceDraft,
     StoredInvoiceDraftLine,
     StoredIngestionReceipt,
@@ -2542,6 +2543,137 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
 
+    def get_credit_adjustment(
+        self, credit_adjustment_id: UUID
+    ) -> StoredCreditAdjustment | None:
+        """Return one credit adjustment by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT credit_adjustment_id
+                FROM billing_core.credit_adjustment
+                WHERE credit_adjustment_id = %s
+                """,
+                (credit_adjustment_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_credit_adjustment(
+                cursor, UUID(str(row[0]))
+            )
+
+    def find_credit_adjustment(
+        self,
+        tenant_account_id: UUID,
+        invoice_draft_id: UUID,
+        source_payload_hash: str,
+        credit_adjustment_contract_version: int,
+    ) -> StoredCreditAdjustment | None:
+        """Return one tenant-scoped credit-adjustment identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT credit_adjustment_id
+                FROM billing_core.credit_adjustment
+                WHERE tenant_account_id = %s
+                  AND invoice_draft_id = %s
+                  AND source_payload_hash = %s
+                  AND credit_adjustment_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    invoice_draft_id,
+                    source_payload_hash,
+                    credit_adjustment_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_credit_adjustment(
+                cursor, UUID(str(row[0]))
+            )
+
+    def insert_credit_adjustment(
+        self, credit: StoredCreditAdjustment
+    ) -> StoredCreditAdjustment:
+        """Persist one exact credit adjustment or return its identity replay."""
+        if credit.credit_reason_code not in {"rating_correction", "goodwill", "billing_error"}:
+            raise ValueError("credit_reason_code is not in the closed set")
+        credit_amount = parse_exact_decimal(format_exact_decimal(credit.credit_amount))
+        tax_exclusive_amount = parse_exact_decimal(
+            format_exact_decimal(credit.tax_exclusive_amount)
+        )
+        tax_amount = parse_exact_decimal(format_exact_decimal(credit.tax_amount))
+        if credit_amount <= 0:
+            raise ValueError("credit amount must be a positive exact decimal")
+        if tax_exclusive_amount + tax_amount != credit_amount:
+            raise ValueError("credit tax split must sum to credit_amount")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.credit_adjustment
+                    (credit_adjustment_id, tenant_account_id, invoice_draft_id,
+                     credit_adjustment_contract_version, credit_reason_code,
+                     currency_code, credit_amount, tax_exclusive_amount, tax_amount,
+                     source_payload_hash, recorded_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING credit_adjustment_id
+                """,
+                (
+                    credit.credit_adjustment_id,
+                    credit.tenant_account_id,
+                    credit.invoice_draft_id,
+                    credit.credit_adjustment_contract_version,
+                    credit.credit_reason_code,
+                    credit.currency_code,
+                    credit_amount,
+                    tax_exclusive_amount,
+                    tax_amount,
+                    credit.source_payload_hash,
+                    credit.recorded_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT credit_adjustment_id
+                    FROM billing_core.credit_adjustment
+                    WHERE tenant_account_id = %s
+                      AND invoice_draft_id = %s
+                      AND source_payload_hash = %s
+                      AND credit_adjustment_contract_version = %s
+                    """,
+                    (
+                        credit.tenant_account_id,
+                        credit.invoice_draft_id,
+                        credit.source_payload_hash,
+                        credit.credit_adjustment_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("credit adjustment identity conflicts with an existing row")
+            return self._fetch_credit_adjustment(cursor, UUID(str(row[0])))
+
+    def list_credit_adjustments(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCreditAdjustment, ...]:
+        """Return credit adjustments limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT credit_adjustment_id
+                FROM billing_core.credit_adjustment
+                WHERE tenant_account_id = %s
+                ORDER BY recorded_at, credit_adjustment_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_credit_adjustment(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
     def find_journal_proposal_for_receipt(
         self,
         tenant_account_id: UUID,
@@ -2563,6 +2695,36 @@ class PostgresUsageLedger:
                 (
                     tenant_account_id,
                     payment_receipt_id,
+                    source_payload_hash,
+                    proposal_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_journal_proposal(
+                cursor, UUID(str(row[0]))
+            )
+
+    def find_journal_proposal_for_credit(
+        self,
+        tenant_account_id: UUID,
+        credit_adjustment_id: UUID,
+        source_payload_hash: str,
+        proposal_contract_version: int,
+    ) -> StoredJournalProposal | None:
+        """Return one tenant-scoped credit proposal identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT journal_proposal_id
+                FROM billing_core.journal_proposal
+                WHERE tenant_account_id = %s
+                  AND credit_adjustment_id = %s
+                  AND source_payload_hash = %s
+                  AND proposal_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    credit_adjustment_id,
                     source_payload_hash,
                     proposal_contract_version,
                 ),
@@ -2616,8 +2778,8 @@ class PostgresUsageLedger:
                      proposal_contract_version, idempotency_key, legal_entity_reference,
                      intended_book_role_code, transaction_currency, transaction_date,
                      accounting_date, source_payload_hash, proposed_at, proposal_status,
-                     source_event_reference, payment_receipt_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     source_event_reference, payment_receipt_id, credit_adjustment_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 RETURNING journal_proposal_id
                 """,
@@ -2637,26 +2799,49 @@ class PostgresUsageLedger:
                     journal_proposal.proposal_status,
                     journal_proposal.source_event_reference,
                     journal_proposal.payment_receipt_id,
+                    journal_proposal.credit_adjustment_id,
                 ),
             )
             row = cursor.fetchone()
             if row is None:
-                cursor.execute(
-                    """
-                    SELECT journal_proposal_id
-                    FROM billing_core.journal_proposal
-                    WHERE tenant_account_id = %s
-                      AND payment_receipt_id = %s
-                      AND source_payload_hash = %s
-                      AND proposal_contract_version = %s
-                    """,
-                    (
-                        journal_proposal.tenant_account_id,
-                        journal_proposal.payment_receipt_id,
-                        journal_proposal.source_payload_hash,
-                        journal_proposal.proposal_contract_version,
-                    ),
-                )
+                if journal_proposal.payment_receipt_id is not None:
+                    identity_value = journal_proposal.payment_receipt_id
+                    cursor.execute(
+                        """
+                        SELECT journal_proposal_id
+                        FROM billing_core.journal_proposal
+                        WHERE tenant_account_id = %s
+                          AND payment_receipt_id = %s
+                          AND source_payload_hash = %s
+                          AND proposal_contract_version = %s
+                        """,
+                        (
+                            journal_proposal.tenant_account_id,
+                            identity_value,
+                            journal_proposal.source_payload_hash,
+                            journal_proposal.proposal_contract_version,
+                        ),
+                    )
+                elif journal_proposal.credit_adjustment_id is not None:
+                    identity_value = journal_proposal.credit_adjustment_id
+                    cursor.execute(
+                        """
+                        SELECT journal_proposal_id
+                        FROM billing_core.journal_proposal
+                        WHERE tenant_account_id = %s
+                          AND credit_adjustment_id = %s
+                          AND source_payload_hash = %s
+                          AND proposal_contract_version = %s
+                        """,
+                        (
+                            journal_proposal.tenant_account_id,
+                            identity_value,
+                            journal_proposal.source_payload_hash,
+                            journal_proposal.proposal_contract_version,
+                        ),
+                    )
+                else:
+                    raise ValueError("journal proposal requires a supported source identity")
                 row = cursor.fetchone()
                 if row is None:
                     raise ValueError("journal proposal identity conflicts with an existing row")
@@ -3786,6 +3971,43 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(payment_receipt_id)
         return self._payment_receipt_from_row(row)
+
+    @staticmethod
+    def _credit_adjustment_from_row(row: tuple[Any, ...]) -> StoredCreditAdjustment:
+        """Decode one normalized credit-adjustment row."""
+        return StoredCreditAdjustment(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            row[3],
+            row[4],
+            row[5],
+            parse_exact_decimal(format_exact_decimal(row[6])),
+            parse_exact_decimal(format_exact_decimal(row[7])),
+            parse_exact_decimal(format_exact_decimal(row[8])),
+            row[9],
+            row[10],
+        )
+
+    def _fetch_credit_adjustment(
+        self, cursor: Any, credit_adjustment_id: UUID
+    ) -> StoredCreditAdjustment:
+        """Hydrate one credit adjustment."""
+        cursor.execute(
+            """
+            SELECT credit_adjustment_id, tenant_account_id, invoice_draft_id,
+                   credit_adjustment_contract_version, credit_reason_code,
+                   currency_code, credit_amount, tax_exclusive_amount, tax_amount,
+                   source_payload_hash, recorded_at
+            FROM billing_core.credit_adjustment
+            WHERE credit_adjustment_id = %s
+            """,
+            (credit_adjustment_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(credit_adjustment_id)
+        return self._credit_adjustment_from_row(row)
 
     @staticmethod
     def _journal_proposal_from_row(

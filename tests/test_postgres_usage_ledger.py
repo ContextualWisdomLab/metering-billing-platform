@@ -17,6 +17,7 @@ import psycopg
 
 from metering_billing import (
     CollectionCaseService,
+    CreditAdjustmentService,
     InvoiceDraftService,
     IssuedInvoiceService,
     PaymentIntentService,
@@ -94,11 +95,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.journal_proposal_line,
+                billing_core.journal_proposal,
                 billing_core.webhook_delivery_attempt,
                 billing_core.webhook_outbox_event,
                 billing_core.webhook_subscription,
                 billing_core.payment_receipt,
                 billing_core.payment_intent,
+                billing_core.credit_adjustment,
                 billing_core.collection_dunning_event,
                 billing_core.collection_case,
                 billing_core.issued_invoice_line,
@@ -1140,6 +1144,140 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.insert_payment_receipt(replace(receipt, received_amount=Decimal("0")))
         self.assertIsNone(self.ledger.get_payment_receipt(uuid4()))
         self.assertIsNone(self.ledger.get_journal_proposal(uuid4()))
+
+    def test_credit_adjustment_and_credit_journal_are_durable(self) -> None:
+        """Persist a credit, its tax split, collection reduction, and journal."""
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        self.assertIsNotNone(card.rate_card_version_id)
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE,
+            TimeWindow(
+                datetime(2026, 8, 16, 10, tzinfo=UTC),
+                datetime(2026, 8, 16, 12, tzinfo=UTC),
+            ),
+            1,
+            rate_card_code="cwl_standard",
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        case = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        assert case.collection_case_id is not None
+        stored_case = self.ledger.get_collection_case(case.collection_case_id)
+        assert stored_case is not None
+        amount = stored_case.outstanding_amount / Decimal("2")
+        credit = CreditAdjustmentService(self.ledger, clock=lambda: CATALOG_START).record_credit_adjustment(
+            TENANT_ONE, draft.invoice_draft_id, amount, "goodwill"
+        )
+        self.assertEqual(credit.credit_adjustment_outcome_code.value, "accepted")
+        assert credit.credit_adjustment_id is not None
+        assert credit.proposal_id is not None
+        stored = self.ledger.get_credit_adjustment(credit.credit_adjustment_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.credit_amount, amount)
+        self.assertEqual(stored.tax_exclusive_amount, amount)
+        self.assertEqual(stored.tax_amount, Decimal("0"))
+        self.assertEqual(self.ledger.list_credit_adjustments(stored.tenant_account_id), (stored,))
+        self.assertEqual(
+            self.ledger.find_credit_adjustment(
+                stored.tenant_account_id,
+                stored.invoice_draft_id,
+                stored.source_payload_hash,
+                stored.credit_adjustment_contract_version,
+            ),
+            stored,
+        )
+        self.assertIsNone(self.ledger.get_credit_adjustment(uuid4()))
+        proposal = self.ledger.get_journal_proposal(credit.proposal_id)
+        self.assertIsNotNone(proposal)
+        assert proposal is not None
+        self.assertEqual(proposal.credit_adjustment_id, stored.credit_adjustment_id)
+        self.assertEqual(len(proposal.proposal_lines), 2)
+        self.assertEqual(proposal.proposal_lines[0].debit_amount, amount)
+        self.assertEqual(proposal.proposal_lines[1].credit_amount, amount)
+        self.assertEqual(
+            self.ledger.find_journal_proposal_for_credit(
+                stored.tenant_account_id,
+                stored.credit_adjustment_id,
+                proposal.source_payload_hash,
+                proposal.proposal_contract_version,
+            ),
+            proposal,
+        )
+        remaining_case = self.ledger.get_collection_case(stored_case.collection_case_id)
+        self.assertIsNotNone(remaining_case)
+        assert remaining_case is not None
+        self.assertEqual(remaining_case.outstanding_amount, amount)
+        replay = CreditAdjustmentService(self.ledger).record_credit_adjustment(
+            TENANT_ONE, draft.invoice_draft_id, amount, "goodwill"
+        )
+        self.assertEqual(replay.credit_adjustment_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.credit_adjustment_id, stored.credit_adjustment_id)
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(proposal, proposal.proposal_lines), proposal
+        )
+
+        class ExistingCreditLedger(PostgresUsageLedger):
+            """Force the repository insert path used after a concurrent credit race."""
+
+            def find_credit_adjustment(self, *args, **kwargs):
+                return None
+
+        race_replay = CreditAdjustmentService(
+            ExistingCreditLedger(self.connection), clock=lambda: CATALOG_START
+        ).record_credit_adjustment(TENANT_ONE, draft.invoice_draft_id, amount, "goodwill")
+        self.assertEqual(race_replay.credit_adjustment_outcome_code.value, "duplicate_replay")
+        self.assertEqual(race_replay.credit_adjustment_id, stored.credit_adjustment_id)
+
+        class MissingCreditProposalLedger(ExistingCreditLedger):
+            """Exercise the fail-closed branch when a raced journal is absent."""
+
+            def find_journal_proposal_for_credit(self, *args, **kwargs):
+                return None
+
+        missing_proposal = CreditAdjustmentService(
+            MissingCreditProposalLedger(self.connection), clock=lambda: CATALOG_START
+        ).record_credit_adjustment(TENANT_ONE, draft.invoice_draft_id, amount, "goodwill")
+        self.assertEqual(missing_proposal.credit_adjustment_outcome_code.value, "rejected")
+
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                replace(proposal, payment_receipt_id=None, credit_adjustment_id=None),
+                proposal.proposal_lines,
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_credit_adjustment(
+                replace(stored, source_payload_hash="sha256:" + "4" * 64)
+            )
+        self.assertEqual(
+            self.ledger.insert_credit_adjustment(replace(stored, credit_adjustment_id=uuid4())),
+            stored,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_credit_adjustment(
+                replace(stored, credit_reason_code="invalid")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_credit_adjustment(
+                replace(stored, credit_amount=Decimal("0"), tax_exclusive_amount=Decimal("0"))
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_credit_adjustment(
+                replace(stored, tax_exclusive_amount=Decimal("1"))
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_credit_adjustment(
+                replace(stored, tax_exclusive_amount=Decimal("-1"))
+            )
 
     def test_webhook_subscription_outbox_and_delivery_are_durable(self) -> None:
         """Persist subscription metadata, attempts, and delivery status in PostgreSQL."""

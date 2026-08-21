@@ -241,6 +241,24 @@ class CreditAdjustmentService:
         credit_amount: object,
         credit_reason_code: str,
     ) -> CreditAdjustmentResult:
+        """Record one credit inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._record_credit_adjustment(
+                tenant_reference, invoice_draft_id, credit_amount, credit_reason_code
+            )
+        with transaction():
+            return self._record_credit_adjustment(
+                tenant_reference, invoice_draft_id, credit_amount, credit_reason_code
+            )
+
+    def _record_credit_adjustment(
+        self,
+        tenant_reference: str,
+        invoice_draft_id: UUID,
+        credit_amount: object,
+        credit_reason_code: str,
+    ) -> CreditAdjustmentResult:
         """Record one commercial credit against a persisted invoice draft.
 
         A replay of the same tenant, draft, amount, reason, source-payload
@@ -320,9 +338,10 @@ class CreditAdjustmentService:
         if collection_case is not None and parsed_amount > collection_case.outstanding_amount:
             return _rejected(CreditAdjustmentRejectionReasonCode.CREDIT_EXCEEDS_OUTSTANDING)
 
+        candidate_credit_adjustment_id = generate_record_id()
         stored = self.ledger.insert_credit_adjustment(
             StoredCreditAdjustment(
-                credit_adjustment_id=generate_record_id(),
+                credit_adjustment_id=candidate_credit_adjustment_id,
                 tenant_account_id=tenant.tenant_account_id,
                 invoice_draft_id=invoice_draft.invoice_draft_id,
                 credit_adjustment_contract_version=CREDIT_ADJUSTMENT_CONTRACT_VERSION,
@@ -335,6 +354,24 @@ class CreditAdjustmentService:
                 recorded_at=self._clock(),
             )
         )
+        if stored.credit_adjustment_id != candidate_credit_adjustment_id:
+            proposal = self.ledger.find_journal_proposal_for_credit(
+                tenant.tenant_account_id,
+                stored.credit_adjustment_id,
+                _credit_journal_hash(tenant.tenant_reference, stored),
+                PROPOSAL_CONTRACT_VERSION,
+            )
+            if proposal is None:
+                return _rejected(CreditAdjustmentRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
+            return _from_stored(
+                stored,
+                invoice_draft,
+                proposal,
+                collection_case,
+                tenant.tenant_reference,
+                CreditAdjustmentOutcomeCode.DUPLICATE_REPLAY,
+                _remaining_adjustable(self.ledger, tenant.tenant_account_id, invoice_draft),
+            )
         proposal = _insert_credit_journal(self.ledger, tenant.tenant_reference, stored, invoice_draft)
         if collection_case is not None:
             collection_case = self.ledger.apply_collection_settlement(

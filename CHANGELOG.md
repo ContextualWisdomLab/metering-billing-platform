@@ -6,8 +6,8 @@
   intents, applied payment receipts, row-locked collection settlement, cash
   journal proposals, tenant-scoped webhook subscriptions, delivery attempts,
   delivered outbox status, and atomic commercial outbox replay paths. The
-  dedicated PostgreSQL suite now passes 604 tests at 100% statement/branch
-  coverage (15,178 statements and 5,180 branches). Webhook secrets remain
+  dedicated PostgreSQL suite now passes 605 tests at 100% statement/branch
+  coverage (15,241 statements and 5,200 branches). Webhook secrets remain
   process-local until a secure secret provider is added. The broader
   commercial persistence and GA recovery backlog remains open under issue #84.
 
