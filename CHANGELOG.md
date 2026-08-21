@@ -1,11 +1,11 @@
 # Changelog
 
 - Extended the real PostgreSQL runtime slice through tenant-scoped rate-card
-  publish, rating, invoice drafting, issued-invoice snapshots, optional tax
-  reads, and an atomic `invoice.issued` webhook outbox replay path. The
-  dedicated PostgreSQL suite now passes 601 tests at 100% statement/branch
-  coverage. The broader commercial persistence and GA recovery backlog remains
-  open under issue #84.
+  publish, rating, invoice drafting, issued-invoice snapshots, tax-rate
+  publish, tax assessments, and an atomic `invoice.issued` webhook outbox
+  replay path. The dedicated PostgreSQL suite now passes 601 tests at 100%
+  statement/branch coverage. The broader commercial persistence and GA
+  recovery backlog remains open under issue #84.
 
 ## [Unreleased]
 

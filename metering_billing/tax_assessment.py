@@ -202,6 +202,19 @@ class TaxAssessmentService:
         invoice_draft_id: UUID,
         tax_rate_version: UUID | int,
     ) -> TaxAssessmentResult:
+        """Assess tax inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._assess_tax(tenant_reference, invoice_draft_id, tax_rate_version)
+        with transaction():
+            return self._assess_tax(tenant_reference, invoice_draft_id, tax_rate_version)
+
+    def _assess_tax(
+        self,
+        tenant_reference: str,
+        invoice_draft_id: UUID,
+        tax_rate_version: UUID | int,
+    ) -> TaxAssessmentResult:
         """Assess a persisted tax-rate version against one invoice draft.
 
         A replay of the same tenant, draft, tax-rate version, and source-payload
@@ -224,8 +237,11 @@ class TaxAssessmentService:
         )
         if rate_version is None:
             return _rejected(TaxAssessmentRejectionReasonCode.TAX_RATE_NOT_FOUND)
-        collection_case = self.ledger.find_collection_case(
-            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        find_collection_case = getattr(self.ledger, "find_collection_case", None)
+        collection_case = (
+            None
+            if find_collection_case is None
+            else find_collection_case(tenant.tenant_account_id, invoice_draft.invoice_draft_id)
         )
         if collection_case is not None:
             return _rejected(TaxAssessmentRejectionReasonCode.TAX_AFTER_COLLECTION_OPENED)

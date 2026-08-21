@@ -21,8 +21,9 @@ against `PostgresUsageLedger` for the durable usage, measurement, catalog, and
 receipt slice.  Both paths use the same hash, tenant, decimal, and
 rating-identity rules; the PostgreSQL path owns the event and receipt write in
 one transaction.  The PostgreSQL commercial vertical now continues through
-rate-card publish, rating, invoice draft, issued-invoice snapshot, optional tax
-read, and atomic `invoice.issued` outbox enqueue.  The broader collection,
+rate-card publish, rating, invoice draft, issued-invoice snapshot, tenant-scoped
+tax-rate publish, tax assessment, and atomic `invoice.issued` outbox enqueue.
+The broader collection,
 payment, provider, accounting, and lifecycle services still use the in-memory
 reference ledger until their own durable repositories land.  Canonical
 source-payload hashing excludes envelope identifiers (`event_id`,

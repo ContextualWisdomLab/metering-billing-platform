@@ -36,6 +36,8 @@ from metering_billing.usage_ledger import (
     StoredRateCardVersion,
     StoredRatingLine,
     StoredRatingRun,
+    StoredTaxRateSchedule,
+    StoredTaxRateVersion,
     StoredTaxAssessment,
     StoredUsageEvent,
     StoredUsageMeasurement,
@@ -755,6 +757,413 @@ class PostgresUsageLedger:
         if row is None:
             return None
         return MeterQualityRule(UUID(str(row[0])), UUID(str(row[1])), row[2], row[3])
+
+    def find_tax_rate_schedule(
+        self, tenant_account_id: UUID, tax_code: str
+    ) -> StoredTaxRateSchedule | None:
+        """Return one tenant-scoped tax-rate schedule by code."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tax_rate_schedule_id, tenant_account_id, tax_code, created_at
+                FROM billing_core.tax_rate_schedule
+                WHERE tenant_account_id = %s AND tax_code = %s
+                """,
+                (tenant_account_id, tax_code),
+            )
+            row = cursor.fetchone()
+        return None if row is None else self._tax_rate_schedule_from_row(row)
+
+    def get_tax_rate_schedule(
+        self, tax_rate_schedule_id: UUID
+    ) -> StoredTaxRateSchedule | None:
+        """Return one tax-rate schedule by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tax_rate_schedule_id, tenant_account_id, tax_code, created_at
+                FROM billing_core.tax_rate_schedule
+                WHERE tax_rate_schedule_id = %s
+                """,
+                (tax_rate_schedule_id,),
+            )
+            row = cursor.fetchone()
+        return None if row is None else self._tax_rate_schedule_from_row(row)
+
+    def insert_tax_rate_schedule(
+        self, schedule: StoredTaxRateSchedule
+    ) -> StoredTaxRateSchedule:
+        """Persist one tax-rate schedule without replacing its code identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.tax_rate_schedule
+                    (tax_rate_schedule_id, tenant_account_id, tax_code, created_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING tax_rate_schedule_id, tenant_account_id, tax_code, created_at
+                """,
+                (
+                    schedule.tax_rate_schedule_id,
+                    schedule.tenant_account_id,
+                    schedule.tax_code,
+                    schedule.created_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT tax_rate_schedule_id, tenant_account_id, tax_code, created_at
+                    FROM billing_core.tax_rate_schedule
+                    WHERE tenant_account_id = %s AND tax_code = %s
+                    """,
+                    (schedule.tenant_account_id, schedule.tax_code),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                raise ValueError("tax-rate schedule identity already belongs to another row")
+        return self._tax_rate_schedule_from_row(row)
+
+    def list_tax_rate_schedules(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredTaxRateSchedule, ...]:
+        """Return tax-rate schedules limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tax_rate_schedule_id, tenant_account_id, tax_code, created_at
+                FROM billing_core.tax_rate_schedule
+                WHERE tenant_account_id = %s
+                ORDER BY tax_code, tax_rate_schedule_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(self._tax_rate_schedule_from_row(row) for row in cursor.fetchall())
+
+    def find_tax_rate_version_by_identity(
+        self,
+        tenant_account_id: UUID,
+        tax_rate_schedule_id: UUID,
+        source_payload_hash: str,
+        tax_rate_contract_version: int,
+    ) -> StoredTaxRateVersion | None:
+        """Return one published tax-rate version by immutable payload identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
+                       version_number, tax_rate_contract_version, tax_code, tax_rate,
+                       source_payload_hash, published_at
+                FROM billing_core.tax_rate_version
+                WHERE tenant_account_id = %s
+                  AND tax_rate_schedule_id = %s
+                  AND source_payload_hash = %s
+                  AND tax_rate_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    tax_rate_schedule_id,
+                    source_payload_hash,
+                    tax_rate_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+        return None if row is None else self._tax_rate_version_from_row(row)
+
+    def get_tax_rate_version(
+        self, tax_rate_version_id: UUID
+    ) -> StoredTaxRateVersion | None:
+        """Return one published tax-rate version by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
+                       version_number, tax_rate_contract_version, tax_code, tax_rate,
+                       source_payload_hash, published_at
+                FROM billing_core.tax_rate_version
+                WHERE tax_rate_version_id = %s
+                """,
+                (tax_rate_version_id,),
+            )
+            row = cursor.fetchone()
+        return None if row is None else self._tax_rate_version_from_row(row)
+
+    def find_tax_rate_version(
+        self,
+        tenant_account_id: UUID,
+        version_number: int,
+        tax_code: str | None = None,
+    ) -> StoredTaxRateVersion | None:
+        """Return one tenant-scoped version number when it is unambiguous."""
+        with self._cursor() as cursor:
+            if tax_code is None:
+                cursor.execute(
+                    """
+                    SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
+                           version_number, tax_rate_contract_version, tax_code, tax_rate,
+                           source_payload_hash, published_at
+                    FROM billing_core.tax_rate_version
+                    WHERE tenant_account_id = %s AND version_number = %s
+                    """,
+                    (tenant_account_id, version_number),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT version.tax_rate_version_id, version.tenant_account_id,
+                           version.tax_rate_schedule_id, version.version_number,
+                           version.tax_rate_contract_version, version.tax_code,
+                           version.tax_rate, version.source_payload_hash,
+                           version.published_at
+                    FROM billing_core.tax_rate_version AS version
+                    JOIN billing_core.tax_rate_schedule AS schedule
+                      ON schedule.tenant_account_id = version.tenant_account_id
+                     AND schedule.tax_rate_schedule_id = version.tax_rate_schedule_id
+                    WHERE version.tenant_account_id = %s
+                      AND schedule.tax_code = %s
+                      AND version.version_number = %s
+                    """,
+                    (tenant_account_id, tax_code, version_number),
+                )
+            rows = cursor.fetchall()
+        if len(rows) != 1:
+            return None
+        return self._tax_rate_version_from_row(rows[0])
+
+    def next_tax_rate_version_number(
+        self, tenant_account_id: UUID, tax_rate_schedule_id: UUID
+    ) -> int:
+        """Return the next append-only version number for one tax schedule."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COALESCE(MAX(version_number), 0) + 1
+                FROM billing_core.tax_rate_version
+                WHERE tenant_account_id = %s AND tax_rate_schedule_id = %s
+                """,
+                (tenant_account_id, tax_rate_schedule_id),
+            )
+            return int(cursor.fetchone()[0])
+
+    def insert_tax_rate_version(
+        self, version: StoredTaxRateVersion
+    ) -> StoredTaxRateVersion:
+        """Persist one immutable tax-rate version and classify replay."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.tax_rate_version
+                    (tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
+                     version_number, tax_rate_contract_version, tax_code, tax_rate,
+                     source_payload_hash, published_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING tax_rate_version_id, tenant_account_id,
+                          tax_rate_schedule_id, version_number,
+                          tax_rate_contract_version, tax_code, tax_rate,
+                          source_payload_hash, published_at
+                """,
+                (
+                    version.tax_rate_version_id,
+                    version.tenant_account_id,
+                    version.tax_rate_schedule_id,
+                    version.version_number,
+                    version.tax_rate_contract_version,
+                    version.tax_code,
+                    version.tax_rate,
+                    version.source_payload_hash,
+                    version.published_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
+                           version_number, tax_rate_contract_version, tax_code, tax_rate,
+                           source_payload_hash, published_at
+                    FROM billing_core.tax_rate_version
+                    WHERE tenant_account_id = %s
+                      AND tax_rate_schedule_id = %s
+                      AND source_payload_hash = %s
+                      AND tax_rate_contract_version = %s
+                    """,
+                    (
+                        version.tenant_account_id,
+                        version.tax_rate_schedule_id,
+                        version.source_payload_hash,
+                        version.tax_rate_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("tax-rate version identity already belongs to another row")
+            return self._tax_rate_version_from_row(row)
+
+    def list_tax_rate_versions(
+        self, tenant_account_id: UUID, tax_rate_schedule_id: UUID | None = None
+    ) -> tuple[StoredTaxRateVersion, ...]:
+        """Return published tax-rate versions limited to one tenant."""
+        with self._cursor() as cursor:
+            if tax_rate_schedule_id is None:
+                cursor.execute(
+                    """
+                    SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
+                           version_number, tax_rate_contract_version, tax_code, tax_rate,
+                           source_payload_hash, published_at
+                    FROM billing_core.tax_rate_version
+                    WHERE tenant_account_id = %s
+                    ORDER BY tax_rate_schedule_id, version_number
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
+                           version_number, tax_rate_contract_version, tax_code, tax_rate,
+                           source_payload_hash, published_at
+                    FROM billing_core.tax_rate_version
+                    WHERE tenant_account_id = %s AND tax_rate_schedule_id = %s
+                    ORDER BY version_number
+                    """,
+                    (tenant_account_id, tax_rate_schedule_id),
+                )
+            return tuple(self._tax_rate_version_from_row(row) for row in cursor.fetchall())
+
+    def find_tax_assessment(
+        self,
+        tenant_account_id: UUID,
+        invoice_draft_id: UUID,
+        tax_rate_version_id: UUID,
+        source_payload_hash: str,
+        tax_assessment_contract_version: int,
+    ) -> StoredTaxAssessment | None:
+        """Return one assessment by its tenant-scoped immutable identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT assessment.tax_assessment_id
+                FROM billing_core.tax_assessment AS assessment
+                WHERE assessment.tenant_account_id = %s
+                  AND assessment.invoice_draft_id = %s
+                  AND assessment.tax_rate_version_id = %s
+                  AND assessment.source_payload_hash = %s
+                  AND assessment.tax_assessment_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    invoice_draft_id,
+                    tax_rate_version_id,
+                    source_payload_hash,
+                    tax_assessment_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_tax_assessment(cursor, UUID(str(row[0])))
+
+    def get_tax_assessment(
+        self, tax_assessment_id: UUID
+    ) -> StoredTaxAssessment | None:
+        """Return one tax assessment by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tax_assessment_id
+                FROM billing_core.tax_assessment
+                WHERE tax_assessment_id = %s
+                """,
+                (tax_assessment_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_tax_assessment(cursor, UUID(str(row[0])))
+
+    def list_tax_assessments(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredTaxAssessment, ...]:
+        """Return assessments, optionally limited to one tenant."""
+        with self._cursor() as cursor:
+            if tenant_account_id is None:
+                cursor.execute(
+                    """
+                    SELECT tax_assessment_id
+                    FROM billing_core.tax_assessment
+                    ORDER BY assessed_at, tax_assessment_id
+                    """
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT tax_assessment_id
+                    FROM billing_core.tax_assessment
+                    WHERE tenant_account_id = %s
+                    ORDER BY assessed_at, tax_assessment_id
+                    """,
+                    (tenant_account_id,),
+                )
+            return tuple(
+                self._fetch_tax_assessment(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_tax_assessment(
+        self, assessment: StoredTaxAssessment
+    ) -> StoredTaxAssessment:
+        """Persist one tax snapshot and classify exact or draft replay."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.tax_assessment
+                    (tax_assessment_id, tenant_account_id, invoice_draft_id,
+                     tax_rate_version_id, tax_assessment_contract_version, tax_code,
+                     tax_rate, currency_code, tax_exclusive_amount, tax_amount,
+                     tax_inclusive_amount, source_payload_hash, assessed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING tax_assessment_id
+                """,
+                (
+                    assessment.tax_assessment_id,
+                    assessment.tenant_account_id,
+                    assessment.invoice_draft_id,
+                    assessment.tax_rate_version_id,
+                    assessment.tax_assessment_contract_version,
+                    assessment.tax_code,
+                    assessment.tax_rate,
+                    assessment.currency_code,
+                    assessment.tax_exclusive_amount,
+                    assessment.tax_amount,
+                    assessment.tax_inclusive_amount,
+                    assessment.source_payload_hash,
+                    assessment.assessed_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT tax_assessment_id
+                    FROM billing_core.tax_assessment
+                    WHERE tenant_account_id = %s
+                      AND invoice_draft_id = %s
+                      AND tax_rate_version_id = %s
+                      AND source_payload_hash = %s
+                      AND tax_assessment_contract_version = %s
+                    """,
+                    (
+                        assessment.tenant_account_id,
+                        assessment.invoice_draft_id,
+                        assessment.tax_rate_version_id,
+                        assessment.source_payload_hash,
+                        assessment.tax_assessment_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("tax assessment identity already belongs to another row")
+                return self._fetch_tax_assessment(cursor, UUID(str(row[0])))
+            return self._fetch_tax_assessment(cursor, UUID(str(row[0])))
 
     def resolve_tenant(
         self, tenant_reference: str
@@ -1926,6 +2335,54 @@ class PostgresUsageLedger:
             row[4],
             row[5],
         )
+
+    @staticmethod
+    def _tax_rate_schedule_from_row(row: tuple[Any, ...]) -> StoredTaxRateSchedule:
+        """Decode one tax-rate schedule row."""
+        return StoredTaxRateSchedule(
+            UUID(str(row[0])), UUID(str(row[1])), row[2], row[3]
+        )
+
+    @staticmethod
+    def _tax_rate_version_from_row(row: tuple[Any, ...]) -> StoredTaxRateVersion:
+        """Decode one published tax-rate version row."""
+        return StoredTaxRateVersion(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+        )
+
+    def _fetch_tax_assessment(
+        self, cursor: Any, tax_assessment_id: UUID
+    ) -> StoredTaxAssessment:
+        """Hydrate one tax assessment with its published version number."""
+        cursor.execute(
+            """
+            SELECT assessment.tax_assessment_id, assessment.tenant_account_id,
+                   assessment.invoice_draft_id, assessment.tax_rate_version_id,
+                   assessment.tax_assessment_contract_version, assessment.tax_code,
+                   assessment.tax_rate, assessment.currency_code,
+                   assessment.tax_exclusive_amount, assessment.tax_amount,
+                   assessment.tax_inclusive_amount, assessment.source_payload_hash,
+                   assessment.assessed_at, version.version_number
+            FROM billing_core.tax_assessment AS assessment
+            JOIN billing_core.tax_rate_version AS version
+              ON version.tenant_account_id = assessment.tenant_account_id
+             AND version.tax_rate_version_id = assessment.tax_rate_version_id
+            WHERE assessment.tax_assessment_id = %s
+            """,
+            (tax_assessment_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(tax_assessment_id)
+        return self._tax_assessment_from_row(row)
 
     def _rate_card_version_from_cursor(
         self, cursor: Any, row: tuple[Any, ...]

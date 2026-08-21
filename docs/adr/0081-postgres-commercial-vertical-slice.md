@@ -13,8 +13,8 @@ buyer-visible commercial fact.
 ## Decision
 
 - Extend the PostgreSQL repository through tenant-scoped rate-card versions,
-  rating runs, invoice drafts, issued-invoice snapshots, optional tax reads,
-  and `invoice.issued` outbox events.
+  rating runs, invoice drafts, issued-invoice snapshots, tenant-scoped tax
+  rate schedules/versions, tax assessments, and `invoice.issued` outbox events.
 - Keep immutable header and line rows in PostgreSQL with exact `numeric` values,
   composite tenant foreign keys, append-only identities, and migration 0038's
   upgrade backfills for canonical billing-account and meter references.
@@ -31,7 +31,8 @@ buyer-visible commercial fact.
 The dedicated PostgreSQL 18 integration suite exercises clean migration,
 tenant isolation, exact decimal totals, tax snapshots, replay, direct unique
 conflicts, rollback, and concurrent usage ingestion. The repository suite
-passes 601 tests with 100% statement and branch coverage.
+passes 601 tests with 100% statement and branch coverage (14,831 statements
+and 5,078 branches).
 
 ## Consequences
 

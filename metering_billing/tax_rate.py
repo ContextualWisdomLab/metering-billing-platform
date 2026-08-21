@@ -170,6 +170,19 @@ class TaxRateService:
         tax_code: str,
         tax_rate: Any,
     ) -> TaxRateResult:
+        """Publish one tax rate inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._publish_tax_rate(tenant_reference, tax_code, tax_rate)
+        with transaction():
+            return self._publish_tax_rate(tenant_reference, tax_code, tax_rate)
+
+    def _publish_tax_rate(
+        self,
+        tenant_reference: str,
+        tax_code: str,
+        tax_rate: Any,
+    ) -> TaxRateResult:
         """Publish one immutable tax-rate version for a tenant.
 
         A replay of the same tenant, tax code, exact rate, and contract

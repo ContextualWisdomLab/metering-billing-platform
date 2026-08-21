@@ -19,6 +19,8 @@ from metering_billing import (
     InvoiceDraftService,
     IssuedInvoiceService,
     PostgresUsageLedger,
+    TaxAssessmentService,
+    TaxRateService,
     UsageIngestionService,
 )
 from metering_billing.errors import RejectionReasonCode, UsageEventConflict
@@ -84,6 +86,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 billing_core.webhook_outbox_event,
                 billing_core.issued_invoice_line,
                 billing_core.issued_invoice,
+                billing_core.tax_assessment,
+                billing_core.tax_rate_version,
+                billing_core.tax_rate_schedule,
                 billing_core.invoice_draft_line,
                 billing_core.invoice_draft,
                 billing_core.rating_line,
@@ -506,11 +511,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         """Issued totals use the same tenant-scoped PostgreSQL tax snapshot."""
         ingest = UsageIngestionService(self.ledger)
         self.assertEqual(ingest.ingest_usage_event(make_event()).ingestion_outcome_code.value, "accepted")
-        card = RateCardService(self.ledger).publish_rate_card(
+        RateCardService(self.ledger).publish_rate_card(
             TENANT_ONE,
             "cwl_standard",
             "USD",
-            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},),
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "2", "currency_code": "USD"},),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE,
@@ -520,45 +525,79 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
         tenant_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
-        schedule_id, version_id, assessment_id = uuid4(), uuid4(), uuid4()
-        snapshot_hash = "sha256:" + "1" * 64
-        self.connection.execute(
-            """
-            INSERT INTO billing_core.tax_rate_schedule
-                (tax_rate_schedule_id, tenant_account_id, tax_code)
-            VALUES (%s, %s, 'vat')
-            """,
-            (schedule_id, tenant_id),
+        tax_rate = TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.1")
+        self.assertEqual(tax_rate.tax_rate_outcome_code.value, "accepted")
+        tax_rate_replay = TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.1")
+        self.assertEqual(tax_rate_replay.tax_rate_outcome_code.value, "duplicate_replay")
+        schedule = self.ledger.find_tax_rate_schedule(tenant_id, "vat")
+        self.assertIsNotNone(schedule)
+        assert schedule is not None
+        self.assertEqual(self.ledger.insert_tax_rate_schedule(schedule), schedule)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_tax_rate_schedule(replace(schedule, tax_code="gst"))
+        self.assertEqual(self.ledger.list_tax_rate_schedules(tenant_id), (schedule,))
+        self.assertEqual(self.ledger.get_tax_rate_schedule(schedule.tax_rate_schedule_id), schedule)
+        version = self.ledger.get_tax_rate_version(tax_rate.tax_rate_version_id)
+        self.assertIsNotNone(version)
+        assert version is not None
+        self.assertEqual(
+            self.ledger.find_tax_rate_version_by_identity(
+                tenant_id,
+                schedule.tax_rate_schedule_id,
+                version.source_payload_hash,
+                version.tax_rate_contract_version,
+            ),
+            version,
         )
-        self.connection.execute(
-            """
-            INSERT INTO billing_core.tax_rate_version
-                (tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
-                 version_number, tax_rate_contract_version, tax_code, tax_rate,
-                 source_payload_hash)
-            VALUES (%s, %s, %s, 1, 1, 'vat', 0.1, %s)
-            """,
-            (version_id, tenant_id, schedule_id, snapshot_hash),
+        self.assertEqual(self.ledger.find_tax_rate_version(tenant_id, 1, "vat"), version)
+        self.assertIsNone(self.ledger.find_tax_rate_version(tenant_id, 9))
+        self.assertEqual(self.ledger.next_tax_rate_version_number(tenant_id, schedule.tax_rate_schedule_id), 2)
+        self.assertEqual(self.ledger.insert_tax_rate_version(version), version)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_tax_rate_version(
+                replace(version, source_payload_hash="sha256:" + "2" * 64)
+            )
+        self.assertEqual(self.ledger.list_tax_rate_versions(tenant_id), (version,))
+        self.assertEqual(
+            self.ledger.list_tax_rate_versions(tenant_id, schedule.tax_rate_schedule_id),
+            (version,),
         )
-        self.connection.execute(
-            """
-            INSERT INTO billing_core.tax_assessment
-                (tax_assessment_id, tenant_account_id, invoice_draft_id,
-                 tax_rate_version_id, tax_assessment_contract_version, tax_code,
-                 tax_rate, currency_code, tax_exclusive_amount, tax_amount,
-                 tax_inclusive_amount, source_payload_hash)
-            VALUES (%s, %s, %s, %s, 1, 'vat', 0.1, 'USD', 0.003620, 0.000362, 0.003982, %s)
-            """,
-            (assessment_id, tenant_id, draft.invoice_draft_id, version_id, snapshot_hash),
+        assessment = TaxAssessmentService(self.ledger).assess_tax(
+            TENANT_ONE, draft.invoice_draft_id, version.tax_rate_version_id
         )
-        self.connection.commit()
+        self.assertEqual(assessment.tax_assessment_outcome_code.value, "accepted")
+        assessment_replay = TaxAssessmentService(self.ledger).assess_tax(
+            TENANT_ONE, draft.invoice_draft_id, version.tax_rate_version_id
+        )
+        self.assertEqual(assessment_replay.tax_assessment_outcome_code.value, "duplicate_replay")
+        stored_assessment = self.ledger.get_tax_assessment(assessment.tax_assessment_id)
+        self.assertIsNotNone(stored_assessment)
+        assert stored_assessment is not None
+        self.assertEqual(self.ledger.insert_tax_assessment(stored_assessment), stored_assessment)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_tax_assessment(
+                replace(stored_assessment, source_payload_hash="sha256:" + "2" * 64)
+            )
+        self.assertEqual(self.ledger.find_tax_assessment_for_draft(tenant_id, draft.invoice_draft_id), stored_assessment)
+        self.assertEqual(self.ledger.list_tax_assessments(), (stored_assessment,))
+        self.assertEqual(self.ledger.list_tax_assessments(tenant_id), (stored_assessment,))
+        self.assertEqual(
+            self.ledger.find_tax_assessment(
+                tenant_id,
+                draft.invoice_draft_id,
+                version.tax_rate_version_id,
+                stored_assessment.source_payload_hash,
+                stored_assessment.tax_assessment_contract_version,
+            ),
+            stored_assessment,
+        )
         issued = IssuedInvoiceService(self.ledger).issue_invoice(
             TENANT_ONE, draft.invoice_draft_id
         )
         self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
-        self.assertEqual(issued.tax_exclusive_amount, Decimal("0.003620"))
-        self.assertEqual(issued.tax_amount, Decimal("0.000362"))
-        self.assertEqual(issued.tax_inclusive_amount, Decimal("0.003982"))
+        self.assertEqual(issued.tax_exclusive_amount, Decimal("3620.000000000000"))
+        self.assertEqual(issued.tax_amount, Decimal("362.00"))
+        self.assertEqual(issued.tax_inclusive_amount, Decimal("3982.000000000000"))
 
     def test_ingestion_is_atomic_replay_safe_and_tenant_scoped(self) -> None:
         """A restart-safe repository keeps one event, normalized measurements, and receipts."""
