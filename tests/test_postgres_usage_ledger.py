@@ -22,11 +22,18 @@ from metering_billing import (
     TaxAssessmentService,
     TaxRateService,
     UsageIngestionService,
+    WebhookDeliveryService,
+    WebhookSubscriptionService,
 )
 from metering_billing.errors import RejectionReasonCode, UsageEventConflict
 from metering_billing.rate_card import RateCardService
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_rating import UsageRatingService
+from metering_billing.usage_ledger import StoredWebhookDeliveryAttempt
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+    enqueue_accepted_fact,
+)
 from scripts.migrate_postgres import (
     MIGRATION_HISTORY_TABLE,
     MigrationDriftError,
@@ -83,7 +90,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.webhook_delivery_attempt,
                 billing_core.webhook_outbox_event,
+                billing_core.webhook_subscription,
                 billing_core.issued_invoice_line,
                 billing_core.issued_invoice,
                 billing_core.tax_assessment,
@@ -799,6 +808,192 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         rejected = next(receipt for receipt in receipts if receipt.ingestion_outcome_code.value == "rejected")
         self.assertEqual(rejected.rejection_reason_code, RejectionReasonCode.SOURCE_EVENT_CONFLICT)
+
+    def test_webhook_subscription_outbox_and_delivery_are_durable(self) -> None:
+        """Persist subscription metadata, attempts, and delivery status in PostgreSQL."""
+        subscription_service = WebhookSubscriptionService(
+            self.ledger, clock=lambda: CATALOG_START
+        )
+        registered = subscription_service.register_subscription(
+            TENANT_ONE,
+            "https://hooks.example.test/cwl",
+            (EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,),
+        )
+        self.assertEqual(registered.webhook_subscription_outcome_code.value, "accepted")
+        self.assertIsNotNone(registered.webhook_secret)
+        replay = subscription_service.register_subscription(
+            TENANT_ONE,
+            "https://hooks.example.test/cwl",
+            (EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,),
+        )
+        self.assertEqual(replay.webhook_subscription_outcome_code.value, "duplicate_replay")
+        self.assertIsNone(replay.webhook_secret)
+        assert registered.webhook_subscription_id is not None
+        stored = self.ledger.get_webhook_subscription(registered.webhook_subscription_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertTrue(stored.webhook_secret_hash.startswith("hmac-sha256:"))
+        self.assertEqual(
+            self.ledger.list_active_webhook_subscriptions(
+                stored.tenant_account_id, EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED
+            ),
+            (stored,),
+        )
+        self.assertEqual(self.ledger.list_active_webhook_subscriptions(
+            self.ledger.register_tenant(TENANT_TWO).tenant_account_id,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+        ), ())
+
+        source_id = uuid4()
+        outbox = enqueue_accepted_fact(
+            self.ledger,
+            TENANT_ONE,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            source_id,
+            {"proposal_id": str(source_id)},
+            CATALOG_START,
+        )
+        self.assertIsNotNone(outbox)
+        assert outbox is not None
+        self.assertEqual(self.ledger.get_webhook_outbox_event(outbox.outbox_event_id), outbox)
+        self.assertEqual(self.ledger.find_webhook_outbox_event(
+            stored.tenant_account_id,
+            outbox.event_type_code,
+            source_id,
+            outbox.payload_hash,
+        ), outbox)
+        self.assertEqual(
+            enqueue_accepted_fact(
+                self.ledger,
+                TENANT_ONE,
+                EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+                source_id,
+                {"proposal_id": str(source_id)},
+                CATALOG_START,
+            ),
+            outbox,
+        )
+        delivered = WebhookDeliveryService(
+            self.ledger,
+            clock=lambda: CATALOG_START,
+            transport=lambda url, body, headers: (200, None),
+        ).deliver_due_events(TENANT_ONE)
+        self.assertEqual(delivered.delivered_event_count, 1)
+        self.assertEqual(delivered.attempted_delivery_count, 1)
+        self.assertEqual(self.ledger.list_pending_webhook_outbox_events(
+            stored.tenant_account_id
+        ), ())
+        delivered_row = self.ledger.mark_webhook_outbox_event_delivered(outbox.outbox_event_id)
+        self.assertEqual(delivered_row.delivery_status, "delivered")
+        attempts = self.ledger.list_webhook_delivery_attempts(
+            outbox.outbox_event_id, registered.webhook_subscription_id
+        )
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0].attempt_number, 1)
+        self.assertEqual(self.ledger.get_webhook_delivery_attempt(attempts[0].delivery_attempt_id), attempts[0])
+        self.assertEqual(
+            self.ledger.list_webhook_delivery_attempts_for_tenant(stored.tenant_account_id),
+            attempts,
+        )
+        self.assertIsNone(self.ledger.get_webhook_subscription(uuid4()))
+        self.assertIsNone(self.ledger.find_webhook_subscription(
+            stored.tenant_account_id,
+            "https://hooks.example.test/missing",
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            1,
+        ))
+        self.assertIsNone(self.ledger.get_webhook_outbox_event(uuid4()))
+        self.assertIsNone(self.ledger.get_webhook_delivery_attempt(uuid4()))
+
+        revoked = subscription_service.revoke_subscription(
+            TENANT_ONE, registered.webhook_subscription_id
+        )
+        self.assertEqual(revoked.subscription_status, "revoked")
+        self.assertEqual(
+            subscription_service.revoke_subscription(
+                TENANT_ONE, registered.webhook_subscription_id
+            ).webhook_subscription_outcome_code.value,
+            "duplicate_replay",
+        )
+        self.assertEqual(
+            self.ledger.list_webhook_subscriptions(stored.tenant_account_id),
+            (self.ledger.get_webhook_subscription(registered.webhook_subscription_id),),
+        )
+        self.assertEqual(
+            self.ledger.revoke_webhook_subscription(
+                registered.webhook_subscription_id, CATALOG_START
+            ).subscription_status,
+            "revoked",
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.revoke_webhook_subscription(uuid4(), CATALOG_START)
+        with self.assertRaises(ValueError):
+            self.ledger.mark_webhook_outbox_event_delivered(uuid4())
+        with self.assertRaises(ValueError):
+            self.ledger.store_webhook_subscription_secret(registered.webhook_subscription_id, "")
+        with self.assertRaises(ValueError):
+            self.ledger.insert_webhook_subscription(
+                replace(stored, subscription_status="invalid", webhook_subscription_id=uuid4())
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_webhook_subscription(
+                replace(stored, webhook_secret_hash="invalid", webhook_subscription_id=uuid4())
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_webhook_subscription(
+                replace(
+                    stored,
+                    webhook_subscription_id=uuid4(),
+                    callback_url="https://hooks.example.test/conflict",
+                )
+            )
+        replay_by_database = self.ledger.insert_webhook_subscription(
+            replace(stored, webhook_subscription_id=uuid4())
+        )
+        self.assertEqual(
+            replay_by_database,
+            self.ledger.get_webhook_subscription(registered.webhook_subscription_id),
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_webhook_delivery_attempt(
+                replace(attempts[0], delivery_attempt_id=uuid4(), attempt_number=0)
+            )
+        self.assertEqual(
+            self.ledger.insert_webhook_delivery_attempt(attempts[0]), attempts[0]
+        )
+        self.assertEqual(
+            self.ledger.list_webhook_delivery_attempts(outbox.outbox_event_id), attempts
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_webhook_delivery_attempt(
+                StoredWebhookDeliveryAttempt(
+                    uuid4(), uuid4(), registered.webhook_subscription_id, 1,
+                    500, None, "missing", CATALOG_START
+                )
+            )
+
+        class ReplayOnInsertLedger(PostgresUsageLedger):
+            def find_webhook_subscription(self, *args, **kwargs):
+                return None
+
+            def insert_webhook_subscription(self, candidate):
+                stored_candidate = super().find_webhook_subscription(
+                    candidate.tenant_account_id,
+                    candidate.callback_url,
+                    candidate.event_type_set,
+                    candidate.webhook_subscription_contract_version,
+                )
+                assert stored_candidate is not None
+                return stored_candidate
+
+        concurrent_replay = WebhookSubscriptionService(
+            ReplayOnInsertLedger(self.connection), clock=lambda: CATALOG_START
+        ).register_subscription(
+            TENANT_ONE,
+            "https://hooks.example.test/cwl",
+            (EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,),
+        )
+        self.assertEqual(concurrent_replay.webhook_subscription_outcome_code.value, "duplicate_replay")
 
     def test_transaction_context_and_connection_lifecycle(self) -> None:
         """The outer ingestion transaction avoids a partial receipt and owned connections close."""

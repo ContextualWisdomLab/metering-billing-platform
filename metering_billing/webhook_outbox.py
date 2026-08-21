@@ -392,20 +392,26 @@ class WebhookSubscriptionService:
                 existing, tenant.tenant_reference, None, WebhookSubscriptionOutcomeCode.DUPLICATE_REPLAY
             )
         prefix, secret = mint_webhook_secret()
-        stored = self.ledger.insert_webhook_subscription(
-            StoredWebhookSubscription(
-                webhook_subscription_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                webhook_subscription_contract_version=WEBHOOK_SUBSCRIPTION_CONTRACT_VERSION,
-                callback_url=callback_url,
-                event_type_set=event_set,
-                webhook_secret_prefix=prefix,
-                webhook_secret_hash=hash_webhook_secret(secret, self._pepper),
-                subscription_status="active",
-                issued_at=self._clock(),
-                revoked_at=None,
-            )
+        candidate = StoredWebhookSubscription(
+            webhook_subscription_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            webhook_subscription_contract_version=WEBHOOK_SUBSCRIPTION_CONTRACT_VERSION,
+            callback_url=callback_url,
+            event_type_set=event_set,
+            webhook_secret_prefix=prefix,
+            webhook_secret_hash=hash_webhook_secret(secret, self._pepper),
+            subscription_status="active",
+            issued_at=self._clock(),
+            revoked_at=None,
         )
+        stored = self.ledger.insert_webhook_subscription(candidate)
+        if stored.webhook_subscription_id != candidate.webhook_subscription_id:
+            return _subscription_from_stored(
+                stored,
+                tenant.tenant_reference,
+                None,
+                WebhookSubscriptionOutcomeCode.DUPLICATE_REPLAY,
+            )
         self.ledger.store_webhook_subscription_secret(stored.webhook_subscription_id, secret)
         return _subscription_from_stored(
             stored, tenant.tenant_reference, secret, WebhookSubscriptionOutcomeCode.ACCEPTED

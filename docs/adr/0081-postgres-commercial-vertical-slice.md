@@ -14,13 +14,19 @@ buyer-visible commercial fact.
 
 - Extend the PostgreSQL repository through tenant-scoped rate-card versions,
   rating runs, invoice drafts, issued-invoice snapshots, tenant-scoped tax
-  rate schedules/versions, tax assessments, and `invoice.issued` outbox events.
+  rate schedules/versions, tax assessments, webhook subscriptions, delivery
+  attempts, delivered status, and `invoice.issued` outbox events.
 - Keep immutable header and line rows in PostgreSQL with exact `numeric` values,
   composite tenant foreign keys, append-only identities, and migration 0038's
   upgrade backfills for canonical billing-account and meter references.
 - Wrap publish, rate, draft, and issue commands in the repository transaction
   boundary. Issued-invoice insertion and outbox enqueue commit together;
   replay returns the stored rows without adding a second event.
+- Persist subscription metadata, outbox events, delivery attempts, and
+  delivered status in PostgreSQL with tenant predicates and composite foreign
+  keys. The one-time webhook secret remains only in the worker process; a
+  restart cannot recover it from SQL and therefore requires the future secure
+  secret-provider boundary before unattended delivery is production-ready.
 - Keep `MemoryUsageLedger` as the fast reference implementation. This slice is
   not a claim that the HTTP default, collection/payment/provider lifecycle,
   raw object storage, RLS policy, readiness, backup/restore, HA, capacity
@@ -29,10 +35,10 @@ buyer-visible commercial fact.
 ## Evidence
 
 The dedicated PostgreSQL 18 integration suite exercises clean migration,
-tenant isolation, exact decimal totals, tax snapshots, replay, direct unique
-conflicts, rollback, and concurrent usage ingestion. The repository suite
-passes 601 tests with 100% statement and branch coverage (14,831 statements
-and 5,078 branches).
+tenant isolation, exact decimal totals, tax snapshots, webhook subscription
+and delivery persistence, replay, direct unique conflicts, rollback, and
+concurrent usage ingestion. The repository suite passes 602 tests with 100%
+statement and branch coverage (14,936 statements and 5,108 branches).
 
 ## Consequences
 
@@ -41,6 +47,7 @@ The first durable buyer-visible path is now observable as:
 ```text
 usage event -> rate-card version -> rating run -> invoice draft
            -> issued invoice + invoice.issued outbox event
+           -> active subscription -> delivery attempt -> delivered outbox
 ```
 
 Issue #84 remains open for the other authoritative commercial records and

@@ -43,6 +43,7 @@ from metering_billing.usage_ledger import (
     StoredUsageMeasurement,
     StoredWebhookDeliveryAttempt,
     StoredWebhookOutboxEvent,
+    StoredWebhookSubscription,
     TenantAccount,
     _require_tenant_scoped_reference,
     _resource_code,
@@ -64,6 +65,7 @@ class PostgresUsageLedger:
         self.connection = connection
         self._owns_connection = owns_connection
         self._transaction_active = False
+        self.webhook_subscription_secrets: dict[UUID, str] = {}
 
     @classmethod
     def connect(cls, dsn: str) -> "PostgresUsageLedger":
@@ -2024,6 +2026,164 @@ class PostgresUsageLedger:
                 )
             return self._fetch_issued_invoice(cursor, issued_invoice.issued_invoice_id)
 
+    def insert_webhook_subscription(
+        self, subscription: StoredWebhookSubscription
+    ) -> StoredWebhookSubscription:
+        """Persist one subscription; a unique identity returns its replay."""
+        if subscription.subscription_status not in {"active", "revoked"}:
+            raise ValueError("subscription_status must be active or revoked")
+        if not subscription.webhook_secret_hash.startswith("hmac-sha256:"):
+            raise ValueError("webhook_secret_hash must be a keyed HMAC")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.webhook_subscription
+                    (webhook_subscription_id, tenant_account_id,
+                     webhook_subscription_contract_version, callback_url,
+                     event_type_set, webhook_secret_prefix, webhook_secret_hash,
+                     subscription_status, issued_at, revoked_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING webhook_subscription_id
+                """,
+                (
+                    subscription.webhook_subscription_id,
+                    subscription.tenant_account_id,
+                    subscription.webhook_subscription_contract_version,
+                    subscription.callback_url,
+                    subscription.event_type_set,
+                    subscription.webhook_secret_prefix,
+                    subscription.webhook_secret_hash,
+                    subscription.subscription_status,
+                    subscription.issued_at,
+                    subscription.revoked_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT webhook_subscription_id
+                    FROM billing_core.webhook_subscription
+                    WHERE tenant_account_id = %s
+                      AND callback_url = %s
+                      AND event_type_set = %s
+                      AND webhook_subscription_contract_version = %s
+                    """,
+                    (
+                        subscription.tenant_account_id,
+                        subscription.callback_url,
+                        subscription.event_type_set,
+                        subscription.webhook_subscription_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("webhook subscription identity already belongs to another row")
+            return self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+
+    def store_webhook_subscription_secret(
+        self, webhook_subscription_id: UUID, webhook_secret: str
+    ) -> None:
+        """Keep the one-time secret in the worker process; SQL stores only its hash."""
+        if not webhook_secret:
+            raise ValueError("webhook secret must be a non-empty string")
+        self.webhook_subscription_secrets[webhook_subscription_id] = webhook_secret
+
+    def get_webhook_subscription_secret(self, webhook_subscription_id: UUID) -> str | None:
+        """Return the process-local secret for one subscription, if present."""
+        return self.webhook_subscription_secrets.get(webhook_subscription_id)
+
+    def get_webhook_subscription(
+        self, webhook_subscription_id: UUID
+    ) -> StoredWebhookSubscription | None:
+        """Return one subscription by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT webhook_subscription_id
+                FROM billing_core.webhook_subscription
+                WHERE webhook_subscription_id = %s
+                """,
+                (webhook_subscription_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+
+    def find_webhook_subscription(
+        self,
+        tenant_account_id: UUID,
+        callback_url: str,
+        event_type_set: str,
+        webhook_subscription_contract_version: int,
+    ) -> StoredWebhookSubscription | None:
+        """Return one tenant-scoped subscription identity, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT webhook_subscription_id
+                FROM billing_core.webhook_subscription
+                WHERE tenant_account_id = %s
+                  AND callback_url = %s
+                  AND event_type_set = %s
+                  AND webhook_subscription_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    callback_url,
+                    event_type_set,
+                    webhook_subscription_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+
+    def list_webhook_subscriptions(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredWebhookSubscription, ...]:
+        """Return subscription metadata limited to one tenant."""
+        return self._list_webhook_subscriptions(tenant_account_id)
+
+    def list_active_webhook_subscriptions(
+        self, tenant_account_id: UUID, event_type_code: str
+    ) -> tuple[StoredWebhookSubscription, ...]:
+        """Return active same-tenant subscriptions containing one event code."""
+        return self._list_webhook_subscriptions(
+            tenant_account_id, event_type_code=event_type_code
+        )
+
+    def revoke_webhook_subscription(
+        self, webhook_subscription_id: UUID, revoked_at: datetime
+    ) -> StoredWebhookSubscription:
+        """Revoke one subscription idempotently."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE billing_core.webhook_subscription
+                SET subscription_status = 'revoked', revoked_at = %s
+                WHERE webhook_subscription_id = %s
+                  AND subscription_status = 'active'
+                RETURNING webhook_subscription_id
+                """,
+                (revoked_at, webhook_subscription_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT webhook_subscription_id
+                    FROM billing_core.webhook_subscription
+                    WHERE webhook_subscription_id = %s
+                    """,
+                    (webhook_subscription_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        "webhook subscription revocation requires a stored subscription"
+                    )
+            return self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+
     def find_webhook_outbox_event(
         self,
         tenant_account_id: UUID,
@@ -2124,6 +2284,157 @@ class PostgresUsageLedger:
     ) -> tuple[StoredWebhookOutboxEvent, ...]:
         """Return all outbox events limited to one tenant."""
         return self._list_webhook_outbox_events(tenant_account_id, pending_only=False)
+
+    def mark_webhook_outbox_event_delivered(
+        self, outbox_event_id: UUID
+    ) -> StoredWebhookOutboxEvent:
+        """Mark one outbox event delivered idempotently."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE billing_core.webhook_outbox_event
+                SET delivery_status = 'delivered'
+                WHERE outbox_event_id = %s
+                  AND delivery_status = 'pending'
+                RETURNING outbox_event_id
+                """,
+                (outbox_event_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT outbox_event_id
+                    FROM billing_core.webhook_outbox_event
+                    WHERE outbox_event_id = %s
+                    """,
+                    (outbox_event_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("outbox delivery requires a stored event")
+            return self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
+
+    def insert_webhook_delivery_attempt(
+        self, attempt: StoredWebhookDeliveryAttempt
+    ) -> StoredWebhookDeliveryAttempt:
+        """Append one delivery attempt; an exact replay returns the stored row."""
+        if attempt.attempt_number < 1:
+            raise ValueError("attempt_number must be at least 1")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.webhook_delivery_attempt
+                    (delivery_attempt_id, outbox_event_id, webhook_subscription_id,
+                     tenant_account_id, attempt_number, http_status, delivered_at,
+                     failure_reason_code, attempted_at)
+                SELECT %s, %s, %s, o.tenant_account_id, %s, %s, %s, %s, %s
+                FROM billing_core.webhook_outbox_event AS o
+                WHERE o.outbox_event_id = %s
+                ON CONFLICT DO NOTHING
+                RETURNING delivery_attempt_id
+                """,
+                (
+                    attempt.delivery_attempt_id,
+                    attempt.outbox_event_id,
+                    attempt.webhook_subscription_id,
+                    attempt.attempt_number,
+                    attempt.http_status,
+                    attempt.delivered_at,
+                    attempt.failure_reason_code,
+                    attempt.attempted_at,
+                    attempt.outbox_event_id,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT delivery_attempt_id
+                    FROM billing_core.webhook_delivery_attempt
+                    WHERE outbox_event_id = %s
+                      AND webhook_subscription_id = %s
+                      AND attempt_number = %s
+                    """,
+                    (
+                        attempt.outbox_event_id,
+                        attempt.webhook_subscription_id,
+                        attempt.attempt_number,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("delivery attempt identity already belongs to another row")
+            return self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
+
+    def list_webhook_delivery_attempts(
+        self, outbox_event_id: UUID, webhook_subscription_id: UUID | None = None
+    ) -> tuple[StoredWebhookDeliveryAttempt, ...]:
+        """Return attempts for one outbox event, optionally one subscription."""
+        with self._cursor() as cursor:
+            if webhook_subscription_id is None:
+                cursor.execute(
+                    """
+                    SELECT delivery_attempt_id
+                    FROM billing_core.webhook_delivery_attempt
+                    WHERE outbox_event_id = %s
+                    ORDER BY attempt_number, delivery_attempt_id
+                    """,
+                    (outbox_event_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT delivery_attempt_id
+                    FROM billing_core.webhook_delivery_attempt
+                    WHERE outbox_event_id = %s
+                      AND webhook_subscription_id = %s
+                    ORDER BY attempt_number, delivery_attempt_id
+                    """,
+                    (outbox_event_id, webhook_subscription_id),
+                )
+            return tuple(
+                self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def get_webhook_delivery_attempt(
+        self, delivery_attempt_id: UUID
+    ) -> StoredWebhookDeliveryAttempt | None:
+        """Return one delivery attempt by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT delivery_attempt_id
+                FROM billing_core.webhook_delivery_attempt
+                WHERE delivery_attempt_id = %s
+                """,
+                (delivery_attempt_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
+
+    def list_webhook_delivery_attempts_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredWebhookDeliveryAttempt, ...]:
+        """Return attempts whose outbox belongs to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT a.delivery_attempt_id
+                FROM billing_core.webhook_delivery_attempt AS a
+                JOIN billing_core.webhook_outbox_event AS o
+                  ON o.tenant_account_id = a.tenant_account_id
+                 AND o.outbox_event_id = a.outbox_event_id
+                WHERE a.tenant_account_id = %s
+                ORDER BY a.attempted_at, a.delivery_attempt_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
 
     def stored_usage_set(self, tenant_account_id: UUID) -> frozenset[tuple[object, ...]]:
         """Return the same deterministic identity projection as the reference ledger."""
@@ -2614,6 +2925,77 @@ class PostgresUsageLedger:
         )
 
     @staticmethod
+    def _webhook_subscription_from_row(row: tuple[Any, ...]) -> StoredWebhookSubscription:
+        """Decode one normalized webhook subscription row."""
+        return StoredWebhookSubscription(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+        )
+
+    def _fetch_webhook_subscription(
+        self, cursor: Any, webhook_subscription_id: UUID
+    ) -> StoredWebhookSubscription:
+        """Hydrate one subscription."""
+        cursor.execute(
+            """
+            SELECT webhook_subscription_id, tenant_account_id,
+                   webhook_subscription_contract_version, callback_url,
+                   event_type_set, webhook_secret_prefix, webhook_secret_hash,
+                   subscription_status, issued_at, revoked_at
+            FROM billing_core.webhook_subscription
+            WHERE webhook_subscription_id = %s
+            """,
+            (webhook_subscription_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(webhook_subscription_id)
+        return self._webhook_subscription_from_row(row)
+
+    def _list_webhook_subscriptions(
+        self,
+        tenant_account_id: UUID,
+        *,
+        event_type_code: str | None = None,
+    ) -> tuple[StoredWebhookSubscription, ...]:
+        """List subscriptions with explicit tenant and optional event predicates."""
+        with self._cursor() as cursor:
+            if event_type_code is not None:
+                cursor.execute(
+                    """
+                    SELECT webhook_subscription_id
+                    FROM billing_core.webhook_subscription
+                    WHERE tenant_account_id = %s
+                      AND subscription_status = 'active'
+                      AND position(',' || %s || ',' in ',' || event_type_set || ',') > 0
+                    ORDER BY issued_at, webhook_subscription_id
+                    """,
+                    (tenant_account_id, event_type_code),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT webhook_subscription_id
+                    FROM billing_core.webhook_subscription
+                    WHERE tenant_account_id = %s
+                    ORDER BY issued_at, webhook_subscription_id
+                    """,
+                    (tenant_account_id,),
+                )
+            return tuple(
+                self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    @staticmethod
     def _webhook_outbox_from_row(row: tuple[Any, ...]) -> StoredWebhookOutboxEvent:
         """Decode one normalized webhook outbox row."""
         return StoredWebhookOutboxEvent(
@@ -2627,6 +3009,41 @@ class PostgresUsageLedger:
             row[7],
             row[8],
         )
+
+    @staticmethod
+    def _webhook_delivery_attempt_from_row(
+        row: tuple[Any, ...]
+    ) -> StoredWebhookDeliveryAttempt:
+        """Decode one normalized webhook delivery attempt row."""
+        return StoredWebhookDeliveryAttempt(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+        )
+
+    def _fetch_webhook_delivery_attempt(
+        self, cursor: Any, delivery_attempt_id: UUID
+    ) -> StoredWebhookDeliveryAttempt:
+        """Hydrate one delivery attempt."""
+        cursor.execute(
+            """
+            SELECT delivery_attempt_id, outbox_event_id, webhook_subscription_id,
+                   attempt_number, http_status, delivered_at,
+                   failure_reason_code, attempted_at
+            FROM billing_core.webhook_delivery_attempt
+            WHERE delivery_attempt_id = %s
+            """,
+            (delivery_attempt_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(delivery_attempt_id)
+        return self._webhook_delivery_attempt_from_row(row)
 
     def _fetch_webhook_outbox_event(
         self, cursor: Any, outbox_event_id: UUID

@@ -41,11 +41,14 @@ draft an invoice.
 ## Persistence plane
 
 PostgreSQL is the authoritative store for normalized records in the durable
-usage-to-issued-invoice vertical. Raw webhook and usage payloads will be
-stored immutably in S3-compatible object storage in a later milestone;
-relational records retain hashes and references. The broader commercial
-repository, production-default, readiness, recovery, HA, and telemetry
-requirements remain tracked by issue #84.
+usage-to-issued-invoice and webhook-delivery vertical. Raw webhook and usage
+payloads will be stored immutably in S3-compatible object storage in a later
+milestone; relational records retain hashes and references. PostgreSQL stores
+subscription metadata, delivery attempts, and outbox delivered status, while
+the one-time webhook secret remains process-local until a secure secret
+provider is added. The broader commercial repository, production-default,
+readiness, recovery, HA, and telemetry requirements remain tracked by issue
+#84.
 
 ## Provider plane
 
@@ -117,7 +120,7 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.TenantApiCredentialService` issues append-only HTTP API credentials. NIST SP 800-63B requires the verifier to store a keyed hash, never the recoverable secret (National Institute of Standards and Technology, 2020). OWASP treats leaked keys as revocable bearer credentials (OWASP, 2023). SOC 2 CC6 requires logical access control on a shippable HTTP surface (American Institute of Certified Public Accountants, 2017). `POST /v1/tenant-api-credentials` returns the secret once. `TenantApiCredentialPresentmentService` projects stored metadata as a commercial statement. `GET /v1/tenant-api-credentials/{tenant_api_credential_id}` and `GET /v1/tenant-api-credentials` are safe tenant-scoped reads and never include the secret (Fielding et al., 2022; Google, 2024). `GET /healthz` stays unauthenticated. Issue a key, then send it on every `/v1` call; revoke when leaked.
 
-`metering_billing.WebhookSubscriptionService` registers an https callback and returns the signing secret once. The verifier stores a keyed HMAC, never the recoverable secret (Krawczyk et al., 1997; National Institute of Standards and Technology, 2020). `WebhookSubscriptionPresentmentService` projects stored metadata as a commercial statement. `GET /v1/webhook-subscriptions/{webhook_subscription_id}` and `GET /v1/webhook-subscriptions` are safe tenant-scoped reads and never include the secret (Fielding et al., 2022; Google, 2024). `WebhookDeliveryService.deliver_due_events` POSTs the published commercial envelope and signs the raw body; receivers check `X-CWL-Webhook-Signature` rather than HTTP Message Signatures (Fielding et al., 2022; Backman et al., 2024). `WebhookOutboxEventPresentmentService` projects a stored commercial `webhook_outbox_event` as metadata only. `GET /v1/webhook-outbox-events/{outbox_event_id}` and `GET /v1/webhook-outbox-events` are safe tenant-scoped reads and never publish, send, or return `payload_json` or the webhook secret (Fielding et al., 2022; Google, 2024). `WebhookDeliveryPresentmentService` projects a stored `webhook_delivery_attempt` as a commercial statement. `GET /v1/webhook-deliveries/{delivery_attempt_id}` and `GET /v1/webhook-deliveries` are safe tenant-scoped reads and never resend or return the secret or signed body (Fielding et al., 2022; Google, 2024). Register an https callback, then run deliveries; AIS may keep polling.
+`metering_billing.WebhookSubscriptionService` registers an https callback and returns the signing secret once. The verifier stores a keyed HMAC, never the recoverable secret in SQL (Krawczyk et al., 1997; National Institute of Standards and Technology, 2020). `PostgresUsageLedger` persists subscription metadata, delivery attempts, and the delivered outbox transition with tenant-scoped predicates and composite foreign keys; its one-time secret remains process-local, so restart-safe unattended delivery still requires a secure secret provider. `WebhookSubscriptionPresentmentService` projects stored metadata as a commercial statement. `GET /v1/webhook-subscriptions/{webhook_subscription_id}` and `GET /v1/webhook-subscriptions` are safe tenant-scoped reads and never include the secret (Fielding et al., 2022; Google, 2024). `WebhookDeliveryService.deliver_due_events` POSTs the published commercial envelope and signs the raw body; receivers check `X-CWL-Webhook-Signature` rather than HTTP Message Signatures (Fielding et al., 2022; Backman et al., 2024). `WebhookOutboxEventPresentmentService` projects a stored commercial `webhook_outbox_event` as metadata only. `GET /v1/webhook-outbox-events/{outbox_event_id}` and `GET /v1/webhook-outbox-events` are safe tenant-scoped reads and never publish, send, or return `payload_json` or the webhook secret (Fielding et al., 2022; Google, 2024). `WebhookDeliveryPresentmentService` projects a stored `webhook_delivery_attempt` as a commercial statement. `GET /v1/webhook-deliveries/{delivery_attempt_id}` and `GET /v1/webhook-deliveries` are safe tenant-scoped reads and never resend or return the secret or signed body (Fielding et al., 2022; Google, 2024). Register an https callback, then run deliveries; AIS may keep polling.
 
 ## Security
 
