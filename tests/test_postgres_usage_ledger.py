@@ -16,8 +16,10 @@ from uuid import uuid4
 import psycopg
 
 from metering_billing import (
+    CollectionCaseService,
     InvoiceDraftService,
     IssuedInvoiceService,
+    PaymentIntentService,
     PostgresUsageLedger,
     TaxAssessmentService,
     TaxRateService,
@@ -25,7 +27,9 @@ from metering_billing import (
     WebhookDeliveryService,
     WebhookSubscriptionService,
 )
+from metering_billing.accounting_export import AccountingExportService
 from metering_billing.errors import RejectionReasonCode, UsageEventConflict
+from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.rate_card import RateCardService
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_rating import UsageRatingService
@@ -93,6 +97,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 billing_core.webhook_delivery_attempt,
                 billing_core.webhook_outbox_event,
                 billing_core.webhook_subscription,
+                billing_core.payment_receipt,
+                billing_core.payment_intent,
+                billing_core.collection_dunning_event,
+                billing_core.collection_case,
                 billing_core.issued_invoice_line,
                 billing_core.issued_invoice,
                 billing_core.tax_assessment,
@@ -808,6 +816,330 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         rejected = next(receipt for receipt in receipts if receipt.ingestion_outcome_code.value == "rejected")
         self.assertEqual(rejected.rejection_reason_code, RejectionReasonCode.SOURCE_EVENT_CONFLICT)
+
+    def test_collection_and_payment_intent_projection_are_durable(self) -> None:
+        """Persist the next buyer-visible collection and payment-intent slice."""
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},),
+        )
+        self.assertIsNotNone(card.rate_card_version_id)
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE,
+            TimeWindow(
+                datetime(2026, 8, 16, 10, tzinfo=UTC),
+                datetime(2026, 8, 16, 12, tzinfo=UTC),
+            ),
+            1,
+            rate_card_code="cwl_standard",
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        case = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(case.collection_case_outcome_code.value, "accepted")
+        assert case.collection_case_id is not None
+        stored_case = self.ledger.get_collection_case(case.collection_case_id)
+        self.assertIsNotNone(stored_case)
+        assert stored_case is not None
+        tenant_id = stored_case.tenant_account_id
+        self.assertEqual(self.ledger.find_collection_case(tenant_id, draft.invoice_draft_id), stored_case)
+        self.assertEqual(self.ledger.list_collection_cases(tenant_id), (stored_case,))
+        self.assertEqual(self.ledger.insert_collection_case(
+            replace(stored_case, collection_case_id=uuid4())
+        ), stored_case)
+        replay_case = CollectionCaseService(self.ledger).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(replay_case.collection_case_outcome_code.value, "duplicate_replay")
+        self.assertIsNone(self.ledger.get_collection_case(uuid4()))
+        self.assertIsNone(self.ledger.find_collection_case(tenant_id, uuid4()))
+
+        dunning = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).record_dunning_event(
+            TENANT_ONE, case.collection_case_id, "first_notice"
+        )
+        self.assertEqual(len(dunning.dunning_events), 1)
+        stored_dunning = self.ledger.get_collection_dunning_event(dunning.dunning_events[0].dunning_event_id)
+        self.assertIsNotNone(stored_dunning)
+        assert stored_dunning is not None
+        self.assertEqual(self.ledger.list_collection_dunning_events(case.collection_case_id), (stored_dunning,))
+        self.assertEqual(self.ledger.list_collection_dunning_events_for_tenant(tenant_id), (stored_dunning,))
+        self.assertEqual(
+            self.ledger.find_collection_dunning_event(case.collection_case_id, "first_notice"),
+            stored_dunning,
+        )
+        self.assertEqual(
+            self.ledger.insert_collection_dunning_event(
+                replace(stored_dunning, collection_dunning_event_id=uuid4())
+            ),
+            stored_dunning,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_dunning_event(
+                replace(stored_dunning, dunning_notice_code="invalid")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_dunning_event(
+                replace(stored_dunning, dunning_event_number=0, dunning_notice_code="overdue_notice")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_dunning_event(
+                replace(stored_dunning, collection_case_id=uuid4(), dunning_notice_code="overdue_notice")
+            )
+        self.assertIsNone(self.ledger.get_collection_dunning_event(uuid4()))
+
+        intent = PaymentIntentService(self.ledger, clock=lambda: CATALOG_START).project_payment_intent(
+            TENANT_ONE, case.collection_case_id
+        )
+        self.assertEqual(intent.payment_intent_outcome_code.value, "accepted")
+        assert intent.payment_intent_id is not None
+        stored_intent = self.ledger.get_payment_intent(intent.payment_intent_id)
+        self.assertIsNotNone(stored_intent)
+        assert stored_intent is not None
+        self.assertEqual(
+            self.ledger.find_payment_intent(
+                tenant_id,
+                case.collection_case_id,
+                stored_intent.source_payload_hash,
+                stored_intent.payment_intent_contract_version,
+            ),
+            stored_intent,
+        )
+        self.assertEqual(self.ledger.list_payment_intents(tenant_id), (stored_intent,))
+        self.assertEqual(
+            self.ledger.insert_payment_intent(
+                replace(stored_intent, payment_intent_id=uuid4())
+            ),
+            stored_intent,
+        )
+        self.assertEqual(
+            PaymentIntentService(self.ledger).project_payment_intent(
+                TENANT_ONE, case.collection_case_id
+            ).payment_intent_outcome_code.value,
+            "duplicate_replay",
+        )
+        self.assertIsNone(self.ledger.get_payment_intent(uuid4()))
+        self.assertIsNone(self.ledger.find_payment_intent(tenant_id, uuid4(), "sha256:" + "0" * 64, 1))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_case(replace(stored_case, collection_case_status="settled"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_case(replace(stored_case, collection_case_id=uuid4(), outstanding_amount=Decimal("0")))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_payment_intent(replace(stored_intent, payment_intent_status="captured"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_payment_intent(replace(stored_intent, payment_intent_id=uuid4(), payment_amount=Decimal("0")))
+        cancelled = self.ledger.cancel_stored_payment_intent(intent.payment_intent_id)
+        self.assertEqual(cancelled.payment_intent_status, "cancelled")
+        self.assertEqual(self.ledger.cancel_stored_payment_intent(intent.payment_intent_id), cancelled)
+        with self.assertRaises(ValueError):
+            self.ledger.cancel_stored_payment_intent(uuid4())
+        rejected_intent = self.ledger.insert_payment_intent(
+            replace(
+                stored_intent,
+                payment_intent_id=uuid4(),
+                payment_intent_status="rejected",
+                source_payload_hash="sha256:" + "1" * 64,
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.cancel_stored_payment_intent(rejected_intent.payment_intent_id)
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_settlement(uuid4(), Decimal("1"))
+        self.connection.execute(
+            "UPDATE billing_core.collection_case SET collection_case_status = 'disputed' WHERE collection_case_id = %s",
+            (case.collection_case_id,),
+        )
+        self.connection.commit()
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_settlement(case.collection_case_id, Decimal("1"))
+        self.connection.execute(
+            "UPDATE billing_core.collection_case SET collection_case_status = 'voided', outstanding_amount = 0 WHERE collection_case_id = %s",
+            (case.collection_case_id,),
+        )
+        self.connection.commit()
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_settlement(case.collection_case_id, Decimal("1"))
+        self.connection.execute(
+            "UPDATE billing_core.collection_case SET collection_case_status = 'open', outstanding_amount = %s WHERE collection_case_id = %s",
+            (stored_case.outstanding_amount, case.collection_case_id),
+        )
+        self.connection.commit()
+        settled = self.ledger.apply_collection_settlement(
+            case.collection_case_id, stored_case.outstanding_amount
+        )
+        self.assertEqual(settled.collection_case_status, "settled")
+        self.assertEqual(settled.outstanding_amount, Decimal("0.000000000000"))
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_settlement(case.collection_case_id, Decimal("1"))
+        with self.assertRaises(ValueError):
+            self.ledger.apply_collection_settlement(case.collection_case_id, Decimal("0"))
+
+    def test_payment_receipt_and_cash_journal_are_durable(self) -> None:
+        """Persist a receipt, atomic collection settlement, and cash proposal."""
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        self.assertIsNotNone(card.rate_card_version_id)
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE,
+            TimeWindow(
+                datetime(2026, 8, 16, 10, tzinfo=UTC),
+                datetime(2026, 8, 16, 12, tzinfo=UTC),
+            ),
+            1,
+            rate_card_code="cwl_standard",
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        case = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        assert case.collection_case_id is not None
+        intent = PaymentIntentService(self.ledger, clock=lambda: CATALOG_START).project_payment_intent(
+            TENANT_ONE, case.collection_case_id
+        )
+        assert intent.payment_intent_id is not None
+        amount = self.ledger.get_collection_case(case.collection_case_id).outstanding_amount / Decimal("2")
+        settlement = PaymentSettlementService(self.ledger, clock=lambda: CATALOG_START)
+        accepted = settlement.record_payment_receipt(
+            TENANT_ONE, intent.payment_intent_id, amount
+        )
+        self.assertEqual(accepted.payment_settlement_outcome_code.value, "accepted")
+        assert accepted.payment_receipt_id is not None
+        receipt = self.ledger.get_payment_receipt(accepted.payment_receipt_id)
+        self.assertIsNotNone(receipt)
+        assert receipt is not None
+        self.assertEqual(self.ledger.list_payment_receipts(receipt.tenant_account_id), (receipt,))
+        self.assertEqual(
+            self.ledger.find_payment_receipt(
+                receipt.tenant_account_id,
+                receipt.payment_intent_id,
+                receipt.source_payload_hash,
+                receipt.settlement_contract_version,
+            ),
+            receipt,
+        )
+        settled_case = self.ledger.get_collection_case(receipt.collection_case_id)
+        self.assertIsNotNone(settled_case)
+        assert settled_case is not None
+        self.assertEqual(settled_case.collection_case_status, "open")
+        self.assertEqual(settled_case.outstanding_amount, receipt.received_amount)
+
+        proposals = self.ledger.list_journal_proposals(receipt.tenant_account_id)
+        self.assertEqual(len(proposals), 1)
+        proposal = proposals[0]
+        self.assertEqual(proposal.payment_receipt_id, receipt.payment_receipt_id)
+        self.assertEqual(len(proposal.proposal_lines), 2)
+        self.assertEqual(proposal.proposal_lines[0].debit_amount, receipt.received_amount)
+        self.assertEqual(proposal.proposal_lines[1].credit_amount, receipt.received_amount)
+        self.assertEqual(self.ledger.get_journal_proposal(proposal.journal_proposal_id), proposal)
+        self.assertEqual(
+            self.ledger.find_journal_proposal_for_receipt(
+                receipt.tenant_account_id,
+                receipt.payment_receipt_id,
+                proposal.source_payload_hash,
+                proposal.proposal_contract_version,
+            ),
+            proposal,
+        )
+        self.assertEqual(
+            AccountingExportService(self.ledger).propose_cash_journal(
+                TENANT_ONE, receipt.payment_receipt_id
+            ).journal_proposal_outcome_code.value,
+            "duplicate_replay",
+        )
+        replay = settlement.record_payment_receipt(TENANT_ONE, intent.payment_intent_id, amount)
+        self.assertEqual(replay.payment_settlement_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.payment_receipt_id, receipt.payment_receipt_id)
+        self.assertEqual(self.ledger.list_payment_receipts(receipt.tenant_account_id), (receipt,))
+
+        class ExistingReceiptLedger(PostgresUsageLedger):
+            """Force the repository insert path used after a concurrent identity race."""
+
+            def find_payment_receipt(self, *args, **kwargs):
+                return None
+
+        race_replay = PaymentSettlementService(
+            ExistingReceiptLedger(self.connection), clock=lambda: CATALOG_START
+        ).record_payment_receipt(TENANT_ONE, intent.payment_intent_id, amount)
+        self.assertEqual(race_replay.payment_settlement_outcome_code.value, "duplicate_replay")
+        self.assertEqual(race_replay.payment_receipt_id, receipt.payment_receipt_id)
+
+        class MissingCaseReceiptLedger(ExistingReceiptLedger):
+            """Exercise the fail-closed branch after a concurrent receipt replay."""
+
+            def __init__(self, connection):
+                super().__init__(connection)
+                self._case_reads = 0
+
+            def get_collection_case(self, collection_case_id):
+                self._case_reads += 1
+                if self._case_reads == 2:
+                    return None
+                return super().get_collection_case(collection_case_id)
+
+        missing_case_replay = PaymentSettlementService(
+            MissingCaseReceiptLedger(self.connection), clock=lambda: CATALOG_START
+        ).record_payment_receipt(TENANT_ONE, intent.payment_intent_id, amount)
+        self.assertEqual(missing_case_replay.payment_settlement_outcome_code.value, "rejected")
+
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(proposal, proposal.proposal_lines), proposal
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_payment_receipt(
+                replace(receipt, source_payload_hash="sha256:" + "2" * 64)
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                replace(proposal, source_payload_hash="sha256:" + "3" * 64),
+                proposal.proposal_lines,
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                replace(proposal, proposal_status="posted"), proposal.proposal_lines
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(proposal, ())
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (replace(proposal.proposal_lines[0], journal_proposal_id=uuid4()),
+                 proposal.proposal_lines[1]),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (replace(proposal.proposal_lines[0], tenant_account_id=uuid4()),
+                 proposal.proposal_lines[1]),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (replace(proposal.proposal_lines[0], credit_amount=Decimal("1")),
+                 proposal.proposal_lines[1]),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (replace(proposal.proposal_lines[0], debit_amount=Decimal("1")),
+                 proposal.proposal_lines[1]),
+            )
+
+        with self.assertRaises(ValueError):
+            self.ledger.insert_payment_receipt(replace(receipt, payment_receipt_status="captured"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_payment_receipt(replace(receipt, received_amount=Decimal("0")))
+        self.assertIsNone(self.ledger.get_payment_receipt(uuid4()))
+        self.assertIsNone(self.ledger.get_journal_proposal(uuid4()))
 
     def test_webhook_subscription_outbox_and_delivery_are_durable(self) -> None:
         """Persist subscription metadata, attempts, and delivery status in PostgreSQL."""

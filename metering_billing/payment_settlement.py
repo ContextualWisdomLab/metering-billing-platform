@@ -179,6 +179,23 @@ class PaymentSettlementService:
         payment_intent_id: UUID,
         received_amount: object,
     ) -> PaymentSettlementResult:
+        """Apply one receipt inside the repository transaction boundary."""
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._record_payment_receipt(
+                tenant_reference, payment_intent_id, received_amount
+            )
+        with transaction():
+            return self._record_payment_receipt(
+                tenant_reference, payment_intent_id, received_amount
+            )
+
+    def _record_payment_receipt(
+        self,
+        tenant_reference: str,
+        payment_intent_id: UUID,
+        received_amount: object,
+    ) -> PaymentSettlementResult:
         """Apply one commercial receipt against a projected payment intent.
 
         A replay of the same tenant, intent, received amount, source-payload
@@ -242,9 +259,10 @@ class PaymentSettlementService:
                 PaymentSettlementRejectionReasonCode.PAYMENT_AMOUNT_EXCEEDS_OUTSTANDING
             )
 
+        candidate_payment_receipt_id = generate_record_id()
         stored = self.ledger.insert_payment_receipt(
             StoredPaymentReceipt(
-                payment_receipt_id=generate_record_id(),
+                payment_receipt_id=candidate_payment_receipt_id,
                 tenant_account_id=tenant.tenant_account_id,
                 payment_intent_id=payment_intent.payment_intent_id,
                 collection_case_id=payment_intent.collection_case_id,
@@ -256,6 +274,19 @@ class PaymentSettlementService:
                 received_at=self._clock(),
             )
         )
+        if stored.payment_receipt_id != candidate_payment_receipt_id:
+            current_case = self.ledger.get_collection_case(stored.collection_case_id)
+            if current_case is None:
+                return _rejected(PaymentSettlementRejectionReasonCode.PAYMENT_INTENT_NOT_FOUND)
+            _compose_cash_journal(self.ledger, tenant.tenant_reference, stored.payment_receipt_id)
+            return _from_receipt(
+                stored,
+                payment_intent,
+                current_case,
+                tenant.tenant_reference,
+                PaymentSettlementOutcomeCode.DUPLICATE_REPLAY,
+                self.ledger.list_collection_dunning_events(current_case.collection_case_id),
+            )
         updated_case = self.ledger.apply_collection_settlement(
             payment_intent.collection_case_id, parsed_amount
         )

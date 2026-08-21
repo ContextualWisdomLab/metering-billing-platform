@@ -19,6 +19,7 @@ from metering_billing.errors import (
     RejectionReasonCode,
     UsageEventConflict,
 )
+from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
 from metering_billing.usage_ledger import (
     BillingAccount,
     BillingPrincipal,
@@ -26,11 +27,15 @@ from metering_billing.usage_ledger import (
     CredentialRecord,
     MeterDefinition,
     MeterQualityRule,
+    StoredCollectionCase,
+    StoredCollectionDunningEvent,
     StoredInvoiceDraft,
     StoredInvoiceDraftLine,
     StoredIngestionReceipt,
     StoredIssuedInvoice,
     StoredIssuedInvoiceLine,
+    StoredJournalProposal,
+    StoredJournalProposalLine,
     StoredRateCard,
     StoredRateCardLine,
     StoredRateCardVersion,
@@ -39,6 +44,8 @@ from metering_billing.usage_ledger import (
     StoredTaxRateSchedule,
     StoredTaxRateVersion,
     StoredTaxAssessment,
+    StoredPaymentIntent,
+    StoredPaymentReceipt,
     StoredUsageEvent,
     StoredUsageMeasurement,
     StoredWebhookDeliveryAttempt,
@@ -2026,6 +2033,694 @@ class PostgresUsageLedger:
                 )
             return self._fetch_issued_invoice(cursor, issued_invoice.issued_invoice_id)
 
+    def get_collection_case(self, collection_case_id: UUID) -> StoredCollectionCase | None:
+        """Return one collection case by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id
+                FROM billing_core.collection_case
+                WHERE collection_case_id = %s
+                """,
+                (collection_case_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_case(cursor, UUID(str(row[0])))
+
+    def find_collection_case(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> StoredCollectionCase | None:
+        """Return one tenant-scoped collection case identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id
+                FROM billing_core.collection_case
+                WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                """,
+                (tenant_account_id, invoice_draft_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_case(cursor, UUID(str(row[0])))
+
+    def insert_collection_case(
+        self, collection_case: StoredCollectionCase
+    ) -> StoredCollectionCase:
+        """Persist one positive tenant-scoped collection case or replay it."""
+        if collection_case.collection_case_status not in {"open", "dunning"}:
+            raise ValueError("collection cases cannot be paid, written off, or posted")
+        outstanding_amount = parse_exact_decimal(
+            format_exact_decimal(collection_case.outstanding_amount)
+        )
+        if outstanding_amount <= 0:
+            raise ValueError("collection case outstanding must be a positive exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.collection_case
+                    (collection_case_id, tenant_account_id, invoice_draft_id,
+                     currency_code, collection_case_status, outstanding_amount, opened_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING collection_case_id
+                """,
+                (
+                    collection_case.collection_case_id,
+                    collection_case.tenant_account_id,
+                    collection_case.invoice_draft_id,
+                    collection_case.currency_code,
+                    collection_case.collection_case_status,
+                    outstanding_amount,
+                    collection_case.opened_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT collection_case_id
+                    FROM billing_core.collection_case
+                    WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                    """,
+                    (collection_case.tenant_account_id, collection_case.invoice_draft_id),
+                )
+                row = cursor.fetchone()
+                if row is None:  # pragma: no cover - a valid FK conflict has an identity row
+                    raise ValueError("collection case identity already belongs to another case")
+            return self._fetch_collection_case(cursor, UUID(str(row[0])))
+
+    def list_collection_cases(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionCase, ...]:
+        """Return collection cases limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id
+                FROM billing_core.collection_case
+                WHERE tenant_account_id = %s
+                ORDER BY opened_at, collection_case_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_collection_case(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def get_collection_dunning_event(
+        self, collection_dunning_event_id: UUID
+    ) -> StoredCollectionDunningEvent | None:
+        """Return one dunning event by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_dunning_event_id
+                FROM billing_core.collection_dunning_event
+                WHERE collection_dunning_event_id = %s
+                """,
+                (collection_dunning_event_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_dunning_event(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_collection_dunning_events(
+        self, collection_case_id: UUID
+    ) -> tuple[StoredCollectionDunningEvent, ...]:
+        """Return dunning events for one case in event-number order."""
+        return self._list_collection_dunning_events(collection_case_id=collection_case_id)
+
+    def list_collection_dunning_events_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionDunningEvent, ...]:
+        """Return dunning events limited to one tenant."""
+        return self._list_collection_dunning_events(tenant_account_id=tenant_account_id)
+
+    def find_collection_dunning_event(
+        self, collection_case_id: UUID, dunning_notice_code: str
+    ) -> StoredCollectionDunningEvent | None:
+        """Return one case and notice identity, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_dunning_event_id
+                FROM billing_core.collection_dunning_event
+                WHERE collection_case_id = %s AND dunning_notice_code = %s
+                """,
+                (collection_case_id, dunning_notice_code),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_dunning_event(
+                cursor, UUID(str(row[0]))
+            )
+
+    def insert_collection_dunning_event(
+        self, dunning_event: StoredCollectionDunningEvent
+    ) -> StoredCollectionDunningEvent:
+        """Append one dunning event; an exact notice replay returns its row."""
+        if dunning_event.dunning_notice_code not in {"first_notice", "overdue_notice"}:
+            raise ValueError("collection dunning notices must be commercial reminder codes")
+        if dunning_event.dunning_event_number < 1:
+            raise ValueError("collection dunning event number must be positive")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.collection_dunning_event
+                    (collection_dunning_event_id, collection_case_id,
+                     tenant_account_id, dunning_event_number, dunning_notice_code,
+                     occurred_at)
+                SELECT %s, %s, c.tenant_account_id, %s, %s, %s
+                FROM billing_core.collection_case AS c
+                WHERE c.collection_case_id = %s
+                ON CONFLICT DO NOTHING
+                RETURNING collection_dunning_event_id
+                """,
+                (
+                    dunning_event.collection_dunning_event_id,
+                    dunning_event.collection_case_id,
+                    dunning_event.dunning_event_number,
+                    dunning_event.dunning_notice_code,
+                    dunning_event.occurred_at,
+                    dunning_event.collection_case_id,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT collection_dunning_event_id
+                    FROM billing_core.collection_dunning_event
+                    WHERE collection_case_id = %s AND dunning_notice_code = %s
+                    """,
+                    (dunning_event.collection_case_id, dunning_event.dunning_notice_code),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("collection dunning event identity requires a stored case")
+            return self._fetch_collection_dunning_event(cursor, UUID(str(row[0])))
+
+    def apply_collection_settlement(
+        self, collection_case_id: UUID, applied_amount: Any
+    ) -> StoredCollectionCase:
+        """Reduce one case balance and settle it when the exact remainder is zero."""
+        applied = parse_exact_decimal(format_exact_decimal(applied_amount))
+        if applied <= 0:
+            raise ValueError("collection settlement amount must be a positive exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
+                       currency_code, collection_case_status, outstanding_amount, opened_at
+                FROM billing_core.collection_case
+                WHERE collection_case_id = %s
+                FOR UPDATE
+                """,
+                (collection_case_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("collection settlement requires a stored collection case")
+            stored = self._collection_case_from_row(row)
+            if stored.collection_case_status == "voided":
+                raise ValueError("voided collection cases cannot accept a settlement apply")
+            if stored.collection_case_status == "disputed":
+                raise ValueError("disputed collection cases cannot accept a settlement apply")
+            if applied > stored.outstanding_amount:
+                raise ValueError("collection settlement amount cannot exceed outstanding")
+            remaining = stored.outstanding_amount - applied
+            status = "settled" if remaining == 0 else stored.collection_case_status
+            cursor.execute(
+                """
+                UPDATE billing_core.collection_case
+                SET collection_case_status = %s, outstanding_amount = %s
+                WHERE collection_case_id = %s
+                RETURNING collection_case_id
+                """,
+                (status, remaining, collection_case_id),
+            )
+            row = cursor.fetchone()
+            if row is None:  # pragma: no cover - the row is locked above
+                raise ValueError("collection settlement requires a stored collection case")
+            return self._fetch_collection_case(cursor, UUID(str(row[0])))
+
+    def get_payment_intent(self, payment_intent_id: UUID) -> StoredPaymentIntent | None:
+        """Return one payment intent by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payment_intent_id
+                FROM billing_core.payment_intent
+                WHERE payment_intent_id = %s
+                """,
+                (payment_intent_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_payment_intent(
+                cursor, UUID(str(row[0]))
+            )
+
+    def find_payment_intent(
+        self,
+        tenant_account_id: UUID,
+        collection_case_id: UUID,
+        source_payload_hash: str,
+        payment_intent_contract_version: int,
+    ) -> StoredPaymentIntent | None:
+        """Return one tenant-scoped payment-intent identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payment_intent_id
+                FROM billing_core.payment_intent
+                WHERE tenant_account_id = %s
+                  AND collection_case_id = %s
+                  AND source_payload_hash = %s
+                  AND payment_intent_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    collection_case_id,
+                    source_payload_hash,
+                    payment_intent_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_payment_intent(
+                cursor, UUID(str(row[0]))
+            )
+
+    def insert_payment_intent(
+        self, payment_intent: StoredPaymentIntent
+    ) -> StoredPaymentIntent:
+        """Persist one positive provider-neutral intent or replay it."""
+        if payment_intent.payment_intent_status not in {"projected", "cancelled", "rejected"}:
+            raise ValueError("payment intents cannot be captured, settled, or posted")
+        payment_amount = parse_exact_decimal(format_exact_decimal(payment_intent.payment_amount))
+        if payment_amount <= 0:
+            raise ValueError("payment intent amount must be a positive exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.payment_intent
+                    (payment_intent_id, tenant_account_id, collection_case_id,
+                     payment_intent_contract_version, currency_code,
+                     payment_intent_status, payment_amount, source_payload_hash,
+                     projected_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING payment_intent_id
+                """,
+                (
+                    payment_intent.payment_intent_id,
+                    payment_intent.tenant_account_id,
+                    payment_intent.collection_case_id,
+                    payment_intent.payment_intent_contract_version,
+                    payment_intent.currency_code,
+                    payment_intent.payment_intent_status,
+                    payment_amount,
+                    payment_intent.source_payload_hash,
+                    payment_intent.projected_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT payment_intent_id
+                    FROM billing_core.payment_intent
+                    WHERE tenant_account_id = %s
+                      AND collection_case_id = %s
+                      AND source_payload_hash = %s
+                      AND payment_intent_contract_version = %s
+                    """,
+                    (
+                        payment_intent.tenant_account_id,
+                        payment_intent.collection_case_id,
+                        payment_intent.source_payload_hash,
+                        payment_intent.payment_intent_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:  # pragma: no cover - a valid FK conflict has an identity row
+                    raise ValueError("payment intent identity already belongs to another intent")
+            return self._fetch_payment_intent(cursor, UUID(str(row[0])))
+
+    def list_payment_intents(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredPaymentIntent, ...]:
+        """Return payment intents limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payment_intent_id
+                FROM billing_core.payment_intent
+                WHERE tenant_account_id = %s
+                ORDER BY projected_at, payment_intent_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_payment_intent(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def cancel_stored_payment_intent(
+        self, payment_intent_id: UUID
+    ) -> StoredPaymentIntent:
+        """Cancel one projected intent idempotently."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE billing_core.payment_intent
+                SET payment_intent_status = 'cancelled'
+                WHERE payment_intent_id = %s
+                  AND payment_intent_status = 'projected'
+                RETURNING payment_intent_id
+                """,
+                (payment_intent_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT payment_intent_id, payment_intent_status
+                    FROM billing_core.payment_intent
+                    WHERE payment_intent_id = %s
+                    """,
+                    (payment_intent_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("payment intent cancellation requires a stored payment intent")
+                if row[1] != "cancelled":
+                    raise ValueError("only projected payment intents can be cancelled")
+            return self._fetch_payment_intent(cursor, UUID(str(row[0])))
+
+    def get_payment_receipt(self, payment_receipt_id: UUID) -> StoredPaymentReceipt | None:
+        """Return one payment receipt by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payment_receipt_id
+                FROM billing_core.payment_receipt
+                WHERE payment_receipt_id = %s
+                """,
+                (payment_receipt_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_payment_receipt(
+                cursor, UUID(str(row[0]))
+            )
+
+    def find_payment_receipt(
+        self,
+        tenant_account_id: UUID,
+        payment_intent_id: UUID,
+        source_payload_hash: str,
+        settlement_contract_version: int,
+    ) -> StoredPaymentReceipt | None:
+        """Return one tenant-scoped payment-receipt identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payment_receipt_id
+                FROM billing_core.payment_receipt
+                WHERE tenant_account_id = %s
+                  AND payment_intent_id = %s
+                  AND source_payload_hash = %s
+                  AND settlement_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    payment_intent_id,
+                    source_payload_hash,
+                    settlement_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_payment_receipt(
+                cursor, UUID(str(row[0]))
+            )
+
+    def insert_payment_receipt(
+        self, payment_receipt: StoredPaymentReceipt
+    ) -> StoredPaymentReceipt:
+        """Persist one applied receipt or return the exact identity replay."""
+        if payment_receipt.payment_receipt_status != "applied":
+            raise ValueError("payment receipts cannot be captured or posted")
+        received_amount = parse_exact_decimal(
+            format_exact_decimal(payment_receipt.received_amount)
+        )
+        if received_amount <= 0:
+            raise ValueError("payment receipt amount must be a positive exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.payment_receipt
+                    (payment_receipt_id, tenant_account_id, payment_intent_id,
+                     collection_case_id, settlement_contract_version, currency_code,
+                     payment_receipt_status, received_amount, source_payload_hash,
+                     received_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING payment_receipt_id
+                """,
+                (
+                    payment_receipt.payment_receipt_id,
+                    payment_receipt.tenant_account_id,
+                    payment_receipt.payment_intent_id,
+                    payment_receipt.collection_case_id,
+                    payment_receipt.settlement_contract_version,
+                    payment_receipt.currency_code,
+                    payment_receipt.payment_receipt_status,
+                    received_amount,
+                    payment_receipt.source_payload_hash,
+                    payment_receipt.received_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT payment_receipt_id
+                    FROM billing_core.payment_receipt
+                    WHERE tenant_account_id = %s
+                      AND payment_intent_id = %s
+                      AND source_payload_hash = %s
+                      AND settlement_contract_version = %s
+                    """,
+                    (
+                        payment_receipt.tenant_account_id,
+                        payment_receipt.payment_intent_id,
+                        payment_receipt.source_payload_hash,
+                        payment_receipt.settlement_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("payment receipt identity conflicts with an existing row")
+            return self._fetch_payment_receipt(cursor, UUID(str(row[0])))
+
+    def list_payment_receipts(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredPaymentReceipt, ...]:
+        """Return payment receipts limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT payment_receipt_id
+                FROM billing_core.payment_receipt
+                WHERE tenant_account_id = %s
+                ORDER BY received_at, payment_receipt_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_payment_receipt(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def find_journal_proposal_for_receipt(
+        self,
+        tenant_account_id: UUID,
+        payment_receipt_id: UUID,
+        source_payload_hash: str,
+        proposal_contract_version: int,
+    ) -> StoredJournalProposal | None:
+        """Return one tenant-scoped cash proposal identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT journal_proposal_id
+                FROM billing_core.journal_proposal
+                WHERE tenant_account_id = %s
+                  AND payment_receipt_id = %s
+                  AND source_payload_hash = %s
+                  AND proposal_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    payment_receipt_id,
+                    source_payload_hash,
+                    proposal_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_journal_proposal(
+                cursor, UUID(str(row[0]))
+            )
+
+    def insert_journal_proposal(
+        self,
+        journal_proposal: StoredJournalProposal,
+        proposal_lines: tuple[StoredJournalProposalLine, ...],
+    ) -> StoredJournalProposal:
+        """Persist one balanced cash proposal or return its identity replay."""
+        if journal_proposal.proposal_status not in {
+            "draft",
+            "validated",
+            "exported",
+            "rejected",
+        }:
+            raise ValueError("journal proposals cannot be posted")
+        if not proposal_lines or len({line.line_number for line in proposal_lines}) != len(
+            proposal_lines
+        ):
+            raise ValueError("journal proposal line numbers must be unique")
+        parsed_lines = tuple(
+            (
+                line,
+                parse_exact_decimal(format_exact_decimal(line.debit_amount)),
+                parse_exact_decimal(format_exact_decimal(line.credit_amount)),
+            )
+            for line in proposal_lines
+        )
+        for line, debit_amount, credit_amount in parsed_lines:
+            if line.journal_proposal_id != journal_proposal.journal_proposal_id:
+                raise ValueError("journal proposal line has the wrong proposal identity")
+            if line.tenant_account_id != journal_proposal.tenant_account_id:
+                raise ValueError("journal proposal line has the wrong tenant identity")
+            if (debit_amount > 0) == (credit_amount > 0):
+                raise ValueError("journal proposal lines must be debit XOR credit")
+        if sum((item[1] for item in parsed_lines), parse_exact_decimal("0")) != sum(
+            (item[2] for item in parsed_lines), parse_exact_decimal("0")
+        ):
+            raise ValueError("journal proposal lines must balance")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.journal_proposal
+                    (journal_proposal_id, tenant_account_id, invoice_draft_id,
+                     proposal_contract_version, idempotency_key, legal_entity_reference,
+                     intended_book_role_code, transaction_currency, transaction_date,
+                     accounting_date, source_payload_hash, proposed_at, proposal_status,
+                     source_event_reference, payment_receipt_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING journal_proposal_id
+                """,
+                (
+                    journal_proposal.journal_proposal_id,
+                    journal_proposal.tenant_account_id,
+                    journal_proposal.invoice_draft_id,
+                    journal_proposal.proposal_contract_version,
+                    journal_proposal.idempotency_key,
+                    journal_proposal.legal_entity_reference,
+                    journal_proposal.intended_book_role_code,
+                    journal_proposal.transaction_currency,
+                    journal_proposal.transaction_date,
+                    journal_proposal.accounting_date,
+                    journal_proposal.source_payload_hash,
+                    journal_proposal.proposed_at,
+                    journal_proposal.proposal_status,
+                    journal_proposal.source_event_reference,
+                    journal_proposal.payment_receipt_id,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT journal_proposal_id
+                    FROM billing_core.journal_proposal
+                    WHERE tenant_account_id = %s
+                      AND payment_receipt_id = %s
+                      AND source_payload_hash = %s
+                      AND proposal_contract_version = %s
+                    """,
+                    (
+                        journal_proposal.tenant_account_id,
+                        journal_proposal.payment_receipt_id,
+                        journal_proposal.source_payload_hash,
+                        journal_proposal.proposal_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("journal proposal identity conflicts with an existing row")
+                return self._fetch_journal_proposal(cursor, UUID(str(row[0])))
+            for line, debit_amount, credit_amount in parsed_lines:
+                cursor.execute(
+                    """
+                    INSERT INTO billing_core.journal_proposal_line
+                        (journal_proposal_line_id, journal_proposal_id,
+                         tenant_account_id, line_number, account_role_code,
+                         debit_amount, credit_amount)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        line.journal_proposal_line_id,
+                        line.journal_proposal_id,
+                        line.tenant_account_id,
+                        line.line_number,
+                        line.account_role_code,
+                        debit_amount,
+                        credit_amount,
+                    ),
+                )
+            return self._fetch_journal_proposal(
+                cursor, UUID(str(journal_proposal.journal_proposal_id))
+            )
+
+    def get_journal_proposal(
+        self, journal_proposal_id: UUID
+    ) -> StoredJournalProposal | None:
+        """Return one journal proposal by opaque identifier."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT journal_proposal_id
+                FROM billing_core.journal_proposal
+                WHERE journal_proposal_id = %s
+                """,
+                (journal_proposal_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_journal_proposal(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_journal_proposals(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredJournalProposal, ...]:
+        """Return journal proposals limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT journal_proposal_id
+                FROM billing_core.journal_proposal
+                WHERE tenant_account_id = %s
+                ORDER BY proposed_at, journal_proposal_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_journal_proposal(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
     def insert_webhook_subscription(
         self, subscription: StoredWebhookSubscription
     ) -> StoredWebhookSubscription:
@@ -2923,6 +3618,252 @@ class PostgresUsageLedger:
             row[13],
             lines,
         )
+
+    @staticmethod
+    def _collection_case_from_row(row: tuple[Any, ...]) -> StoredCollectionCase:
+        """Decode one normalized collection-case row."""
+        return StoredCollectionCase(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            row[3],
+            row[4],
+            parse_exact_decimal(format_exact_decimal(row[5])),
+            row[6],
+        )
+
+    def _fetch_collection_case(
+        self, cursor: Any, collection_case_id: UUID
+    ) -> StoredCollectionCase:
+        """Hydrate one collection case."""
+        cursor.execute(
+            """
+            SELECT collection_case_id, tenant_account_id, invoice_draft_id,
+                   currency_code, collection_case_status, outstanding_amount, opened_at
+            FROM billing_core.collection_case
+            WHERE collection_case_id = %s
+            """,
+            (collection_case_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(collection_case_id)
+        return self._collection_case_from_row(row)
+
+    @staticmethod
+    def _collection_dunning_event_from_row(
+        row: tuple[Any, ...]
+    ) -> StoredCollectionDunningEvent:
+        """Decode one normalized dunning-event row."""
+        return StoredCollectionDunningEvent(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            row[3],
+            row[4],
+            row[5],
+        )
+
+    def _fetch_collection_dunning_event(
+        self, cursor: Any, collection_dunning_event_id: UUID
+    ) -> StoredCollectionDunningEvent:
+        """Hydrate one dunning event."""
+        cursor.execute(
+            """
+            SELECT collection_dunning_event_id, collection_case_id,
+                   tenant_account_id, dunning_event_number, dunning_notice_code,
+                   occurred_at
+            FROM billing_core.collection_dunning_event
+            WHERE collection_dunning_event_id = %s
+            """,
+            (collection_dunning_event_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(collection_dunning_event_id)
+        return self._collection_dunning_event_from_row(row)
+
+    def _list_collection_dunning_events(
+        self,
+        *,
+        collection_case_id: UUID | None = None,
+        tenant_account_id: UUID | None = None,
+    ) -> tuple[StoredCollectionDunningEvent, ...]:
+        """List dunning events by case or tenant with an explicit predicate."""
+        with self._cursor() as cursor:
+            if collection_case_id is not None:
+                cursor.execute(
+                    """
+                    SELECT collection_dunning_event_id
+                    FROM billing_core.collection_dunning_event
+                    WHERE collection_case_id = %s
+                    ORDER BY dunning_event_number, collection_dunning_event_id
+                    """,
+                    (collection_case_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT collection_dunning_event_id
+                    FROM billing_core.collection_dunning_event
+                    WHERE tenant_account_id = %s
+                    ORDER BY occurred_at, collection_dunning_event_id
+                    """,
+                    (tenant_account_id,),
+                )
+            return tuple(
+                self._fetch_collection_dunning_event(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    @staticmethod
+    def _payment_intent_from_row(row: tuple[Any, ...]) -> StoredPaymentIntent:
+        """Decode one normalized payment-intent row."""
+        return StoredPaymentIntent(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            row[3],
+            row[4],
+            row[5],
+            parse_exact_decimal(format_exact_decimal(row[6])),
+            row[7],
+            row[8],
+        )
+
+    def _fetch_payment_intent(
+        self, cursor: Any, payment_intent_id: UUID
+    ) -> StoredPaymentIntent:
+        """Hydrate one payment intent."""
+        cursor.execute(
+            """
+            SELECT payment_intent_id, tenant_account_id, collection_case_id,
+                   payment_intent_contract_version, currency_code,
+                   payment_intent_status, payment_amount, source_payload_hash,
+                   projected_at
+            FROM billing_core.payment_intent
+            WHERE payment_intent_id = %s
+            """,
+            (payment_intent_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(payment_intent_id)
+        return self._payment_intent_from_row(row)
+
+    @staticmethod
+    def _payment_receipt_from_row(row: tuple[Any, ...]) -> StoredPaymentReceipt:
+        """Decode one normalized payment-receipt row."""
+        return StoredPaymentReceipt(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            row[4],
+            row[5],
+            row[6],
+            parse_exact_decimal(format_exact_decimal(row[7])),
+            row[8],
+            row[9],
+        )
+
+    def _fetch_payment_receipt(
+        self, cursor: Any, payment_receipt_id: UUID
+    ) -> StoredPaymentReceipt:
+        """Hydrate one payment receipt."""
+        cursor.execute(
+            """
+            SELECT payment_receipt_id, tenant_account_id, payment_intent_id,
+                   collection_case_id, settlement_contract_version, currency_code,
+                   payment_receipt_status, received_amount, source_payload_hash,
+                   received_at
+            FROM billing_core.payment_receipt
+            WHERE payment_receipt_id = %s
+            """,
+            (payment_receipt_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(payment_receipt_id)
+        return self._payment_receipt_from_row(row)
+
+    @staticmethod
+    def _journal_proposal_from_row(
+        row: tuple[Any, ...], lines: tuple[StoredJournalProposalLine, ...]
+    ) -> StoredJournalProposal:
+        """Decode one normalized journal-proposal row and its lines."""
+        return StoredJournalProposal(
+            journal_proposal_id=UUID(str(row[0])),
+            tenant_account_id=UUID(str(row[1])),
+            invoice_draft_id=UUID(str(row[2])),
+            proposal_contract_version=row[3],
+            idempotency_key=row[4],
+            legal_entity_reference=row[5],
+            intended_book_role_code=row[6],
+            transaction_currency=row[7],
+            transaction_date=row[8].isoformat() if hasattr(row[8], "isoformat") else row[8],
+            accounting_date=row[9].isoformat() if hasattr(row[9], "isoformat") else row[9],
+            source_payload_hash=row[10],
+            proposed_at=row[11],
+            proposal_status=row[12],
+            source_event_reference=row[13],
+            proposal_lines=lines,
+            payment_receipt_id=None if row[14] is None else UUID(str(row[14])),
+            credit_adjustment_id=None if row[15] is None else UUID(str(row[15])),
+            collection_write_off_id=None if row[16] is None else UUID(str(row[16])),
+            unapplied_cash_refund_id=None if row[17] is None else UUID(str(row[17])),
+            unapplied_cash_id=None if row[18] is None else UUID(str(row[18])),
+            unapplied_cash_application_id=None if row[19] is None else UUID(str(row[19])),
+            issued_invoice_void_id=None if row[20] is None else UUID(str(row[20])),
+            issued_credit_note_void_id=None if row[21] is None else UUID(str(row[21])),
+        )
+
+    def _fetch_journal_proposal(
+        self, cursor: Any, journal_proposal_id: UUID
+    ) -> StoredJournalProposal:
+        """Hydrate one journal proposal and its immutable lines."""
+        cursor.execute(
+            """
+            SELECT journal_proposal_id, tenant_account_id, invoice_draft_id,
+                   proposal_contract_version, idempotency_key, legal_entity_reference,
+                   intended_book_role_code, transaction_currency, transaction_date,
+                   accounting_date, source_payload_hash, proposed_at, proposal_status,
+                   source_event_reference, payment_receipt_id, credit_adjustment_id,
+                   collection_write_off_id, unapplied_cash_refund_id, unapplied_cash_id,
+                   unapplied_cash_application_id, issued_invoice_void_id,
+                   issued_credit_note_void_id
+            FROM billing_core.journal_proposal
+            WHERE journal_proposal_id = %s
+            """,
+            (journal_proposal_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(journal_proposal_id)
+        cursor.execute(
+            """
+            SELECT journal_proposal_line_id, journal_proposal_id,
+                   tenant_account_id, line_number, account_role_code,
+                   debit_amount, credit_amount
+            FROM billing_core.journal_proposal_line
+            WHERE journal_proposal_id = %s
+            ORDER BY line_number, journal_proposal_line_id
+            """,
+            (journal_proposal_id,),
+        )
+        lines = tuple(
+            StoredJournalProposalLine(
+                UUID(str(line[0])),
+                UUID(str(line[1])),
+                UUID(str(line[2])),
+                line[3],
+                line[4],
+                parse_exact_decimal(format_exact_decimal(line[5])),
+                parse_exact_decimal(format_exact_decimal(line[6])),
+            )
+            for line in cursor.fetchall()
+        )
+        return self._journal_proposal_from_row(row, lines)
 
     @staticmethod
     def _webhook_subscription_from_row(row: tuple[Any, ...]) -> StoredWebhookSubscription:
