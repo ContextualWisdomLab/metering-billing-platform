@@ -45,6 +45,22 @@ class RejectionReasonCode(StrEnum):
     PRODUCER_EVENT_CONFLICT = "producer_event_conflict"
 
 
+class UsageEventConflict(ValueError):
+    """Describe a PostgreSQL unique-identity race for one usage event."""
+
+    def __init__(
+        self,
+        existing: object,
+        *,
+        duplicate_replay: bool,
+        rejection_reason_code: RejectionReasonCode | None = None,
+    ) -> None:
+        super().__init__("usage event identity already exists")
+        self.existing = existing
+        self.duplicate_replay = duplicate_replay
+        self.rejection_reason_code = rejection_reason_code
+
+
 class RatingOutcomeCode(StrEnum):
     """Terminal result of attempting to persist one windowed rating run."""
 

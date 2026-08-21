@@ -18,7 +18,23 @@ jobs:
   repository-contracts:
     name: Repository contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      METERING_BILLING_POSTGRES_DSN: dbname=metering_billing_test user=postgres password=postgres host=127.0.0.1 port=5432
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: metering_billing_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metering_billing_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Check out exact head
         uses: actions/checkout@631c942040754b6e095e929c1677c07e10ed4f87
@@ -29,7 +45,9 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: requirements-quality.txt
+          cache-dependency-path: |
+            requirements-quality.txt
+            requirements-runtime.txt
       - name: Install hash-locked quality dependency
         run: >-
           python -m pip install
@@ -37,6 +55,13 @@ jobs:
           --only-binary=:all:
           --require-hashes
           -r requirements-quality.txt
+      - name: Install hash-locked runtime dependency
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r requirements-runtime.txt
       - name: Run tests with complete branch coverage
         run: python -m coverage run --branch --source=scripts,metering_billing -m unittest discover -s tests -v
       - name: Enforce complete statement and branch coverage

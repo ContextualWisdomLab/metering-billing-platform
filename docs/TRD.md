@@ -15,7 +15,24 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 
 ## Usage-ingestion plane
 
-The importable `metering_billing` package is the first runtime module.  It can run in-process against the in-memory third-normal-form ledger that mirrors the PostgreSQL constraints.  A later adapter can persist the same rows without changing the hash, tenant, decimal, or rating-identity rules.  Canonical source-payload hashing excludes envelope identifiers (`event_id`, `source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest, usage queries, and rating accept half-open ISO 8601 windows.  Rating identity is tenant, window, persisted rate-card version, and usage-snapshot hash.  `UsageEventPresentmentService` projects a stored event as a statement.  `GET /v1/usage-events/{usage_event_id}` and `GET /v1/usage-events` are safe tenant-scoped reads (Fielding et al., 2022; Google, 2024).  Ingest usage, then rate a window against a published card.  `RatingRunPresentmentService` projects a stored run as a statement.  `GET /v1/rating-runs/{rating_run_id}` and `GET /v1/rating-runs` are safe tenant-scoped reads.  Rate a window, then draft an invoice.
+The importable `metering_billing` package is the first runtime module.  Usage
+ingest can run against `MemoryUsageLedger` for isolated reference tests or
+against `PostgresUsageLedger` for the durable usage, measurement, catalog, and
+receipt slice.  Both paths use the same hash, tenant, decimal, and
+rating-identity rules; the PostgreSQL path owns the event and receipt write in
+one transaction.  The broader commercial services still use the in-memory
+reference ledger until their own durable repositories land.  Canonical
+source-payload hashing excludes envelope identifiers (`event_id`,
+`source_event_key`), `source_payload_hash`, and `recorded_at`.  Batch ingest,
+usage queries, and rating accept half-open ISO 8601 windows.  Rating identity
+is tenant, window, persisted rate-card version, and usage-snapshot hash.
+`UsageEventPresentmentService` projects a stored event as a statement.
+`GET /v1/usage-events/{usage_event_id}` and `GET /v1/usage-events` are safe
+tenant-scoped reads (Fielding et al., 2022; Google, 2024).  Ingest usage, then
+rate a window against a published card.  `RatingRunPresentmentService`
+projects a stored run as a statement.  `GET /v1/rating-runs/{rating_run_id}`
+and `GET /v1/rating-runs` are safe tenant-scoped reads.  Rate a window, then
+draft an invoice.
 
 ## Persistence plane
 

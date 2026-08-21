@@ -333,6 +333,7 @@ from metering_billing.posting_receipt import AisPostingReceiptClient, PostingRec
 from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
 from metering_billing.usage_ingestion import UsageIngestionService
 from metering_billing.usage_ledger import MemoryUsageLedger
+from metering_billing.postgres_usage_ledger import PostgresUsageLedger
 from metering_billing.usage_rating import UsageRatingService
 
 __all__ = (
@@ -528,6 +529,7 @@ __all__ = (
     "JournalProposalOutcomeCode",
     "JournalProposalRejectionReasonCode",
     "MemoryUsageLedger",
+    "PostgresUsageLedger",
     "PaymentIntentOutcomeCode",
     "PaymentIntentRejectionReasonCode",
     "PaymentIntentService",

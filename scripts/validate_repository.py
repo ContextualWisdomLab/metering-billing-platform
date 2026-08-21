@@ -110,6 +110,7 @@ REQUIRED_FILES = (
     "docs/adr/0077-rated-spend-group-by-principal.md",
     "docs/adr/0078-rated-spend-group-by-cost-center.md",
     "docs/adr/0079-spend-budget-publish.md",
+    "docs/adr/0080-postgres-usage-ingestion.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
@@ -276,6 +277,7 @@ REQUIRED_FILES = (
     "operator_console/tokens/design_tokens.json",
     "operator_console/fixtures/taxed_partial_credit.json",
     "requirements-quality.txt",
+    "requirements-runtime.txt",
     "pyproject.toml",
     "uv.lock",
     ".github/workflows/ci.yml",
@@ -397,6 +399,12 @@ def validate_repository(root: Path) -> tuple[str, ...]:
         requirements_text = requirements_path.read_text(encoding="utf-8")
         if "--hash=sha256:" not in requirements_text:
             errors.append("quality dependencies must be hash locked")
+
+    runtime_requirements_path = root / "requirements-runtime.txt"
+    if runtime_requirements_path.is_file():
+        runtime_requirements_text = runtime_requirements_path.read_text(encoding="utf-8")
+        if "--hash=sha256:" not in runtime_requirements_text:
+            errors.append("runtime dependencies must be hash locked")
 
     for file_path in _iter_contract_files(root):
         text = file_path.read_text(encoding="utf-8")

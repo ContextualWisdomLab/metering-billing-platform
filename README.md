@@ -39,19 +39,33 @@ uv run --locked --group dev python scripts/validate_repository.py
 ```
 
 The repository uses a project-local `.venv` managed by `uv`; the checked-in
-`uv.lock` pins the development toolchain.  PostgreSQL migrations are a schema
-boundary, while the current standalone runtime still uses `MemoryUsageLedger`.
+`uv.lock` pins the development and PostgreSQL runtime dependencies.  The
+integration suite expects PostgreSQL 18 at
+`METERING_BILLING_POSTGRES_DSN` and uses only a dedicated test database.
 
 ## Ingest usage
 
 ```bash
-python3 -c "from metering_billing import UsageIngestionService, MemoryUsageLedger"
+python3 -c "from metering_billing import PostgresUsageLedger, UsageIngestionService"
 # POST /v1/usage-events
 # GET /v1/usage-events/{usage_event_id}?tenant_reference=urn:cwl:tenant_001
 # GET /v1/usage-events?tenant_reference=urn:cwl:tenant_001
 ```
 
-Register the tenant, billing account, principal, meter, and quality rules on a `MemoryUsageLedger`, then call `UsageIngestionService.ingest_usage_batch`. Identical retries return `duplicate_replay` and leave the stored usage set unchanged. A changed hash or contract version for the same source key is rejected. `POST /v1/usage-events` stays that ingest and refuses PAN and provider secrets. After a `usage_event` exists, `GET /v1/usage-events/{usage_event_id}` returns the tenant-scoped statement. `GET /v1/usage-events` lists `{usage_events, next_cursor}`. Ingest usage, then rate a window against a published card.
+Register the tenant, billing account, principal, meter, and quality rules on a
+`PostgresUsageLedger` created with a migrated PostgreSQL connection, then call
+`UsageIngestionService.ingest_usage_batch`. `MemoryUsageLedger` remains the
+fast in-process reference option. Identical retries return
+`duplicate_replay` and leave the stored usage set unchanged; concurrent
+retries are arbitrated by PostgreSQL and leave one event plus one receipt per
+attempt. A changed hash or contract version for the same source key is
+rejected. `POST /v1/usage-events` stays that ingest and refuses PAN and
+provider secrets. After a `usage_event` exists,
+`GET /v1/usage-events/{usage_event_id}` returns the tenant-scoped statement.
+`GET /v1/usage-events` lists `{usage_events, next_cursor}`. Ingest usage, then
+rate a window against a published card. This durable slice does not claim that
+the rest of the commercial services, backup/restore, or production readiness
+controls are complete.
 
 ## Publish a rate card
 

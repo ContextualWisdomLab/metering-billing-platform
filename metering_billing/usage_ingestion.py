@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from contextlib import nullcontext
 from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
@@ -30,6 +31,7 @@ from metering_billing.errors import (
     IngestionOutcomeCode,
     RejectionReasonCode,
     TimeWindowError,
+    UsageEventConflict,
     require_resolved,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
@@ -117,8 +119,21 @@ class UsageIngestionService:
         time_window: TimeWindow | None = None,
     ) -> EventIngestionReceipt:
         """Ingest one event.  Replays of the same fact return the stored row."""
-        receipt = self._decide_usage_event(event, time_window)
-        self._persist_ingestion_receipt(receipt)
+        transaction = getattr(self.ledger, "ingestion_transaction", None)
+        context = nullcontext() if transaction is None else transaction()
+        with context:
+            try:
+                receipt = self._decide_usage_event(event, time_window)
+            except UsageEventConflict as conflict:
+                if conflict.duplicate_replay:
+                    receipt = _replay(event, conflict.existing)
+                else:
+                    receipt = _rejected(
+                        *_extract_identity(event),
+                        conflict.rejection_reason_code
+                        or RejectionReasonCode.SOURCE_EVENT_CONFLICT,
+                    )
+            self._persist_ingestion_receipt(receipt)
         return receipt
 
     def _decide_usage_event(

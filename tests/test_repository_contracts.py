@@ -3764,6 +3764,8 @@ class RepositoryContractTests(unittest.TestCase):
             )
             requirements = copied_root / "requirements-quality.txt"
             requirements.write_text("coverage==7.15.4\n", encoding="utf-8")
+            runtime_requirements = copied_root / "requirements-runtime.txt"
+            runtime_requirements.write_text("psycopg==3.3.4\n", encoding="utf-8")
             workflow = copied_root / ".github/workflows/ci.yml"
             workflow.write_text(
                 workflow.read_text(encoding="utf-8")
@@ -3786,6 +3788,7 @@ class RepositoryContractTests(unittest.TestCase):
             errors,
         )
         self.assertIn("quality dependencies must be hash locked", errors)
+        self.assertIn("runtime dependencies must be hash locked", errors)
         self.assertIn("unresolved placeholder in README.md: TODO", errors)
         self.assertIn(
             "mutable GitHub Action reference in .github/workflows/ci.yml: actions/checkout@v4",
