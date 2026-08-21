@@ -8,12 +8,21 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import psycopg
 
 from metering_billing import PostgresUsageLedger, UsageIngestionService
 from metering_billing.errors import RejectionReasonCode, UsageEventConflict
+from scripts.migrate_postgres import (
+    MIGRATION_HISTORY_TABLE,
+    MigrationDriftError,
+    MigrationPlanError,
+    apply_migrations,
+    main as migrate_main,
+)
 from tests.test_usage_ingestion import (
     ACCOUNT_ONE,
     ACCOUNT_TWO,
@@ -45,15 +54,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "METERING_BILLING_POSTGRES_DSN must point to a dedicated test database"
             )
         cls.connection = psycopg.connect(POSTGRES_DSN)
+        cls.connection.execute(f"DROP TABLE IF EXISTS {MIGRATION_HISTORY_TABLE}")
         cls.connection.execute("DROP SCHEMA IF EXISTS billing_core CASCADE")
         cls.connection.commit()
-        migration_directory = os.path.join(ROOT, "database", "migrations")
-        for name in sorted(os.listdir(migration_directory)):
-            if not name.endswith(".sql"):
-                continue
-            with open(os.path.join(migration_directory, name), encoding="utf-8") as migration:
-                cls.connection.execute(migration.read())
-        cls.connection.commit()
+        migration_directory = Path(ROOT) / "database" / "migrations"
+        applied = apply_migrations(cls.connection, migration_directory)
+        if len(applied) != 37:
+            raise AssertionError(f"expected 37 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -206,6 +213,51 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(KeyError):
             self.ledger.require_tenant("urn:cwl:missing_tenant")
+
+    def test_migration_runner_is_idempotent_and_detects_drift(self) -> None:
+        """The runner records checksums and refuses a changed applied migration."""
+        migration_directory = Path(ROOT) / "database" / "migrations"
+        self.assertEqual(apply_migrations(self.connection, migration_directory), ())
+        first_name = "0001_initial_billing_core.sql"
+        original_checksum = self.connection.execute(
+            f"SELECT checksum_sha256 FROM {MIGRATION_HISTORY_TABLE} WHERE migration_name = %s",
+            (first_name,),
+        ).fetchone()[0]
+        self.connection.execute(
+            f"UPDATE {MIGRATION_HISTORY_TABLE} SET checksum_sha256 = %s WHERE migration_name = %s",
+            ("bad", first_name),
+        )
+        self.connection.commit()
+        with self.assertRaises(MigrationDriftError):
+            apply_migrations(self.connection, migration_directory)
+        self.connection.execute(
+            f"UPDATE {MIGRATION_HISTORY_TABLE} SET checksum_sha256 = %s WHERE migration_name = %s",
+            (original_checksum, first_name),
+        )
+        self.connection.commit()
+        self.assertEqual(
+            migrate_main(["--dsn", POSTGRES_DSN, "--migrations", str(migration_directory)]),
+            0,
+        )
+
+    def test_migration_runner_rejects_bad_plans(self) -> None:
+        """Migration names and transaction wrappers are explicit contracts."""
+        with TemporaryDirectory() as directory:
+            path = Path(directory)
+            with self.assertRaises(MigrationPlanError):
+                apply_migrations(self.connection, path)
+            invalid = path / "0001_bad-name.sql"
+            invalid.write_text("BEGIN; SELECT 1; COMMIT;", encoding="utf-8")
+            with self.assertRaises(MigrationPlanError):
+                apply_migrations(self.connection, path)
+            invalid.unlink()
+            valid = path / "0001_valid_name.sql"
+            valid.write_text("BEGIN; COMMIT;", encoding="utf-8")
+            with self.assertRaises(MigrationPlanError):
+                apply_migrations(self.connection, path)
+            valid.write_text("SELECT 1;", encoding="utf-8")
+            with self.assertRaises(MigrationPlanError):
+                apply_migrations(self.connection, path)
 
     def test_meter_and_assignment_effective_rules(self) -> None:
         """Half-open assignment and meter quality rules match the reference semantics."""

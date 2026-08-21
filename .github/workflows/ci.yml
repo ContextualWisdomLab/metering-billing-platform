@@ -62,6 +62,8 @@ jobs:
           --only-binary=:all:
           --require-hashes
           -r requirements-runtime.txt
+      - name: Apply PostgreSQL migrations with advisory lock
+        run: python scripts/migrate_postgres.py --dsn "$METERING_BILLING_POSTGRES_DSN"
       - name: Run tests with complete branch coverage
         run: python -m coverage run --branch --source=scripts,metering_billing -m unittest discover -s tests -v
       - name: Enforce complete statement and branch coverage

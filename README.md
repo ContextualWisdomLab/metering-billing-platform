@@ -32,6 +32,7 @@ The current milestone contains:
 
 ```bash
 uv sync --group dev
+METERING_BILLING_POSTGRES_DSN='dbname=metering_billing_usage_repo_test' uv run --locked --group dev python scripts/migrate_postgres.py --dsn 'dbname=metering_billing_usage_repo_test'
 uv run --locked --group dev python -m unittest discover -s tests -p 'test_*.py'
 uv run --locked --group dev python -m coverage run --branch -m unittest discover -s tests -p 'test_*.py'
 uv run --locked --group dev python -m coverage report --fail-under=100 --show-missing
@@ -42,6 +43,9 @@ The repository uses a project-local `.venv` managed by `uv`; the checked-in
 `uv.lock` pins the development and PostgreSQL runtime dependencies.  The
 integration suite expects PostgreSQL 18 at
 `METERING_BILLING_POSTGRES_DSN` and uses only a dedicated test database.
+The migration runner records SHA-256 checksums in
+`public.metering_billing_schema_migration` and takes a transaction-scoped
+advisory lock; changing an applied migration is rejected.
 
 ## Ingest usage
 

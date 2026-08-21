@@ -276,6 +276,7 @@ REQUIRED_FILES = (
     "operator_console/src/index.js",
     "operator_console/tokens/design_tokens.json",
     "operator_console/fixtures/taxed_partial_credit.json",
+    "scripts/migrate_postgres.py",
     "requirements-quality.txt",
     "requirements-runtime.txt",
     "pyproject.toml",

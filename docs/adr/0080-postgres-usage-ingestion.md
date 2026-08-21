@@ -36,12 +36,15 @@ also support keeping identity and interval rules in the database. Helland
   PostgreSQL half-open time predicates. Tenant references and composite foreign
   keys remain the isolation boundary.
 - Run the adapter against PostgreSQL 18 in CI with the checked-in migrations,
-  and keep the runtime dependency export hash locked.
+  applying them through `scripts/migrate_postgres.py`. The runner records
+  SHA-256 checksums in `public.metering_billing_schema_migration`, takes a
+  transaction-scoped advisory lock, and rejects drift in an applied file.
+- Keep the runtime dependency export hash locked.
 
 ## Consequences
 
 The first durable vertical slice now has observed restart-safe, rollback-safe,
-tenant-scoped, and concurrent PostgreSQL evidence. The broader invoice,
+tenant-scoped, concurrent, and migration-serialized PostgreSQL evidence. The broader invoice,
 collection, provider, accounting-outbox, raw-payload object storage,
 deployment readiness, migration recovery, backup/restore, performance, and
 OpenTelemetry requirements remain open under issue #84; this ADR does not
