@@ -1,6 +1,6 @@
 # Product and Technical Gap Baseline
 
-Assessment date: 2026-08-20 (Asia/Seoul)
+Assessment date: 2026-08-21 (Asia/Seoul)
 
 This baseline separates observed repository evidence from the target product
 state. It is intentionally a release-gate document, not a claim that the
@@ -11,10 +11,10 @@ currently open pull requests are merged or production-ready.
 | Evidence | Observed state |
 | --- | --- |
 | `develop` | Bootstrap commit `17e1408`; the checked-out branch has no implementation before the pull-request chain is merged. |
-| Foundation candidate | PR #1, `agent/initial-billing-foundation`, last verified code head `bd87bde`; its exact-head repository-contract check is the first gate. |
-| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, last verified head `205a190`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, tests, dependency repairs, outbound URL validation, hollow-resolver hardening, boolean JSON Schema validator support, reusable-workflow reference validation, persistence attribution constraints, catalog URN identity migration, uv project metadata, and matching data-model documentation. |
-| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 588 Python tests at 100% coverage, optimized-Python resolver tests, 42 operator-console tests, lint, Storybook build, local Semgrep with zero findings, real PostgreSQL migration and constraint smoke checks, and production-dependency audit with zero vulnerabilities. Hosted Checks remain authoritative for the pushed heads. |
-| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades and outbound URL revalidation; head `ac592d9` additionally replaces production `assert` resolver guards with `require_resolved` and adds hollow-success regression tests; head `34e3c2a` adds boolean JSON Schema support and edge tests; head `72003a0` adds reusable-workflow reference validation; head `0faa5c9` adds tenant proposal-reference uniqueness, non-overlapping credential intervals, and matching in-memory validation; head `1fc169d` documents those persistence rules in `DATA_MODEL.md`; head `5c64f9d` pins the project-local uv development boundary; head `205a190` adds catalog URN identity backfill. Its new hosted Checks are pending. |
+| Foundation candidate | PR #1, `agent/initial-billing-foundation`, last verified code head `f2355b4`; its exact-head repository-contract check is the first gate. |
+| Latest feature candidate | PR #82, `cursor/spend-budget-publish-f556`, last verified head `59051d4`; it contains the cumulative Python package, PostgreSQL migrations, HTTP surface, operator-console Storybook, schemas, tests, dependency repairs, outbound URL validation, hollow-resolver hardening, boolean JSON Schema validator support, reusable-workflow reference validation, persistence attribution constraints, catalog URN identity migration, uv project metadata, durable PostgreSQL usage ingestion, and matching data-model/ADR documentation. |
+| Local verification | Foundation tests passed with 100% statement and branch coverage after the contract scanner was corrected to ignore `.venv/`. The cumulative candidate passed 597 Python tests at 100% coverage including a dedicated PostgreSQL 18 integration database, optimized-Python resolver tests, 42 operator-console tests, local Semgrep with zero findings, actionlint, real PostgreSQL migration/constraint/concurrency checks, and hash-locked runtime dependency validation. Hosted Checks remain authoritative for the pushed heads. |
+| Recent gate repair | The prior PR #82 head `f8d8e79` failed OSV on Storybook/Vite/uuid and Semgrep on two outbound `urllib` calls. Head `adea8cc` contains the dependency upgrades and outbound URL revalidation; head `ac592d9` additionally replaces production `assert` resolver guards with `require_resolved` and adds hollow-success regression tests; head `34e3c2a` adds boolean JSON Schema support and edge tests; head `72003a0` adds reusable-workflow reference validation; head `0faa5c9` adds tenant proposal-reference uniqueness, non-overlapping credential intervals, and matching in-memory validation; head `1fc169d` documents those persistence rules in `DATA_MODEL.md`; head `5c64f9d` pins the project-local uv development boundary; head `205a190` adds catalog URN identity backfill; head `59051d4` adds the first durable PostgreSQL usage-ingestion runtime slice. Its new hosted Checks are pending. |
 | Authority documents | `docs/PRD.md`, `docs/TRD.md`, `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`, `docs/ACCOUNTING_BOUNDARY.md`, `docs/SECURITY.md`, `docs/STORYBOOK.md`, ADRs, and `docs/doctoring/*`. |
 | External boundary | Accounting Information Platform, Keyverse, contextual-orchestrator, payment/MoR providers, tax services, and bank/treasury systems are described as replaceable or authoritative external systems; their production integration is not inferred from a local merge. |
 
@@ -107,7 +107,7 @@ that the existing implementation cannot safely satisfy.
 ## Open pull-request inventory
 
 The following inventory was obtained from the repository's open PR list on
-2026-08-20 after removing superseded cumulative snapshots. Every item remains
+2026-08-21 after removing superseded cumulative snapshots. Every item remains
 an open candidate until its current head has a review, terminal Checks, and a
 recorded merge result. PR #3 targets the foundation branch; PR #92 stacks on
 PR #82; the other listed PRs target `develop`.
@@ -123,7 +123,7 @@ PR #82; the other listed PRs target `develop`.
 PRs #5–#81 are closed as superseded snapshots. Their code ancestry is
 contained in #82 except for #7's resolver-hardening commit; that behavior was
 reapplied directly to #82 at `ac592d9` with optimized-Python regression tests;
-the current #82 head is `0faa5c9`.
+the current #82 head is `59051d4`.
 PR #6 was separately superseded by #7 before the cumulative cleanup. The
 closure reason is recorded on each PR; no closed snapshot is treated as a
 merge or production evidence.
