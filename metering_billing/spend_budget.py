@@ -8,8 +8,9 @@ The service is the buyer-facing spend-budget write:
 4. Replay the same tenant, account, window, currency, payload hash, and version.
 
 A published budget is never edited.  A later distinct amount or hash is a new
-row.  The budget is a commercial control fact, not a rated-spend comparison
-and not a posted journal (IFRS Foundation, 2024).
+row.  First successful publish enqueues one ``spend_budget.published``
+outbox event.  The budget is a commercial control fact, not a rated-spend
+comparison and not a posted journal (IFRS Foundation, 2024).
 """
 
 from __future__ import annotations
@@ -36,6 +37,10 @@ from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredSpendBudget,
     generate_record_id,
+)
+from metering_billing.webhook_outbox import (
+    EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
+    enqueue_accepted_fact,
 )
 
 
@@ -137,6 +142,30 @@ class SpendBudgetResult:
             "next_operator_action": self.next_operator_action,
         }
 
+    def as_webhook_event_data(self) -> dict[str, object]:
+        """Return the thin ``spend_budget.published`` facts for the #24 envelope.
+
+        The payload is a reference plus hash, not a rated-spend comparison.
+        Remaining, over, utilization, lines, PII, PAN, secrets, raw
+        documents, and statutory identifiers are omitted.
+        """
+        if self.spend_budget_id is None or self.billing_account_id is None:
+            raise ValueError("rejected spend budget has no webhook event data")
+        if self.published_at is None:
+            raise ValueError("accepted spend budgets must include published_at")
+        return {
+            "spend_budget_id": str(self.spend_budget_id),
+            "billing_account_id": str(self.billing_account_id),
+            "source_payload_hash": self.source_payload_hash,
+            "spend_budget_contract_version": self.spend_budget_contract_version,
+            "currency_code": self.currency_code,
+            "budget_amount": format_exact_decimal(self.budget_amount),
+            "window_started_at": _format_instant(self.window_started_at),
+            "window_ended_at": _format_instant(self.window_ended_at),
+            "published_at": _format_instant(self.published_at),
+            "spend_budget_status": SPEND_BUDGET_STATUS,
+        }
+
 
 class SpendBudgetService:
     """Append-only commercial spend-budget publisher backed by a normalized ledger."""
@@ -162,8 +191,10 @@ class SpendBudgetService:
 
         A replay of the same tenant, account, window, currency, exact amount,
         and contract version returns the stored ``spend_budget_id``.  A later
-        distinct amount or hash appends a new row.  Rated-spend, rating,
-        invoice draft, and outbox rows are unchanged.
+        distinct amount or hash appends a new row.  First successful publish
+        enqueues one ``spend_budget.published`` outbox event.  Replay of
+        that publish does not enqueue a second row.  Rated-spend, rating,
+        and invoice-draft rows are unchanged.
         """
         if not isinstance(tenant_reference, str) or not tenant_reference:
             return _rejected(SpendBudgetRejectionReasonCode.TENANT_NOT_FOUND)
@@ -211,9 +242,11 @@ class SpendBudgetService:
             SPEND_BUDGET_CONTRACT_VERSION,
         )
         if existing is not None:
-            return _from_stored(
+            result = _from_stored(
                 existing, tenant.tenant_reference, SpendBudgetOutcomeCode.DUPLICATE_REPLAY
             )
+            _enqueue_spend_budget_published(self.ledger, tenant.tenant_reference, result)
+            return result
         stored = self.ledger.insert_spend_budget(
             StoredSpendBudget(
                 spend_budget_id=generate_record_id(),
@@ -228,7 +261,32 @@ class SpendBudgetService:
                 published_at=self._clock(),
             )
         )
-        return _from_stored(stored, tenant.tenant_reference, SpendBudgetOutcomeCode.ACCEPTED)
+        result = _from_stored(stored, tenant.tenant_reference, SpendBudgetOutcomeCode.ACCEPTED)
+        _enqueue_spend_budget_published(self.ledger, tenant.tenant_reference, result)
+        return result
+
+
+def _enqueue_spend_budget_published(
+    ledger: MemoryUsageLedger,
+    tenant_reference: str,
+    result: SpendBudgetResult,
+) -> None:
+    """Append one ``spend_budget.published`` outbox row for a stored budget.
+
+    Replay of the same tenant, event type, ``spend_budget_id``, and payload
+    hash returns the stored row.  A crash after insert and before enqueue
+    is healed by the next publish replay.
+    """
+    if result.spend_budget_id is None or result.published_at is None:
+        raise ValueError("accepted spend budgets must include identity and published_at")
+    enqueue_accepted_fact(
+        ledger,
+        tenant_reference,
+        EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
+        result.spend_budget_id,
+        result.as_webhook_event_data(),
+        result.published_at,
+    )
 
 
 def _billing_account_for(ledger: MemoryUsageLedger, billing_account_id: UUID):
