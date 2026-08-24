@@ -1895,6 +1895,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             TENANT_ONE, account.billing_account_id
         )
         self.assertGreaterEqual(len(statuses.budget_statuses), 1)
+        self.assertEqual(
+            {row.spend_budget_id for row in statuses.budget_statuses},
+            {
+                stored.spend_budget_id,
+                later.spend_budget_id,
+                inserted_without_outbox.spend_budget_id,
+            },
+        )
         self.assertEqual(statuses.budget_statuses[0].spend_budget_id, stored.spend_budget_id)
         restarted_app = create_http_app(fresh, clock=lambda: published_at)
         get_status, get_body = invoke_http(
