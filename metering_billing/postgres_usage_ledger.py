@@ -2,11 +2,11 @@
 
 The repository owns catalog rows, immutable usage facts, rating runs, invoice
 drafts, issued invoices, collection cases, payment and credit facts, journal
-proposals, and the atomic webhook outbox used by the first commercial path.
-Every public operation uses the supplied PostgreSQL connection; the
-implementation never falls back to an in-memory copy. Provider capture and
-remaining exception repositories remain subsequent slices of the persistence
-port.
+proposals, published spend budgets, and the atomic webhook outbox used by
+the first commercial path. Every public operation uses the supplied
+PostgreSQL connection; the implementation never falls back to an in-memory
+copy. Provider capture and remaining exception repositories remain
+subsequent slices of the persistence port.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from metering_billing.exact_decimal import (
     require_postable_journal_line_amounts,
 )
 from metering_billing.usage_ledger import (
+    CURRENCY_CODE_PATTERN,
+    SOURCE_PAYLOAD_HASH_PATTERN,
     BillingAccount,
     BillingPrincipal,
     CredentialAssignment,
@@ -54,6 +56,7 @@ from metering_billing.usage_ledger import (
     StoredTaxAssessment,
     StoredPaymentIntent,
     StoredPaymentReceipt,
+    StoredSpendBudget,
     StoredUsageEvent,
     StoredUsageMeasurement,
     StoredWebhookDeliveryAttempt,
@@ -1225,6 +1228,25 @@ class PostgresUsageLedger:
         if account.account_status_code != "active":
             return None, RejectionReasonCode.BILLING_ACCOUNT_NOT_ACTIVE
         return account, None
+
+    def get_billing_account(self, billing_account_id: UUID) -> BillingAccount | None:
+        """Return one billing account by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT billing_account_id, tenant_account_id, billing_account_code,
+                       billing_account_reference, account_status_code
+                FROM billing_core.billing_account
+                WHERE billing_account_id = %s
+                """,
+                (billing_account_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return BillingAccount(
+            UUID(str(row[0])), UUID(str(row[1])), row[3], row[2], row[4]
+        )
 
     def resolve_billing_principal(
         self, tenant: TenantAccount, billing_principal_reference: str, occurred_at: datetime
@@ -2983,6 +3005,146 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
 
+    def find_spend_budget(
+        self,
+        tenant_account_id: UUID,
+        billing_account_id: UUID,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+        currency_code: str,
+        source_payload_hash: str,
+        spend_budget_contract_version: int,
+    ) -> StoredSpendBudget | None:
+        """Return the spend budget for one tenant-scoped identity, if any."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT spend_budget_id
+                FROM billing_core.spend_budget
+                WHERE tenant_account_id = %s
+                  AND billing_account_id = %s
+                  AND window_started_at = %s
+                  AND window_ended_at = %s
+                  AND currency_code = %s
+                  AND source_payload_hash = %s
+                  AND spend_budget_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    billing_account_id,
+                    window_started_at,
+                    window_ended_at,
+                    currency_code,
+                    source_payload_hash,
+                    spend_budget_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_spend_budget(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_spend_budget(self, spend_budget_id: UUID) -> StoredSpendBudget | None:
+        """Return one spend budget by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT spend_budget_id
+                FROM billing_core.spend_budget
+                WHERE spend_budget_id = %s
+                """,
+                (spend_budget_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_spend_budget(
+                cursor, UUID(str(row[0]))
+            )
+
+    def insert_spend_budget(self, budget: StoredSpendBudget) -> StoredSpendBudget:
+        """Persist one published spend budget or return its identity replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(budget.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(budget.source_payload_hash) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if budget.spend_budget_status != "published":
+            raise ValueError("spend_budget_status must be published")
+        budget_amount = parse_exact_decimal(format_exact_decimal(budget.budget_amount))
+        if budget_amount <= 0:
+            raise ValueError("budget amount must be a positive exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.spend_budget
+                    (spend_budget_id, tenant_account_id, billing_account_id,
+                     spend_budget_contract_version, currency_code, budget_amount,
+                     window_started_at, window_ended_at, source_payload_hash,
+                     published_at, spend_budget_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING spend_budget_id
+                """,
+                (
+                    budget.spend_budget_id,
+                    budget.tenant_account_id,
+                    budget.billing_account_id,
+                    budget.spend_budget_contract_version,
+                    budget.currency_code,
+                    budget_amount,
+                    budget.window_started_at,
+                    budget.window_ended_at,
+                    budget.source_payload_hash,
+                    budget.published_at,
+                    budget.spend_budget_status,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT spend_budget_id
+                    FROM billing_core.spend_budget
+                    WHERE tenant_account_id = %s
+                      AND billing_account_id = %s
+                      AND window_started_at = %s
+                      AND window_ended_at = %s
+                      AND currency_code = %s
+                      AND source_payload_hash = %s
+                      AND spend_budget_contract_version = %s
+                    """,
+                    (
+                        budget.tenant_account_id,
+                        budget.billing_account_id,
+                        budget.window_started_at,
+                        budget.window_ended_at,
+                        budget.currency_code,
+                        budget.source_payload_hash,
+                        budget.spend_budget_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("spend budget identity conflicts with an existing row")
+            return self._fetch_spend_budget(cursor, UUID(str(row[0])))
+
+    def list_spend_budgets(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredSpendBudget, ...]:
+        """Return spend budgets limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT spend_budget_id
+                FROM billing_core.spend_budget
+                WHERE tenant_account_id = %s
+                ORDER BY published_at, spend_budget_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_spend_budget(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
     def find_journal_proposal_for_receipt(
         self,
         tenant_account_id: UUID,
@@ -4318,6 +4480,43 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(credit_adjustment_id)
         return self._credit_adjustment_from_row(row)
+
+    @staticmethod
+    def _spend_budget_from_row(row: tuple[Any, ...]) -> StoredSpendBudget:
+        """Decode one normalized published spend-budget row."""
+        return StoredSpendBudget(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            row[3],
+            row[4],
+            parse_exact_decimal(format_exact_decimal(row[5])),
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+            row[10],
+        )
+
+    def _fetch_spend_budget(
+        self, cursor: Any, spend_budget_id: UUID
+    ) -> StoredSpendBudget:
+        """Hydrate one published spend budget."""
+        cursor.execute(
+            """
+            SELECT spend_budget_id, tenant_account_id, billing_account_id,
+                   spend_budget_contract_version, currency_code, budget_amount,
+                   window_started_at, window_ended_at, source_payload_hash,
+                   published_at, spend_budget_status
+            FROM billing_core.spend_budget
+            WHERE spend_budget_id = %s
+            """,
+            (spend_budget_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(spend_budget_id)
+        return self._spend_budget_from_row(row)
 
     @staticmethod
     def _collection_write_off_from_row(row: tuple[Any, ...]) -> StoredCollectionWriteOff:

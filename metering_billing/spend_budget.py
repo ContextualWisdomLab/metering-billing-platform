@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -196,6 +197,27 @@ class SpendBudgetService:
         that publish does not enqueue a second row.  Rated-spend, rating,
         and invoice-draft rows are unchanged.
         """
+        boundary = getattr(self.ledger, "transaction", nullcontext)
+        with boundary():
+            return self._publish_spend_budget_in_boundary(
+                tenant_reference,
+                billing_account_id,
+                currency_code,
+                budget_amount,
+                time_window,
+                source_payload_hash,
+            )
+
+    def _publish_spend_budget_in_boundary(
+        self,
+        tenant_reference: str,
+        billing_account_id: UUID,
+        currency_code: str,
+        budget_amount: Any,
+        time_window: TimeWindow,
+        source_payload_hash: str | None,
+    ) -> SpendBudgetResult:
+        """Execute one publish and outbox enqueue inside the ledger boundary."""
         if not isinstance(tenant_reference, str) or not tenant_reference:
             return _rejected(SpendBudgetRejectionReasonCode.TENANT_NOT_FOUND)
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
@@ -291,10 +313,7 @@ def _enqueue_spend_budget_published(
 
 def _billing_account_for(ledger: MemoryUsageLedger, billing_account_id: UUID):
     """Return the stored billing account for one internal identifier, if any."""
-    for account in ledger.billing_accounts.values():
-        if account.billing_account_id == billing_account_id:
-            return account
-    return None
+    return ledger.get_billing_account(billing_account_id)
 
 
 def _rejected(reason: SpendBudgetRejectionReasonCode) -> SpendBudgetResult:
@@ -333,7 +352,7 @@ def _from_stored(
         budget_amount=stored.budget_amount,
         window_started_at=stored.window_started_at,
         window_ended_at=stored.window_ended_at,
-        spend_budget_status=SPEND_BUDGET_STATUS,
+        spend_budget_status=stored.spend_budget_status,
         source_payload_hash=stored.source_payload_hash,
         published_at=stored.published_at,
         next_operator_action=NEXT_OPERATOR_ACTION,

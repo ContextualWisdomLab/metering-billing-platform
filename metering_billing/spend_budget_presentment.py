@@ -176,7 +176,7 @@ class SpendBudgetPresentmentService:
             budget_amount=parse_invoice_amount(budget.budget_amount),
             window_started_at=budget.window_started_at,
             window_ended_at=budget.window_ended_at,
-            spend_budget_status="published",
+            spend_budget_status=budget.spend_budget_status,
             source_payload_hash=budget.source_payload_hash,
             published_at=budget.published_at,
             next_operator_action=next_operator_action(),

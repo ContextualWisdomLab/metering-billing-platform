@@ -272,7 +272,7 @@ class SpendBudgetEvaluationPresentmentService:
             utilization_status=utilization_status,
             window_started_at=budget.window_started_at,
             window_ended_at=budget.window_ended_at,
-            spend_budget_status="published",
+            spend_budget_status=budget.spend_budget_status,
             next_operator_action=next_operator_action(),
         )
 
@@ -281,10 +281,7 @@ def _billing_account_for(
     ledger: MemoryUsageLedger, billing_account_id: UUID
 ) -> BillingAccount | None:
     """Return the stored billing account for one internal identifier, if any."""
-    for account in ledger.billing_accounts.values():
-        if account.billing_account_id == billing_account_id:
-            return account
-    return None
+    return ledger.get_billing_account(billing_account_id)
 
 
 def _same_currency_rated_amount(products: tuple, currency_code: str) -> Decimal:

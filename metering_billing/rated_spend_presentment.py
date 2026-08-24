@@ -261,10 +261,7 @@ def _billing_account_for(
     ledger: MemoryUsageLedger, billing_account_id: UUID
 ) -> BillingAccount | None:
     """Return the stored billing account for one internal identifier, if any."""
-    for account in ledger.billing_accounts.values():
-        if account.billing_account_id == billing_account_id:
-            return account
-    return None
+    return ledger.get_billing_account(billing_account_id)
 
 
 def _exclusive_rated_amount(

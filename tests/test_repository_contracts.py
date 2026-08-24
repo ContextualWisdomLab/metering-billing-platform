@@ -1774,6 +1774,15 @@ class RepositoryContractTests(unittest.TestCase):
             "CHECK (window_ended_at > window_started_at)",
         ):
             self.assertIn(expected_fragment, sql)
+        status_sql = (ROOT / "database/migrations/0039_spend_budget_status.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ALTER TABLE billing_core.spend_budget",
+            "ADD COLUMN spend_budget_status",
+            "CHECK (spend_budget_status = 'published')",
+        ):
+            self.assertIn(expected_fragment, status_sql)
 
     def test_rate_card_presentment_accepts_lines_and_rejects_outcome(self) -> None:
         """A rate-card statement records exact unit prices and cannot claim a write outcome."""
