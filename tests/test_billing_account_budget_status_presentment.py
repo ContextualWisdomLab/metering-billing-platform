@@ -244,6 +244,23 @@ class BillingAccountBudgetStatusPresentmentTests(unittest.TestCase):
                 TENANT_ONE, account_id, cursor="not-a-cursor"
             )
         self.assertEqual(cursor.exception.rejection_reason_code, "request_invalid")
+        for invalid_cursor in (True, 1.5, b"2026-08-18T15:00:00Z|019d7001-0000-7000-8000-000000000001"):
+            with self.assertRaises(SpendBudgetEvaluationPresentmentQueryError) as typed:
+                service.list_billing_account_budget_statuses(
+                    TENANT_ONE, account_id, cursor=invalid_cursor
+                )
+            self.assertEqual(typed.exception.rejection_reason_code, "request_invalid")
+        with mock.patch(
+            "metering_billing.spend_budget_evaluation_presentment.parse_iso8601_datetime",
+            side_effect=TypeError("closed"),
+        ):
+            with self.assertRaises(SpendBudgetEvaluationPresentmentQueryError) as typed_parse:
+                service.list_billing_account_budget_statuses(
+                    TENANT_ONE,
+                    account_id,
+                    cursor="2026-08-18T14:00:00Z|019d7001-0000-7000-8000-000000000001",
+                )
+            self.assertEqual(typed_parse.exception.rejection_reason_code, "request_invalid")
 
     def test_omits_unknown_and_cross_tenant_budgets_without_leak(self) -> None:
         """Other-account and foreign-tenant budgets are omitted; empty account is 200."""

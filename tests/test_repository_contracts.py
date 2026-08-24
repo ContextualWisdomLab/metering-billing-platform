@@ -1748,6 +1748,12 @@ class RepositoryContractTests(unittest.TestCase):
             ),
             (),
         )
+        self.assertNotEqual(
+            validate_billing_account_budget_status_presentment(
+                {"budget_statuses": "nope", "next_cursor": None}
+            ),
+            (),
+        )
 
     def test_spend_budget_migration_is_tenant_scoped_and_append_only(self) -> None:
         """Spend-budget rows stay tenant-scoped and append-only."""

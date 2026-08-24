@@ -339,6 +339,8 @@ def _parse_page_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
     """Decode a keyset cursor or reject an unreadable token."""
     if cursor is None or cursor == "":
         return None
+    if not isinstance(cursor, str):
+        raise SpendBudgetEvaluationPresentmentQueryError("request_invalid")
     try:
         published_text, budget_text = cursor.split("|", 1)
         return parse_iso8601_datetime(published_text), UUID(budget_text)
