@@ -1840,7 +1840,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 window_started_at=MORNING_WINDOW.window_started_at,
                 window_ended_at=MORNING_WINDOW.window_ended_at,
                 source_payload_hash=crash_payload_hash,
-                published_at=published_at,
+                published_at=datetime(2026, 8, 18, 17, 0, tzinfo=UTC),
             )
         )
         prior_outbox = len(
