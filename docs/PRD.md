@@ -502,6 +502,12 @@ contextual-orchestrator usage
 - `GET /v1/spend-budgets/{spend_budget_id}/evaluation` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak. Missing tenant is HTTP 422. A stored budget whose billing account belongs to another commercial `tenant_account` is HTTP 403. Float money fails closed.
 - Operators inspect remaining, then wait. The read does not persist, mutate the budget, hard-stop rating, ingest, or invoice draft, emit a webhook or journal, call AIS, invent a statutory identifier, or add a VAT/NTS adapter. Atomic authorization and quotas remain a later slice.
 
+## Billing-account-budget-status acceptance
+
+- A known tenant and `billing_account_id` present every published commercial `spend_budget` on that same-tenant account using the same rated-spend plus exact remaining/over math as one-budget evaluation. Each row carries `spend_budget_id`, `currency_code`, exact `budget_amount`, `rated_amount`, `remaining_amount`, `over_amount`, `utilization_status` `under`/`at`/`over`, window instants, `spend_budget_status`, and `next_operator_action` (`wait`). Currencies are never mixed in one monetary total.
+- `GET /v1/billing-accounts/{billing_account_id}/budget-status` lists `{budget_statuses, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{published_at}|{spend_budget_id}`. Same-tenant is HTTP 200. Unknown billing account is HTTP 404. Cross-tenant account is HTTP 403. Missing tenant is HTTP 422. Unknown or cross-tenant budgets are omitted with no leak. Float money fails closed.
+- Operators inspect remaining, then wait. The read does not persist, mutate the budget, hard-stop rating, ingest, or invoice draft, emit a webhook or journal, call AIS, invent a statutory identifier, or add a VAT/NTS adapter. Atomic authorization and quotas remain a later slice. POST spend-budgets, one-budget evaluation GET, #24 outbox, and Storybook stay unchanged.
+
 ## Dunning-event-presentment acceptance
 
 - A known stored `collection_dunning_event` presents one tenant-scoped statement with `dunning_event_id`, `collection_case_id`, `dunning_event_number`, `dunning_notice_code`, `occurred_at`, and `next_operator_action` (`wait` when the parent case is settled, otherwise `collect`).

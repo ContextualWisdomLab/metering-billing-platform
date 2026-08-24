@@ -9,6 +9,8 @@ The service is a read path:
 5. Sum already-rated amounts in the budget currency only.
 6. Return exact remaining, over, and utilization.  Do not persist, hard-stop,
    post, or call AIS.
+7. List those evaluations for every published budget on one same-tenant
+   billing account as ``{budget_statuses, next_cursor}``.
 
 IFRS 15 treats a commercial budget as control evidence, not collected revenue
 (IFRS Foundation, 2024).  IAS 21 requires source currency to stay unmixed
@@ -34,13 +36,16 @@ from metering_billing.rated_spend_presentment import (
     GROUP_BY_PRODUCT,
     RatedSpendPresentmentService,
 )
-from metering_billing.time_window import TimeWindow
+from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
 from metering_billing.usage_ledger import BillingAccount, MemoryUsageLedger, StoredSpendBudget
 
 
 SPEND_BUDGET_EVALUATION_PRESENTMENT_CONTRACT_VERSION = 1
+DEFAULT_PAGE_LIMIT = 50
+MAXIMUM_PAGE_LIMIT = 100
 ZERO = Decimal("0")
 OPERATOR_ACTION_WAIT = "wait"
+OMITTED_BUDGET_REASONS = frozenset({"spend_budget_not_found"})
 UTILIZATION_UNDER = "under"
 UTILIZATION_AT = "at"
 UTILIZATION_OVER = "over"
@@ -88,6 +93,37 @@ class SpendBudgetEvaluationPresentmentResult:
             "window_ended_at": _format_instant(self.window_ended_at),
             "spend_budget_status": self.spend_budget_status,
             "next_operator_action": self.next_operator_action,
+        }
+
+    def as_budget_status_dict(self) -> dict[str, object]:
+        """Return the list-item envelope used by account-level budget-status GET."""
+        return {
+            "spend_budget_id": str(self.spend_budget_id),
+            "currency_code": self.currency_code,
+            "budget_amount": format_exact_decimal(self.budget_amount),
+            "rated_amount": format_exact_decimal(self.rated_amount),
+            "remaining_amount": format_exact_decimal(self.remaining_amount),
+            "over_amount": format_exact_decimal(self.over_amount),
+            "utilization_status": self.utilization_status,
+            "window_started_at": _format_instant(self.window_started_at),
+            "window_ended_at": _format_instant(self.window_ended_at),
+            "spend_budget_status": self.spend_budget_status,
+            "next_operator_action": self.next_operator_action,
+        }
+
+
+@dataclass(frozen=True)
+class BillingAccountBudgetStatusPage:
+    """One same-tenant page of published budget evaluations for one account."""
+
+    budget_statuses: tuple[SpendBudgetEvaluationPresentmentResult, ...]
+    next_cursor: str | None
+
+    def as_contract_dict(self) -> dict[str, object]:
+        """Return ``{budget_statuses, next_cursor}`` with per-budget rows."""
+        return {
+            "budget_statuses": [item.as_budget_status_dict() for item in self.budget_statuses],
+            "next_cursor": self.next_cursor,
         }
 
 
@@ -143,6 +179,64 @@ class SpendBudgetEvaluationPresentmentService:
             remaining_amount,
             over_amount,
             utilization_status,
+        )
+
+    def list_billing_account_budget_statuses(
+        self,
+        tenant_reference: str,
+        billing_account_id: UUID,
+        cursor: str | None = None,
+        page_limit: object | None = None,
+    ) -> BillingAccountBudgetStatusPage:
+        """Return one same-tenant page of published budget evaluations.
+
+        Unknown account is ``billing_account_not_found``.  A stored account
+        that belongs to another commercial ``tenant_account`` is
+        ``billing_account_forbidden``.  Unknown or cross-tenant budgets are
+        omitted with no leak.  The read does not persist or mutate budgets.
+        """
+        tenant = self._require_tenant(tenant_reference)
+        account = _billing_account_for(self.ledger, billing_account_id)
+        if account is None:
+            raise SpendBudgetEvaluationPresentmentQueryError("billing_account_not_found")
+        if account.tenant_account_id != tenant.tenant_account_id:
+            raise SpendBudgetEvaluationPresentmentQueryError("billing_account_forbidden")
+        cursor_key = _parse_page_cursor(cursor)
+        limit = _parse_page_limit(page_limit)
+        stored_rows = sorted(
+            (
+                budget
+                for budget in self.ledger.list_spend_budgets(tenant.tenant_account_id)
+                if budget.billing_account_id == account.billing_account_id
+                and budget.tenant_account_id == tenant.tenant_account_id
+            ),
+            key=lambda budget: (budget.published_at, budget.spend_budget_id),
+        )
+        matched: list[StoredSpendBudget] = []
+        for stored in stored_rows:
+            if cursor_key is not None and (stored.published_at, stored.spend_budget_id) <= cursor_key:
+                continue
+            matched.append(stored)
+        page_rows = matched[:limit]
+        next_cursor = None
+        if len(matched) > limit:
+            last = page_rows[-1]
+            next_cursor = _encode_page_cursor(last.published_at, last.spend_budget_id)
+        statuses: list[SpendBudgetEvaluationPresentmentResult] = []
+        for stored in page_rows:
+            try:
+                statuses.append(
+                    self.present_spend_budget_evaluation(
+                        tenant.tenant_reference, stored.spend_budget_id
+                    )
+                )
+            except SpendBudgetEvaluationPresentmentQueryError as error:
+                if error.rejection_reason_code in OMITTED_BUDGET_REASONS:
+                    continue
+                raise
+        return BillingAccountBudgetStatusPage(
+            budget_statuses=tuple(statuses),
+            next_cursor=next_cursor,
         )
 
     def _require_tenant(self, tenant_reference: str):
@@ -217,3 +311,36 @@ def _utilization(
 def _format_instant(instant: datetime) -> str:
     """Render one timezone-aware instant as ISO 8601 with a ``Z`` suffix."""
     return instant.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _parse_page_limit(page_limit: object | None) -> int:
+    """Bound page size to a positive integer no greater than the maximum."""
+    if page_limit is None or page_limit == "":
+        return DEFAULT_PAGE_LIMIT
+    if isinstance(page_limit, bool) or not isinstance(page_limit, (int, str)):
+        raise SpendBudgetEvaluationPresentmentQueryError("request_invalid")
+    if isinstance(page_limit, str):
+        if not page_limit.isdigit():
+            raise SpendBudgetEvaluationPresentmentQueryError("request_invalid")
+        parsed = int(page_limit)
+    else:
+        parsed = page_limit
+    if parsed < 1 or parsed > MAXIMUM_PAGE_LIMIT:
+        raise SpendBudgetEvaluationPresentmentQueryError("request_invalid")
+    return parsed
+
+
+def _encode_page_cursor(published_at: datetime, spend_budget_id: UUID) -> str:
+    """Encode the keyset cursor as published_at then spend_budget_id."""
+    return f"{_format_instant(published_at)}|{spend_budget_id}"
+
+
+def _parse_page_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
+    """Decode a keyset cursor or reject an unreadable token."""
+    if cursor is None or cursor == "":
+        return None
+    try:
+        published_text, budget_text = cursor.split("|", 1)
+        return parse_iso8601_datetime(published_text), UUID(budget_text)
+    except (TypeError, ValueError) as error:
+        raise SpendBudgetEvaluationPresentmentQueryError("request_invalid") from error
