@@ -112,6 +112,10 @@ import {
   SPEND_BUDGET_CUSTOMER_COPY,
   nextOperatorActionCopy as nextSpendBudgetActionCopy,
 } from "../src/spend_budget.js";
+import {
+  renderRatedSpend,
+  RATED_SPEND_CUSTOMER_COPY,
+} from "../src/rated_spend.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -757,6 +761,57 @@ test("published over budget shows complementary over amount and wait", () => {
   assert.ok(!("card_pan" in statement));
 });
 
+test("product-grouped morning rated spend shows exact amount and draft-invoice copy", () => {
+  const statement = loadFixture("rated_spend_morning_product.json");
+  const html = renderRatedSpend(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /contextual_orchestrator/);
+  assert.match(html, /oc-status-chip--due/);
+  assert.match(
+    html,
+    /Inspect rated product, project, credential, principal, or cost-center spend, then draft an invoice/,
+  );
+  assert.equal(
+    RATED_SPEND_CUSTOMER_COPY,
+    "Inspect rated product, project, credential, principal, or cost-center spend, then draft an invoice.",
+  );
+  assert.equal(statement.products[0].rated_amount, "0.003705");
+  assert.equal(typeof statement.products[0].rated_amount, "string");
+  assert.notEqual(typeof statement.products[0].rated_amount, "number");
+  assert.ok(!("project_reference" in statement.products[0]));
+  assert.ok(!("group_by" in statement));
+  assert.ok(!("next_operator_action" in statement));
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.products[0].rated_amount,
+    currency_code: statement.products[0].currency_code,
+  }), /0\.003705 USD/);
+  assert.match(renderStatusChip({
+    amount_due: statement.products[0].rated_amount,
+    status_label: statement.products[0].product_code,
+  }), /oc-status-chip--due/);
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+  assert.ok(!("statutory_account_id" in statement));
+  assert.ok(!("journal_entry_id" in statement));
+});
+
+test("project-grouped morning rated spend keeps the stored project URN unmixed", () => {
+  const statement = loadFixture("rated_spend_morning_project.json");
+  const html = renderRatedSpend(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /urn:cwl:tenant_001:project:metering/);
+  assert.match(html, /contextual_orchestrator/);
+  assert.equal(statement.products[0].project_reference, "urn:cwl:tenant_001:project:metering");
+  assert.equal(statement.products[0].rated_amount, "0.003705");
+  assert.equal(typeof statement.products[0].rated_amount, "string");
+  assert.ok(!("group_by" in statement));
+  assert.ok(!("next_operator_action" in statement));
+  assert.ok(!("credential_reference" in statement.products[0]));
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.ok(!("card_pan" in statement));
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -855,6 +910,13 @@ test("float money fails closed", () => {
         remaining_amount: "99.996295",
         over_amount: "0",
         utilization_status: "unknown",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderRatedSpend({
+        products: [{ currency_code: "USD", product_code: "contextual_orchestrator", rated_amount: 0.003705 }],
       }),
     TypeError,
   );

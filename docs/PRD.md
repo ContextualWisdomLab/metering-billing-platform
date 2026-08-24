@@ -484,6 +484,7 @@ contextual-orchestrator usage
 - Money is attributed only through rating or invoice-draft lines exclusive to that billing account. Mixed-account and lineless drafts are omitted.
 - `GET /v1/billing-accounts/{billing_account_id}/rated-spend?window_started_at=&window_ended_at=&group_by=product|project|credential|principal|cost_center` is HTTP 200 for the same tenant. Omitting `group_by` keeps product rows. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Missing tenant, an illegal window, or unknown `group_by` is HTTP 422.
 - Operators inspect rated product, project, credential, principal, or cost-center spend, then draft an invoice. HTTP presentment does not capture cards, write money, or call AIS.
+- `operator_console` Storybook renders those exact-decimal product and project rows with tokenized amount due, status chip, and tenant pin. Fixtures are one product-grouped morning window and one project-grouped window. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Spend-budget acceptance
 

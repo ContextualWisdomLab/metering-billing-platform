@@ -1,0 +1,16 @@
+{
+  "rated_spend_presentment_contract_version": 1,
+  "tenant_reference": "urn:cwl:tenant_001",
+  "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+  "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+  "window_started_at": "2026-08-16T10:00:00Z",
+  "window_ended_at": "2026-08-16T11:00:00Z",
+  "products": [
+    {
+      "currency_code": "USD",
+      "product_code": "contextual_orchestrator",
+      "project_reference": "urn:cwl:tenant_001:project:metering",
+      "rated_amount": "0.003705"
+    }
+  ]
+}
