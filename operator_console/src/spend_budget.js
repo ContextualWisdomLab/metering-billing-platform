@@ -109,17 +109,19 @@ function requireUtilizationStatus(utilizationStatus) {
 /**
  * Map utilization onto the existing StatusChip tokens.
  *
+ * Remaining is not used as amount_due for `under`: a healthy leftover would
+ * otherwise paint as due. Under and at share settled. Only over uses due.
+ *
  * @param {"under" | "at" | "over"} utilizationStatus
  * @param {string} remainingAmount
  * @param {string} overAmount
- * @returns {{ amount_due: string, tax_amount?: string, status_label: string }}
+ * @returns {{ amount_due: string, status_label: string }}
  */
 function utilizationChipStatement(utilizationStatus, remainingAmount, overAmount) {
   switch (utilizationStatus) {
     case "under":
       return {
-        amount_due: remainingAmount,
-        tax_amount: "0",
+        amount_due: "0",
         status_label: "under",
       };
     case "at":

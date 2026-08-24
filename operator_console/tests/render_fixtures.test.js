@@ -684,6 +684,7 @@ test("published under budget shows remaining and wait", () => {
   assert.match(html, /100\.00 USD/);
   assert.match(html, /0\.003705 USD/);
   assert.match(html, />Wait</);
+  assert.match(html, /oc-status-chip--settled/);
   assert.match(html, /under/);
   assert.match(html, /Publish a commercial spend budget, then wait/);
   assert.equal(
@@ -706,10 +707,9 @@ test("published under budget shows remaining and wait", () => {
     currency_code: statement.currency_code,
   }), /99\.996295 USD/);
   assert.match(renderStatusChip({
-    amount_due: statement.remaining_amount,
-    tax_amount: "0",
+    amount_due: "0",
     status_label: statement.utilization_status,
-  }), /under/);
+  }), /oc-status-chip--settled/);
   assert.ok(!("card_pan" in statement));
   assert.ok(!("retained_earnings" in statement));
   assert.ok(!("statutory_account_id" in statement));
@@ -721,6 +721,7 @@ test("published at budget shows exact-zero remaining and wait", () => {
   const html = renderSpendBudget(statement);
   assert.match(html, /0\.003705 USD/);
   assert.match(html, />Wait</);
+  assert.match(html, /oc-status-chip--settled/);
   assert.match(html, /at/);
   assert.equal(statement.utilization_status, "at");
   assert.equal(statement.remaining_amount, "0");
@@ -731,7 +732,7 @@ test("published at budget shows exact-zero remaining and wait", () => {
   assert.match(renderStatusChip({
     amount_due: statement.remaining_amount,
     status_label: statement.utilization_status,
-  }), /at/);
+  }), /oc-status-chip--settled/);
   assert.ok(!("card_pan" in statement));
 });
 
@@ -741,6 +742,7 @@ test("published over budget shows complementary over amount and wait", () => {
   assert.match(html, /0\.002705 USD/);
   assert.match(html, /0\.001 USD/);
   assert.match(html, />Wait</);
+  assert.match(html, /oc-status-chip--due/);
   assert.match(html, /over/);
   assert.equal(statement.utilization_status, "over");
   assert.equal(statement.remaining_amount, "0");
@@ -751,7 +753,7 @@ test("published over budget shows complementary over amount and wait", () => {
   assert.match(renderStatusChip({
     amount_due: statement.over_amount,
     status_label: statement.utilization_status,
-  }), /over/);
+  }), /oc-status-chip--due/);
   assert.ok(!("card_pan" in statement));
 });
 
