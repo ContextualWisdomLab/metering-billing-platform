@@ -27,6 +27,7 @@ from metering_billing.contracts import (
     validate_credit_note_application_presentment,
     validate_collection_case_settlement_presentment,
     validate_account_statement_presentment,
+    validate_spend_budget_evaluation_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -104,6 +105,17 @@ COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES = ("settled_morning_zero.json",)
 ACCOUNT_STATEMENT_FIXTURE_NAMES = (
     "settled_account_statement.json",
     "voided_account_statement.json",
+)
+SPEND_BUDGET_FIXTURE_NAMES = (
+    "published_under_budget.json",
+    "published_at_budget.json",
+    "published_over_budget.json",
+)
+SPEND_BUDGET_MONEY_FIELDS = (
+    "budget_amount",
+    "rated_amount",
+    "remaining_amount",
+    "over_amount",
 )
 ACCOUNT_STATEMENT_MONEY_FIELDS = (
     "issued_invoice_total",
@@ -421,6 +433,38 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertEqual(voided_account["currencies"][0]["voided_invoice_total"], "110.00")
         self.assertEqual(voided_account["currencies"][0]["voided_credit_total"], "11.00")
         self.assertEqual(voided_account["currencies"][0]["applied_credit_total"], "0")
+        for fixture_name in SPEND_BUDGET_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_spend_budget_evaluation_presentment(payload), ())
+            for field_name in SPEND_BUDGET_MONEY_FIELDS:
+                value = payload[field_name]
+                self.assertIsInstance(value, str)
+                self.assertNotIsInstance(value, float)
+                parse_exact_decimal(value)
+            self.assertEqual(payload["spend_budget_status"], "published")
+            self.assertEqual(payload["next_operator_action"], "wait")
+            self.assertIn(payload["utilization_status"], {"under", "at", "over"})
+            self.assertEqual(payload["tenant_reference"], "urn:cwl:tenant_001")
+            self.assertNotIn("card_pan", payload)
+            self.assertNotIn("retained_earnings", payload)
+            self.assertNotIn("statutory_account_id", payload)
+            self.assertNotIn("journal_entry_id", payload)
+        under_budget = self._fixture("published_under_budget.json")
+        self.assertEqual(under_budget["budget_amount"], "100.00")
+        self.assertEqual(under_budget["rated_amount"], "0.003705")
+        self.assertEqual(under_budget["remaining_amount"], "99.996295")
+        self.assertEqual(under_budget["over_amount"], "0")
+        self.assertEqual(under_budget["utilization_status"], "under")
+        at_budget = self._fixture("published_at_budget.json")
+        self.assertEqual(at_budget["budget_amount"], "0.003705")
+        self.assertEqual(at_budget["remaining_amount"], "0")
+        self.assertEqual(at_budget["over_amount"], "0")
+        self.assertEqual(at_budget["utilization_status"], "at")
+        over_budget = self._fixture("published_over_budget.json")
+        self.assertEqual(over_budget["budget_amount"], "0.001")
+        self.assertEqual(over_budget["over_amount"], "0.002705")
+        self.assertEqual(over_budget["remaining_amount"], "0")
+        self.assertEqual(over_budget["utilization_status"], "over")
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -463,6 +507,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "CreditNoteApplication",
             "CollectionCaseSettlement",
             "AccountStatement",
+            "SpendBudget",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -485,6 +530,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + CREDIT_NOTE_APPLICATION_FIXTURE_NAMES
             + COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES
             + ACCOUNT_STATEMENT_FIXTURE_NAMES
+            + SPEND_BUDGET_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -526,6 +572,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "Open the account statement, then collect, credit, park, apply, or refund",
             inventory,
         )
+        self.assertIn("Publish a commercial spend budget, then wait", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""
