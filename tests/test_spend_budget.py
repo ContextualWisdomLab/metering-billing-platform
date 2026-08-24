@@ -683,6 +683,13 @@ class SpendBudgetTests(unittest.TestCase):
             replace(stored, spend_budget_id=generate_record_id())
         )
         self.assertEqual(identity_replay.spend_budget_id, stored.spend_budget_id)
+        with mock.patch.object(ledger, "find_spend_budget", return_value=None):
+            raced = SpendBudgetService(ledger, clock=lambda: AS_OF).publish_spend_budget(
+                TENANT_ONE, billing_account_id, "USD", BUDGET_AMOUNT, MORNING_WINDOW
+            )
+        self.assertEqual(raced.spend_budget_outcome_code, SpendBudgetOutcomeCode.DUPLICATE_REPLAY)
+        self.assertEqual(raced.spend_budget_id, stored.spend_budget_id)
+        self.assertEqual(len(ledger.spend_budgets), 1)
         reused = replace(
             stored,
             currency_code="EUR",

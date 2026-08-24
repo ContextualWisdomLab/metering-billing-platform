@@ -269,21 +269,25 @@ class SpendBudgetService:
             )
             _enqueue_spend_budget_published(self.ledger, tenant.tenant_reference, result)
             return result
-        stored = self.ledger.insert_spend_budget(
-            StoredSpendBudget(
-                spend_budget_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                billing_account_id=account.billing_account_id,
-                spend_budget_contract_version=SPEND_BUDGET_CONTRACT_VERSION,
-                currency_code=currency_code,
-                budget_amount=parsed_amount,
-                window_started_at=started,
-                window_ended_at=ended,
-                source_payload_hash=computed_hash,
-                published_at=self._clock(),
-            )
+        candidate = StoredSpendBudget(
+            spend_budget_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            billing_account_id=account.billing_account_id,
+            spend_budget_contract_version=SPEND_BUDGET_CONTRACT_VERSION,
+            currency_code=currency_code,
+            budget_amount=parsed_amount,
+            window_started_at=started,
+            window_ended_at=ended,
+            source_payload_hash=computed_hash,
+            published_at=self._clock(),
         )
-        result = _from_stored(stored, tenant.tenant_reference, SpendBudgetOutcomeCode.ACCEPTED)
+        stored = self.ledger.insert_spend_budget(candidate)
+        outcome = (
+            SpendBudgetOutcomeCode.ACCEPTED
+            if stored.spend_budget_id == candidate.spend_budget_id
+            else SpendBudgetOutcomeCode.DUPLICATE_REPLAY
+        )
+        result = _from_stored(stored, tenant.tenant_reference, outcome)
         _enqueue_spend_budget_published(self.ledger, tenant.tenant_reference, result)
         return result
 
