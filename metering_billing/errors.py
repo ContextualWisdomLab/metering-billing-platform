@@ -766,6 +766,7 @@ class JournalProposalRejectionReasonCode(StrEnum):
     CREDIT_JOURNAL_NOT_FOUND = "credit_journal_not_found"
     CREDIT_NOTE_ALREADY_APPLIED = "credit_note_already_applied"
     VOIDED_AMOUNT_INVALID = "voided_amount_invalid"
+    JOURNAL_LINE_AMOUNT_INVALID = "journal_line_amount_invalid"
     CURRENCY_MISMATCH = "currency_mismatch"
 
 
@@ -961,6 +962,10 @@ class PaymentSettlementRejectionReasonCode(StrEnum):
 
 class ExactDecimalError(ValueError):
     """Raised when a quantity cannot be treated as an exact non-negative decimal."""
+
+
+class JournalLineAmountScaleError(ValueError):
+    """Raised when a journal line cannot be represented with six fractional digits."""
 
 
 class TimeWindowError(ValueError):

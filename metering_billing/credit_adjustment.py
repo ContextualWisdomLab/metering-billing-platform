@@ -43,8 +43,12 @@ from metering_billing.errors import (
     CreditAdjustmentQueryError,
     CreditAdjustmentRejectionReasonCode,
     ExactDecimalError,
+    JournalLineAmountScaleError,
 )
-from metering_billing.exact_decimal import format_exact_decimal
+from metering_billing.exact_decimal import (
+    format_exact_decimal,
+    require_postable_journal_line_amounts,
+)
 from metering_billing.invoice_draft import parse_invoice_amount
 from metering_billing.tax_assessment import CurrencyExponentError, round_tax_amount
 from metering_billing.usage_ledger import (
@@ -289,6 +293,12 @@ class CreditAdjustmentService:
             )
         except CreditSplitError:
             return _rejected(CreditAdjustmentRejectionReasonCode.TAX_SPLIT_INVALID)
+        try:
+            require_postable_journal_line_amounts(
+                parsed_amount, tax_exclusive_amount, tax_amount
+            )
+        except JournalLineAmountScaleError:
+            return _rejected(CreditAdjustmentRejectionReasonCode.CREDIT_AMOUNT_INVALID)
 
         source_payload_hash = compute_credit_payload_hash(
             _canonical_credit_snapshot(
@@ -602,6 +612,7 @@ def _insert_credit_journal(
     exclusive = parse_proposal_amount(credit.tax_exclusive_amount)
     tax_amount = parse_proposal_amount(credit.tax_amount)
     inclusive = parse_proposal_amount(credit.credit_amount)
+    require_postable_journal_line_amounts(exclusive, tax_amount, inclusive)
     journal_proposal_id = generate_record_id()
     source_payload_hash = _credit_journal_hash(tenant_reference, credit)
     commercial_date = credit.recorded_at.astimezone(UTC).date().isoformat()

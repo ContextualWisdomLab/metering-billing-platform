@@ -13,9 +13,13 @@ import re
 from decimal import Decimal
 from typing import Any
 
-from metering_billing.errors import ExactDecimalError
+from metering_billing.errors import ExactDecimalError, JournalLineAmountScaleError
 
 QUANTITY_PATTERN = re.compile(r"^(0|[1-9][0-9]*)(\.[0-9]+)?$")
+JOURNAL_LINE_AMOUNT_QUANTUM = Decimal("0.000001")
+JOURNAL_LINE_AMOUNT_SCALE_ERROR = (
+    "journal proposal line amounts cannot exceed six fractional digits"
+)
 
 
 def parse_exact_decimal(quantity_text: str) -> Decimal:
@@ -49,3 +53,22 @@ def require_decimal_quantity(value: Any) -> Decimal:
     if isinstance(value, Decimal):
         return parse_exact_decimal(format_exact_decimal(value))
     return parse_exact_decimal(value)
+
+
+def journal_line_amount_exceeds_postable_scale(amount: Decimal) -> bool:
+    """Return True when *amount* cannot be represented with six fractional digits.
+
+    The stored Exact Decimal is not quantized.  Trailing zeros that do not
+    change the value remain postable because AIS ``numeric(38, 6)`` can hold
+    them without rounding.  A non-zero digit beyond six places fails closed.
+    """
+    if amount.is_nan() or amount.is_infinite():
+        return True
+    return amount != amount.quantize(JOURNAL_LINE_AMOUNT_QUANTUM)
+
+
+def require_postable_journal_line_amounts(*amounts: Decimal) -> None:
+    """Fail closed when any journal-line amount exceeds six fractional digits."""
+    for amount in amounts:
+        if journal_line_amount_exceeds_postable_scale(amount):
+            raise JournalLineAmountScaleError(JOURNAL_LINE_AMOUNT_SCALE_ERROR)

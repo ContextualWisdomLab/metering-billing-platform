@@ -23,7 +23,7 @@
 - `issued_invoice_line`: append-only commercial line frozen from one invoice-draft line.
 - `issued_invoice_void`: append-only commercial void of one unused issued invoice. Identity is `(tenant_account_id, issued_invoice_id)`. `issued_invoice_void_id` is the opaque generated identifier, not a statutory number.
 - `journal_proposal`: append-only balanced accounting-journal proposal for one tenant invoice draft, payment receipt, credit adjustment, collection write-off, leftover refund, leftover apply, issued-invoice void, or issued-credit-note void. AIS pulls these rows; query does not add a second table.
-- `journal_proposal_line`: append-only debit-or-credit line using a semantic account role.
+- `journal_proposal_line`: append-only debit-or-credit line using a semantic account role. Amounts are Exact Decimal. Compose and insert fail closed when a debit or credit cannot be represented with six fractional digits without changing the value; trailing zeros that do not change the value remain postable.
 - `collection_case`: commercial collection case for one tenant invoice draft; receipts update outstanding and may mark the case settled; an unused issued-invoice void may mark the case `voided`.
 - `collection_dunning_event`: append-only commercial reminder that does not capture money.
 - `payment_intent`: provider-neutral payment initiation projection for one collection case; cancellation updates current status.

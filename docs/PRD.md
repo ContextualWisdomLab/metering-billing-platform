@@ -80,7 +80,7 @@ contextual-orchestrator usage
 - A known invoice draft produces one balanced exact-decimal `accounting_journal_proposal` whose debit total equals its credit total.
 - A second propose of the same tenant, `invoice_draft_id`, source-payload hash, and contract version returns the same `proposal_id`.
 - Another tenant cannot see or propose from the first tenant's draft.
-- Missing drafts, zero draft totals, float money, and unbalanced lines fail closed.
+- Missing drafts, zero draft totals, float money, unbalanced lines, and debit or credit amounts with more than six significant fractional digits fail closed. Do not round those amounts into `numeric(38, 6)`.
 - Status stays inside the proposal lifecycle and is never `posted`. Operators hand the proposal to AIS.
 
 ## Collection-case acceptance

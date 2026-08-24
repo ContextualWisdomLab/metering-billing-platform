@@ -46,7 +46,7 @@ The billing platform emits `accounting_journal_proposal` with:
 - legal-entity and intended-book references;
 - transaction date, accounting date, transaction currency, and source amounts;
 - semantic account roles rather than chart-account IDs;
-- balanced debit and credit lines in the proposal currency;
+- balanced debit and credit lines in the proposal currency whose amounts AIS can post without rounding (no more than six significant fractional digits);
 - billing, invoice, payment, refund, fee, or settlement evidence;
 - an idempotency key, contract version, and payload hash.
 

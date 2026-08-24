@@ -30,12 +30,17 @@ from uuid import UUID
 
 from metering_billing.errors import (
     ExactDecimalError,
+    JournalLineAmountScaleError,
     JournalProposalOutcomeCode,
     JournalProposalQueryError,
     JournalProposalRejectionReasonCode,
     require_resolved,
 )
-from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
+from metering_billing.exact_decimal import (
+    format_exact_decimal,
+    parse_exact_decimal,
+    require_postable_journal_line_amounts,
+)
 from metering_billing.time_window import parse_iso8601_datetime
 from metering_billing.unapplied_cash import UNAPPLIED_CASH_STATUS
 from metering_billing.usage_ledger import (
@@ -216,6 +221,30 @@ class AccountingExportService:
         self.ledger = MemoryUsageLedger() if ledger is None else ledger
         self._clock: Clock = clock if clock is not None else (lambda: datetime.now(UTC))
 
+    def _insert_accepted_proposal(
+        self,
+        journal_proposal: StoredJournalProposal,
+        proposal_lines: tuple[StoredJournalProposalLine, ...],
+        tenant_reference: str,
+        project: Callable[..., JournalProposalResult] | None = None,
+    ) -> JournalProposalResult:
+        """Persist one validated proposal or fail closed before AIS can pull it."""
+        rejected = _reject_unpostable_journal_lines(proposal_lines)
+        if rejected is not None:
+            return rejected
+        persisted = self.ledger.insert_journal_proposal(journal_proposal, proposal_lines)
+        projector = _from_stored if project is None else project
+        result = projector(persisted, tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
+        enqueue_accepted_fact(
+            self.ledger,
+            tenant_reference,
+            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            persisted.journal_proposal_id,
+            result.as_contract_dict(),
+            persisted.proposed_at,
+        )
+        return result
+
     def propose_journal(
         self, tenant_reference: str, invoice_draft_id: UUID
     ) -> JournalProposalResult:
@@ -273,7 +302,7 @@ class AccountingExportService:
             drafted_total_amount,
             assessment,
         )
-        stored = self.ledger.insert_journal_proposal(
+        return self._insert_accepted_proposal(
             StoredJournalProposal(
                 journal_proposal_id=journal_proposal_id,
                 tenant_account_id=tenant.tenant_account_id,
@@ -295,17 +324,8 @@ class AccountingExportService:
                 proposal_lines=stored_lines,
             ),
             stored_lines,
-        )
-        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
-        enqueue_accepted_fact(
-            self.ledger,
             tenant.tenant_reference,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            stored.journal_proposal_id,
-            result.as_contract_dict(),
-            stored.proposed_at,
         )
-        return result
 
     def propose_cash_journal(
         self, tenant_reference: str, payment_receipt_id: UUID
@@ -372,7 +392,7 @@ class AccountingExportService:
             tenant.tenant_account_id,
             received_amount,
         )
-        stored = self.ledger.insert_journal_proposal(
+        return self._insert_accepted_proposal(
             StoredJournalProposal(
                 journal_proposal_id=journal_proposal_id,
                 tenant_account_id=tenant.tenant_account_id,
@@ -395,17 +415,8 @@ class AccountingExportService:
                 payment_receipt_id=payment_receipt.payment_receipt_id,
             ),
             stored_lines,
-        )
-        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
-        enqueue_accepted_fact(
-            self.ledger,
             tenant.tenant_reference,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            stored.journal_proposal_id,
-            result.as_contract_dict(),
-            stored.proposed_at,
         )
-        return result
 
     def propose_write_off_journal(
         self,
@@ -466,7 +477,7 @@ class AccountingExportService:
             tenant.tenant_account_id,
             write_off_amount,
         )
-        stored = self.ledger.insert_journal_proposal(
+        return self._insert_accepted_proposal(
             StoredJournalProposal(
                 journal_proposal_id=journal_proposal_id,
                 tenant_account_id=tenant.tenant_account_id,
@@ -490,17 +501,8 @@ class AccountingExportService:
                 collection_write_off_id=write_off.collection_write_off_id,
             ),
             stored_lines,
-        )
-        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
-        enqueue_accepted_fact(
-            self.ledger,
             tenant.tenant_reference,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            stored.journal_proposal_id,
-            result.as_contract_dict(),
-            stored.proposed_at,
         )
-        return result
 
     def propose_refund_journal(
         self,
@@ -567,7 +569,7 @@ class AccountingExportService:
             tenant.tenant_account_id,
             refund_amount,
         )
-        stored = self.ledger.insert_journal_proposal(
+        return self._insert_accepted_proposal(
             StoredJournalProposal(
                 journal_proposal_id=journal_proposal_id,
                 tenant_account_id=tenant.tenant_account_id,
@@ -591,17 +593,8 @@ class AccountingExportService:
                 unapplied_cash_refund_id=refund.unapplied_cash_refund_id,
             ),
             stored_lines,
-        )
-        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
-        enqueue_accepted_fact(
-            self.ledger,
             tenant.tenant_reference,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            stored.journal_proposal_id,
-            result.as_contract_dict(),
-            stored.proposed_at,
         )
-        return result
 
     def propose_unapplied_cash_journal(
         self,
@@ -671,7 +664,7 @@ class AccountingExportService:
             tenant.tenant_account_id,
             leftover_amount,
         )
-        stored = self.ledger.insert_journal_proposal(
+        return self._insert_accepted_proposal(
             StoredJournalProposal(
                 journal_proposal_id=journal_proposal_id,
                 tenant_account_id=tenant.tenant_account_id,
@@ -695,17 +688,8 @@ class AccountingExportService:
                 unapplied_cash_id=leftover.unapplied_cash_id,
             ),
             stored_lines,
-        )
-        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
-        enqueue_accepted_fact(
-            self.ledger,
             tenant.tenant_reference,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            stored.journal_proposal_id,
-            result.as_contract_dict(),
-            stored.proposed_at,
         )
-        return result
 
     def propose_unapplied_cash_application_journal(
         self,
@@ -768,7 +752,7 @@ class AccountingExportService:
             tenant.tenant_account_id,
             applied_amount,
         )
-        stored = self.ledger.insert_journal_proposal(
+        return self._insert_accepted_proposal(
             StoredJournalProposal(
                 journal_proposal_id=journal_proposal_id,
                 tenant_account_id=tenant.tenant_account_id,
@@ -792,17 +776,8 @@ class AccountingExportService:
                 unapplied_cash_application_id=application.unapplied_cash_application_id,
             ),
             stored_lines,
-        )
-        result = _from_stored(stored, tenant.tenant_reference, JournalProposalOutcomeCode.ACCEPTED)
-        enqueue_accepted_fact(
-            self.ledger,
             tenant.tenant_reference,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            stored.journal_proposal_id,
-            result.as_contract_dict(),
-            stored.proposed_at,
         )
-        return result
 
     def propose_credit_journal(
         self,
@@ -847,6 +822,9 @@ class AccountingExportService:
             return _rejected(JournalProposalRejectionReasonCode.CREDIT_AMOUNT_INVALID)
         if credit_amount <= 0 or exclusive_amount + tax_amount != credit_amount:
             return _rejected(JournalProposalRejectionReasonCode.CREDIT_AMOUNT_INVALID)
+        rejected = _reject_unpostable_amounts(credit_amount, exclusive_amount, tax_amount)
+        if rejected is not None:
+            return rejected
 
         # Circular: CreditAdjustmentService imports this module to enqueue
         # journal_proposal.validated.  Reuse the existing credit-journal insert
@@ -952,7 +930,7 @@ class AccountingExportService:
             tax_amount,
             inclusive_amount,
         )
-        stored = self.ledger.insert_journal_proposal(
+        return self._insert_accepted_proposal(
             StoredJournalProposal(
                 journal_proposal_id=journal_proposal_id,
                 tenant_account_id=tenant.tenant_account_id,
@@ -977,22 +955,11 @@ class AccountingExportService:
                 issued_invoice_void_id=void_row.issued_invoice_void_id,
             ),
             stored_lines,
-        )
-        result = _void_result_from_stored(
-            stored,
             tenant.tenant_reference,
-            JournalProposalOutcomeCode.ACCEPTED,
-            self.ledger,
+            project=lambda persisted, tenant_reference, outcome: _void_result_from_stored(
+                persisted, tenant_reference, outcome, self.ledger
+            ),
         )
-        enqueue_accepted_fact(
-            self.ledger,
-            tenant.tenant_reference,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            stored.journal_proposal_id,
-            result.as_contract_dict(),
-            stored.proposed_at,
-        )
-        return result
 
     def propose_credit_note_void_journal(
         self,
@@ -1085,7 +1052,7 @@ class AccountingExportService:
             tax_amount,
             inclusive_amount,
         )
-        stored = self.ledger.insert_journal_proposal(
+        return self._insert_accepted_proposal(
             StoredJournalProposal(
                 journal_proposal_id=journal_proposal_id,
                 tenant_account_id=tenant.tenant_account_id,
@@ -1110,22 +1077,13 @@ class AccountingExportService:
                 issued_credit_note_void_id=void_row.issued_credit_note_void_id,
             ),
             stored_lines,
-        )
-        result = _credit_note_void_result_from_stored(
-            stored,
             tenant.tenant_reference,
-            JournalProposalOutcomeCode.ACCEPTED,
-            self.ledger,
+            project=lambda persisted, tenant_reference, outcome: (
+                _credit_note_void_result_from_stored(
+                    persisted, tenant_reference, outcome, self.ledger
+                )
+            ),
         )
-        enqueue_accepted_fact(
-            self.ledger,
-            tenant.tenant_reference,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            stored.journal_proposal_id,
-            result.as_contract_dict(),
-            stored.proposed_at,
-        )
-        return result
 
     def list_journal_proposals(
         self,
@@ -1934,6 +1892,26 @@ def _build_proposal_lines(
             )
         )
     return tuple(lines)
+
+
+def _reject_unpostable_amounts(*amounts: Decimal) -> JournalProposalResult | None:
+    """Return a rejected proposal when any amount exceeds six fractional digits."""
+    try:
+        require_postable_journal_line_amounts(*amounts)
+    except JournalLineAmountScaleError:
+        return _rejected(JournalProposalRejectionReasonCode.JOURNAL_LINE_AMOUNT_INVALID)
+    return None
+
+
+def _reject_unpostable_journal_lines(
+    lines: tuple[StoredJournalProposalLine, ...],
+) -> JournalProposalResult | None:
+    """Return a rejected proposal when any composed line exceeds AIS scale."""
+    amounts: list[Decimal] = []
+    for line in lines:
+        amounts.append(line.debit_amount)
+        amounts.append(line.credit_amount)
+    return _reject_unpostable_amounts(*amounts)
 
 
 def _rejected(reason_code: JournalProposalRejectionReasonCode) -> JournalProposalResult:
