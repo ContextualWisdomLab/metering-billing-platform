@@ -940,6 +940,14 @@ class SpendBudgetPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class SpendBudgetEvaluationPresentmentQueryError(ValueError):
+    """Raised when a spend-budget evaluation cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class PaymentSettlementRejectionReasonCode(StrEnum):
     """Why a settlement request was refused without capturing money or posting."""
 
