@@ -29,6 +29,7 @@ from metering_billing.contracts import (
     validate_account_statement_presentment,
     validate_spend_budget_evaluation_presentment,
     validate_rated_spend_presentment,
+    validate_billing_account_budget_status_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -115,6 +116,10 @@ SPEND_BUDGET_FIXTURE_NAMES = (
 RATED_SPEND_FIXTURE_NAMES = (
     "rated_spend_morning_product.json",
     "rated_spend_morning_project.json",
+)
+BUDGET_STATUS_FIXTURE_NAMES = (
+    "account_budget_status_under_over.json",
+    "account_budget_status_next_cursor.json",
 )
 SPEND_BUDGET_MONEY_FIELDS = (
     "budget_amount",
@@ -502,6 +507,45 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertEqual(project_spend["products"][0]["product_code"], "contextual_orchestrator")
         self.assertEqual(project_spend["products"][0]["project_reference"], "urn:cwl:tenant_001:project:metering")
         self.assertEqual(project_spend["products"][0]["rated_amount"], "0.003705")
+        for fixture_name in BUDGET_STATUS_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_billing_account_budget_status_presentment(payload), ())
+            self.assertEqual(set(payload), {"budget_statuses", "next_cursor"})
+            self.assertNotIn("tenant_reference", payload)
+            self.assertNotIn("items", payload)
+            self.assertNotIn("cursor", payload)
+            self.assertNotIn("rated_amount", payload)
+            self.assertNotIn("card_pan", payload)
+            self.assertNotIn("retained_earnings", payload)
+            self.assertNotIn("statutory_account_id", payload)
+            self.assertNotIn("journal_entry_id", payload)
+            currencies = {row["currency_code"] for row in payload["budget_statuses"]}
+            self.assertEqual(currencies, {"USD"})
+            for row in payload["budget_statuses"]:
+                for field_name in SPEND_BUDGET_MONEY_FIELDS:
+                    value = row[field_name]
+                    self.assertIsInstance(value, str)
+                    self.assertNotIsInstance(value, float)
+                    parse_exact_decimal(value)
+                self.assertEqual(row["spend_budget_status"], "published")
+                self.assertEqual(row["next_operator_action"], "wait")
+                self.assertIn(row["utilization_status"], {"under", "at", "over"})
+        under_over = self._fixture("account_budget_status_under_over.json")
+        self.assertEqual(under_over["next_cursor"], None)
+        self.assertEqual(
+            [row["utilization_status"] for row in under_over["budget_statuses"]],
+            ["under", "at", "over"],
+        )
+        self.assertEqual(under_over["budget_statuses"][0]["remaining_amount"], "99.996295")
+        self.assertEqual(under_over["budget_statuses"][2]["over_amount"], "0.002705")
+        next_page = self._fixture("account_budget_status_next_cursor.json")
+        self.assertEqual(
+            next_page["next_cursor"],
+            "2026-08-18T15:00:00Z|019d7b92-1aa0-7a7f-b61c-962c0f4bfe02",
+        )
+        self.assertEqual(len(next_page["budget_statuses"]), 2)
+        self.assertEqual(next_page["budget_statuses"][0]["utilization_status"], "under")
+        self.assertEqual(next_page["budget_statuses"][1]["utilization_status"], "at")
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -546,6 +590,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "AccountStatement",
             "SpendBudget",
             "RatedSpend",
+            "BudgetStatus",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -570,6 +615,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + ACCOUNT_STATEMENT_FIXTURE_NAMES
             + SPEND_BUDGET_FIXTURE_NAMES
             + RATED_SPEND_FIXTURE_NAMES
+            + BUDGET_STATUS_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -616,6 +662,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "Inspect rated product, project, credential, principal, or cost-center spend, then draft an invoice",
             inventory,
         )
+        self.assertIn("Open the account budget status, then wait", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

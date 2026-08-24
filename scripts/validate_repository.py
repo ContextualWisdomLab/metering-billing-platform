@@ -118,6 +118,7 @@ REQUIRED_FILES = (
     "docs/adr/0085-operator-spend-budget-storybook.md",
     "docs/adr/0086-billing-account-budget-status.md",
     "docs/adr/0087-operator-rated-spend-storybook.md",
+    "docs/adr/0088-operator-budget-status-storybook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

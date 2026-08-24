@@ -116,6 +116,11 @@ import {
   renderRatedSpend,
   RATED_SPEND_CUSTOMER_COPY,
 } from "../src/rated_spend.js";
+import {
+  renderBudgetStatus,
+  BUDGET_STATUS_CUSTOMER_COPY,
+  BUDGET_STATUS_TENANT_REFERENCE,
+} from "../src/budget_status.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -796,6 +801,82 @@ test("product-grouped morning rated spend shows exact amount and draft-invoice c
   assert.ok(!("journal_entry_id" in statement));
 });
 
+test("account budget status lists under, at, and over on one tenant and waits", () => {
+  const statement = loadFixture("account_budget_status_under_over.json");
+  const html = renderBudgetStatus(statement);
+  assert.match(html, /99\.996295 USD/);
+  assert.match(html, /100\.00 USD/);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /0\.002705 USD/);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, /oc-status-chip--settled/);
+  assert.match(html, /oc-status-chip--due/);
+  assert.match(html, /under/);
+  assert.match(html, /at/);
+  assert.match(html, /over/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Open the account budget status, then wait/);
+  assert.equal(BUDGET_STATUS_CUSTOMER_COPY, "Open the account budget status, then wait.");
+  assert.equal(BUDGET_STATUS_TENANT_REFERENCE, "urn:cwl:tenant_001");
+  assert.equal(statement.next_cursor, null);
+  assert.equal(statement.budget_statuses.length, 3);
+  assert.equal(statement.budget_statuses[0].utilization_status, "under");
+  assert.equal(statement.budget_statuses[1].utilization_status, "at");
+  assert.equal(statement.budget_statuses[2].utilization_status, "over");
+  assert.equal(statement.budget_statuses[0].next_operator_action, "wait");
+  assert.equal(typeof statement.budget_statuses[0].remaining_amount, "string");
+  assert.notEqual(typeof statement.budget_statuses[0].remaining_amount, "number");
+  assert.ok(!("tenant_reference" in statement));
+  assert.ok(!("rated_amount" in statement));
+  assert.ok(!("items" in statement));
+  assert.ok(!("cursor" in statement));
+  assert.match(html, /urn:cwl:tenant_001/);
+  assert.match(renderTenantPin({ tenant_reference: BUDGET_STATUS_TENANT_REFERENCE }), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.budget_statuses[0].remaining_amount,
+    currency_code: statement.budget_statuses[0].currency_code,
+  }), /99\.996295 USD/);
+  assert.match(renderStatusChip({
+    amount_due: "0",
+    status_label: statement.budget_statuses[0].utilization_status,
+  }), /oc-status-chip--settled/);
+  assert.match(renderStatusChip({
+    amount_due: statement.budget_statuses[2].over_amount,
+    status_label: statement.budget_statuses[2].utilization_status,
+  }), /oc-status-chip--due/);
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+  assert.ok(!("statutory_account_id" in statement));
+  assert.ok(!("journal_entry_id" in statement));
+});
+
+test("account budget status next_cursor page shows the keyset token without a money widget", () => {
+  const statement = loadFixture("account_budget_status_next_cursor.json");
+  const html = renderBudgetStatus(statement);
+  assert.match(html, /99\.996295 USD/);
+  assert.match(html, /2026-08-18T15:00:00Z\|019d7b92-1aa0-7a7f-b61c-962c0f4bfe02/);
+  assert.match(html, /Next cursor/);
+  assert.doesNotMatch(html, /Amount due<\/span><p class="oc-amount-due__value">2026-08-18T15:00:00Z/);
+  assert.equal(statement.next_cursor, "2026-08-18T15:00:00Z|019d7b92-1aa0-7a7f-b61c-962c0f4bfe02");
+  assert.equal(statement.budget_statuses.length, 2);
+  assert.equal(statement.budget_statuses[0].utilization_status, "under");
+  assert.equal(statement.budget_statuses[1].utilization_status, "at");
+  assert.equal(typeof statement.budget_statuses[0].budget_amount, "string");
+  assert.match(html, /urn:cwl:tenant_001/);
+  assert.ok(!("card_pan" in statement));
+});
+
+test("empty account budget status still pins the commercial tenant and waits", () => {
+  const html = renderBudgetStatus({ budget_statuses: [], next_cursor: null });
+  assert.match(html, /urn:cwl:tenant_001/);
+  assert.match(html, />Wait</);
+  assert.match(html, /oc-status-chip--settled/);
+  assert.doesNotMatch(html, /Next cursor/);
+  const missing = renderBudgetStatus({ next_cursor: "" });
+  assert.match(missing, /urn:cwl:tenant_001/);
+  assert.doesNotMatch(missing, /Next cursor/);
+});
+
 test("project-grouped morning rated spend keeps the stored project URN unmixed", () => {
   const statement = loadFixture("rated_spend_morning_project.json");
   const html = renderRatedSpend(statement);
@@ -917,6 +998,76 @@ test("float money fails closed", () => {
     () =>
       renderRatedSpend({
         products: [{ currency_code: "USD", product_code: "contextual_orchestrator", rated_amount: 0.003705 }],
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderBudgetStatus({
+        budget_statuses: [{
+          budget_amount: 100.0,
+          rated_amount: "0.003705",
+          remaining_amount: "99.996295",
+          over_amount: "0",
+          utilization_status: "under",
+        }],
+        next_cursor: null,
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderBudgetStatus({
+        budget_statuses: [{
+          budget_amount: "100.00",
+          rated_amount: 0.003705,
+          remaining_amount: "99.996295",
+          over_amount: "0",
+          utilization_status: "under",
+        }],
+        next_cursor: null,
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderBudgetStatus({
+        budget_statuses: [{
+          budget_amount: "100.00",
+          rated_amount: "0.003705",
+          remaining_amount: 99.996295,
+          over_amount: "0",
+          utilization_status: "under",
+        }],
+        next_cursor: null,
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderBudgetStatus({
+        budget_statuses: [{
+          budget_amount: "100.00",
+          rated_amount: "0.003705",
+          remaining_amount: "99.996295",
+          over_amount: 0,
+          utilization_status: "under",
+        }],
+        next_cursor: null,
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderBudgetStatus({
+        budget_statuses: [{
+          budget_amount: "100.00",
+          rated_amount: "0.003705",
+          remaining_amount: "99.996295",
+          over_amount: "0",
+          utilization_status: "unknown",
+        }],
+        next_cursor: null,
       }),
     TypeError,
   );

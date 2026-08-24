@@ -1,0 +1,44 @@
+{
+  "budget_statuses": [
+    {
+      "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfe01",
+      "currency_code": "USD",
+      "budget_amount": "100.00",
+      "rated_amount": "0.003705",
+      "remaining_amount": "99.996295",
+      "over_amount": "0",
+      "utilization_status": "under",
+      "window_started_at": "2026-08-16T10:00:00Z",
+      "window_ended_at": "2026-08-16T11:00:00Z",
+      "spend_budget_status": "published",
+      "next_operator_action": "wait"
+    },
+    {
+      "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfe02",
+      "currency_code": "USD",
+      "budget_amount": "0.003705",
+      "rated_amount": "0.003705",
+      "remaining_amount": "0",
+      "over_amount": "0",
+      "utilization_status": "at",
+      "window_started_at": "2026-08-16T10:00:00Z",
+      "window_ended_at": "2026-08-16T11:00:00Z",
+      "spend_budget_status": "published",
+      "next_operator_action": "wait"
+    },
+    {
+      "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfe03",
+      "currency_code": "USD",
+      "budget_amount": "0.001",
+      "rated_amount": "0.003705",
+      "remaining_amount": "0",
+      "over_amount": "0.002705",
+      "utilization_status": "over",
+      "window_started_at": "2026-08-16T10:00:00Z",
+      "window_ended_at": "2026-08-16T11:00:00Z",
+      "spend_budget_status": "published",
+      "next_operator_action": "wait"
+    }
+  ],
+  "next_cursor": null
+}
