@@ -3,7 +3,8 @@
 The repository owns catalog rows, immutable usage facts, rating runs, invoice
 drafts, issued invoices, unused issued-invoice voids, issued credit notes,
 unused issued-credit-note voids, credit-note applications, parked leftover
-``unapplied_cash``, collection cases, payment and
+``unapplied_cash``, leftover-apply ``unapplied_cash_application``, collection
+cases, payment and
 credit facts, journal proposals, published spend budgets, and the atomic
 webhook outbox used by the first commercial path. Every public operation uses
 the supplied PostgreSQL connection; the implementation never falls back to an
@@ -52,6 +53,7 @@ from metering_billing.usage_ledger import (
     StoredIssuedInvoiceVoid,
     StoredUnappliedCash,
     StoredUnappliedCashApplication,
+    StoredUnappliedCashRefund,
     StoredJournalProposal,
     StoredJournalProposalLine,
     StoredRateCard,
@@ -2415,27 +2417,6 @@ class PostgresUsageLedger:
                     raise ValueError("collection write-off identity conflicts with an existing row")
             return self._fetch_collection_write_off(cursor, UUID(str(row[0])))
 
-    def list_unapplied_cash_applications_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredUnappliedCashApplication, ...]:
-        """Return leftover applications limited to one tenant.
-
-        Leftover-apply persist remains a later #84 slice. Unused-invoice
-        void still fail-closes on payment receipts, credit applies, and
-        write-offs that already reload.
-        """
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_application_id
-                FROM billing_core.unapplied_cash_application
-                WHERE tenant_account_id = %s
-                """,
-                (tenant_account_id,),
-            )
-            cursor.fetchall()
-            return ()
-
     def apply_collection_write_off(
         self, collection_case_id: UUID, write_off_amount: Any
     ) -> StoredCollectionCase:
@@ -3063,6 +3044,194 @@ class PostgresUsageLedger:
                         "unapplied cash identity conflicts with an existing row"
                     )
             return self._fetch_unapplied_cash(cursor, UUID(str(row[0])))
+
+    def find_unapplied_cash_application(
+        self, tenant_account_id: UUID, unapplied_cash_id: UUID
+    ) -> StoredUnappliedCashApplication | None:
+        """Return the leftover apply for one tenant parked leftover, if any."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT unapplied_cash_application_id
+                FROM billing_core.unapplied_cash_application
+                WHERE tenant_account_id = %s AND unapplied_cash_id = %s
+                """,
+                (tenant_account_id, unapplied_cash_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_unapplied_cash_application(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_unapplied_cash_application(
+        self, unapplied_cash_application_id: UUID
+    ) -> StoredUnappliedCashApplication | None:
+        """Return one leftover application by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT unapplied_cash_application_id
+                FROM billing_core.unapplied_cash_application
+                WHERE unapplied_cash_application_id = %s
+                """,
+                (unapplied_cash_application_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_unapplied_cash_application(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_unapplied_cash_applications_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredUnappliedCashApplication, ...]:
+        """Return leftover applications limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT unapplied_cash_application_id
+                FROM billing_core.unapplied_cash_application
+                WHERE tenant_account_id = %s
+                ORDER BY applied_at, unapplied_cash_application_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_unapplied_cash_application(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_unapplied_cash_application(
+        self, unapplied_cash_application: StoredUnappliedCashApplication
+    ) -> StoredUnappliedCashApplication:
+        """Persist one leftover apply or return its identity replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash_application.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+            unapplied_cash_application.source_payload_hash
+        ) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if unapplied_cash_application.unapplied_cash_application_status != "applied":
+            raise ValueError("unapplied_cash_application_status must be applied")
+        applied_amount = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash_application.applied_amount)
+        )
+        if applied_amount <= 0:
+            raise ValueError(
+                "unapplied cash application amount must be a positive exact decimal"
+            )
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.unapplied_cash_application
+                    (unapplied_cash_application_id, tenant_account_id,
+                     unapplied_cash_id, collection_case_id, payment_receipt_id,
+                     invoice_draft_id, unapplied_cash_application_contract_version,
+                     source_payload_hash, currency_code, applied_amount,
+                     unapplied_cash_application_status, applied_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING unapplied_cash_application_id
+                """,
+                (
+                    unapplied_cash_application.unapplied_cash_application_id,
+                    unapplied_cash_application.tenant_account_id,
+                    unapplied_cash_application.unapplied_cash_id,
+                    unapplied_cash_application.collection_case_id,
+                    unapplied_cash_application.payment_receipt_id,
+                    unapplied_cash_application.invoice_draft_id,
+                    unapplied_cash_application.unapplied_cash_application_contract_version,
+                    unapplied_cash_application.source_payload_hash,
+                    unapplied_cash_application.currency_code,
+                    applied_amount,
+                    unapplied_cash_application.unapplied_cash_application_status,
+                    unapplied_cash_application.applied_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT unapplied_cash_application_id
+                    FROM billing_core.unapplied_cash_application
+                    WHERE tenant_account_id = %s AND unapplied_cash_id = %s
+                    """,
+                    (
+                        unapplied_cash_application.tenant_account_id,
+                        unapplied_cash_application.unapplied_cash_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        "unapplied cash application identity conflicts with an existing row"
+                    )
+            return self._fetch_unapplied_cash_application(cursor, UUID(str(row[0])))
+
+    def find_unapplied_cash_refund(
+        self, tenant_account_id: UUID, unapplied_cash_id: UUID
+    ) -> StoredUnappliedCashRefund | None:
+        """Return the leftover refund for one tenant parked leftover, if any.
+
+        Leftover-refund persist remains a later #84 slice. Leftover-apply
+        still fail-closes on this lookup; the table stays empty until that
+        later persist.
+        """
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT unapplied_cash_refund_id
+                FROM billing_core.unapplied_cash_refund
+                WHERE tenant_account_id = %s AND unapplied_cash_id = %s
+                """,
+                (tenant_account_id, unapplied_cash_id),
+            )
+            cursor.fetchone()
+            return None
+
+    def apply_unapplied_cash_to_collection_case(
+        self, collection_case_id: UUID, applied_amount: Any
+    ) -> StoredCollectionCase:
+        """Reduce outstanding by parked leftover without flipping to settled.
+
+        #46 remains the explicit settle-when-zero command. Status stays
+        ``open`` or ``dunning`` even when remaining becomes exact zero.
+        """
+        amount = parse_exact_decimal(format_exact_decimal(applied_amount))
+        if amount <= 0:
+            raise ValueError("unapplied cash apply amount must be a positive exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
+                       currency_code, collection_case_status, outstanding_amount, opened_at
+                FROM billing_core.collection_case
+                WHERE collection_case_id = %s
+                FOR UPDATE
+                """,
+                (collection_case_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("unapplied cash apply requires a stored collection case")
+            stored = self._collection_case_from_row(row)
+            if stored.collection_case_status in {"settled", "voided", "disputed"}:
+                raise ValueError("settled collection cases cannot accept unapplied cash")
+            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+            if amount > remaining:
+                raise ValueError("unapplied cash apply amount cannot exceed outstanding")
+            cursor.execute(
+                """
+                UPDATE billing_core.collection_case
+                SET outstanding_amount = %s
+                WHERE collection_case_id = %s
+                RETURNING collection_case_id
+                """,
+                (remaining - amount, collection_case_id),
+            )
+            updated = cursor.fetchone()
+            if updated is None:  # pragma: no cover - the row is locked above
+                raise ValueError("unapplied cash apply requires a stored collection case")
+            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
 
     def get_credit_adjustment(
         self, credit_adjustment_id: UUID
@@ -5190,6 +5359,47 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(unapplied_cash_id)
         return self._unapplied_cash_from_row(row)
+
+    @staticmethod
+    def _unapplied_cash_application_from_row(
+        row: tuple[Any, ...],
+    ) -> StoredUnappliedCashApplication:
+        """Decode one normalized leftover-apply row."""
+        return StoredUnappliedCashApplication(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            UUID(str(row[4])),
+            UUID(str(row[5])),
+            row[6],
+            row[7],
+            row[8],
+            parse_exact_decimal(format_exact_decimal(row[9])),
+            row[10],
+            row[11],
+        )
+
+    def _fetch_unapplied_cash_application(
+        self, cursor: Any, unapplied_cash_application_id: UUID
+    ) -> StoredUnappliedCashApplication:
+        """Hydrate one leftover apply."""
+        cursor.execute(
+            """
+            SELECT unapplied_cash_application_id, tenant_account_id,
+                   unapplied_cash_id, collection_case_id, payment_receipt_id,
+                   invoice_draft_id, unapplied_cash_application_contract_version,
+                   source_payload_hash, currency_code, applied_amount,
+                   unapplied_cash_application_status, applied_at
+            FROM billing_core.unapplied_cash_application
+            WHERE unapplied_cash_application_id = %s
+            """,
+            (unapplied_cash_application_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(unapplied_cash_application_id)
+        return self._unapplied_cash_application_from_row(row)
 
     @staticmethod
     def _credit_adjustment_from_row(row: tuple[Any, ...]) -> StoredCreditAdjustment:
