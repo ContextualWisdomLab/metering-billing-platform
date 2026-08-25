@@ -5,7 +5,7 @@ Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
 those drafts as statements, present already-rated spend for one billing
-account and window grouped by product, optional project, optional credential, optional principal, or optional cost center, publish one commercial spend budget for one billing account and window, evaluate that published budget against already-rated spend, list those evaluations for one billing account, observe first-over utilization onto the commercial webhook outbox, present that live over-signal plus stored outbox observation, issue an immutable commercial invoice snapshot
+account and window grouped by product, optional project, optional credential, optional principal, or optional cost center, publish one commercial spend budget for one billing account and window, evaluate that published budget against already-rated spend, list those evaluations for one billing account,     observe first-over utilization onto the commercial webhook outbox, present that live over-signal plus stored outbox observation, observe first-at approaching utilization onto the commercial webhook outbox, issue an immutable commercial invoice snapshot
 from a stored draft, present that issued invoice, issue an immutable
 commercial credit-note snapshot from a stored credit adjustment, present
 that issued credit note, void one unused issued credit note, publish tax rates, assess tax on a draft, present
@@ -44,6 +44,9 @@ from metering_billing.spend_budget_evaluation_presentment import (
 from metering_billing.spend_budget_over_signal import SpendBudgetOverSignalService
 from metering_billing.spend_budget_over_signal_presentment import (
     SpendBudgetOverSignalPresentmentService,
+)
+from metering_billing.spend_budget_approaching_signal import (
+    SpendBudgetApproachingSignalService,
 )
 from metering_billing.collection_aging_presentment import CollectionAgingPresentmentService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
@@ -118,6 +121,7 @@ from metering_billing.contracts import (
     validate_spend_budget,
     validate_spend_budget_over_signal,
     validate_spend_budget_over_signal_presentment,
+    validate_spend_budget_approaching_signal,
     validate_spend_budget_presentment,
     validate_spend_budget_evaluation_presentment,
     validate_billing_account_budget_status_presentment,
@@ -181,6 +185,7 @@ from metering_billing.errors import (
     CreditAdjustmentRejectionReasonCode,
     SpendBudgetOutcomeCode,
     SpendBudgetOverSignalOutcomeCode,
+    SpendBudgetApproachingSignalOutcomeCode,
     SpendBudgetEvaluationPresentmentQueryError,
     SpendBudgetOverSignalPresentmentQueryError,
     SpendBudgetPresentmentQueryError,
@@ -416,6 +421,8 @@ __all__ = (
     "RatedSpendPresentmentService",
     "SpendBudgetOutcomeCode",
     "SpendBudgetOverSignalOutcomeCode",
+    "SpendBudgetApproachingSignalOutcomeCode",
+    "SpendBudgetApproachingSignalService",
     "SpendBudgetEvaluationPresentmentQueryError",
     "SpendBudgetEvaluationPresentmentService",
     "SpendBudgetOverSignalPresentmentQueryError",
@@ -593,6 +600,7 @@ __all__ = (
     "validate_spend_budget",
     "validate_spend_budget_over_signal",
     "validate_spend_budget_over_signal_presentment",
+    "validate_spend_budget_approaching_signal",
     "validate_spend_budget_presentment",
     "validate_spend_budget_evaluation_presentment",
     "validate_billing_account_budget_status_presentment",

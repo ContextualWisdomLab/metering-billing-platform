@@ -24,6 +24,7 @@ from metering_billing import (
     PaymentIntentService,
     PostgresUsageLedger,
     SpendBudgetEvaluationPresentmentService,
+    SpendBudgetApproachingSignalService,
     SpendBudgetOverSignalPresentmentService,
     SpendBudgetOverSignalService,
     SpendBudgetPresentmentService,
@@ -50,6 +51,7 @@ from metering_billing.usage_rating import UsageRatingService
 from metering_billing.usage_ledger import StoredSpendBudget, StoredWebhookDeliveryAttempt
 from metering_billing.webhook_outbox import (
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+    EVENT_TYPE_SPEND_BUDGET_APPROACHING,
     EVENT_TYPE_SPEND_BUDGET_OVER,
     EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
     enqueue_accepted_fact,
@@ -1984,6 +1986,53 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             reloaded_observation.webhook_outbox_events[0].outbox_event_id,
             over_observation.webhook_outbox_events[0].outbox_event_id,
+        )
+        at_budget = SpendBudgetService(fresh, clock=lambda: published_at).publish_spend_budget(
+            TENANT_ONE,
+            account.billing_account_id,
+            "USD",
+            evaluation.rated_amount,
+            MORNING_WINDOW,
+        )
+        self.assertEqual(at_budget.spend_budget_outcome_code.value, "accepted")
+        assert at_budget.spend_budget_id is not None
+        first_approaching = SpendBudgetApproachingSignalService(
+            fresh, clock=lambda: published_at
+        ).observe_spend_budget_approaching(TENANT_ONE, at_budget.spend_budget_id)
+        self.assertEqual(
+            first_approaching.spend_budget_approaching_signal_outcome_code.value, "accepted"
+        )
+        self.assertEqual(first_approaching.utilization_status, "at")
+        approaching_events = [
+            event
+            for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+            if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_APPROACHING
+        ]
+        self.assertEqual(len(approaching_events), 1)
+        self.assertEqual(approaching_events[0].source_id, at_budget.spend_budget_id)
+        replay_approaching = SpendBudgetApproachingSignalService(
+            fresh, clock=lambda: published_at
+        ).observe_spend_budget_approaching(TENANT_ONE, at_budget.spend_budget_id)
+        self.assertEqual(
+            replay_approaching.spend_budget_approaching_signal_outcome_code.value,
+            "duplicate_replay",
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+                    if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_APPROACHING
+                ]
+            ),
+            1,
+        )
+        reloaded_approaching = SpendBudgetApproachingSignalService(
+            PostgresUsageLedger(self.connection), clock=lambda: published_at
+        ).observe_spend_budget_approaching(TENANT_ONE, at_budget.spend_budget_id)
+        self.assertEqual(
+            reloaded_approaching.spend_budget_approaching_signal_outcome_code.value,
+            "duplicate_replay",
         )
         # HTTP create_http_app still requires #22 credential methods on the ledger.
         with self.assertRaises(SpendBudgetPresentmentQueryError) as missing_pin:

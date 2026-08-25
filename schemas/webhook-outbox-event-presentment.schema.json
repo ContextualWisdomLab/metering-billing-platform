@@ -40,7 +40,8 @@
         "dispute.held",
         "dispute.released",
         "spend_budget.published",
-        "spend_budget.over"
+        "spend_budget.over",
+        "spend_budget.approaching"
       ]
     },
     "source_id": {"type": "string", "format": "uuid"},
