@@ -121,6 +121,11 @@ import {
   BUDGET_STATUS_CUSTOMER_COPY,
   BUDGET_STATUS_TENANT_REFERENCE,
 } from "../src/budget_status.js";
+import {
+  renderSpendBudgetOver,
+  SPEND_BUDGET_OVER_CUSTOMER_COPY,
+  SPEND_BUDGET_OVER_TENANT_REFERENCE,
+} from "../src/spend_budget_over.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -866,6 +871,132 @@ test("account budget status next_cursor page shows the keyset token without a mo
   assert.ok(!("card_pan" in statement));
 });
 
+test("first-over accepted observation shows exact over amount, enqueue, and wait", () => {
+  const observation = loadFixture("accepted_over_signal.json");
+  const outbox = loadFixture("pending_spend_budget_over.json");
+  const html = renderSpendBudgetOver(observation, [outbox]);
+  assert.match(html, /0\.002705 USD/);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, /oc-status-chip--due/);
+  assert.match(html, /over/);
+  assert.match(html, /accepted/);
+  assert.match(html, /spend_budget\.over/);
+  assert.match(html, /019d7b92-1aa0-7a7f-b61c-962c0f4bfe03/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Observe the spend budget over signal, then wait/);
+  assert.equal(
+    SPEND_BUDGET_OVER_CUSTOMER_COPY,
+    "Observe the spend budget over signal, then wait.",
+  );
+  assert.equal(SPEND_BUDGET_OVER_TENANT_REFERENCE, "urn:cwl:tenant_001");
+  assert.equal(observation.spend_budget_over_signal_outcome_code, "accepted");
+  assert.equal(observation.utilization_status, "over");
+  assert.equal(observation.over_amount, "0.002705");
+  assert.equal(observation.budget_amount, "0.001");
+  assert.equal(observation.next_operator_action, "wait");
+  assert.equal(typeof observation.over_amount, "string");
+  assert.equal(typeof observation.budget_amount, "string");
+  assert.notEqual(typeof observation.over_amount, "number");
+  assert.equal(outbox.event_type_code, "spend_budget.over");
+  assert.equal(outbox.source_id, observation.spend_budget_id);
+  assert.equal(outbox.delivery_status, "pending");
+  assert.match(html, /urn:cwl:tenant_001/);
+  assert.match(
+    renderTenantPin({ tenant_reference: SPEND_BUDGET_OVER_TENANT_REFERENCE }),
+    /urn:cwl:tenant_001/,
+  );
+  assert.match(renderAmountDue({
+    amount_due: observation.over_amount,
+    currency_code: observation.currency_code,
+  }), /0\.002705 USD/);
+  assert.match(renderAmountDue({
+    amount_due: observation.budget_amount,
+    currency_code: observation.currency_code,
+  }), /0\.001 USD/);
+  assert.match(renderStatusChip({
+    amount_due: observation.over_amount,
+    status_label: observation.utilization_status,
+  }), /oc-status-chip--due/);
+  assert.ok(!("remaining_amount" in observation));
+  assert.ok(!("rated_amount" in observation));
+  assert.ok(!("card_pan" in observation));
+  assert.ok(!("retained_earnings" in observation));
+  assert.ok(!("statutory_account_id" in observation));
+  assert.ok(!("journal_entry_id" in observation));
+});
+
+test("under observation waits with zero over-signal rows", () => {
+  const observation = loadFixture("accepted_under_signal.json");
+  const html = renderSpendBudgetOver(observation, []);
+  assert.match(html, /100\.00 USD/);
+  assert.match(html, /0 USD/);
+  assert.match(html, /oc-status-chip--settled/);
+  assert.match(html, /under/);
+  assert.match(html, /accepted/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Over-signal rows<\/span><p class="oc-invoice-statement__id">0<\/p>/);
+  assert.doesNotMatch(html, /spend_budget\.over/);
+  assert.equal(observation.utilization_status, "under");
+  assert.equal(observation.over_amount, "0");
+  assert.equal(observation.budget_amount, "100.00");
+  assert.equal(observation.next_operator_action, "wait");
+  assert.equal(typeof observation.over_amount, "string");
+  assert.notEqual(typeof observation.over_amount, "number");
+  assert.match(html, /urn:cwl:tenant_001/);
+  assert.match(renderStatusChip({
+    amount_due: observation.over_amount,
+    status_label: observation.utilization_status,
+  }), /oc-status-chip--settled/);
+  const missingRows = renderSpendBudgetOver(observation);
+  assert.match(missingRows, /Over-signal rows<\/span><p class="oc-invoice-statement__id">0<\/p>/);
+  assert.doesNotMatch(missingRows, /spend_budget\.over/);
+  assert.ok(!("remaining_amount" in observation));
+  assert.ok(!("card_pan" in observation));
+});
+
+test("at observation stays settled with complementary-zero remaining and no over rows", () => {
+  const observation = {
+    ...loadFixture("accepted_under_signal.json"),
+    utilization_status: "at",
+    budget_amount: "0.003705",
+    over_amount: "0",
+  };
+  const html = renderSpendBudgetOver(observation, []);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /0 USD/);
+  assert.match(html, /oc-status-chip--settled/);
+  assert.match(html, /at/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Over-signal rows<\/span><p class="oc-invoice-statement__id">0<\/p>/);
+  assert.doesNotMatch(html, /spend_budget\.over/);
+  assert.match(renderStatusChip({
+    amount_due: "0",
+    status_label: "at",
+  }), /oc-status-chip--settled/);
+});
+
+test("duplicate replay keeps first-over-wins outbox and current over evaluation", () => {
+  const observation = loadFixture("duplicate_replay_over_signal.json");
+  const outbox = loadFixture("pending_spend_budget_over.json");
+  const firstOver = loadFixture("accepted_over_signal.json");
+  const html = renderSpendBudgetOver(observation, [outbox]);
+  assert.match(html, /0\.002705 USD/);
+  assert.match(html, /duplicate_replay/);
+  assert.match(html, /spend_budget\.over/);
+  assert.match(html, /Over-signal rows<\/span><p class="oc-invoice-statement__id">1<\/p>/);
+  assert.match(html, />Wait</);
+  assert.equal(observation.spend_budget_id, firstOver.spend_budget_id);
+  assert.equal(observation.over_amount, firstOver.over_amount);
+  assert.equal(observation.budget_amount, firstOver.budget_amount);
+  assert.equal(observation.utilization_status, "over");
+  assert.equal(observation.spend_budget_over_signal_outcome_code, "duplicate_replay");
+  assert.equal(outbox.source_id, firstOver.spend_budget_id);
+  assert.equal(typeof observation.over_amount, "string");
+  assert.match(html, /urn:cwl:tenant_001/);
+  assert.ok(!("remaining_amount" in observation));
+  assert.ok(!("card_pan" in observation));
+});
+
 test("empty account budget status still pins the commercial tenant and waits", () => {
   const html = renderBudgetStatus({ budget_statuses: [], next_cursor: null });
   assert.match(html, /urn:cwl:tenant_001/);
@@ -1069,6 +1200,59 @@ test("float money fails closed", () => {
         }],
         next_cursor: null,
       }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderSpendBudgetOver({
+        spend_budget_over_signal_outcome_code: "accepted",
+        budget_amount: 0.001,
+        over_amount: "0.002705",
+        utilization_status: "over",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderSpendBudgetOver({
+        spend_budget_over_signal_outcome_code: "accepted",
+        budget_amount: "0.001",
+        over_amount: 0.002705,
+        utilization_status: "over",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderSpendBudgetOver({
+        spend_budget_over_signal_outcome_code: "accepted",
+        budget_amount: "0.001",
+        over_amount: "0.002705",
+        utilization_status: "unknown",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderSpendBudgetOver({
+        spend_budget_over_signal_outcome_code: "posted",
+        budget_amount: "0.001",
+        over_amount: "0.002705",
+        utilization_status: "over",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderSpendBudgetOver(
+        {
+          spend_budget_over_signal_outcome_code: "accepted",
+          budget_amount: "0.001",
+          over_amount: "0.002705",
+          utilization_status: "over",
+        },
+        [{ event_type_code: "spend_budget.published", source_id: "019d7b92-1aa0-7a7f-b61c-962c0f4bfe03" }],
+      ),
     TypeError,
   );
   assert.throws(
