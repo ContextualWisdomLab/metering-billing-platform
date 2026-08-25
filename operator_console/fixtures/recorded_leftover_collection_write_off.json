@@ -1,0 +1,15 @@
+{
+  "collection_write_off_presentment_contract_version": 1,
+  "collection_write_off_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd90",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd91",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd92",
+  "currency_code": "USD",
+  "write_off_amount": "0.001",
+  "remaining_outstanding_amount": "0",
+  "collection_write_off_status": "recorded",
+  "collection_case_status": "open",
+  "written_off_at": "2026-08-18T11:00:00Z",
+  "source_payload_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "next_operator_action": "settle"
+}

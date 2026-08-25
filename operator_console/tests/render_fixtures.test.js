@@ -149,6 +149,11 @@ import {
   ISSUED_CREDIT_NOTE_VOID_CUSTOMER_COPY,
   nextOperatorActionCopy as nextIssuedCreditNoteVoidActionCopy,
 } from "../src/issued_credit_note_void.js";
+import {
+  renderCollectionWriteOff,
+  COLLECTION_WRITE_OFF_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCollectionWriteOffActionCopy,
+} from "../src/collection_write_off.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -1315,6 +1320,51 @@ test("unused issued credit note void shows exact voided amount and wait", () => 
   assert.ok(!("retained_earnings" in statement));
 });
 
+test("recorded leftover remaining write-off shows exact zero remaining and settle", () => {
+  const statement = loadFixture("recorded_leftover_collection_write_off.json");
+  const leftoverApply = loadFixture("applied_morning_unapplied_cash.json");
+  const html = renderCollectionWriteOff(statement);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, /0 USD/);
+  assert.match(html, /recorded/);
+  assert.match(html, />Settle</);
+  assert.match(html, /Write off leftover remaining, then settle/);
+  assert.equal(
+    COLLECTION_WRITE_OFF_CUSTOMER_COPY,
+    "Write off leftover remaining, then settle.",
+  );
+  assert.equal(nextCollectionWriteOffActionCopy("settle"), "Settle");
+  assert.equal(nextCollectionWriteOffActionCopy("wait"), "Wait");
+  assert.equal(statement.next_operator_action, "settle");
+  assert.equal(statement.collection_write_off_status, "recorded");
+  assert.equal(statement.collection_case_status, "open");
+  assert.equal(statement.write_off_amount, "0.001");
+  assert.equal(statement.remaining_outstanding_amount, "0");
+  assert.equal(statement.write_off_amount, leftoverApply.applied_amount);
+  assert.notEqual(statement.collection_case_id, leftoverApply.collection_case_id);
+  assert.equal(typeof statement.write_off_amount, "string");
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+  assert.notEqual(typeof statement.write_off_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.write_off_amount,
+    currency_code: statement.currency_code,
+  }), /0\.001 USD/);
+  assert.match(renderAmountDue({
+    amount_due: statement.remaining_outstanding_amount,
+    currency_code: statement.currency_code,
+  }), /0 USD/);
+  assert.match(renderStatusChip({
+    amount_due: statement.write_off_amount,
+    tax_amount: "0",
+    status_label: statement.collection_write_off_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("collection_write_off_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
 test("project-grouped morning rated spend keeps the stored project URN unmixed", () => {
   const statement = loadFixture("rated_spend_morning_project.json");
   const html = renderRatedSpend(statement);
@@ -1643,6 +1693,14 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderIssuedCreditNoteVoid({ voided_amount: 11.0 }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderCollectionWriteOff({
+        write_off_amount: 0.001,
+        remaining_outstanding_amount: "0",
+      }),
     TypeError,
   );
   assert.throws(

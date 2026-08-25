@@ -298,7 +298,7 @@ contextual-orchestrator usage
 - `GET /v1/collection-write-offs/{collection_write_off_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/collection-write-offs` lists summaries as `{collection_write_offs, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{written_off_at}|{collection_write_off_id}`.
 - Payment-receipt, issued-credit-note, credit-note-application, collection-settlement, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. #46 remains the explicit settle-when-zero command. First successful write-off enqueues one existing #24 `write_off.recorded` outbox event. HMAC, SSRF, and delivery contracts stay unchanged.
-- Operators write off leftover remaining, compose the journal, then settle. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
+- Operators write off leftover remaining, compose the journal, then settle. `operator_console` Storybook adds one `CollectionWriteOff` story for the recorded leftover remaining write-off presentment. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Write-off-journal acceptance
 

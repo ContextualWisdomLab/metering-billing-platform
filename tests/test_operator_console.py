@@ -38,6 +38,7 @@ from metering_billing.contracts import (
     validate_unapplied_cash_application_presentment,
     validate_unapplied_cash_refund_presentment,
     validate_issued_credit_note_void_presentment,
+    validate_collection_write_off_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -160,6 +161,11 @@ UNAPPLIED_CASH_FIXTURE_NAMES = (
     "refunded_morning_unapplied_cash.json",
 )
 ISSUED_CREDIT_NOTE_VOID_FIXTURE_NAMES = ("voided_unused_issued_credit_note.json",)
+COLLECTION_WRITE_OFF_FIXTURE_NAMES = ("recorded_leftover_collection_write_off.json",)
+COLLECTION_WRITE_OFF_MONEY_FIELDS = (
+    "write_off_amount",
+    "remaining_outstanding_amount",
+)
 UNAPPLIED_CASH_MONEY_FIELDS = (
     "unapplied_amount",
     "received_amount",
@@ -814,6 +820,30 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("card_pan", unused_void)
         self.assertNotIn("legal_invoice_number", unused_void)
         self.assertNotIn("issued_credit_note_lines", unused_void)
+        leftover_write_off = self._fixture("recorded_leftover_collection_write_off.json")
+        leftover_apply = self._fixture("applied_morning_unapplied_cash.json")
+        self.assertEqual(validate_collection_write_off_presentment(leftover_write_off), ())
+        self.assertEqual(leftover_write_off["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(leftover_write_off["collection_write_off_status"], "recorded")
+        self.assertEqual(leftover_write_off["collection_case_status"], "open")
+        self.assertEqual(leftover_write_off["write_off_amount"], "0.001")
+        self.assertEqual(leftover_write_off["remaining_outstanding_amount"], "0")
+        self.assertEqual(leftover_write_off["next_operator_action"], "settle")
+        self.assertEqual(
+            leftover_write_off["write_off_amount"],
+            leftover_apply["applied_amount"],
+        )
+        self.assertNotEqual(
+            leftover_write_off["collection_case_id"],
+            leftover_apply["collection_case_id"],
+        )
+        for field_name in COLLECTION_WRITE_OFF_MONEY_FIELDS:
+            self.assertIsInstance(leftover_write_off[field_name], str)
+            self.assertNotIsInstance(leftover_write_off[field_name], float)
+            parse_exact_decimal(leftover_write_off[field_name])
+        self.assertNotIn("collection_write_off_outcome_code", leftover_write_off)
+        self.assertNotIn("card_pan", leftover_write_off)
+        self.assertNotIn("legal_invoice_number", leftover_write_off)
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -864,6 +894,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "CollectionDispute",
             "UnappliedCash",
             "IssuedCreditNoteVoid",
+            "CollectionWriteOff",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -894,6 +925,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + COLLECTION_DISPUTE_FIXTURE_NAMES
             + UNAPPLIED_CASH_FIXTURE_NAMES
             + ISSUED_CREDIT_NOTE_VOID_FIXTURE_NAMES
+            + COLLECTION_WRITE_OFF_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -949,6 +981,7 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Apply parked leftover, then collect the residual", inventory)
         self.assertIn("Refund unused parked leftover, then wait", inventory)
         self.assertIn("Void an unused issued credit note, then wait", inventory)
+        self.assertIn("Write off leftover remaining, then settle", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

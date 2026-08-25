@@ -144,3 +144,8 @@ export {
   ISSUED_CREDIT_NOTE_VOID_CUSTOMER_COPY,
   nextOperatorActionCopy as nextIssuedCreditNoteVoidActionCopy,
 } from "./issued_credit_note_void.js";
+export {
+  renderCollectionWriteOff,
+  COLLECTION_WRITE_OFF_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCollectionWriteOffActionCopy,
+} from "./collection_write_off.js";
