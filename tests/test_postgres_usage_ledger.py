@@ -67,6 +67,7 @@ from metering_billing.unapplied_cash_refund import (
 )
 from metering_billing.errors import (
     CollectionDisputePresentmentQueryError,
+    CollectionDisputeRejectionReasonCode,
     CollectionDisputeReleasePresentmentQueryError,
     CollectionWriteOffRejectionReasonCode,
     CreditNoteApplicationPresentmentQueryError,
@@ -5874,6 +5875,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.mark_collection_case_released_from_dispute(
                 afternoon_collection.collection_case_id
             )
+        with self.connection.transaction():
+            self.connection.execute(
+                """
+                UPDATE billing_core.collection_case
+                SET collection_case_status = 'voided'
+                WHERE collection_case_id = %s
+                """,
+                (afternoon_collection.collection_case_id,),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_released_from_dispute(
+                afternoon_collection.collection_case_id
+            )
         dunning_usage = make_event(
             event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf12c",
             source_event_key="workflow_381:step_25:attempt_01",
@@ -5922,6 +5936,27 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 dunning_collection.collection_case_id
             ).collection_case_status,
             "dunning",
+        )
+
+        class BlindFindReleasedLedger(PostgresUsageLedger):
+            """Force the insert race when the stored dispute is already released."""
+
+            def find_collection_dispute(self, *args, **kwargs):
+                return None
+
+        released_mismatch = CollectionDisputeService(
+            BlindFindReleasedLedger(self.connection), clock=lambda: held_at
+        ).hold_collection_case(TENANT_ONE, dunning_collection.collection_case_id)
+        self.assertEqual(released_mismatch.collection_dispute_outcome_code.value, "rejected")
+        self.assertEqual(
+            released_mismatch.rejection_reason_code,
+            CollectionDisputeRejectionReasonCode.COLLECTION_DISPUTE_RELEASED,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            5,
         )
 
         race_usage = make_event(
@@ -5984,28 +6019,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "open",
         )
 
-        class BlindFindLedger(PostgresUsageLedger):
-            """Force the insert path used after a concurrent identity race."""
-
-            def find_collection_dispute(self, *args, **kwargs):
-                return None
-
-        raced = CollectionDisputeService(
-            BlindFindLedger(self.connection), clock=lambda: held_at
-        ).hold_collection_case(TENANT_ONE, race_collection.collection_case_id)
-        self.assertEqual(raced.collection_dispute_outcome_code.value, "duplicate_replay")
-        self.assertEqual(raced.collection_dispute_id, raced_row.collection_dispute_id)
-        self.assertEqual(
-            self.ledger.get_collection_case(race_case.collection_case_id).collection_case_status,
-            "disputed",
-        )
-        self.assertEqual(
-            self.connection.execute(
-                "SELECT COUNT(*) FROM billing_core.collection_dispute"
-            ).fetchone()[0],
-            6,
-        )
-
         class BlindFindMissingCaseLedger(PostgresUsageLedger):
             """Force the insert race when the stored case cannot be loaded."""
 
@@ -6030,6 +6043,30 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             BlindFindMissingCaseLedger(self.connection), clock=lambda: held_at
         ).hold_collection_case(TENANT_ONE, race_collection.collection_case_id)
         self.assertEqual(missing_case.collection_dispute_outcome_code.value, "rejected")
+        self.assertEqual(
+            missing_case.rejection_reason_code,
+            CollectionDisputeRejectionReasonCode.COLLECTION_CASE_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(race_case.collection_case_id).collection_case_status,
+            "open",
+        )
+
+        class BlindFindLedger(PostgresUsageLedger):
+            """Force the insert path used after a concurrent identity race."""
+
+            def find_collection_dispute(self, *args, **kwargs):
+                return None
+
+        raced = CollectionDisputeService(
+            BlindFindLedger(self.connection), clock=lambda: held_at
+        ).hold_collection_case(TENANT_ONE, race_collection.collection_case_id)
+        self.assertEqual(raced.collection_dispute_outcome_code.value, "duplicate_replay")
+        self.assertEqual(raced.collection_dispute_id, raced_row.collection_dispute_id)
+        self.assertEqual(
+            self.ledger.get_collection_case(race_case.collection_case_id).collection_case_status,
+            "disputed",
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.collection_dispute"

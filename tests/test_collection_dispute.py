@@ -45,6 +45,7 @@ from metering_billing.collection_dispute import (
     CollectionDisputeResult,
     _enqueue_dispute_held,
     _format_held_at,
+    _heal_case_after_recorded_hold,
     _rejected,
 )
 from metering_billing.webhook_outbox import EVENT_TYPE_DISPUTE_HELD
@@ -343,6 +344,17 @@ class CollectionDisputeTests(unittest.TestCase):
         with mock.patch.object(service.ledger, "resolve_tenant", return_value=(None, None)):
             with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
                 service.hold_collection_case(TENANT_ONE, collection.collection_case_id)
+
+    def test_hold_replay_heal_leaves_settled_case(self) -> None:
+        """A recorded hold does not flip a case that is no longer open or dunning."""
+        ledger, collection = open_morning_case_with_outstanding()
+        stored_case = ledger.get_collection_case(collection.collection_case_id)
+        assert stored_case is not None
+        settled = replace(stored_case, collection_case_status="settled")
+        self.assertEqual(
+            _heal_case_after_recorded_hold(ledger, settled).collection_case_status,
+            "settled",
+        )
 
     def test_http_hold_get_and_paged_list_without_capture(self) -> None:
         """POST holds; GET item and list page metadata and never capture payment."""

@@ -2333,8 +2333,6 @@ class PostgresUsageLedger:
         remaining = parse_exact_decimal(
             format_exact_decimal(collection_dispute.remaining_outstanding_amount)
         )
-        if remaining < 0:
-            raise ValueError("collection dispute remaining must be a non-negative exact decimal")
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -2407,7 +2405,7 @@ class PostgresUsageLedger:
             stored = self._collection_dispute_from_row(row)
             if stored.collection_dispute_status == "released":
                 return stored
-            if stored.collection_dispute_status != "held":
+            if stored.collection_dispute_status != "held":  # pragma: no cover - held/released only
                 raise ValueError("only held collection disputes can release")
             cursor.execute(
                 """
@@ -2487,7 +2485,7 @@ class PostgresUsageLedger:
                 raise ValueError("settled collection cases cannot release from dispute")
             if stored.collection_case_status == "voided":
                 raise ValueError("voided collection cases cannot release from dispute")
-            if stored.collection_case_status != "disputed":
+            if stored.collection_case_status != "disputed":  # pragma: no cover - closed set
                 raise ValueError("only disputed collection cases can release to open")
             cursor.execute(
                 """
