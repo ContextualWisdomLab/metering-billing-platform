@@ -92,6 +92,9 @@ class SpendBudgetOverSignalResult:
             raise ValueError(f"unsupported spend budget over signal outcome: {outcome_text}")
         if (
             self.spend_budget_id is None
+            or self.tenant_reference is None
+            or self.billing_account_id is None
+            or self.currency_code is None
             or self.budget_amount is None
             or self.over_amount is None
             or self.window_started_at is None
