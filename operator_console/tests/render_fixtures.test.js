@@ -962,7 +962,7 @@ test("duplicate replay keeps first-over-wins outbox and current over evaluation"
   assert.match(html, /0\.002705 USD/);
   assert.match(html, /duplicate_replay/);
   assert.match(html, /spend_budget\.over/);
-  assert.match(html, /019d7b92-1aa0-7a7f-b61c-962c0f4bfe13/);
+  assert.match(html, /Over-signal rows<\/span><p class="oc-invoice-statement__id">1<\/p>/);
   assert.match(html, />Wait</);
   assert.equal(observation.spend_budget_id, firstOver.spend_budget_id);
   assert.equal(observation.over_amount, firstOver.over_amount);
