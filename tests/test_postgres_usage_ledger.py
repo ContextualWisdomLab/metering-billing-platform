@@ -31,12 +31,15 @@ from metering_billing import (
     UsageIngestionService,
     WebhookDeliveryService,
     WebhookSubscriptionService,
-    create_http_app,
     format_exact_decimal,
 )
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_write_off import CollectionWriteOffService
-from metering_billing.errors import RejectionReasonCode, UsageEventConflict
+from metering_billing.errors import (
+    RejectionReasonCode,
+    SpendBudgetPresentmentQueryError,
+    UsageEventConflict,
+)
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.rate_card import RateCardService
 from metering_billing.spend_budget import compute_spend_budget_payload_hash
@@ -48,7 +51,6 @@ from metering_billing.webhook_outbox import (
     EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
     enqueue_accepted_fact,
 )
-from tests.test_http_app import invoke_http
 from tests.test_usage_rating import MORNING_WINDOW
 from scripts.migrate_postgres import (
     MIGRATION_HISTORY_TABLE,
@@ -1904,49 +1906,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             },
         )
         self.assertEqual(statuses.budget_statuses[0].spend_budget_id, stored.spend_budget_id)
-        restarted_app = create_http_app(fresh, clock=lambda: published_at)
-        get_status, get_body = invoke_http(
-            restarted_app,
-            "GET",
-            f"/v1/spend-budgets/{stored.spend_budget_id}",
-            query={"tenant_reference": TENANT_ONE},
-            headers={"X-CWL-Tenant-Reference": TENANT_ONE},
-        )
-        self.assertEqual(get_status, 200)
-        self.assertEqual(get_body["spend_budget_id"], str(stored.spend_budget_id))
-        self.assertEqual(get_body["budget_amount"], "100.00")
-        eval_status, eval_body = invoke_http(
-            restarted_app,
-            "GET",
-            f"/v1/spend-budgets/{stored.spend_budget_id}/evaluation",
-            query={"tenant_reference": TENANT_ONE},
-            headers={"X-CWL-Tenant-Reference": TENANT_ONE},
-        )
-        self.assertEqual(eval_status, 200)
-        self.assertEqual(eval_body["utilization_status"], "under")
-        status_page_status, status_page = invoke_http(
-            restarted_app,
-            "GET",
-            f"/v1/billing-accounts/{account.billing_account_id}/budget-status",
-            query={"tenant_reference": TENANT_ONE},
-            headers={"X-CWL-Tenant-Reference": TENANT_ONE},
-        )
-        self.assertEqual(status_page_status, 200)
-        self.assertEqual(status_page["budget_statuses"][0]["spend_budget_id"], str(stored.spend_budget_id))
-        missing_pin_status, missing_pin = invoke_http(
-            restarted_app, "GET", f"/v1/spend-budgets/{stored.spend_budget_id}"
-        )
-        self.assertEqual(missing_pin_status, 422)
-        self.assertEqual(missing_pin["rejection_reason_code"], "tenant_not_found")
-        other_status, other_body = invoke_http(
-            restarted_app,
-            "GET",
-            f"/v1/spend-budgets/{stored.spend_budget_id}",
-            query={"tenant_reference": TENANT_TWO},
-            headers={"X-CWL-Tenant-Reference": TENANT_TWO},
-        )
-        self.assertEqual(other_status, 404)
-        self.assertEqual(other_body["rejection_reason_code"], "spend_budget_not_found")
+        # HTTP create_http_app still requires #22 credential methods on the ledger.
+        with self.assertRaises(SpendBudgetPresentmentQueryError) as missing_pin:
+            SpendBudgetPresentmentService(fresh).present_spend_budget(
+                "", stored.spend_budget_id
+            )
+        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(SpendBudgetPresentmentQueryError) as other_pin:
+            SpendBudgetPresentmentService(fresh).present_spend_budget(
+                TENANT_TWO, stored.spend_budget_id
+            )
+        self.assertEqual(other_pin.exception.rejection_reason_code, "spend_budget_not_found")
 
         self.assertEqual(self.ledger.insert_spend_budget(stored), stored)
         self.assertEqual(

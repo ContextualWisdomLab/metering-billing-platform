@@ -47,7 +47,9 @@ mutate it. IEEE 754 forbids smuggling binary floating-point values into money
   310100, tenant auto-create, or dimension-scoped budgets.
 - Keep `MemoryUsageLedger` as the deterministic reference adapter. This slice
   is not a claim that the HTTP default, RLS, readiness, backup/restore, HA,
-  capacity benchmark, or OpenTelemetry requirements are complete.
+  capacity benchmark, or OpenTelemetry requirements are complete. Tenant API
+  credentials stay memory-only, so restart proof is the presentment services
+  loaded from PostgreSQL rather than `create_http_app` on that ledger.
 
 ## Consequences
 
