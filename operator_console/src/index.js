@@ -139,3 +139,8 @@ export {
   UNAPPLIED_CASH_REFUND_CUSTOMER_COPY,
   nextOperatorActionCopy as nextUnappliedCashActionCopy,
 } from "./unapplied_cash.js";
+export {
+  renderIssuedCreditNoteVoid,
+  ISSUED_CREDIT_NOTE_VOID_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedCreditNoteVoidActionCopy,
+} from "./issued_credit_note_void.js";

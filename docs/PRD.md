@@ -220,6 +220,7 @@ contextual-orchestrator usage
 - `GET /v1/issued-credit-note-voids` lists summaries as `{issued_credit_note_voids, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{voided_at}|{issued_credit_note_void_id}`.
 - Issued-credit-note, credit-note-application, collection, payment, and AIS contracts stay unchanged except the additive apply fail-closed on a voided unused note.
 - Operators void an unused issued credit note. Existing subscriptions opt in by including `credit_note.voided`. There is no login wall, Stripe, AIS call, journal, second webhook system, or production SPA.
+- `operator_console` Storybook adds one `IssuedCreditNoteVoid` story for the unused issued-credit-note-void presentment. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Credit-note-application acceptance
 

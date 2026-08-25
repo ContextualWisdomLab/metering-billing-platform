@@ -37,6 +37,7 @@ from metering_billing.contracts import (
     validate_unapplied_cash_presentment,
     validate_unapplied_cash_application_presentment,
     validate_unapplied_cash_refund_presentment,
+    validate_issued_credit_note_void_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -158,6 +159,7 @@ UNAPPLIED_CASH_FIXTURE_NAMES = (
     "applied_morning_unapplied_cash.json",
     "refunded_morning_unapplied_cash.json",
 )
+ISSUED_CREDIT_NOTE_VOID_FIXTURE_NAMES = ("voided_unused_issued_credit_note.json",)
 UNAPPLIED_CASH_MONEY_FIELDS = (
     "unapplied_amount",
     "received_amount",
@@ -790,6 +792,28 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("unapplied_cash_refund_outcome_code", refunded_leftover)
         self.assertNotIn("card_pan", refunded_leftover)
         self.assertNotIn("legal_invoice_number", refunded_leftover)
+        unused_void = self._fixture("voided_unused_issued_credit_note.json")
+        taxed_issued = self._fixture("issued_taxed_credit_note.json")
+        self.assertEqual(validate_issued_credit_note_void_presentment(unused_void), ())
+        self.assertEqual(unused_void["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(unused_void["issued_credit_note_void_status"], "recorded")
+        self.assertEqual(unused_void["voided_amount"], "11.00")
+        self.assertEqual(unused_void["next_operator_action"], "wait")
+        self.assertEqual(
+            unused_void["issued_credit_note_id"],
+            taxed_issued["issued_credit_note_id"],
+        )
+        self.assertNotEqual(
+            unused_void["issued_credit_note_id"],
+            self._fixture("applied_morning_credit_note.json")["issued_credit_note_id"],
+        )
+        self.assertIsInstance(unused_void["voided_amount"], str)
+        self.assertNotIsInstance(unused_void["voided_amount"], float)
+        parse_exact_decimal(unused_void["voided_amount"])
+        self.assertNotIn("issued_credit_note_void_outcome_code", unused_void)
+        self.assertNotIn("card_pan", unused_void)
+        self.assertNotIn("legal_invoice_number", unused_void)
+        self.assertNotIn("issued_credit_note_lines", unused_void)
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -839,6 +863,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "SpendBudgetApproaching",
             "CollectionDispute",
             "UnappliedCash",
+            "IssuedCreditNoteVoid",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -868,6 +893,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + SPEND_BUDGET_APPROACHING_FIXTURE_NAMES
             + COLLECTION_DISPUTE_FIXTURE_NAMES
             + UNAPPLIED_CASH_FIXTURE_NAMES
+            + ISSUED_CREDIT_NOTE_VOID_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -922,6 +948,7 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Park leftover remittance, then wait", inventory)
         self.assertIn("Apply parked leftover, then collect the residual", inventory)
         self.assertIn("Refund unused parked leftover, then wait", inventory)
+        self.assertIn("Void an unused issued credit note, then wait", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""
