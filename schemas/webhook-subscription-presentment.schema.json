@@ -42,7 +42,8 @@
           "refund.recorded",
           "dispute.held",
           "dispute.released",
-          "spend_budget.published"
+          "spend_budget.published",
+          "spend_budget.over"
         ]
       }
     },

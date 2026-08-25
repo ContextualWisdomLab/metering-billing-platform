@@ -24,6 +24,7 @@ from metering_billing import (
     PaymentIntentService,
     PostgresUsageLedger,
     SpendBudgetEvaluationPresentmentService,
+    SpendBudgetOverSignalService,
     SpendBudgetPresentmentService,
     SpendBudgetService,
     TaxAssessmentService,
@@ -48,6 +49,7 @@ from metering_billing.usage_rating import UsageRatingService
 from metering_billing.usage_ledger import StoredSpendBudget, StoredWebhookDeliveryAttempt
 from metering_billing.webhook_outbox import (
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+    EVENT_TYPE_SPEND_BUDGET_OVER,
     EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
     enqueue_accepted_fact,
 )
@@ -1906,6 +1908,21 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             },
         )
         self.assertEqual(statuses.budget_statuses[0].spend_budget_id, stored.spend_budget_id)
+        over_signal = SpendBudgetOverSignalService(fresh, clock=lambda: published_at).observe_spend_budget_over(
+            TENANT_ONE, stored.spend_budget_id
+        )
+        self.assertEqual(over_signal.spend_budget_over_signal_outcome_code.value, "accepted")
+        self.assertEqual(over_signal.utilization_status, "under")
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+                    if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_OVER
+                ]
+            ),
+            0,
+        )
         # HTTP create_http_app still requires #22 credential methods on the ledger.
         with self.assertRaises(SpendBudgetPresentmentQueryError) as missing_pin:
             SpendBudgetPresentmentService(fresh).present_spend_budget(
