@@ -1,0 +1,37 @@
+{
+  "proposal_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfcf0",
+  "proposal_contract_version": 1,
+  "idempotency_key": "urn:cwl:tenant_001:invoice_draft:019d7b92-1aa0-7a7f-b61c-962c0f4bf6b0:sha256:3434343434343434343434343434343434343434343434343434343434343434:v1",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "legal_entity_reference": "urn:cwl:tenant_001:legal_entity:commercial",
+  "intended_book_role_code": "primary_statutory",
+  "transaction_currency": "USD",
+  "transaction_date": "2026-08-17",
+  "accounting_date": "2026-08-17",
+  "source_payload_hash": "sha256:3434343434343434343434343434343434343434343434343434343434343434",
+  "proposed_at": "2026-08-17T21:00:00Z",
+  "proposal_status": "validated",
+  "source_event_references": [
+    "urn:cwl:tenant_001:invoice_draft:019d7b92-1aa0-7a7f-b61c-962c0f4bf6b0"
+  ],
+  "lines": [
+    {
+      "line_number": 1,
+      "account_role_code": "accounts_receivable",
+      "debit_amount": "110.00",
+      "credit_amount": "0"
+    },
+    {
+      "line_number": 2,
+      "account_role_code": "usage_revenue",
+      "debit_amount": "0",
+      "credit_amount": "100.00"
+    },
+    {
+      "line_number": 3,
+      "account_role_code": "tax_payable",
+      "debit_amount": "0",
+      "credit_amount": "10.00"
+    }
+  ]
+}

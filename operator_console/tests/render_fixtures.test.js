@@ -1450,6 +1450,86 @@ test("recorded leftover remaining write-off shows exact zero remaining and settl
   assert.ok(!("retained_earnings" in statement));
 });
 
+test("validated morning invoice-draft journal shows exact AR debit and wait", () => {
+  const statement = loadFixture("validated_morning_invoice_draft_journal.json");
+  const morningDraft = loadFixture("untaxed_morning.json");
+  const cashJournal = loadFixture("validated_morning_cash_journal.json");
+  const html = renderJournalProposal(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /validated/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Let AIS pull the validated journal/);
+  assert.equal(statement.proposal_status, "validated");
+  assert.equal(journalProposalAmount(statement), "0.003705");
+  assert.equal(statement.lines[0].account_role_code, "accounts_receivable");
+  assert.equal(statement.lines[0].debit_amount, morningDraft.amount_due);
+  assert.equal(statement.lines[1].account_role_code, "usage_revenue");
+  assert.equal(statement.lines[1].credit_amount, morningDraft.amount_due);
+  assert.equal(statement.lines.length, 2);
+  assert.equal(
+    statement.source_event_references[0],
+    `urn:cwl:tenant_001:invoice_draft:${morningDraft.invoice_draft_id}`,
+  );
+  assert.notEqual(statement.proposal_id, cashJournal.proposal_id);
+  assert.ok(!("next_operator_action" in statement));
+  assert.equal(typeof statement.lines[0].debit_amount, "string");
+  assert.notEqual(typeof statement.lines[0].debit_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: journalProposalAmount(statement),
+    currency_code: statement.transaction_currency,
+  }), /0\.003705 USD/);
+  assert.match(renderStatusChip({
+    amount_due: journalProposalAmount(statement),
+    tax_amount: "0",
+    status_label: statement.proposal_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("journal_entry_id" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
+test("validated taxed invoice-draft journal shows inclusive AR and tax payable", () => {
+  const statement = loadFixture("validated_taxed_invoice_draft_journal.json");
+  const taxedIssued = loadFixture("issued_taxed_hundred.json");
+  const assessedVat = loadFixture("assessed_morning_vat.json");
+  const html = renderJournalProposal(statement);
+  assert.match(html, /110\.00 USD/);
+  assert.match(html, /validated/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Let AIS pull the validated journal/);
+  assert.equal(statement.proposal_status, "validated");
+  assert.equal(journalProposalAmount(statement), "110.00");
+  assert.equal(statement.lines[0].account_role_code, "accounts_receivable");
+  assert.equal(statement.lines[0].debit_amount, taxedIssued.tax_inclusive_amount);
+  assert.equal(statement.lines[1].account_role_code, "usage_revenue");
+  assert.equal(statement.lines[1].credit_amount, taxedIssued.tax_exclusive_amount);
+  assert.equal(statement.lines[2].account_role_code, "tax_payable");
+  assert.equal(statement.lines[2].credit_amount, taxedIssued.tax_amount);
+  assert.equal(statement.lines.length, 3);
+  assert.equal(
+    statement.source_event_references[0],
+    `urn:cwl:tenant_001:invoice_draft:${taxedIssued.invoice_draft_id}`,
+  );
+  assert.equal(taxedIssued.invoice_draft_id, assessedVat.invoice_draft_id);
+  assert.ok(!("next_operator_action" in statement));
+  assert.equal(typeof statement.lines[0].debit_amount, "string");
+  assert.notEqual(typeof statement.lines[2].credit_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: journalProposalAmount(statement),
+    currency_code: statement.transaction_currency,
+  }), /110\.00 USD/);
+  assert.match(renderStatusChip({
+    amount_due: journalProposalAmount(statement),
+    tax_amount: "0",
+    status_label: statement.proposal_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("journal_entry_id" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
 test("validated morning cash journal shows exact received amount and wait", () => {
   const statement = loadFixture("validated_morning_cash_journal.json");
   const fullReceipt = loadFixture("applied_full_payment_receipt.json");
