@@ -1923,6 +1923,41 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             0,
         )
+        over_budget = SpendBudgetService(fresh, clock=lambda: published_at).publish_spend_budget(
+            TENANT_ONE,
+            account.billing_account_id,
+            "USD",
+            Decimal("0.001"),
+            MORNING_WINDOW,
+        )
+        self.assertEqual(over_budget.spend_budget_outcome_code.value, "accepted")
+        assert over_budget.spend_budget_id is not None
+        first_over = SpendBudgetOverSignalService(fresh, clock=lambda: published_at).observe_spend_budget_over(
+            TENANT_ONE, over_budget.spend_budget_id
+        )
+        self.assertEqual(first_over.spend_budget_over_signal_outcome_code.value, "accepted")
+        self.assertEqual(first_over.utilization_status, "over")
+        over_events = [
+            event
+            for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+            if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_OVER
+        ]
+        self.assertEqual(len(over_events), 1)
+        self.assertEqual(over_events[0].source_id, over_budget.spend_budget_id)
+        replay_over = SpendBudgetOverSignalService(fresh, clock=lambda: published_at).observe_spend_budget_over(
+            TENANT_ONE, over_budget.spend_budget_id
+        )
+        self.assertEqual(replay_over.spend_budget_over_signal_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+                    if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_OVER
+                ]
+            ),
+            1,
+        )
         # HTTP create_http_app still requires #22 credential methods on the ledger.
         with self.assertRaises(SpendBudgetPresentmentQueryError) as missing_pin:
             SpendBudgetPresentmentService(fresh).present_spend_budget(
