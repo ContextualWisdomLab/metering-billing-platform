@@ -1,0 +1,31 @@
+{
+  "proposal_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd98",
+  "proposal_contract_version": 1,
+  "idempotency_key": "urn:cwl:tenant_001:unapplied_cash_refund:019d7b92-1aa0-7a7f-b61c-962c0f4bfd82:sha256:1616161616161616161616161616161616161616161616161616161616161616:v1",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "legal_entity_reference": "urn:cwl:tenant_001:legal_entity:commercial",
+  "intended_book_role_code": "primary_statutory",
+  "transaction_currency": "USD",
+  "transaction_date": "2026-08-18",
+  "accounting_date": "2026-08-18",
+  "source_payload_hash": "sha256:1616161616161616161616161616161616161616161616161616161616161616",
+  "proposed_at": "2026-08-18T19:00:00Z",
+  "proposal_status": "validated",
+  "source_event_references": [
+    "urn:cwl:tenant_001:unapplied_cash_refund:019d7b92-1aa0-7a7f-b61c-962c0f4bfd82"
+  ],
+  "lines": [
+    {
+      "line_number": 1,
+      "account_role_code": "unapplied_cash",
+      "debit_amount": "0.001",
+      "credit_amount": "0"
+    },
+    {
+      "line_number": 2,
+      "account_role_code": "cash_receipt",
+      "debit_amount": "0",
+      "credit_amount": "0.001"
+    }
+  ]
+}
