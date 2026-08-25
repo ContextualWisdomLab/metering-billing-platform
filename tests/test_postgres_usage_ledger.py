@@ -18,6 +18,10 @@ import psycopg
 from metering_billing import (
     CollectionCaseService,
     CollectionCaseSettlementService,
+    CollectionDisputePresentmentService,
+    CollectionDisputeReleasePresentmentService,
+    CollectionDisputeReleaseService,
+    CollectionDisputeService,
     CreditAdjustmentService,
     CreditNoteApplicationPresentmentService,
     CreditNoteApplicationService,
@@ -52,6 +56,7 @@ from metering_billing import (
     format_exact_decimal,
 )
 from metering_billing.accounting_export import AccountingExportService
+from metering_billing.collection_dispute import compute_dispute_payload_hash
 from metering_billing.collection_write_off import CollectionWriteOffService
 from metering_billing.credit_note_application import compute_application_payload_hash
 from metering_billing.unapplied_cash_application import (
@@ -61,6 +66,9 @@ from metering_billing.unapplied_cash_refund import (
     compute_unapplied_cash_refund_payload_hash,
 )
 from metering_billing.errors import (
+    CollectionDisputePresentmentQueryError,
+    CollectionDisputeReleasePresentmentQueryError,
+    CollectionWriteOffRejectionReasonCode,
     CreditNoteApplicationPresentmentQueryError,
     IssuedCreditNotePresentmentQueryError,
     IssuedCreditNoteVoidPresentmentQueryError,
@@ -87,6 +95,7 @@ from metering_billing.spend_budget import compute_spend_budget_payload_hash
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_rating import UsageRatingService
 from metering_billing.usage_ledger import (
+    StoredCollectionDispute,
     StoredCreditNoteApplication,
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
@@ -98,6 +107,8 @@ from metering_billing.usage_ledger import (
     StoredWebhookDeliveryAttempt,
 )
 from metering_billing.webhook_outbox import (
+    EVENT_TYPE_DISPUTE_HELD,
+    EVENT_TYPE_DISPUTE_RELEASED,
     EVENT_TYPE_UNAPPLIED_CASH_APPLIED,
     EVENT_TYPE_REFUND_RECORDED,
     EVENT_TYPE_CREDIT_NOTE_APPLIED,
@@ -186,6 +197,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 billing_core.issued_credit_note,
                 billing_core.credit_adjustment,
                 billing_core.collection_dunning_event,
+                billing_core.collection_dispute,
                 billing_core.collection_case,
                 billing_core.issued_invoice_line,
                 billing_core.issued_invoice,
@@ -5323,6 +5335,706 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash_refund"
             ).fetchone()[0],
             3,
+        )
+
+    def test_collection_dispute_is_durable(self) -> None:
+        """Persist one dispute hold and keep GET presentment after restart."""
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
+        self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
+        assert collection.collection_case_id is not None
+        remaining = self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount
+        self.assertGreater(remaining, 0)
+        self.assertNotEqual(remaining, KNOWN_MORNING_TOTAL)
+
+        held_at = datetime(2026, 8, 18, 13, 0, tzinfo=UTC)
+        accepted = CollectionDisputeService(
+            self.ledger, clock=lambda: held_at
+        ).hold_collection_case(TENANT_ONE, collection.collection_case_id)
+        self.assertEqual(accepted.collection_dispute_outcome_code.value, "accepted")
+        assert accepted.collection_dispute_id is not None
+        stored = self.ledger.get_collection_dispute(accepted.collection_dispute_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
+        self.assertEqual(stored.collection_case_id, collection.collection_case_id)
+        self.assertEqual(stored.invoice_draft_id, draft.invoice_draft_id)
+        self.assertEqual(stored.currency_code, "USD")
+        self.assertEqual(stored.remaining_outstanding_amount, remaining)
+        self.assertEqual(stored.collection_dispute_status, "held")
+        self.assertEqual(stored.held_at, held_at)
+        self.assertIsNone(stored.released_at)
+        self.assertEqual(stored.source_payload_hash, accepted.source_payload_hash)
+        self.assertIsInstance(stored.remaining_outstanding_amount, Decimal)
+        self.assertNotIsInstance(stored.remaining_outstanding_amount, float)
+        reloaded_case = self.ledger.get_collection_case(collection.collection_case_id)
+        assert reloaded_case is not None
+        self.assertEqual(reloaded_case.collection_case_status, "disputed")
+        self.assertEqual(reloaded_case.outstanding_amount, remaining)
+        self.assertEqual(
+            self.ledger.find_collection_dispute(
+                stored.tenant_account_id, stored.collection_case_id
+            ),
+            stored,
+        )
+        self.assertEqual(
+            self.ledger.list_collection_disputes_for_tenant(stored.tenant_account_id),
+            (stored,),
+        )
+        self.assertEqual(
+            self.ledger.list_collection_disputes_for_tenant(
+                self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+            ),
+            (),
+        )
+        self.assertIsNone(self.ledger.get_collection_dispute(uuid4()))
+        self.assertIsNone(
+            self.ledger.find_collection_dispute(stored.tenant_account_id, uuid4())
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            1,
+        )
+        outbox_rows = [
+            event
+            for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                stored.tenant_account_id
+            )
+            if event.event_type_code == EVENT_TYPE_DISPUTE_HELD
+        ]
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].source_id, stored.collection_dispute_id)
+
+        replay = CollectionDisputeService(
+            self.ledger, clock=lambda: held_at
+        ).hold_collection_case(TENANT_ONE, collection.collection_case_id)
+        self.assertEqual(replay.collection_dispute_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.collection_dispute_id, stored.collection_dispute_id)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
+            remaining,
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_DISPUTE_HELD
+                ]
+            ),
+            1,
+        )
+
+        rejected = CollectionDisputeService(self.ledger).hold_collection_case(
+            TENANT_ONE, uuid4()
+        )
+        self.assertEqual(rejected.collection_dispute_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            1,
+        )
+        mismatch = CollectionDisputeService(self.ledger).hold_collection_case(
+            TENANT_TWO, collection.collection_case_id
+        )
+        self.assertEqual(mismatch.collection_dispute_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            1,
+        )
+        disputed_write_off = CollectionWriteOffService(self.ledger).write_off_collection_case(
+            TENANT_ONE, collection.collection_case_id
+        )
+        self.assertEqual(disputed_write_off.collection_write_off_outcome_code.value, "rejected")
+        self.assertEqual(
+            disputed_write_off.rejection_reason_code,
+            CollectionWriteOffRejectionReasonCode.COLLECTION_CASE_DISPUTED,
+        )
+
+        afternoon = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bfc2c",
+            source_event_key="workflow_381:step_21:attempt_01",
+            occurred_at="2026-08-16T11:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "500",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(afternoon)
+        afternoon_window = TimeWindow.from_iso8601(
+            "2026-08-16T11:00:00Z", "2026-08-16T12:00:00Z"
+        )
+        afternoon_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, afternoon_window, 1, rate_card_code="cwl_standard"
+        )
+        afternoon_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, afternoon_rating.rating_run_id
+        )
+        afternoon_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, afternoon_draft.invoice_draft_id)
+        assert afternoon_collection.collection_case_id is not None
+        afternoon_remaining = self.ledger.get_collection_case(
+            afternoon_collection.collection_case_id
+        ).outstanding_amount
+        afternoon_held_at = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
+        later = CollectionDisputeService(
+            self.ledger, clock=lambda: afternoon_held_at
+        ).hold_collection_case(TENANT_ONE, afternoon_collection.collection_case_id)
+        self.assertEqual(later.collection_dispute_outcome_code.value, "accepted")
+        assert later.collection_dispute_id is not None
+        later_stored = self.ledger.get_collection_dispute(later.collection_dispute_id)
+        assert later_stored is not None
+        self.assertEqual(later_stored.remaining_outstanding_amount, afternoon_remaining)
+        self.assertEqual(
+            self.ledger.get_collection_case(afternoon_collection.collection_case_id).collection_case_status,
+            "disputed",
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            2,
+        )
+
+        released_at = datetime(2026, 8, 18, 16, 0, tzinfo=UTC)
+        released = CollectionDisputeReleaseService(
+            self.ledger, clock=lambda: released_at
+        ).release_collection_dispute(TENANT_ONE, later.collection_dispute_id)
+        self.assertEqual(released.collection_dispute_release_outcome_code.value, "accepted")
+        released_row = self.ledger.get_collection_dispute(later.collection_dispute_id)
+        assert released_row is not None
+        self.assertEqual(released_row.collection_dispute_status, "released")
+        self.assertEqual(released_row.released_at, released_at)
+        self.assertEqual(released_row.remaining_outstanding_amount, afternoon_remaining)
+        self.assertEqual(
+            self.ledger.get_collection_case(afternoon_collection.collection_case_id).collection_case_status,
+            "open",
+        )
+        release_outbox = [
+            event
+            for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                stored.tenant_account_id
+            )
+            if event.event_type_code == EVENT_TYPE_DISPUTE_RELEASED
+        ]
+        self.assertEqual(len(release_outbox), 1)
+        self.assertEqual(release_outbox[0].source_id, later.collection_dispute_id)
+        release_replay = CollectionDisputeReleaseService(
+            self.ledger, clock=lambda: released_at
+        ).release_collection_dispute(TENANT_ONE, later.collection_dispute_id)
+        self.assertEqual(
+            release_replay.collection_dispute_release_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_DISPUTE_RELEASED
+                ]
+            ),
+            1,
+        )
+        later_hold = CollectionDisputeService(self.ledger).hold_collection_case(
+            TENANT_ONE, afternoon_collection.collection_case_id
+        )
+        self.assertEqual(later_hold.collection_dispute_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            2,
+        )
+
+        crash_usage = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bfe2c",
+            source_event_key="workflow_381:step_22:attempt_01",
+            occurred_at="2026-08-16T17:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "1500",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(crash_usage)
+        crash_window = TimeWindow.from_iso8601(
+            "2026-08-16T17:00:00Z", "2026-08-16T18:00:00Z"
+        )
+        crash_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, crash_window, 1, rate_card_code="cwl_standard"
+        )
+        crash_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, crash_rating.rating_run_id
+        )
+        crash_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, crash_draft.invoice_draft_id)
+        assert crash_collection.collection_case_id is not None
+        crash_case = self.ledger.get_collection_case(crash_collection.collection_case_id)
+        assert crash_case is not None
+        crash_hash = compute_dispute_payload_hash(
+            {
+                "collection_case_id": str(crash_case.collection_case_id),
+                "invoice_draft_id": str(crash_case.invoice_draft_id),
+                "currency_code": crash_case.currency_code,
+                "remaining_outstanding_amount": format_exact_decimal(
+                    crash_case.outstanding_amount
+                ),
+                "collection_dispute_contract_version": 1,
+            }
+        )
+        inserted_without_outbox = self.ledger.insert_collection_dispute(
+            StoredCollectionDispute(
+                collection_dispute_id=uuid4(),
+                tenant_account_id=tenant.tenant_account_id,
+                collection_case_id=crash_case.collection_case_id,
+                invoice_draft_id=crash_case.invoice_draft_id,
+                issued_invoice_id=None,
+                collection_dispute_contract_version=1,
+                source_payload_hash=crash_hash,
+                currency_code=crash_case.currency_code,
+                remaining_outstanding_amount=crash_case.outstanding_amount,
+                collection_dispute_status="held",
+                held_at=datetime(2026, 8, 18, 17, 30, tzinfo=UTC),
+            )
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(crash_case.collection_case_id).collection_case_status,
+            "open",
+        )
+        prior_outbox = len(
+            [
+                event
+                for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                    stored.tenant_account_id
+                )
+                if event.event_type_code == EVENT_TYPE_DISPUTE_HELD
+            ]
+        )
+        healed = CollectionDisputeService(
+            self.ledger, clock=lambda: held_at
+        ).hold_collection_case(TENANT_ONE, crash_collection.collection_case_id)
+        self.assertEqual(healed.collection_dispute_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            healed.collection_dispute_id,
+            inserted_without_outbox.collection_dispute_id,
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(crash_case.collection_case_id).collection_case_status,
+            "disputed",
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_DISPUTE_HELD
+                ]
+            ),
+            prior_outbox + 1,
+        )
+
+        release_crash_usage = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bff2c",
+            source_event_key="workflow_381:step_23:attempt_01",
+            occurred_at="2026-08-16T19:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "2000",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(release_crash_usage)
+        release_crash_window = TimeWindow.from_iso8601(
+            "2026-08-16T19:00:00Z", "2026-08-16T20:00:00Z"
+        )
+        release_crash_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, release_crash_window, 1, rate_card_code="cwl_standard"
+        )
+        release_crash_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, release_crash_rating.rating_run_id
+        )
+        release_crash_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, release_crash_draft.invoice_draft_id)
+        assert release_crash_collection.collection_case_id is not None
+        crash_hold = CollectionDisputeService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 18, 0, tzinfo=UTC)
+        ).hold_collection_case(TENANT_ONE, release_crash_collection.collection_case_id)
+        assert crash_hold.collection_dispute_id is not None
+        crash_released_at = datetime(2026, 8, 18, 18, 30, tzinfo=UTC)
+        self.ledger.mark_collection_dispute_released(
+            crash_hold.collection_dispute_id, crash_released_at
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(
+                release_crash_collection.collection_case_id
+            ).collection_case_status,
+            "disputed",
+        )
+        prior_release_outbox = len(
+            [
+                event
+                for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                    stored.tenant_account_id
+                )
+                if event.event_type_code == EVENT_TYPE_DISPUTE_RELEASED
+            ]
+        )
+        healed_release = CollectionDisputeReleaseService(
+            self.ledger, clock=lambda: crash_released_at
+        ).release_collection_dispute(TENANT_ONE, crash_hold.collection_dispute_id)
+        self.assertEqual(
+            healed_release.collection_dispute_release_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(
+                release_crash_collection.collection_case_id
+            ).collection_case_status,
+            "open",
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_DISPUTE_RELEASED
+                ]
+            ),
+            prior_release_outbox + 1,
+        )
+
+        fresh = PostgresUsageLedger(self.connection)
+        reloaded = fresh.get_collection_dispute(stored.collection_dispute_id)
+        self.assertEqual(reloaded, stored)
+        presentment = CollectionDisputePresentmentService(fresh).present_collection_dispute(
+            TENANT_ONE, stored.collection_dispute_id
+        )
+        self.assertEqual(presentment.remaining_outstanding_amount, remaining)
+        self.assertEqual(presentment.collection_dispute_status, "held")
+        self.assertEqual(presentment.collection_case_status, "disputed")
+        self.assertEqual(presentment.next_operator_action, "wait")
+        page = CollectionDisputePresentmentService(fresh).list_collection_disputes(TENANT_ONE)
+        self.assertEqual(
+            {row.collection_dispute_id for row in page.collection_disputes},
+            {
+                stored.collection_dispute_id,
+                later.collection_dispute_id,
+                inserted_without_outbox.collection_dispute_id,
+                crash_hold.collection_dispute_id,
+            },
+        )
+        release_presentment = CollectionDisputeReleasePresentmentService(
+            fresh
+        ).present_collection_dispute_release(TENANT_ONE, later.collection_dispute_id)
+        self.assertEqual(release_presentment.collection_dispute_status, "released")
+        self.assertEqual(release_presentment.collection_case_status, "open")
+        reloaded_presentment = CollectionDisputePresentmentService(
+            PostgresUsageLedger(self.connection)
+        ).present_collection_dispute(TENANT_ONE, stored.collection_dispute_id)
+        self.assertEqual(
+            reloaded_presentment.collection_dispute_id,
+            presentment.collection_dispute_id,
+        )
+        with self.assertRaises(CollectionDisputePresentmentQueryError) as missing_pin:
+            CollectionDisputePresentmentService(fresh).present_collection_dispute(
+                "", stored.collection_dispute_id
+            )
+        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(CollectionDisputePresentmentQueryError) as other_pin:
+            CollectionDisputePresentmentService(fresh).present_collection_dispute(
+                TENANT_TWO, stored.collection_dispute_id
+            )
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "collection_dispute_not_found"
+        )
+        with self.assertRaises(CollectionDisputeReleasePresentmentQueryError) as held_release:
+            CollectionDisputeReleasePresentmentService(fresh).present_collection_dispute_release(
+                TENANT_ONE, stored.collection_dispute_id
+            )
+        self.assertEqual(
+            held_release.exception.rejection_reason_code,
+            "collection_dispute_release_not_found",
+        )
+
+        self.assertEqual(self.ledger.insert_collection_dispute(stored), stored)
+        self.assertEqual(
+            self.ledger.insert_collection_dispute(
+                replace(stored, collection_dispute_id=uuid4())
+            ),
+            stored,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_dispute(replace(stored, currency_code="usd"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_dispute(
+                replace(stored, source_payload_hash="md5:abc")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_dispute(
+                replace(stored, collection_dispute_status="released")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_dispute(
+                replace(
+                    stored,
+                    remaining_outstanding_amount=Decimal("-0.001"),
+                    collection_dispute_id=uuid4(),
+                )
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_collection_dispute(
+                replace(
+                    stored,
+                    collection_dispute_id=later.collection_dispute_id,
+                    collection_case_id=uuid4(),
+                    source_payload_hash="sha256:" + "d" * 64,
+                )
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_dispute_released(uuid4(), released_at)
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_disputed(uuid4())
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_released_from_dispute(uuid4())
+        settled_case = self.ledger.get_collection_case(collection.collection_case_id)
+        assert settled_case is not None
+        self.assertEqual(
+            self.ledger.mark_collection_case_disputed(collection.collection_case_id),
+            self.ledger.get_collection_case(collection.collection_case_id),
+        )
+        self.assertEqual(
+            self.ledger.mark_collection_dispute_released(
+                later.collection_dispute_id, released_at
+            ).collection_dispute_status,
+            "released",
+        )
+        self.assertEqual(
+            self.ledger.mark_collection_case_released_from_dispute(
+                afternoon_collection.collection_case_id
+            ).collection_case_status,
+            "open",
+        )
+        written_off = CollectionWriteOffService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 16, 30, tzinfo=UTC)
+        ).write_off_collection_case(TENANT_ONE, afternoon_collection.collection_case_id)
+        self.assertEqual(written_off.collection_write_off_outcome_code.value, "accepted")
+        settled = CollectionCaseSettlementService(self.ledger).settle_collection_case(
+            TENANT_ONE, afternoon_collection.collection_case_id
+        )
+        self.assertEqual(settled.collection_case_settlement_outcome_code.value, "accepted")
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_disputed(afternoon_collection.collection_case_id)
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_released_from_dispute(
+                afternoon_collection.collection_case_id
+            )
+        dunning_usage = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf12c",
+            source_event_key="workflow_381:step_25:attempt_01",
+            occurred_at="2026-08-16T23:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "3000",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(dunning_usage)
+        dunning_window = TimeWindow.from_iso8601(
+            "2026-08-16T23:00:00Z", "2026-08-17T00:00:00Z"
+        )
+        dunning_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, dunning_window, 1, rate_card_code="cwl_standard"
+        )
+        dunning_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, dunning_rating.rating_run_id
+        )
+        dunning_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, dunning_draft.invoice_draft_id)
+        assert dunning_collection.collection_case_id is not None
+        dunning_notice = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).record_dunning_event(
+            TENANT_ONE, dunning_collection.collection_case_id, "first_notice"
+        )
+        self.assertEqual(dunning_notice.collection_case_outcome_code.value, "accepted")
+        dunning_hold = CollectionDisputeService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 23, 0, tzinfo=UTC)
+        ).hold_collection_case(TENANT_ONE, dunning_collection.collection_case_id)
+        self.assertEqual(dunning_hold.collection_dispute_outcome_code.value, "accepted")
+        assert dunning_hold.collection_dispute_id is not None
+        dunning_release = CollectionDisputeReleaseService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 23, 30, tzinfo=UTC)
+        ).release_collection_dispute(TENANT_ONE, dunning_hold.collection_dispute_id)
+        self.assertEqual(dunning_release.collection_dispute_release_outcome_code.value, "accepted")
+        self.assertEqual(dunning_release.collection_case_status, "dunning")
+        self.assertEqual(
+            self.ledger.get_collection_case(
+                dunning_collection.collection_case_id
+            ).collection_case_status,
+            "dunning",
+        )
+
+        race_usage = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf02c",
+            source_event_key="workflow_381:step_24:attempt_01",
+            occurred_at="2026-08-16T21:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "2500",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(race_usage)
+        race_window = TimeWindow.from_iso8601(
+            "2026-08-16T21:00:00Z", "2026-08-16T22:00:00Z"
+        )
+        race_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, race_window, 1, rate_card_code="cwl_standard"
+        )
+        race_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, race_rating.rating_run_id
+        )
+        race_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, race_draft.invoice_draft_id)
+        assert race_collection.collection_case_id is not None
+        race_case = self.ledger.get_collection_case(race_collection.collection_case_id)
+        assert race_case is not None
+        race_hash = compute_dispute_payload_hash(
+            {
+                "collection_case_id": str(race_case.collection_case_id),
+                "invoice_draft_id": str(race_case.invoice_draft_id),
+                "currency_code": race_case.currency_code,
+                "remaining_outstanding_amount": format_exact_decimal(
+                    race_case.outstanding_amount
+                ),
+                "collection_dispute_contract_version": 1,
+            }
+        )
+        raced_row = self.ledger.insert_collection_dispute(
+            StoredCollectionDispute(
+                collection_dispute_id=uuid4(),
+                tenant_account_id=tenant.tenant_account_id,
+                collection_case_id=race_case.collection_case_id,
+                invoice_draft_id=race_case.invoice_draft_id,
+                issued_invoice_id=None,
+                collection_dispute_contract_version=1,
+                source_payload_hash=race_hash,
+                currency_code=race_case.currency_code,
+                remaining_outstanding_amount=race_case.outstanding_amount,
+                collection_dispute_status="held",
+                held_at=datetime(2026, 8, 18, 21, 0, tzinfo=UTC),
+            )
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(race_case.collection_case_id).collection_case_status,
+            "open",
+        )
+
+        class BlindFindLedger(PostgresUsageLedger):
+            """Force the insert path used after a concurrent identity race."""
+
+            def find_collection_dispute(self, *args, **kwargs):
+                return None
+
+        raced = CollectionDisputeService(
+            BlindFindLedger(self.connection), clock=lambda: held_at
+        ).hold_collection_case(TENANT_ONE, race_collection.collection_case_id)
+        self.assertEqual(raced.collection_dispute_outcome_code.value, "duplicate_replay")
+        self.assertEqual(raced.collection_dispute_id, raced_row.collection_dispute_id)
+        self.assertEqual(
+            self.ledger.get_collection_case(race_case.collection_case_id).collection_case_status,
+            "disputed",
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            6,
+        )
+
+        class BlindFindMissingCaseLedger(PostgresUsageLedger):
+            """Force the insert race when the stored case cannot be loaded."""
+
+            def __init__(self, connection: object) -> None:
+                super().__init__(connection)
+                self._hide_case = False
+
+            def find_collection_dispute(self, *args, **kwargs):
+                return None
+
+            def insert_collection_dispute(self, dispute):
+                stored_dispute = PostgresUsageLedger.insert_collection_dispute(self, dispute)
+                self._hide_case = True
+                return stored_dispute
+
+            def get_collection_case(self, collection_case_id):
+                if self._hide_case:
+                    return None
+                return PostgresUsageLedger.get_collection_case(self, collection_case_id)
+
+        missing_case = CollectionDisputeService(
+            BlindFindMissingCaseLedger(self.connection), clock=lambda: held_at
+        ).hold_collection_case(TENANT_ONE, race_collection.collection_case_id)
+        self.assertEqual(missing_case.collection_dispute_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.collection_dispute"
+            ).fetchone()[0],
+            6,
         )
 
     def test_transaction_context_and_connection_lifecycle(self) -> None:

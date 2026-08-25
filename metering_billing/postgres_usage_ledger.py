@@ -4,7 +4,8 @@ The repository owns catalog rows, immutable usage facts, rating runs, invoice
 drafts, issued invoices, unused issued-invoice voids, issued credit notes,
 unused issued-credit-note voids, credit-note applications, parked leftover
 ``unapplied_cash``, leftover-apply ``unapplied_cash_application``, leftover
-refund ``unapplied_cash_refund``, collection cases, payment and
+refund ``unapplied_cash_refund``, collection cases, collection-dispute
+holds, payment and
 credit facts, journal proposals, published spend budgets, and the atomic
 webhook outbox used by the first commercial path. Every public operation uses
 the supplied PostgreSQL connection; the implementation never falls back to an
@@ -38,6 +39,7 @@ from metering_billing.usage_ledger import (
     MeterDefinition,
     MeterQualityRule,
     StoredCollectionCase,
+    StoredCollectionDispute,
     StoredCollectionDunningEvent,
     StoredCreditAdjustment,
     StoredCollectionCaseSettlement,
@@ -2260,6 +2262,258 @@ class PostgresUsageLedger:
                 if row is None:
                     raise ValueError("collection dunning event identity requires a stored case")
             return self._fetch_collection_dunning_event(cursor, UUID(str(row[0])))
+
+    def find_collection_dispute(
+        self, tenant_account_id: UUID, collection_case_id: UUID
+    ) -> StoredCollectionDispute | None:
+        """Return the dispute-hold row for one tenant collection case, if any."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_dispute_id
+                FROM billing_core.collection_dispute
+                WHERE tenant_account_id = %s AND collection_case_id = %s
+                """,
+                (tenant_account_id, collection_case_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_dispute(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_collection_dispute(
+        self, collection_dispute_id: UUID
+    ) -> StoredCollectionDispute | None:
+        """Return one collection dispute by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_dispute_id
+                FROM billing_core.collection_dispute
+                WHERE collection_dispute_id = %s
+                """,
+                (collection_dispute_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_collection_dispute(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_collection_disputes_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCollectionDispute, ...]:
+        """Return collection disputes limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_dispute_id
+                FROM billing_core.collection_dispute
+                WHERE tenant_account_id = %s
+                ORDER BY held_at, collection_dispute_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_collection_dispute(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_collection_dispute(
+        self, collection_dispute: StoredCollectionDispute
+    ) -> StoredCollectionDispute:
+        """Persist one held commercial dispute or return its identity replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(collection_dispute.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+            collection_dispute.source_payload_hash
+        ) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if collection_dispute.collection_dispute_status != "held":
+            raise ValueError("collection_dispute_status must be held")
+        remaining = parse_exact_decimal(
+            format_exact_decimal(collection_dispute.remaining_outstanding_amount)
+        )
+        if remaining < 0:
+            raise ValueError("collection dispute remaining must be a non-negative exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.collection_dispute
+                    (collection_dispute_id, tenant_account_id, collection_case_id,
+                     invoice_draft_id, issued_invoice_id,
+                     collection_dispute_contract_version, source_payload_hash,
+                     currency_code, remaining_outstanding_amount,
+                     collection_dispute_status, held_at, released_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING collection_dispute_id
+                """,
+                (
+                    collection_dispute.collection_dispute_id,
+                    collection_dispute.tenant_account_id,
+                    collection_dispute.collection_case_id,
+                    collection_dispute.invoice_draft_id,
+                    collection_dispute.issued_invoice_id,
+                    collection_dispute.collection_dispute_contract_version,
+                    collection_dispute.source_payload_hash,
+                    collection_dispute.currency_code,
+                    remaining,
+                    collection_dispute.collection_dispute_status,
+                    collection_dispute.held_at,
+                    collection_dispute.released_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT collection_dispute_id
+                    FROM billing_core.collection_dispute
+                    WHERE tenant_account_id = %s AND collection_case_id = %s
+                    """,
+                    (
+                        collection_dispute.tenant_account_id,
+                        collection_dispute.collection_case_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        "collection dispute identity conflicts with an existing row"
+                    )
+            return self._fetch_collection_dispute(cursor, UUID(str(row[0])))
+
+    def mark_collection_dispute_released(
+        self, collection_dispute_id: UUID, released_at: datetime
+    ) -> StoredCollectionDispute:
+        """Flip one held dispute to ``released`` without changing remaining."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_dispute_id, tenant_account_id, collection_case_id,
+                       invoice_draft_id, issued_invoice_id,
+                       collection_dispute_contract_version, source_payload_hash,
+                       currency_code, remaining_outstanding_amount,
+                       collection_dispute_status, held_at, released_at
+                FROM billing_core.collection_dispute
+                WHERE collection_dispute_id = %s
+                FOR UPDATE
+                """,
+                (collection_dispute_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("collection dispute release requires a stored dispute")
+            stored = self._collection_dispute_from_row(row)
+            if stored.collection_dispute_status == "released":
+                return stored
+            if stored.collection_dispute_status != "held":
+                raise ValueError("only held collection disputes can release")
+            cursor.execute(
+                """
+                UPDATE billing_core.collection_dispute
+                SET collection_dispute_status = 'released', released_at = %s
+                WHERE collection_dispute_id = %s
+                RETURNING collection_dispute_id
+                """,
+                (released_at, collection_dispute_id),
+            )
+            updated = cursor.fetchone()
+            if updated is None:  # pragma: no cover - the row is locked above
+                raise ValueError("collection dispute release requires a stored dispute")
+            return self._fetch_collection_dispute(cursor, UUID(str(updated[0])))
+
+    def mark_collection_case_disputed(
+        self, collection_case_id: UUID
+    ) -> StoredCollectionCase:
+        """Flip an open or dunning case to ``disputed`` without changing outstanding."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
+                       currency_code, collection_case_status, outstanding_amount, opened_at
+                FROM billing_core.collection_case
+                WHERE collection_case_id = %s
+                FOR UPDATE
+                """,
+                (collection_case_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("collection dispute requires a stored collection case")
+            stored = self._collection_case_from_row(row)
+            if stored.collection_case_status == "disputed":
+                return stored
+            if stored.collection_case_status not in {"open", "dunning"}:
+                raise ValueError("only open or dunning collection cases can hold as disputed")
+            cursor.execute(
+                """
+                UPDATE billing_core.collection_case
+                SET collection_case_status = 'disputed'
+                WHERE collection_case_id = %s
+                RETURNING collection_case_id
+                """,
+                (collection_case_id,),
+            )
+            updated = cursor.fetchone()
+            if updated is None:  # pragma: no cover - the row is locked above
+                raise ValueError("collection dispute requires a stored collection case")
+            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
+
+    def mark_collection_case_released_from_dispute(
+        self, collection_case_id: UUID
+    ) -> StoredCollectionCase:
+        """Restore a disputed case to open or dunning without changing outstanding."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
+                       currency_code, collection_case_status, outstanding_amount, opened_at
+                FROM billing_core.collection_case
+                WHERE collection_case_id = %s
+                FOR UPDATE
+                """,
+                (collection_case_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError(
+                    "collection dispute release requires a stored collection case"
+                )
+            stored = self._collection_case_from_row(row)
+            if stored.collection_case_status in {"open", "dunning"}:
+                return stored
+            if stored.collection_case_status == "settled":
+                raise ValueError("settled collection cases cannot release from dispute")
+            if stored.collection_case_status == "voided":
+                raise ValueError("voided collection cases cannot release from dispute")
+            if stored.collection_case_status != "disputed":
+                raise ValueError("only disputed collection cases can release to open")
+            cursor.execute(
+                """
+                SELECT 1
+                FROM billing_core.collection_dunning_event
+                WHERE collection_case_id = %s
+                LIMIT 1
+                """,
+                (collection_case_id,),
+            )
+            restored_status = "dunning" if cursor.fetchone() is not None else "open"
+            cursor.execute(
+                """
+                UPDATE billing_core.collection_case
+                SET collection_case_status = %s
+                WHERE collection_case_id = %s
+                RETURNING collection_case_id
+                """,
+                (restored_status, collection_case_id),
+            )
+            updated = cursor.fetchone()
+            if updated is None:  # pragma: no cover - the row is locked above
+                raise ValueError(
+                    "collection dispute release requires a stored collection case"
+                )
+            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
 
     def apply_collection_settlement(
         self, collection_case_id: UUID, applied_amount: Any
@@ -5871,6 +6125,45 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(collection_case_settlement_id)
         return self._collection_case_settlement_from_row(row)
+
+    @staticmethod
+    def _collection_dispute_from_row(row: tuple[Any, ...]) -> StoredCollectionDispute:
+        """Decode one normalized collection-dispute row."""
+        return StoredCollectionDispute(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            None if row[4] is None else UUID(str(row[4])),
+            row[5],
+            row[6],
+            row[7],
+            parse_exact_decimal(format_exact_decimal(row[8])),
+            row[9],
+            row[10],
+            row[11],
+        )
+
+    def _fetch_collection_dispute(
+        self, cursor: Any, collection_dispute_id: UUID
+    ) -> StoredCollectionDispute:
+        """Hydrate one collection dispute."""
+        cursor.execute(
+            """
+            SELECT collection_dispute_id, tenant_account_id, collection_case_id,
+                   invoice_draft_id, issued_invoice_id,
+                   collection_dispute_contract_version, source_payload_hash,
+                   currency_code, remaining_outstanding_amount,
+                   collection_dispute_status, held_at, released_at
+            FROM billing_core.collection_dispute
+            WHERE collection_dispute_id = %s
+            """,
+            (collection_dispute_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(collection_dispute_id)
+        return self._collection_dispute_from_row(row)
 
     @staticmethod
     def _journal_proposal_from_row(

@@ -7,10 +7,13 @@ The service is the buyer-facing release path:
 3. Restore case status to ``open``, or ``dunning`` when notices already exist.
 
 Replay of the same tenant and ``collection_dispute_id`` returns the stored
-release and never changes remaining outstanding.  First successful release
-enqueues one ``dispute.released`` outbox event.  Replay of that release
-does not enqueue a second row.  The path does not emit a journal, unwind
-tax, capture payment, call AIS, write off, settle, or void.
+release and never changes remaining outstanding.  A crash after
+``mark_collection_dispute_released`` and before
+``mark_collection_case_released_from_dispute`` is healed by the next
+replay when the stored case is still ``disputed``.  First successful
+release enqueues one ``dispute.released`` outbox event.  Replay of that
+release does not enqueue a second row.  The path does not emit a journal,
+unwind tax, capture payment, call AIS, write off, settle, or void.
 """
 
 from __future__ import annotations
@@ -22,6 +25,9 @@ from typing import Callable
 from uuid import UUID
 
 from metering_billing.collection_case import (
+    COLLECTION_CASE_DISPUTED_STATUS,
+    COLLECTION_CASE_DUNNING_STATUS,
+    COLLECTION_CASE_OPEN_STATUS,
     COLLECTION_CASE_SETTLED_STATUS,
     COLLECTION_CASE_VOIDED_STATUS,
 )
@@ -203,9 +209,10 @@ class CollectionDisputeReleaseService:
                 CollectionDisputeReleaseRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
             )
         if stored.collection_dispute_status == COLLECTION_DISPUTE_RELEASED_STATUS:
+            updated_case = _heal_case_after_recorded_release(self.ledger, collection_case)
             result = _from_stored(
                 stored,
-                collection_case,
+                updated_case,
                 tenant.tenant_reference,
                 CollectionDisputeReleaseOutcomeCode.DUPLICATE_REPLAY,
             )
@@ -281,6 +288,27 @@ def _enqueue_dispute_released(
         result.collection_dispute_id,
         payload,
         stored.released_at,
+    )
+
+
+def _heal_case_after_recorded_release(
+    ledger: MemoryUsageLedger,
+    collection_case: StoredCollectionCase,
+) -> StoredCollectionCase:
+    """Restore a disputed case left disputed after a recorded release.
+
+    Already-``open`` or ``dunning`` cases stay as-is.  Replay does not
+    change remaining.
+    """
+    if collection_case.collection_case_status in {
+        COLLECTION_CASE_OPEN_STATUS,
+        COLLECTION_CASE_DUNNING_STATUS,
+    }:
+        return collection_case
+    if collection_case.collection_case_status != COLLECTION_CASE_DISPUTED_STATUS:
+        return collection_case
+    return ledger.mark_collection_case_released_from_dispute(
+        collection_case.collection_case_id
     )
 
 
