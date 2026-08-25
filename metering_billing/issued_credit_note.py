@@ -212,29 +212,31 @@ class IssuedCreditNoteService:
         source_payload_hash = compute_issued_credit_note_payload_hash(
             _canonical_snapshot(credit, issued_invoice_id)
         )
-        stored = self.ledger.insert_issued_credit_note(
-            StoredIssuedCreditNote(
-                issued_credit_note_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                credit_adjustment_id=credit.credit_adjustment_id,
-                invoice_draft_id=credit.invoice_draft_id,
-                issued_invoice_id=issued_invoice_id,
-                issued_credit_note_contract_version=ISSUED_CREDIT_NOTE_CONTRACT_VERSION,
-                credit_adjustment_contract_version=credit.credit_adjustment_contract_version,
-                credit_reason_code=credit.credit_reason_code,
-                credit_adjustment_source_payload_hash=credit.source_payload_hash,
-                source_payload_hash=source_payload_hash,
-                currency_code=credit.currency_code,
-                tax_exclusive_amount=credit.tax_exclusive_amount,
-                tax_amount=credit.tax_amount,
-                tax_inclusive_amount=credit.credit_amount,
-                issued_credit_note_status=ISSUED_CREDIT_NOTE_STATUS,
-                issued_at=self._clock(),
-            )
+        candidate = StoredIssuedCreditNote(
+            issued_credit_note_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            credit_adjustment_id=credit.credit_adjustment_id,
+            invoice_draft_id=credit.invoice_draft_id,
+            issued_invoice_id=issued_invoice_id,
+            issued_credit_note_contract_version=ISSUED_CREDIT_NOTE_CONTRACT_VERSION,
+            credit_adjustment_contract_version=credit.credit_adjustment_contract_version,
+            credit_reason_code=credit.credit_reason_code,
+            credit_adjustment_source_payload_hash=credit.source_payload_hash,
+            source_payload_hash=source_payload_hash,
+            currency_code=credit.currency_code,
+            tax_exclusive_amount=credit.tax_exclusive_amount,
+            tax_amount=credit.tax_amount,
+            tax_inclusive_amount=credit.credit_amount,
+            issued_credit_note_status=ISSUED_CREDIT_NOTE_STATUS,
+            issued_at=self._clock(),
         )
-        result = _from_stored(
-            stored, tenant.tenant_reference, IssuedCreditNoteOutcomeCode.ACCEPTED
+        stored = self.ledger.insert_issued_credit_note(candidate)
+        outcome = (
+            IssuedCreditNoteOutcomeCode.ACCEPTED
+            if stored.issued_credit_note_id == candidate.issued_credit_note_id
+            else IssuedCreditNoteOutcomeCode.DUPLICATE_REPLAY
         )
+        result = _from_stored(stored, tenant.tenant_reference, outcome)
         _enqueue_credit_note_issued(self.ledger, tenant.tenant_reference, result)
         return result
 

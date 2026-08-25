@@ -194,8 +194,8 @@ contextual-orchestrator usage
 
 ## Issued-credit-note acceptance
 
-- A known stored credit adjustment issues one append-only commercial `issued_credit_note` whose currency and tax-exclusive/tax/inclusive totals match the stored credit.
-- A second issue of the same tenant and `credit_adjustment_id` returns the same `issued_credit_note_id` as `duplicate_replay`.
+- A known stored credit adjustment issues one append-only commercial `issued_credit_note` whose currency and tax-exclusive/tax/inclusive totals match the stored credit. `PostgresUsageLedger` persists that issued row so GET presentment survives process restart.
+- A second issue of the same tenant and `credit_adjustment_id` returns the same `issued_credit_note_id` as `duplicate_replay` and does not insert a second row.
 - `issued_credit_note_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, QR/fiscal signatures, Peppol clearance, or jurisdiction-specific compliance claims.
 - `issued_invoice_id` is stored only when an issued invoice already exists for the same draft. The field is omitted when absent.
 - The snapshot copies the closed `credit_reason_code`. It invents no credit-note lines and no PII.
