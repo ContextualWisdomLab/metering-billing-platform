@@ -3758,10 +3758,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             def get_collection_case(self, *args, **kwargs):
                 return None
 
-        missing_case = IssuedInvoiceVoidService(
-            BlindFindMissingCaseLedger(self.connection), clock=lambda: voided_at
-        ).void_issued_invoice(TENANT_ONE, race_issued.issued_invoice_id)
-        self.assertEqual(missing_case.issued_invoice_void_outcome_code.value, "rejected")
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
@@ -3836,6 +3832,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(unclosed_case.collection_case_status, "open")
         self.assertEqual(
             unclosed_case.outstanding_amount, stored_night_invoice.tax_inclusive_amount
+        )
+        missing_case = IssuedInvoiceVoidService(
+            BlindFindMissingCaseLedger(self.connection), clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, night_issued.issued_invoice_id)
+        self.assertEqual(missing_case.issued_invoice_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            missing_case.rejection_reason_code,
+            IssuedInvoiceVoidRejectionReasonCode.ISSUED_INVOICE_NOT_FOUND,
+        )
+        still_unclosed = self.ledger.get_collection_case(night_collection.collection_case_id)
+        assert still_unclosed is not None
+        self.assertEqual(still_unclosed.collection_case_status, "open")
+        self.assertEqual(
+            still_unclosed.outstanding_amount, stored_night_invoice.tax_inclusive_amount
         )
         healed_case = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: voided_at
