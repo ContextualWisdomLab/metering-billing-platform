@@ -198,10 +198,13 @@ class UnappliedCashApplicationService:
 
         Replay of the same tenant and ``unapplied_cash_id`` returns the
         stored ``unapplied_cash_application_id`` and does not reduce
-        outstanding again.  The apply uses the full parked amount.
-        Remaining zero does not settle the case.  First successful apply
-        enqueues one ``unapplied_cash.applied`` outbox event.  Replay of
-        that application does not enqueue a second row.
+        outstanding again once remaining already excludes the applied
+        amount.  A crash after insert and before outstanding reduction
+        is healed by the next replay.  The apply uses the full parked
+        amount.  Remaining zero does not settle the case.  First
+        successful apply enqueues one ``unapplied_cash.applied`` outbox
+        event.  Replay of that application does not enqueue a second
+        row.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -226,6 +229,9 @@ class UnappliedCashApplicationService:
                 return _rejected(
                     UnappliedCashApplicationRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
                 )
+            current_case = _heal_remaining_after_recorded_apply(
+                self.ledger, existing, current_case
+            )
             result = _from_stored(
                 existing,
                 current_case,
@@ -308,6 +314,9 @@ class UnappliedCashApplicationService:
                 return _rejected(
                     UnappliedCashApplicationRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
                 )
+            current_case = _heal_remaining_after_recorded_apply(
+                self.ledger, stored, current_case
+            )
             result = _from_stored(
                 stored,
                 current_case,
@@ -327,6 +336,48 @@ class UnappliedCashApplicationService:
         )
         _enqueue_unapplied_cash_applied(self.ledger, tenant.tenant_reference, result)
         return result
+
+
+def _heal_remaining_after_recorded_apply(
+    ledger: MemoryUsageLedger,
+    stored: StoredUnappliedCashApplication,
+    collection_case: StoredCollectionCase,
+) -> StoredCollectionCase:
+    """Reduce outstanding left un-reduced after a recorded leftover-apply.
+
+    Remaining still includes the applied amount when it equals unused
+    opened outstanding.  Already-reduced remaining stays as-is.  Replay
+    does not settle.
+    """
+    remaining = collection_case.outstanding_amount
+    if remaining == 0:
+        remaining = ZERO
+    applied = stored.applied_amount
+    if remaining < applied:
+        return collection_case
+    opened = _opened_outstanding_for_apply(ledger, stored)
+    if opened is None:  # pragma: no cover - apply rows store a draft id
+        return collection_case
+    if remaining != opened:
+        return collection_case
+    return ledger.apply_unapplied_cash_to_collection_case(
+        collection_case.collection_case_id, applied
+    )
+
+
+def _opened_outstanding_for_apply(
+    ledger: MemoryUsageLedger, stored: StoredUnappliedCashApplication
+) -> Decimal | None:
+    """Return unused opened outstanding for the stored apply target."""
+    issued = ledger.find_issued_invoice(
+        stored.tenant_account_id, stored.invoice_draft_id
+    )
+    if issued is not None:
+        return issued.tax_inclusive_amount
+    draft = ledger.get_invoice_draft(stored.invoice_draft_id)
+    if draft is None:  # pragma: no cover - apply rows store a draft id
+        return None
+    return draft.drafted_total_amount
 
 
 def _enqueue_unapplied_cash_applied(
