@@ -4380,6 +4380,36 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
 
+    def find_journal_proposal(
+        self,
+        tenant_account_id: UUID,
+        invoice_draft_id: UUID,
+        source_payload_hash: str,
+        proposal_contract_version: int,
+    ) -> StoredJournalProposal | None:
+        """Return one tenant-scoped draft proposal identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT journal_proposal_id
+                FROM billing_core.journal_proposal
+                WHERE tenant_account_id = %s
+                  AND invoice_draft_id = %s
+                  AND source_payload_hash = %s
+                  AND proposal_contract_version = %s
+                """,
+                (
+                    tenant_account_id,
+                    invoice_draft_id,
+                    source_payload_hash,
+                    proposal_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_journal_proposal(
+                cursor, UUID(str(row[0]))
+            )
+
     def find_journal_proposal_for_receipt(
         self,
         tenant_account_id: UUID,
@@ -4524,12 +4554,68 @@ class PostgresUsageLedger:
                 cursor, UUID(str(row[0]))
             )
 
+    def find_journal_proposal_for_issued_invoice_void(
+        self,
+        tenant_account_id: UUID,
+        issued_invoice_void_id: UUID,
+    ) -> StoredJournalProposal | None:
+        """Return one tenant-scoped unused invoice-void proposal identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT journal_proposal_id
+                FROM billing_core.journal_proposal
+                WHERE tenant_account_id = %s
+                  AND issued_invoice_void_id = %s
+                """,
+                (tenant_account_id, issued_invoice_void_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_journal_proposal(
+                cursor, UUID(str(row[0]))
+            )
+
+    def find_journal_proposal_for_invoice_draft(
+        self,
+        tenant_account_id: UUID,
+        invoice_draft_id: UUID,
+    ) -> StoredJournalProposal | None:
+        """Return the draft-only invoice journal for one tenant-scoped draft.
+
+        Specialized cash, credit, write-off, leftover, apply, refund,
+        invoice-void, and credit-note-void proposals share
+        ``invoice_draft_id`` but are not this identity. Binding uses Billing
+        ``proposal_id`` only.
+        """
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT journal_proposal_id
+                FROM billing_core.journal_proposal
+                WHERE tenant_account_id = %s
+                  AND invoice_draft_id = %s
+                  AND payment_receipt_id IS NULL
+                  AND credit_adjustment_id IS NULL
+                  AND collection_write_off_id IS NULL
+                  AND unapplied_cash_refund_id IS NULL
+                  AND unapplied_cash_id IS NULL
+                  AND unapplied_cash_application_id IS NULL
+                  AND issued_invoice_void_id IS NULL
+                  AND issued_credit_note_void_id IS NULL
+                """,
+                (tenant_account_id, invoice_draft_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_journal_proposal(
+                cursor, UUID(str(row[0]))
+            )
+
     def insert_journal_proposal(
         self,
         journal_proposal: StoredJournalProposal,
         proposal_lines: tuple[StoredJournalProposalLine, ...],
     ) -> StoredJournalProposal:
-        """Persist one balanced cash, credit, write-off, leftover, apply, or refund proposal or its replay."""
+        """Persist one balanced cash, credit, write-off, leftover, apply, refund, or unused invoice-void proposal or its replay."""
         if journal_proposal.proposal_status not in {
             "draft",
             "validated",
@@ -4571,8 +4657,8 @@ class PostgresUsageLedger:
                      accounting_date, source_payload_hash, proposed_at, proposal_status,
                      source_event_reference, payment_receipt_id, credit_adjustment_id,
                      collection_write_off_id, unapplied_cash_refund_id, unapplied_cash_id,
-                     unapplied_cash_application_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     unapplied_cash_application_id, issued_invoice_void_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 RETURNING journal_proposal_id
                 """,
@@ -4597,6 +4683,7 @@ class PostgresUsageLedger:
                     journal_proposal.unapplied_cash_refund_id,
                     journal_proposal.unapplied_cash_id,
                     journal_proposal.unapplied_cash_application_id,
+                    journal_proposal.issued_invoice_void_id,
                 ),
             )
             row = cursor.fetchone()
@@ -4687,6 +4774,19 @@ class PostgresUsageLedger:
                         (
                             journal_proposal.tenant_account_id,
                             journal_proposal.unapplied_cash_application_id,
+                        ),
+                    )
+                elif journal_proposal.issued_invoice_void_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT journal_proposal_id
+                        FROM billing_core.journal_proposal
+                        WHERE tenant_account_id = %s
+                          AND issued_invoice_void_id = %s
+                        """,
+                        (
+                            journal_proposal.tenant_account_id,
+                            journal_proposal.issued_invoice_void_id,
                         ),
                     )
                 else:
