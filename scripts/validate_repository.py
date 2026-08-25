@@ -143,6 +143,8 @@ REQUIRED_FILES = (
     "docs/adr/0110-operator-journal-proposal-storybook.md",
     "docs/adr/0111-postgres-write-off-journal.md",
     "docs/adr/0112-postgres-unapplied-cash-journal.md",
+    "docs/adr/0113-postgres-unapplied-cash-application-journal.md",
+    "docs/adr/0114-postgres-unapplied-cash-refund-journal.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
