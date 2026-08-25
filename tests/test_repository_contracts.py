@@ -4189,6 +4189,20 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_credit_note_void_journal_migration_reuses_journal_proposal(self) -> None:
+        """Credit-note void proposals reuse journal_proposal and add a void identity."""
+        sql = (
+            ROOT / "database/migrations/0034_credit_note_void_journal_proposal.sql"
+        ).read_text(encoding="utf-8")
+        for expected_fragment in (
+            "ADD COLUMN issued_credit_note_void_id uuid",
+            "FOREIGN KEY (tenant_account_id, issued_credit_note_void_id)",
+            "REFERENCES billing_core.issued_credit_note_void (tenant_account_id, issued_credit_note_void_id)",
+            "CREATE UNIQUE INDEX journal_proposal_issued_credit_note_void_identity",
+            "issued_credit_note_void_id IS NOT NULL",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_write_off_journal_migration_reuses_journal_proposal_for_write_offs(self) -> None:
         """Write-off proposals reuse journal_proposal and add a write-off-scoped identity."""
         sql = (ROOT / "database/migrations/0022_write_off_journal_proposal.sql").read_text(

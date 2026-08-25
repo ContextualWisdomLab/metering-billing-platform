@@ -1030,12 +1030,21 @@ class AccountingExportService:
             tenant.tenant_account_id, issued_credit_note_void_id
         )
         if existing is not None:
-            return _credit_note_void_result_from_stored(
+            result = _credit_note_void_result_from_stored(
                 existing,
                 tenant.tenant_reference,
                 JournalProposalOutcomeCode.DUPLICATE_REPLAY,
                 self.ledger,
             )
+            enqueue_accepted_fact(
+                self.ledger,
+                tenant.tenant_reference,
+                EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+                existing.journal_proposal_id,
+                result.as_contract_dict(),
+                existing.proposed_at,
+            )
+            return result
 
         void_row = self.ledger.get_issued_credit_note_void(issued_credit_note_void_id)
         if void_row is None or void_row.tenant_account_id != tenant.tenant_account_id:
