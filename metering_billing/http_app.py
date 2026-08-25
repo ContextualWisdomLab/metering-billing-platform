@@ -2506,11 +2506,7 @@ def create_http_app(
                     _parse_uuid(path_values["spend_budget_id"], "spend_budget_id"),
                 )
                 if result.spend_budget_over_signal_outcome_code.value == "rejected":
-                    reason = (
-                        result.rejection_reason_code.value
-                        if result.rejection_reason_code is not None
-                        else "request_invalid"
-                    )
+                    reason = result.rejection_reason_text()
                     if reason == "spend_budget_not_found":
                         status_code = 404
                     elif reason == "billing_account_not_found":
