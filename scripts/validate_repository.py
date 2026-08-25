@@ -121,6 +121,7 @@ REQUIRED_FILES = (
     "docs/adr/0088-operator-budget-status-storybook.md",
     "docs/adr/0089-postgres-spend-budget.md",
     "docs/adr/0090-spend-budget-over-webhook.md",
+    "docs/adr/0091-operator-spend-budget-over-storybook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
