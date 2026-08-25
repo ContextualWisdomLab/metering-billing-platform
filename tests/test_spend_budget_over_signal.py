@@ -576,7 +576,7 @@ class SpendBudgetOverSignalTests(unittest.TestCase):
                 {"tenant_reference": TENANT_ONE},
                 headers={"X-CWL-Tenant-Reference": TENANT_ONE},
             )
-        self.assertEqual(hollow_status, 422)
+        self.assertEqual(hollow_status, 404)
         self.assertEqual(hollow_body["rejection_reason_code"], "spend_budget_not_found")
 
     def test_result_contract_and_enqueue_helpers_fail_closed(self) -> None:
@@ -625,6 +625,14 @@ class SpendBudgetOverSignalTests(unittest.TestCase):
         rejected_payload = none_reason.as_contract_dict()
         self.assertEqual(rejected_payload["spend_budget_over_signal_outcome_code"], "rejected")
         self.assertEqual(rejected_payload["rejection_reason_code"], "spend_budget_not_found")
+        self.assertEqual(none_reason.rejection_reason_text(), "spend_budget_not_found")
+        self.assertEqual(
+            replace(
+                none_reason,
+                rejection_reason_code=SpendBudgetRejectionReasonCode.REQUEST_INVALID,
+            ).rejection_reason_text(),
+            "request_invalid",
+        )
         with self.assertRaisesRegex(ValueError, "rejected spend budget over signal has no webhook"):
             none_reason.as_webhook_event_data()
         missing_account = replace(observed, billing_account_id=None)

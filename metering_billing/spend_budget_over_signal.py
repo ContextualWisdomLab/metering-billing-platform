@@ -83,11 +83,7 @@ class SpendBudgetOverSignalResult:
                     self.spend_budget_over_signal_contract_version
                 ),
                 "spend_budget_over_signal_outcome_code": outcome_text,
-                "rejection_reason_code": (
-                    self.rejection_reason_code.value
-                    if self.rejection_reason_code is not None
-                    else SpendBudgetRejectionReasonCode.SPEND_BUDGET_NOT_FOUND.value
-                ),
+                "rejection_reason_code": self.rejection_reason_text(),
             }
         if (
             outcome_text != SpendBudgetOverSignalOutcomeCode.ACCEPTED
@@ -121,6 +117,17 @@ class SpendBudgetOverSignalResult:
             "spend_budget_contract_version": self.spend_budget_contract_version,
             "next_operator_action": self.next_operator_action,
         }
+
+    def rejection_reason_text(self) -> str:
+        """Return the serialized rejection reason used by HTTP status and body.
+
+        A missing reason fail-closes as ``spend_budget_not_found`` so status
+        and contract stay one vocabulary.  The service always supplies a
+        reason; this default is the hollow-result guard.
+        """
+        if self.rejection_reason_code is not None:
+            return self.rejection_reason_code.value
+        return SpendBudgetRejectionReasonCode.SPEND_BUDGET_NOT_FOUND.value
 
     def as_webhook_event_data(self) -> dict[str, object]:
         """Return the thin ``spend_budget.over`` facts for the #24 envelope.
