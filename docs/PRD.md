@@ -135,6 +135,7 @@ contextual-orchestrator usage
 - Cash, AR, and credit proposals share `journal_proposal` and appear in the same list. There is no cash-specific GET route.
 - HTTP 200 is a successful read. HTTP 422 is a missing tenant or illegal filter. HTTP 404 is an unknown route or unknown/cross-tenant proposal.
 - Query never mutates `proposal_status` and never emits `posted`. AIS pulls validated proposals and owns `posting_receipt`.
+- `operator_console` Storybook adds one `JournalProposal` story for the validated morning cash-journal GET. There is no login wall, Stripe, AIS call, journal compose, or production SPA.
 
 ## Posting-receipt observation acceptance
 
@@ -191,6 +192,7 @@ contextual-orchestrator usage
 - `GET /v1/issued-invoice-voids` lists summaries as `{issued_invoice_voids, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{voided_at}|{issued_invoice_void_id}`.
 - Issued-invoice, collection, payment, credit, write-off, leftover, settlement, statement, and AIS contracts stay unchanged except the additive `voided` collection-case status and settle fail-closed on that status.
 - Operators void an unused issue. Existing subscriptions opt in by including `invoice.voided`. There is no login wall, Stripe, AIS call, journal, second webhook system, or production SPA.
+- `operator_console` Storybook adds one `IssuedInvoiceVoid` story for the unused issued-invoice-void presentment. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Issued-credit-note acceptance
 
@@ -246,7 +248,7 @@ contextual-orchestrator usage
 - `GET /v1/collection-case-settlements/{collection_case_settlement_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/collection-case-settlements` lists summaries as `{collection_case_settlements, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{settled_at}|{collection_case_settlement_id}`.
 - Payment-receipt, credit-note-application, collection-open, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. Implicit #12/#17/#45 settle-when-zero on positive apply paths stays. First successful settle enqueues one existing #24 `collection.settled` outbox event. HMAC, SSRF, and delivery contracts stay unchanged. Cases already settled by #12/#45 without a settlement row are not backfilled.
-- Operators settle the zero-outstanding case, then wait. `operator_console` Storybook adds one `CollectionCaseSettlement` story. There is no login wall, Stripe, AIS call, or production SPA.
+- Operators settle the zero-outstanding case, then wait. `operator_console` Storybook adds one `CollectionCaseSettlement` story for the leftover write-off settle-when-zero presentment. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Collection-dispute-hold acceptance
 

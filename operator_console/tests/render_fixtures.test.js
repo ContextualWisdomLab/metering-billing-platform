@@ -150,10 +150,21 @@ import {
   nextOperatorActionCopy as nextIssuedCreditNoteVoidActionCopy,
 } from "../src/issued_credit_note_void.js";
 import {
+  renderIssuedInvoiceVoid,
+  ISSUED_INVOICE_VOID_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedInvoiceVoidActionCopy,
+} from "../src/issued_invoice_void.js";
+import {
   renderCollectionWriteOff,
   COLLECTION_WRITE_OFF_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionWriteOffActionCopy,
 } from "../src/collection_write_off.js";
+import {
+  renderJournalProposal,
+  JOURNAL_PROPOSAL_CUSTOMER_COPY,
+  journalProposalAmount,
+  nextOperatorActionCopy as nextJournalProposalActionCopy,
+} from "../src/journal_proposal.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -705,6 +716,42 @@ test("settled morning zero shows exact-zero remaining and wait", () => {
   assert.ok(!("write_off_amount" in statement));
   assert.ok(!("collection_case_settlement_outcome_code" in statement));
   assert.ok(!("card_pan" in statement));
+});
+
+test("settled leftover write-off zero settles the same leftover case and waits", () => {
+  const statement = loadFixture("settled_leftover_write_off_zero.json");
+  const leftoverWriteOff = loadFixture("recorded_leftover_collection_write_off.json");
+  const html = renderCollectionCaseSettlement(statement);
+  assert.match(html, /0 USD/);
+  assert.match(html, /settled/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Settle the zero-outstanding case, then wait/);
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.collection_case_settlement_status, "settled");
+  assert.equal(statement.collection_case_status, "settled");
+  assert.equal(statement.remaining_outstanding_amount, "0");
+  assert.equal(statement.tenant_reference, "urn:cwl:tenant_001");
+  assert.equal(statement.collection_case_id, leftoverWriteOff.collection_case_id);
+  assert.equal(statement.invoice_draft_id, leftoverWriteOff.invoice_draft_id);
+  assert.equal(leftoverWriteOff.remaining_outstanding_amount, "0");
+  assert.equal(leftoverWriteOff.next_operator_action, "settle");
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+  assert.notEqual(typeof statement.remaining_outstanding_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.remaining_outstanding_amount,
+    currency_code: statement.currency_code,
+  }), /0 USD/);
+  assert.match(renderStatusChip({
+    amount_due: statement.remaining_outstanding_amount,
+    tax_amount: "0",
+    status_label: statement.collection_case_settlement_status,
+  }), /oc-status-chip--settled/);
+  assert.ok(!("write_off_amount" in statement));
+  assert.ok(!("collection_case_settlement_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("retained_earnings" in statement));
 });
 
 test("issued taxed credit note freezes inclusive 11.00", () => {
@@ -1302,6 +1349,44 @@ test("refunded morning leftover keeps parked leftover and waits", () => {
   assert.ok(!("legal_invoice_number" in statement));
 });
 
+test("unused issued invoice void shows exact inclusive voided amount and wait", () => {
+  const statement = loadFixture("voided_unused_issued_invoice.json");
+  const taxedIssued = loadFixture("issued_taxed_hundred.json");
+  const html = renderIssuedInvoiceVoid(statement);
+  assert.match(html, /110\.00 USD/);
+  assert.match(html, /recorded/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Void an unused issued invoice, then wait/);
+  assert.equal(
+    ISSUED_INVOICE_VOID_CUSTOMER_COPY,
+    "Void an unused issued invoice, then wait.",
+  );
+  assert.equal(nextIssuedInvoiceVoidActionCopy("wait"), "Wait");
+  assert.equal(nextIssuedInvoiceVoidActionCopy("void"), "Void unused invoice");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.issued_invoice_void_status, "recorded");
+  assert.equal(statement.voided_amount, "110.00");
+  assert.equal(statement.issued_invoice_id, taxedIssued.issued_invoice_id);
+  assert.equal(statement.invoice_draft_id, taxedIssued.invoice_draft_id);
+  assert.equal(typeof statement.voided_amount, "string");
+  assert.notEqual(typeof statement.voided_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.voided_amount,
+    currency_code: statement.currency_code,
+  }), /110\.00 USD/);
+  assert.match(renderStatusChip({
+    amount_due: statement.voided_amount,
+    tax_amount: "0",
+    status_label: statement.issued_invoice_void_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("issued_invoice_void_outcome_code" in statement));
+  assert.ok(!("invoice_number" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
 test("unused issued credit note void shows exact voided amount and wait", () => {
   const statement = loadFixture("voided_unused_issued_credit_note.json");
   const taxedIssued = loadFixture("issued_taxed_credit_note.json");
@@ -1383,6 +1468,47 @@ test("recorded leftover remaining write-off shows exact zero remaining and settl
   assert.ok(!("collection_write_off_outcome_code" in statement));
   assert.ok(!("card_pan" in statement));
   assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
+test("validated morning cash journal shows exact received amount and wait", () => {
+  const statement = loadFixture("validated_morning_cash_journal.json");
+  const fullReceipt = loadFixture("applied_full_payment_receipt.json");
+  const pendingOutbox = loadFixture("pending_journal_validated.json");
+  const html = renderJournalProposal(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /validated/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Let AIS pull the validated journal/);
+  assert.equal(
+    JOURNAL_PROPOSAL_CUSTOMER_COPY,
+    "Let AIS pull the validated journal.",
+  );
+  assert.equal(nextJournalProposalActionCopy("wait"), "Wait");
+  assert.equal(nextJournalProposalActionCopy("collect"), "Let AIS pull");
+  assert.equal(statement.proposal_status, "validated");
+  assert.equal(journalProposalAmount(statement), "0.003705");
+  assert.equal(statement.lines[0].debit_amount, fullReceipt.received_amount);
+  assert.equal(
+    statement.source_event_references[0],
+    `urn:cwl:tenant_001:cash_receipt:${fullReceipt.payment_receipt_id}`,
+  );
+  assert.equal(statement.proposal_id, pendingOutbox.source_id);
+  assert.ok(!("next_operator_action" in statement));
+  assert.equal(typeof statement.lines[0].debit_amount, "string");
+  assert.notEqual(typeof statement.lines[0].debit_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: journalProposalAmount(statement),
+    currency_code: statement.transaction_currency,
+  }), /0\.003705 USD/);
+  assert.match(renderStatusChip({
+    amount_due: journalProposalAmount(statement),
+    tax_amount: "0",
+    status_label: statement.proposal_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("journal_entry_id" in statement));
+  assert.ok(!("card_pan" in statement));
   assert.ok(!("retained_earnings" in statement));
 });
 
@@ -1717,10 +1843,29 @@ test("float money fails closed", () => {
     TypeError,
   );
   assert.throws(
+    () => renderIssuedInvoiceVoid({ voided_amount: 110.0 }),
+    TypeError,
+  );
+  assert.throws(
     () =>
       renderCollectionWriteOff({
         write_off_amount: 0.001,
         remaining_outstanding_amount: "0",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderJournalProposal({
+        transaction_currency: "USD",
+        proposal_status: "validated",
+        lines: [
+          {
+            account_role_code: "cash_receipt",
+            debit_amount: 0.003705,
+            credit_amount: "0",
+          },
+        ],
       }),
     TypeError,
   );

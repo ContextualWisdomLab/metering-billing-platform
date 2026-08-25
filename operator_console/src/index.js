@@ -145,7 +145,18 @@ export {
   nextOperatorActionCopy as nextIssuedCreditNoteVoidActionCopy,
 } from "./issued_credit_note_void.js";
 export {
+  renderIssuedInvoiceVoid,
+  ISSUED_INVOICE_VOID_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedInvoiceVoidActionCopy,
+} from "./issued_invoice_void.js";
+export {
   renderCollectionWriteOff,
   COLLECTION_WRITE_OFF_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionWriteOffActionCopy,
 } from "./collection_write_off.js";
+export {
+  renderJournalProposal,
+  JOURNAL_PROPOSAL_CUSTOMER_COPY,
+  journalProposalAmount,
+  nextOperatorActionCopy as nextJournalProposalActionCopy,
+} from "./journal_proposal.js";
