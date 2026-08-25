@@ -592,6 +592,15 @@ class SpendBudgetOverSignalTests(unittest.TestCase):
         accepted_without_id = replace(observed, spend_budget_id=None)
         with self.assertRaises(ValueError):
             accepted_without_id.as_contract_dict()
+        accepted_without_tenant = replace(observed, tenant_reference=None)
+        with self.assertRaises(ValueError):
+            accepted_without_tenant.as_contract_dict()
+        accepted_without_account = replace(observed, billing_account_id=None)
+        with self.assertRaises(ValueError):
+            accepted_without_account.as_contract_dict()
+        accepted_without_currency = replace(observed, currency_code=None)
+        with self.assertRaises(ValueError):
+            accepted_without_currency.as_contract_dict()
         accepted_without_amount = replace(observed, budget_amount=None)
         with self.assertRaises(ValueError):
             accepted_without_amount.as_contract_dict()
