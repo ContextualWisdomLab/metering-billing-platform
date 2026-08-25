@@ -150,6 +150,11 @@ import {
   nextOperatorActionCopy as nextIssuedCreditNoteVoidActionCopy,
 } from "../src/issued_credit_note_void.js";
 import {
+  renderIssuedInvoiceVoid,
+  ISSUED_INVOICE_VOID_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedInvoiceVoidActionCopy,
+} from "../src/issued_invoice_void.js";
+import {
   renderCollectionWriteOff,
   COLLECTION_WRITE_OFF_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionWriteOffActionCopy,
@@ -1317,6 +1322,44 @@ test("refunded morning leftover keeps parked leftover and waits", () => {
   assert.ok(!("legal_invoice_number" in statement));
 });
 
+test("unused issued invoice void shows exact inclusive voided amount and wait", () => {
+  const statement = loadFixture("voided_unused_issued_invoice.json");
+  const taxedIssued = loadFixture("issued_taxed_hundred.json");
+  const html = renderIssuedInvoiceVoid(statement);
+  assert.match(html, /110\.00 USD/);
+  assert.match(html, /recorded/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Void an unused issued invoice, then wait/);
+  assert.equal(
+    ISSUED_INVOICE_VOID_CUSTOMER_COPY,
+    "Void an unused issued invoice, then wait.",
+  );
+  assert.equal(nextIssuedInvoiceVoidActionCopy("wait"), "Wait");
+  assert.equal(nextIssuedInvoiceVoidActionCopy("void"), "Void unused invoice");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.issued_invoice_void_status, "recorded");
+  assert.equal(statement.voided_amount, "110.00");
+  assert.equal(statement.issued_invoice_id, taxedIssued.issued_invoice_id);
+  assert.equal(statement.invoice_draft_id, taxedIssued.invoice_draft_id);
+  assert.equal(typeof statement.voided_amount, "string");
+  assert.notEqual(typeof statement.voided_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.voided_amount,
+    currency_code: statement.currency_code,
+  }), /110\.00 USD/);
+  assert.match(renderStatusChip({
+    amount_due: statement.voided_amount,
+    tax_amount: "0",
+    status_label: statement.issued_invoice_void_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("issued_invoice_void_outcome_code" in statement));
+  assert.ok(!("invoice_number" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
 test("unused issued credit note void shows exact voided amount and wait", () => {
   const statement = loadFixture("voided_unused_issued_credit_note.json");
   const taxedIssued = loadFixture("issued_taxed_credit_note.json");
@@ -1729,6 +1772,10 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderIssuedCreditNoteVoid({ voided_amount: 11.0 }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderIssuedInvoiceVoid({ voided_amount: 110.0 }),
     TypeError,
   );
   assert.throws(
