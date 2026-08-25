@@ -421,7 +421,7 @@ contextual-orchestrator usage
 
 ## Refund-journal acceptance
 
-- A known stored leftover refund produces one balanced exact-decimal `accounting_journal_proposal` that debits `unapplied_cash` and credits `cash_receipt`.
+- A known stored leftover refund produces one balanced exact-decimal `accounting_journal_proposal` that debits `unapplied_cash` and credits `cash_receipt`. `PostgresUsageLedger` persists that leftover-refund journal so GET presentment survives process restart.
 - A second propose of the same tenant and `unapplied_cash_refund_id` returns the same `proposal_id` as `duplicate_replay` and does not grow the store.
 - Another tenant cannot see or propose from the first tenant's refund.
 - Missing refunds, cross-tenant IDs, currency mismatch, float money, and zero or negative amounts fail closed.
