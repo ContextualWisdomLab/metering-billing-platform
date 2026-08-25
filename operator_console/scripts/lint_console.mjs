@@ -115,6 +115,16 @@ for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.ends
       }
     }
   }
+  const products = Array.isArray(payload.products) ? payload.products : [];
+  for (const [index, product] of products.entries()) {
+    const value = product.rated_amount;
+    if (value === undefined) {
+      continue;
+    }
+    if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+      fail(`${fileName}: products[${index}].rated_amount must be an exact-decimal string`);
+    }
+  }
   const issuedLines = Array.isArray(payload.issued_invoice_lines)
     ? payload.issued_invoice_lines
     : [];

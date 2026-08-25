@@ -107,3 +107,7 @@ export {
   SPEND_BUDGET_CUSTOMER_COPY,
   nextOperatorActionCopy as nextSpendBudgetActionCopy,
 } from "./spend_budget.js";
+export {
+  renderRatedSpend,
+  RATED_SPEND_CUSTOMER_COPY,
+} from "./rated_spend.js";
