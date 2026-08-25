@@ -1,0 +1,16 @@
+{
+  "unapplied_cash_presentment_contract_version": 1,
+  "unapplied_cash_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd80",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "payment_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf650",
+  "payment_intent_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf640",
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+  "currency_code": "USD",
+  "unapplied_amount": "0.001",
+  "received_amount": "0.003705",
+  "applied_amount": "0.003705",
+  "unapplied_cash_status": "parked",
+  "parked_at": "2026-08-18T13:00:00Z",
+  "source_payload_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "next_operator_action": "wait"
+}

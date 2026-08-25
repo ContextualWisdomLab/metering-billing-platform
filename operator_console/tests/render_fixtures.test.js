@@ -137,6 +137,13 @@ import {
   COLLECTION_DISPUTE_RELEASE_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionDisputeActionCopy,
 } from "../src/collection_dispute.js";
+import {
+  renderUnappliedCash,
+  UNAPPLIED_CASH_CUSTOMER_COPY,
+  UNAPPLIED_CASH_APPLICATION_CUSTOMER_COPY,
+  UNAPPLIED_CASH_REFUND_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextUnappliedCashActionCopy,
+} from "../src/unapplied_cash.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -1185,6 +1192,106 @@ test("released morning collection dispute keeps remaining and fail-closes a late
   assert.ok(!("legal_invoice_number" in statement));
 });
 
+test("parked morning leftover shows exact leftover and wait", () => {
+  const statement = loadFixture("parked_morning_unapplied_cash.json");
+  const html = renderUnappliedCash(statement);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, /parked/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Park leftover remittance, then wait/);
+  assert.equal(UNAPPLIED_CASH_CUSTOMER_COPY, "Park leftover remittance, then wait.");
+  assert.equal(
+    UNAPPLIED_CASH_APPLICATION_CUSTOMER_COPY,
+    "Apply parked leftover, then collect the residual.",
+  );
+  assert.equal(
+    UNAPPLIED_CASH_REFUND_CUSTOMER_COPY,
+    "Refund unused parked leftover, then wait.",
+  );
+  assert.equal(nextUnappliedCashActionCopy("wait"), "Wait");
+  assert.equal(nextUnappliedCashActionCopy("collect"), "Collect");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.unapplied_cash_status, "parked");
+  assert.equal(statement.unapplied_amount, "0.001");
+  assert.equal(statement.received_amount, "0.003705");
+  assert.equal(typeof statement.unapplied_amount, "string");
+  assert.notEqual(typeof statement.unapplied_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.unapplied_amount,
+    currency_code: statement.currency_code,
+  }), /0\.001 USD/);
+  assert.match(renderStatusChip({
+    amount_due: statement.unapplied_amount,
+    tax_amount: "0",
+    status_label: statement.unapplied_cash_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("unapplied_cash_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
+test("applied morning leftover shows applied amount, residual, and collect", () => {
+  const statement = loadFixture("applied_morning_unapplied_cash.json");
+  const parked = loadFixture("parked_morning_unapplied_cash.json");
+  const html = renderUnappliedCash(statement);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, /19\.999 USD/);
+  assert.match(html, /applied/);
+  assert.match(html, /open/);
+  assert.match(html, /Collect/);
+  assert.match(html, /Apply parked leftover, then collect the residual/);
+  assert.equal(statement.next_operator_action, "collect");
+  assert.equal(statement.unapplied_cash_application_status, "applied");
+  assert.equal(statement.collection_case_status, "open");
+  assert.equal(statement.applied_amount, "0.001");
+  assert.equal(statement.remaining_outstanding_amount, "19.999");
+  assert.notEqual(statement.unapplied_cash_id, parked.unapplied_cash_id);
+  assert.equal(typeof statement.applied_amount, "string");
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.applied_amount,
+    currency_code: statement.currency_code,
+  }), /0\.001 USD/);
+  assert.match(html, /oc-status-chip--due/);
+  assert.match(renderStatusChip({
+    amount_due: statement.remaining_outstanding_amount,
+    status_label: statement.unapplied_cash_application_status,
+  }), /oc-status-chip--due/);
+  assert.ok(!("unapplied_cash_application_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+});
+
+test("refunded morning leftover keeps parked leftover and waits", () => {
+  const statement = loadFixture("refunded_morning_unapplied_cash.json");
+  const parked = loadFixture("parked_morning_unapplied_cash.json");
+  const html = renderUnappliedCash(statement);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, /recorded/);
+  assert.match(html, /parked/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Refund unused parked leftover, then wait/);
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.unapplied_cash_refund_status, "recorded");
+  assert.equal(statement.unapplied_cash_status, "parked");
+  assert.equal(statement.refund_amount, "0.001");
+  assert.equal(statement.unapplied_amount, "0.001");
+  assert.equal(statement.unapplied_cash_id, parked.unapplied_cash_id);
+  assert.equal(typeof statement.refund_amount, "string");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderStatusChip({
+    amount_due: statement.refund_amount,
+    tax_amount: "0",
+    status_label: statement.unapplied_cash_refund_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("unapplied_cash_refund_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+});
+
 test("project-grouped morning rated spend keeps the stored project URN unmixed", () => {
   const statement = loadFixture("rated_spend_morning_project.json");
   const html = renderRatedSpend(statement);
@@ -1487,6 +1594,28 @@ test("float money fails closed", () => {
   );
   assert.throws(
     () => renderCollectionDispute({ remaining_outstanding_amount: 0.003705 }),
+    TypeError,
+  );
+  assert.throws(
+    () => renderUnappliedCash({ unapplied_amount: 0.001 }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderUnappliedCash({
+        unapplied_cash_application_id: "019d7b92-1aa0-7a7f-b61c-962c0f4bfd81",
+        applied_amount: 0.001,
+        remaining_outstanding_amount: "19.999",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderUnappliedCash({
+        unapplied_cash_refund_id: "019d7b92-1aa0-7a7f-b61c-962c0f4bfd82",
+        refund_amount: 0.001,
+        unapplied_amount: "0.001",
+      }),
     TypeError,
   );
   assert.throws(

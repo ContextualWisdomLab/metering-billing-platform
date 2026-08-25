@@ -390,6 +390,7 @@ contextual-orchestrator usage
 - `GET /v1/unapplied-cash` lists summaries as `{unapplied_cash, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{parked_at}|{unapplied_cash_id}`.
 - Missing tenant, illegal cursor, and illegal page_limit fail closed.
 - Operators park leftover against a stored receipt. HTTP does not apply leftover to another case, capture cards, or call AIS. Journal compose is an explicit later command.
+- `operator_console` Storybook adds one `UnappliedCash` story for the parked leftover presentment. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Unapplied-cash-application acceptance
 
@@ -401,6 +402,7 @@ contextual-orchestrator usage
 - `GET /v1/unapplied-cash-applications` lists summaries as `{unapplied_cash_applications, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{applied_at}|{unapplied_cash_application_id}`.
 - Missing tenant, illegal cursor, and illegal page_limit fail closed.
 - Operators apply parked leftover, then collect the residual or settle at exact zero. First successful apply enqueues one existing #24 `unapplied_cash.applied` outbox event. HTTP does not auto-settle, capture cards, or call AIS. Journal compose is an explicit later command.
+- `operator_console` Storybook presents that leftover-apply residual on the same `UnappliedCash` story. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Unapplied-cash-refund acceptance
 
@@ -412,6 +414,7 @@ contextual-orchestrator usage
 - `GET /v1/unapplied-cash-refunds` lists summaries as `{unapplied_cash_refunds, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{refunded_at}|{unapplied_cash_refund_id}`.
 - Missing tenant, leftover already applied, leftover not parked, currency mismatch, zero/negative leftover, mismatched amount, IEEE leftover, illegal cursor, and illegal page_limit fail closed.
 - Operators refund unused parked leftover as a commercial fact. First successful refund enqueues one existing #24 `refund.recorded` outbox event. HTTP does not capture cards, call a PSP, or call AIS. Journal compose is an explicit later command.
+- `operator_console` Storybook presents that leftover-refund remaining snapshot on the same `UnappliedCash` story. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Refund-journal acceptance
 

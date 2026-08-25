@@ -34,6 +34,9 @@ from metering_billing.contracts import (
     validate_spend_budget_approaching_signal,
     validate_collection_dispute_presentment,
     validate_collection_dispute_release_presentment,
+    validate_unapplied_cash_presentment,
+    validate_unapplied_cash_application_presentment,
+    validate_unapplied_cash_refund_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -149,6 +152,18 @@ SPEND_BUDGET_APPROACHING_MONEY_FIELDS = ("budget_amount", "remaining_amount")
 COLLECTION_DISPUTE_FIXTURE_NAMES = (
     "held_morning_collection_dispute.json",
     "released_morning_collection_dispute.json",
+)
+UNAPPLIED_CASH_FIXTURE_NAMES = (
+    "parked_morning_unapplied_cash.json",
+    "applied_morning_unapplied_cash.json",
+    "refunded_morning_unapplied_cash.json",
+)
+UNAPPLIED_CASH_MONEY_FIELDS = (
+    "unapplied_amount",
+    "received_amount",
+    "applied_amount",
+    "refund_amount",
+    "remaining_outstanding_amount",
 )
 SPEND_BUDGET_MONEY_FIELDS = (
     "budget_amount",
@@ -719,6 +734,62 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("collection_dispute_release_outcome_code", released_dispute)
         self.assertNotIn("card_pan", released_dispute)
         self.assertNotIn("legal_invoice_number", released_dispute)
+        parked_leftover = self._fixture("parked_morning_unapplied_cash.json")
+        self.assertEqual(validate_unapplied_cash_presentment(parked_leftover), ())
+        self.assertEqual(parked_leftover["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(parked_leftover["unapplied_cash_status"], "parked")
+        self.assertEqual(parked_leftover["unapplied_amount"], "0.001")
+        self.assertEqual(parked_leftover["received_amount"], "0.003705")
+        self.assertEqual(parked_leftover["applied_amount"], "0.003705")
+        self.assertEqual(parked_leftover["next_operator_action"], "wait")
+        for field_name in ("unapplied_amount", "received_amount", "applied_amount"):
+            self.assertIsInstance(parked_leftover[field_name], str)
+            self.assertNotIsInstance(parked_leftover[field_name], float)
+            parse_exact_decimal(parked_leftover[field_name])
+        self.assertNotIn("unapplied_cash_outcome_code", parked_leftover)
+        self.assertNotIn("card_pan", parked_leftover)
+        self.assertNotIn("legal_invoice_number", parked_leftover)
+        applied_leftover = self._fixture("applied_morning_unapplied_cash.json")
+        self.assertEqual(
+            validate_unapplied_cash_application_presentment(applied_leftover),
+            (),
+        )
+        self.assertEqual(applied_leftover["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(applied_leftover["unapplied_cash_application_status"], "applied")
+        self.assertEqual(applied_leftover["collection_case_status"], "open")
+        self.assertEqual(applied_leftover["applied_amount"], "0.001")
+        self.assertEqual(applied_leftover["remaining_outstanding_amount"], "19.999")
+        self.assertEqual(applied_leftover["next_operator_action"], "collect")
+        self.assertNotEqual(
+            applied_leftover["unapplied_cash_id"],
+            parked_leftover["unapplied_cash_id"],
+        )
+        for field_name in ("applied_amount", "remaining_outstanding_amount"):
+            self.assertIsInstance(applied_leftover[field_name], str)
+            self.assertNotIsInstance(applied_leftover[field_name], float)
+            parse_exact_decimal(applied_leftover[field_name])
+        self.assertNotIn("unapplied_cash_application_outcome_code", applied_leftover)
+        self.assertNotIn("card_pan", applied_leftover)
+        self.assertNotIn("legal_invoice_number", applied_leftover)
+        refunded_leftover = self._fixture("refunded_morning_unapplied_cash.json")
+        self.assertEqual(validate_unapplied_cash_refund_presentment(refunded_leftover), ())
+        self.assertEqual(refunded_leftover["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(refunded_leftover["unapplied_cash_refund_status"], "recorded")
+        self.assertEqual(refunded_leftover["unapplied_cash_status"], "parked")
+        self.assertEqual(refunded_leftover["refund_amount"], "0.001")
+        self.assertEqual(refunded_leftover["unapplied_amount"], "0.001")
+        self.assertEqual(refunded_leftover["next_operator_action"], "wait")
+        self.assertEqual(
+            refunded_leftover["unapplied_cash_id"],
+            parked_leftover["unapplied_cash_id"],
+        )
+        for field_name in ("refund_amount", "unapplied_amount"):
+            self.assertIsInstance(refunded_leftover[field_name], str)
+            self.assertNotIsInstance(refunded_leftover[field_name], float)
+            parse_exact_decimal(refunded_leftover[field_name])
+        self.assertNotIn("unapplied_cash_refund_outcome_code", refunded_leftover)
+        self.assertNotIn("card_pan", refunded_leftover)
+        self.assertNotIn("legal_invoice_number", refunded_leftover)
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -767,6 +838,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "SpendBudgetOver",
             "SpendBudgetApproaching",
             "CollectionDispute",
+            "UnappliedCash",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -795,6 +867,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + SPEND_BUDGET_OVER_FIXTURE_NAMES
             + SPEND_BUDGET_APPROACHING_FIXTURE_NAMES
             + COLLECTION_DISPUTE_FIXTURE_NAMES
+            + UNAPPLIED_CASH_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -846,6 +919,9 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Observe the spend budget approaching signal, then wait", inventory)
         self.assertIn("Hold the disputed case, then wait", inventory)
         self.assertIn("Release the hold, then collect or dunn", inventory)
+        self.assertIn("Park leftover remittance, then wait", inventory)
+        self.assertIn("Apply parked leftover, then collect the residual", inventory)
+        self.assertIn("Refund unused parked leftover, then wait", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""
