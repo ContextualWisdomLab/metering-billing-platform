@@ -29,6 +29,7 @@
 .oc-account-statement,
 .oc-spend-budget,
 .oc-rated-spend,
+.oc-budget-status,
 .oc-amount-due,
 .oc-line-table,
 .oc-status-chip,
@@ -41,7 +42,8 @@
 .oc-invoice-statement,
 .oc-account-statement,
 .oc-spend-budget,
-.oc-rated-spend {
+.oc-rated-spend,
+.oc-budget-status {
   background: var(--oc-color-paper);
   border-radius: var(--oc-radius-card);
   padding: var(--oc-spacing-lg);

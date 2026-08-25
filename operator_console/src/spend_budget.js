@@ -95,7 +95,7 @@ export function renderSpendBudget(statement) {
  * @param {unknown} utilizationStatus
  * @returns {"under" | "at" | "over"}
  */
-function requireUtilizationStatus(utilizationStatus) {
+export function requireUtilizationStatus(utilizationStatus) {
   switch (utilizationStatus) {
     case "under":
     case "at":
@@ -117,7 +117,7 @@ function requireUtilizationStatus(utilizationStatus) {
  * @param {string} overAmount
  * @returns {{ amount_due: string, status_label: string }}
  */
-function utilizationChipStatement(utilizationStatus, remainingAmount, overAmount) {
+export function utilizationChipStatement(utilizationStatus, remainingAmount, overAmount) {
   switch (utilizationStatus) {
     case "under":
       return {

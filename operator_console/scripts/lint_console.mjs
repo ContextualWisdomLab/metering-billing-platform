@@ -125,6 +125,20 @@ for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.ends
       fail(`${fileName}: products[${index}].rated_amount must be an exact-decimal string`);
     }
   }
+  const budgetStatuses = Array.isArray(payload.budget_statuses) ? payload.budget_statuses : [];
+  for (const [index, row] of budgetStatuses.entries()) {
+    for (const fieldName of ["budget_amount", "rated_amount", "remaining_amount", "over_amount"]) {
+      const value = row[fieldName];
+      if (value === undefined) {
+        continue;
+      }
+      if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+        fail(
+          `${fileName}: budget_statuses[${index}].${fieldName} must be an exact-decimal string`,
+        );
+      }
+    }
+  }
   const issuedLines = Array.isArray(payload.issued_invoice_lines)
     ? payload.issued_invoice_lines
     : [];
