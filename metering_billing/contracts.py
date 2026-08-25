@@ -26,6 +26,7 @@ __all__ = (
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_SCHEMA_NAME",
+    "SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
     "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
@@ -136,6 +137,7 @@ __all__ = (
     "validate_payment_receipt",
     "validate_credit_adjustment",
     "validate_spend_budget",
+    "validate_spend_budget_over_signal",
     "validate_rate_card",
     "validate_tax_rate",
     "validate_tax_assessment",
@@ -162,6 +164,7 @@ PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
 SPEND_BUDGET_SCHEMA_NAME = "spend-budget.schema.json"
+SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME = "spend-budget-over-signal.schema.json"
 SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME = "spend-budget-presentment.schema.json"
 SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME = (
     "spend-budget-evaluation-presentment.schema.json"
@@ -1555,6 +1558,81 @@ def validate_spend_budget(
     if "retained_earnings" in spend_budget:
         errors.append("$: spend budget must not include retained_earnings")
     return tuple(errors)
+
+
+def validate_spend_budget_over_signal(
+    over_signal: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate over-signal shape plus identity, exact over, and utilization."""
+    schema = load_json_schema(SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, over_signal))
+    if not isinstance(over_signal, Mapping):
+        return tuple(errors)
+    outcome = over_signal.get("spend_budget_over_signal_outcome_code")
+    if outcome == "accepted" or outcome == "duplicate_replay":
+        errors.extend(_missing_success_spend_budget_over_signal_fields(over_signal, str(outcome)))
+        budget_amount = over_signal.get("budget_amount")
+        over_amount = over_signal.get("over_amount")
+        utilization_status = over_signal.get("utilization_status")
+        parsed_amounts: dict[str, Decimal] = {}
+        for field_name, raw_value in (
+            ("budget_amount", budget_amount),
+            ("over_amount", over_amount),
+        ):
+            if isinstance(raw_value, str):
+                try:
+                    parsed = Decimal(raw_value)
+                    if parsed < Decimal("0"):
+                        errors.append(f"$: {field_name} must be a non-negative exact decimal")
+                    else:
+                        parsed_amounts[field_name] = parsed
+                except Exception:
+                    errors.append(f"$: {field_name} must be an exact decimal")
+        if "budget_amount" in parsed_amounts and parsed_amounts["budget_amount"] <= Decimal("0"):
+            errors.append("$: budget_amount must be greater than zero")
+        if "over_amount" in parsed_amounts and utilization_status == "over":
+            if parsed_amounts["over_amount"] <= Decimal("0"):
+                errors.append("$: over observations must include a positive over_amount")
+        if "over_amount" in parsed_amounts and utilization_status in {"under", "at"}:
+            if parsed_amounts["over_amount"] != Decimal("0"):
+                errors.append("$: under and at observations must have zero over_amount")
+        if over_signal.get("spend_budget_status") == "published":
+            if over_signal.get("next_operator_action") != "wait":
+                errors.append("$: published spend budgets must wait")
+    elif outcome == "rejected":
+        if "rejection_reason_code" not in over_signal:
+            errors.append("$: rejected over signals must include rejection_reason_code")
+    if "card_pan" in over_signal:
+        errors.append("$: spend budget over signal must not include card_pan")
+    if "retained_earnings" in over_signal:
+        errors.append("$: spend budget over signal must not include retained_earnings")
+    if "remaining_amount" in over_signal:
+        errors.append("$: spend budget over signal must not include remaining_amount")
+    return tuple(errors)
+
+
+def _missing_success_spend_budget_over_signal_fields(
+    over_signal: Mapping[str, Any], outcome: str
+) -> tuple[str, ...]:
+    """Return semantic errors when an accepted or replay over-signal lacks identity."""
+    missing: list[str] = []
+    for field_name in (
+        "spend_budget_id",
+        "tenant_reference",
+        "billing_account_id",
+        "currency_code",
+        "budget_amount",
+        "over_amount",
+        "utilization_status",
+        "window_started_at",
+        "window_ended_at",
+        "spend_budget_status",
+        "source_payload_hash",
+        "spend_budget_contract_version",
+    ):
+        if field_name not in over_signal:
+            missing.append(f"$: {outcome} over signals must include {field_name}")
+    return tuple(missing)
 
 
 def _missing_success_spend_budget_fields(
