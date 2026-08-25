@@ -20,7 +20,11 @@ from metering_billing.errors import (
     RejectionReasonCode,
     UsageEventConflict,
 )
-from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
+from metering_billing.exact_decimal import (
+    format_exact_decimal,
+    parse_exact_decimal,
+    require_postable_journal_line_amounts,
+)
 from metering_billing.usage_ledger import (
     BillingAccount,
     BillingPrincipal,
@@ -3071,6 +3075,7 @@ class PostgresUsageLedger:
                 raise ValueError("journal proposal line has the wrong tenant identity")
             if (debit_amount > 0) == (credit_amount > 0):
                 raise ValueError("journal proposal lines must be debit XOR credit")
+            require_postable_journal_line_amounts(debit_amount, credit_amount)
         if sum((item[1] for item in parsed_lines), parse_exact_decimal("0")) != sum(
             (item[2] for item in parsed_lines), parse_exact_decimal("0")
         ):

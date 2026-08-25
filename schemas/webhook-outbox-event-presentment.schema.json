@@ -38,7 +38,8 @@
         "unapplied_cash.applied",
         "refund.recorded",
         "dispute.held",
-        "dispute.released"
+        "dispute.released",
+        "spend_budget.published"
       ]
     },
     "source_id": {"type": "string", "format": "uuid"},

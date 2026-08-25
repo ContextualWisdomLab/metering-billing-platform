@@ -1141,6 +1141,22 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 (replace(proposal.proposal_lines[0], debit_amount=Decimal("1")),
                  proposal.proposal_lines[1]),
             )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (
+                    replace(proposal.proposal_lines[0], debit_amount=Decimal("0.0000001")),
+                    replace(proposal.proposal_lines[1], credit_amount=Decimal("0.0000001")),
+                ),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (
+                    replace(proposal.proposal_lines[0], debit_amount=Decimal("10")),
+                    replace(proposal.proposal_lines[1], credit_amount=Decimal("10.0000001")),
+                ),
+            )
 
         with self.assertRaises(ValueError):
             self.ledger.insert_payment_receipt(replace(receipt, payment_receipt_status="captured"))

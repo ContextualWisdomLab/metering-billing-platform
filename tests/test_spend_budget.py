@@ -29,9 +29,11 @@ from metering_billing.errors import (
 from metering_billing.spend_budget import (
     SPEND_BUDGET_CONTRACT_VERSION,
     SpendBudgetResult,
+    _enqueue_spend_budget_published,
     compute_spend_budget_payload_hash,
     parse_budget_amount,
 )
+from metering_billing.webhook_outbox import EVENT_TYPE_SPEND_BUDGET_PUBLISHED
 from metering_billing.spend_budget_presentment import next_operator_action
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_ledger import StoredSpendBudget, generate_record_id
@@ -116,7 +118,30 @@ class SpendBudgetTests(unittest.TestCase):
         self.assertEqual(len(ledger.rating_runs), 0)
         self.assertEqual(len(ledger.invoice_drafts), 0)
         self.assertEqual(len(ledger.journal_proposals), 0)
-        self.assertEqual(len(ledger.webhook_outbox_events), 0)
+        published_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_PUBLISHED
+        ]
+        self.assertEqual(len(published_events), 1)
+        self.assertEqual(published_events[0].source_id, accepted.spend_budget_id)
+        webhook_data = accepted.as_webhook_event_data()
+        self.assertEqual(webhook_data["spend_budget_id"], str(accepted.spend_budget_id))
+        self.assertEqual(webhook_data["billing_account_id"], str(billing_account_id))
+        self.assertEqual(webhook_data["source_payload_hash"], accepted.source_payload_hash)
+        self.assertEqual(webhook_data["spend_budget_contract_version"], SPEND_BUDGET_CONTRACT_VERSION)
+        self.assertEqual(webhook_data["currency_code"], "USD")
+        self.assertEqual(webhook_data["budget_amount"], payload["budget_amount"])
+        self.assertEqual(webhook_data["window_started_at"], WINDOW_STARTED)
+        self.assertEqual(webhook_data["window_ended_at"], WINDOW_ENDED)
+        self.assertEqual(webhook_data["published_at"], payload["published_at"])
+        self.assertEqual(webhook_data["spend_budget_status"], "published")
+        self.assertNotIn("rated_amount", webhook_data)
+        self.assertNotIn("remaining_amount", webhook_data)
+        self.assertNotIn("over_amount", webhook_data)
+        self.assertNotIn("utilization_status", webhook_data)
+        self.assertNotIn("next_operator_action", webhook_data)
+        self.assertNotIn("spend_budget_outcome_code", webhook_data)
 
     def test_distinct_amount_or_currency_appends_a_new_row(self) -> None:
         """A later distinct amount or currency is a new append-only row."""
@@ -136,6 +161,7 @@ class SpendBudgetTests(unittest.TestCase):
         )
         self.assertEqual(krw.spend_budget_outcome_code, SpendBudgetOutcomeCode.ACCEPTED)
         self.assertEqual(len(ledger.spend_budgets), 3)
+        self.assertEqual(len(ledger.webhook_outbox_events), 3)
         matching_hash = compute_spend_budget_payload_hash(
             {
                 "billing_account_id": str(billing_account_id),
@@ -168,6 +194,7 @@ class SpendBudgetTests(unittest.TestCase):
         self.assertEqual(
             mismatched.rejection_reason_code, SpendBudgetRejectionReasonCode.REQUEST_INVALID
         )
+        self.assertEqual(len(ledger.webhook_outbox_events), 3)
 
     def test_fail_closed_tenant_account_amount_window_and_currency(self) -> None:
         """Missing tenant, unknown account, IEEE money, and illegal currency fail closed."""
@@ -238,6 +265,7 @@ class SpendBudgetTests(unittest.TestCase):
         self.assertEqual(parse_budget_amount(BUDGET_AMOUNT), BUDGET_AMOUNT)
         self.assertEqual(parse_budget_amount("100.00"), BUDGET_AMOUNT)
         self.assertEqual(len(ledger.spend_budgets), 0)
+        self.assertEqual(len(ledger.webhook_outbox_events), 0)
 
     def test_http_post_get_list_and_refuses_secrets(self) -> None:
         """POST publishes; GET presents; PAN and secrets are refused."""
@@ -263,6 +291,13 @@ class SpendBudgetTests(unittest.TestCase):
         self.assertEqual(body["next_operator_action"], "wait")
         self.assertEqual(validate_spend_budget(body), ())
         spend_budget_id = body["spend_budget_id"]
+        published_events = [
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_PUBLISHED
+        ]
+        self.assertEqual(len(published_events), 1)
+        self.assertEqual(str(published_events[0].source_id), spend_budget_id)
         replay_status, replay_body = invoke_http(
             app,
             "POST",
@@ -627,6 +662,20 @@ class SpendBudgetTests(unittest.TestCase):
         rejected_payload = none_reason.as_contract_dict()
         self.assertEqual(rejected_payload["spend_budget_outcome_code"], "rejected")
         self.assertEqual(rejected_payload["rejection_reason_code"], "spend_budget_not_found")
+        with self.assertRaisesRegex(ValueError, "rejected spend budget has no webhook event data"):
+            none_reason.as_webhook_event_data()
+        missing_account = replace(accepted, billing_account_id=None)
+        with self.assertRaisesRegex(ValueError, "rejected spend budget has no webhook event data"):
+            missing_account.as_webhook_event_data()
+        accepted_without_published = replace(accepted, published_at=None)
+        with self.assertRaisesRegex(ValueError, "accepted spend budgets must include published_at"):
+            accepted_without_published.as_webhook_event_data()
+        incomplete = replace(accepted, spend_budget_id=None)
+        with self.assertRaisesRegex(ValueError, "accepted spend budgets must include identity"):
+            _enqueue_spend_budget_published(ledger, TENANT_ONE, incomplete)
+        missing_time = replace(accepted, published_at=None)
+        with self.assertRaisesRegex(ValueError, "accepted spend budgets must include identity"):
+            _enqueue_spend_budget_published(ledger, TENANT_ONE, missing_time)
         stored = next(iter(ledger.spend_budgets.values()))
         replayed = ledger.insert_spend_budget(stored)
         self.assertEqual(replayed.spend_budget_id, stored.spend_budget_id)

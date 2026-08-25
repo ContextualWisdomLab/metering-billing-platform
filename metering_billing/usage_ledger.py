@@ -21,7 +21,11 @@ from typing import Callable
 from uuid import UUID
 
 from metering_billing.errors import RejectionReasonCode
-from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
+from metering_billing.exact_decimal import (
+    format_exact_decimal,
+    parse_exact_decimal,
+    require_postable_journal_line_amounts,
+)
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
 TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
@@ -3225,6 +3229,7 @@ class MemoryUsageLedger:
             credit_positive = line.credit_amount > 0
             if debit_positive == credit_positive:
                 raise ValueError("journal proposal lines must be debit XOR credit")
+            require_postable_journal_line_amounts(line.debit_amount, line.credit_amount)
         debit_total = sum((line.debit_amount for line in parsed_lines), Decimal("0"))
         credit_total = sum((line.credit_amount for line in parsed_lines), Decimal("0"))
         if debit_total != credit_total:

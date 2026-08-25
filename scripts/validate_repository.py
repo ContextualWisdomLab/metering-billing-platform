@@ -113,6 +113,8 @@ REQUIRED_FILES = (
     "docs/adr/0080-postgres-usage-ingestion.md",
     "docs/adr/0081-postgres-commercial-vertical-slice.md",
     "docs/adr/0082-spend-budget-evaluation.md",
+    "docs/adr/0083-journal-compose-six-place-scale.md",
+    "docs/adr/0084-spend-budget-published-webhook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
@@ -372,6 +374,15 @@ def validate_accounting_journal_proposal(
     credit_total = sum(Decimal(line["credit_amount"]) for line in lines)
     if debit_total != credit_total:
         errors.append("$: debit and credit totals must balance")
+
+    postable_quantum = Decimal("0.000001")
+    for line in lines:
+        for field_name in ("debit_amount", "credit_amount"):
+            amount = Decimal(line[field_name])
+            if amount != amount.quantize(postable_quantum):
+                errors.append(
+                    f"$.lines: {field_name} cannot exceed six fractional digits"
+                )
     return tuple(errors)
 
 
