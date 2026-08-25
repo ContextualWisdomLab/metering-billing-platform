@@ -590,7 +590,7 @@ contextual-orchestrator usage
 
 ## Void-journal-proposal acceptance
 
-- A stored issued-invoice void composes one balanced reverse `accounting_journal_proposal` through `AccountingExportService.propose_void_journal`.
+- A stored issued-invoice void composes one balanced reverse `accounting_journal_proposal` through `AccountingExportService.propose_void_journal`. `PostgresUsageLedger` persists that unused invoice-void journal so GET presentment survives process restart.
 - Identity is `(tenant_account_id, issued_invoice_void_id)`. A second compose returns the same `proposal_id` as `duplicate_replay`.
 - Untaxed lines debit semantic `usage_revenue` and credit semantic `accounts_receivable` for the exact inclusive voided amount. Taxed unused issues also debit `tax_payable` on the same journal.
 - The original invoice journal is bound by Billing `proposal_id` / stored invoice-draft journal identity only. The payload never includes `journal_entry_id` or a statutory account ID.
