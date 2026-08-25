@@ -132,3 +132,10 @@ export {
   COLLECTION_DISPUTE_RELEASE_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionDisputeActionCopy,
 } from "./collection_dispute.js";
+export {
+  renderUnappliedCash,
+  UNAPPLIED_CASH_CUSTOMER_COPY,
+  UNAPPLIED_CASH_APPLICATION_CUSTOMER_COPY,
+  UNAPPLIED_CASH_REFUND_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextUnappliedCashActionCopy,
+} from "./unapplied_cash.js";

@@ -1,0 +1,17 @@
+{
+  "unapplied_cash_refund_presentment_contract_version": 1,
+  "unapplied_cash_refund_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd82",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "unapplied_cash_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd80",
+  "payment_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf650",
+  "payment_intent_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf640",
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+  "currency_code": "USD",
+  "refund_amount": "0.001",
+  "unapplied_amount": "0.001",
+  "unapplied_cash_refund_status": "recorded",
+  "unapplied_cash_status": "parked",
+  "refunded_at": "2026-08-18T16:00:00Z",
+  "source_payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "next_operator_action": "wait"
+}
