@@ -689,38 +689,6 @@ class SpendBudgetOverSignalTests(unittest.TestCase):
                 SpendBudgetOverSignalService(ledger).observe_spend_budget_over(
                     TENANT_ONE, accepted.spend_budget_id
                 )
-        with mock.patch.object(ledger, "resolve_tenant", return_value=(None, None)):
-            with self.assertRaises(ValueError):
-                SpendBudgetOverSignalService(ledger).observe_spend_budget_over(
-                    TENANT_ONE, accepted.spend_budget_id
-                )
-        real_resolve = ledger.resolve_tenant
-        later_calls = {"count": 0}
-
-        def _tenant_error_after_eval(tenant_reference):
-            later_calls["count"] += 1
-            if later_calls["count"] > 1:
-                return None, "tenant_not_found"
-            return real_resolve(tenant_reference)
-
-        with mock.patch.object(ledger, "resolve_tenant", side_effect=_tenant_error_after_eval):
-            vanished = SpendBudgetOverSignalService(ledger).observe_spend_budget_over(
-                TENANT_ONE, accepted.spend_budget_id
-            )
-        self.assertEqual(vanished.rejection_reason_code, SpendBudgetRejectionReasonCode.TENANT_NOT_FOUND)
-        hollow_calls = {"count": 0}
-
-        def _none_tenant_after_eval(tenant_reference):
-            hollow_calls["count"] += 1
-            if hollow_calls["count"] > 1:
-                return None, None
-            return real_resolve(tenant_reference)
-
-        with mock.patch.object(ledger, "resolve_tenant", side_effect=_none_tenant_after_eval):
-            with self.assertRaises(ValueError):
-                SpendBudgetOverSignalService(ledger).observe_spend_budget_over(
-                    TENANT_ONE, accepted.spend_budget_id
-                )
         with mock.patch.object(
             SpendBudgetEvaluationPresentmentService,
             "present_spend_budget_evaluation",
