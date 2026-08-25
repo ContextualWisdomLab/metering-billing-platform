@@ -31,6 +31,7 @@ from metering_billing.contracts import (
     validate_rated_spend_presentment,
     validate_billing_account_budget_status_presentment,
     validate_spend_budget_over_signal,
+    validate_spend_budget_approaching_signal,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -132,6 +133,17 @@ SPEND_BUDGET_OVER_FIXTURE_NAMES = (
     SPEND_BUDGET_OVER_OBSERVATION_FIXTURE_NAMES + SPEND_BUDGET_OVER_OUTBOX_FIXTURE_NAMES
 )
 SPEND_BUDGET_OVER_MONEY_FIELDS = ("budget_amount", "over_amount")
+SPEND_BUDGET_APPROACHING_OBSERVATION_FIXTURE_NAMES = (
+    "accepted_at_signal.json",
+    "accepted_under_approaching_signal.json",
+    "duplicate_replay_approaching_signal.json",
+)
+SPEND_BUDGET_APPROACHING_OUTBOX_FIXTURE_NAMES = ("pending_spend_budget_approaching.json",)
+SPEND_BUDGET_APPROACHING_FIXTURE_NAMES = (
+    SPEND_BUDGET_APPROACHING_OBSERVATION_FIXTURE_NAMES
+    + SPEND_BUDGET_APPROACHING_OUTBOX_FIXTURE_NAMES
+)
+SPEND_BUDGET_APPROACHING_MONEY_FIELDS = ("budget_amount", "remaining_amount")
 SPEND_BUDGET_MONEY_FIELDS = (
     "budget_amount",
     "rated_amount",
@@ -606,6 +618,64 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertEqual(over_outbox["delivery_status"], "pending")
         self.assertEqual(over_outbox["next_operator_action"], "run_deliveries")
         self.assertTrue(str(over_outbox["payload_hash"]).startswith("sha256:"))
+        for fixture_name in SPEND_BUDGET_APPROACHING_OBSERVATION_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_spend_budget_approaching_signal(payload), ())
+            self.assertEqual(payload["tenant_reference"], "urn:cwl:tenant_001")
+            self.assertEqual(payload["next_operator_action"], "wait")
+            self.assertEqual(payload["spend_budget_status"], "published")
+            self.assertNotIn("over_amount", payload)
+            self.assertNotIn("rated_amount", payload)
+            self.assertNotIn("card_pan", payload)
+            self.assertNotIn("retained_earnings", payload)
+            self.assertNotIn("statutory_account_id", payload)
+            self.assertNotIn("journal_entry_id", payload)
+            self.assertNotIn("payload_json", payload)
+            for field_name in SPEND_BUDGET_APPROACHING_MONEY_FIELDS:
+                value = payload[field_name]
+                self.assertIsInstance(value, str)
+                self.assertNotIsInstance(value, float)
+                parse_exact_decimal(value)
+        first_at = self._fixture("accepted_at_signal.json")
+        self.assertEqual(first_at["spend_budget_approaching_signal_outcome_code"], "accepted")
+        self.assertEqual(first_at["utilization_status"], "at")
+        self.assertEqual(first_at["remaining_amount"], "0")
+        self.assertEqual(first_at["budget_amount"], "0.003705")
+        under_approaching = self._fixture("accepted_under_approaching_signal.json")
+        self.assertEqual(
+            under_approaching["spend_budget_approaching_signal_outcome_code"],
+            "accepted",
+        )
+        self.assertEqual(under_approaching["utilization_status"], "under")
+        self.assertEqual(under_approaching["remaining_amount"], "99.996295")
+        self.assertEqual(under_approaching["budget_amount"], "100.00")
+        approaching_replay = self._fixture("duplicate_replay_approaching_signal.json")
+        self.assertEqual(
+            approaching_replay["spend_budget_approaching_signal_outcome_code"],
+            "duplicate_replay",
+        )
+        self.assertEqual(approaching_replay["spend_budget_id"], first_at["spend_budget_id"])
+        self.assertEqual(approaching_replay["remaining_amount"], first_at["remaining_amount"])
+        self.assertEqual(approaching_replay["budget_amount"], first_at["budget_amount"])
+        self.assertEqual(
+            approaching_replay["source_payload_hash"],
+            first_at["source_payload_hash"],
+        )
+        for fixture_name in SPEND_BUDGET_APPROACHING_OUTBOX_FIXTURE_NAMES:
+            payload = self._fixture(fixture_name)
+            self.assertEqual(validate_webhook_outbox_event_presentment(payload), ())
+            self.assertEqual(payload["tenant_reference"], "urn:cwl:tenant_001")
+            self.assertEqual(payload["event_type_code"], "spend_budget.approaching")
+            self.assertNotIn("payload_json", payload)
+            self.assertNotIn("webhook_secret", payload)
+            self.assertNotIn("data", payload)
+            self.assertNotIn("remaining_amount", payload)
+            self.assertNotIn("card_pan", payload)
+        approaching_outbox = self._fixture("pending_spend_budget_approaching.json")
+        self.assertEqual(approaching_outbox["source_id"], first_at["spend_budget_id"])
+        self.assertEqual(approaching_outbox["delivery_status"], "pending")
+        self.assertEqual(approaching_outbox["next_operator_action"], "run_deliveries")
+        self.assertTrue(str(approaching_outbox["payload_hash"]).startswith("sha256:"))
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -652,6 +722,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "RatedSpend",
             "BudgetStatus",
             "SpendBudgetOver",
+            "SpendBudgetApproaching",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -678,6 +749,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + RATED_SPEND_FIXTURE_NAMES
             + BUDGET_STATUS_FIXTURE_NAMES
             + SPEND_BUDGET_OVER_FIXTURE_NAMES
+            + SPEND_BUDGET_APPROACHING_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -726,6 +798,7 @@ class OperatorConsoleTests(unittest.TestCase):
         )
         self.assertIn("Open the account budget status, then wait", inventory)
         self.assertIn("Observe the spend budget over signal, then wait", inventory)
+        self.assertIn("Observe the spend budget approaching signal, then wait", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

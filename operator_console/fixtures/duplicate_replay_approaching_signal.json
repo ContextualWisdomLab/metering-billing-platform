@@ -1,0 +1,17 @@
+{
+  "spend_budget_approaching_signal_contract_version": 1,
+  "spend_budget_approaching_signal_outcome_code": "duplicate_replay",
+  "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfe02",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "billing_account_id": "019d7001-0000-7000-8000-000000000001",
+  "currency_code": "USD",
+  "budget_amount": "0.003705",
+  "remaining_amount": "0",
+  "utilization_status": "at",
+  "window_started_at": "2026-08-16T10:00:00Z",
+  "window_ended_at": "2026-08-16T11:00:00Z",
+  "spend_budget_status": "published",
+  "source_payload_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "spend_budget_contract_version": 1,
+  "next_operator_action": "wait"
+}

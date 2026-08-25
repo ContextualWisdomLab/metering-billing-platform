@@ -121,3 +121,8 @@ export {
   SPEND_BUDGET_OVER_CUSTOMER_COPY,
   SPEND_BUDGET_OVER_TENANT_REFERENCE,
 } from "./spend_budget_over.js";
+export {
+  renderSpendBudgetApproaching,
+  SPEND_BUDGET_APPROACHING_CUSTOMER_COPY,
+  SPEND_BUDGET_APPROACHING_TENANT_REFERENCE,
+} from "./spend_budget_approaching.js";
