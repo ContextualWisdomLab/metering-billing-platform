@@ -56,7 +56,7 @@ from metering_billing.webhook_outbox import (
     EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
     enqueue_accepted_fact,
 )
-from tests.test_usage_rating import KNOWN_MORNING_TOTAL, MORNING_WINDOW
+from tests.test_usage_rating import MORNING_WINDOW
 from scripts.migrate_postgres import (
     MIGRATION_HISTORY_TABLE,
     MigrationDriftError,
@@ -1991,7 +1991,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             TENANT_ONE,
             account.billing_account_id,
             "USD",
-            KNOWN_MORNING_TOTAL,
+            evaluation.rated_amount,
             MORNING_WINDOW,
         )
         self.assertEqual(at_budget.spend_budget_outcome_code.value, "accepted")
