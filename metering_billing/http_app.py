@@ -116,6 +116,13 @@ The application is a thin WSGI adapter:
     A budget whose billing account belongs to another commercial
     ``tenant_account`` is HTTP 403.  The read does not persist, hard-stop,
     or compose a journal.
+    ``GET /v1/billing-accounts/{billing_account_id}/budget-status`` evaluates
+    every published commercial ``spend_budget`` on that same-tenant account.
+    The envelope is ``{budget_statuses, next_cursor}``.  Same tenant is
+    HTTP 200.  Unknown billing account is HTTP 404.  Cross-tenant account
+    is HTTP 403.  Missing tenant pin is HTTP 422.  Unknown or cross-tenant
+    budgets are omitted with no leak.  The read does not persist, hard-stop,
+    or compose a journal.
     ``POST /v1/issued-invoices/{issued_invoice_id}/voids`` records one
     commercial void of an unused issued invoice.  Replay of the same
     tenant and issued invoice returns the stored
@@ -401,6 +408,9 @@ BILLING_ACCOUNT_STATEMENT_PATH = re.compile(
 )
 BILLING_ACCOUNT_RATED_SPEND_PATH = re.compile(
     r"^/v1/billing-accounts/([0-9a-fA-F-]{36})/rated-spend$"
+)
+BILLING_ACCOUNT_BUDGET_STATUS_PATH = re.compile(
+    r"^/v1/billing-accounts/([0-9a-fA-F-]{36})/budget-status$"
 )
 BILLING_ACCOUNT_SPEND_BUDGETS_PATH = re.compile(
     r"^/v1/billing-accounts/([0-9a-fA-F-]{36})/spend-budgets$"
@@ -1582,6 +1592,37 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "list_billing_account_budget_statuses":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                page = spend_budget_evaluations.list_billing_account_budget_statuses(
+                    tenant_reference,
+                    _parse_uuid(path_values["billing_account_id"], "billing_account_id"),
+                    cursor=query.get("cursor"),
+                    page_limit=query.get("page_limit"),
+                )
+                return _send_json(start_response, 200, page.as_contract_dict())
+            except SpendBudgetEvaluationPresentmentQueryError as error:
+                if error.rejection_reason_code == "billing_account_not_found":
+                    status_code = 404
+                elif error.rejection_reason_code == "billing_account_forbidden":
+                    status_code = 403
+                else:
+                    status_code = 422
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "get_spend_budget_evaluation":
             try:
                 query = _read_query(environ)
@@ -2732,6 +2773,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if spend_match is not None:
         if method == "GET":
             return "rated_spend", {"billing_account_id": spend_match.group(1)}
+        return "method_not_allowed", {}
+    budget_status_match = BILLING_ACCOUNT_BUDGET_STATUS_PATH.fullmatch(path)
+    if budget_status_match is not None:
+        if method == "GET":
+            return "list_billing_account_budget_statuses", {
+                "billing_account_id": budget_status_match.group(1)
+            }
         return "method_not_allowed", {}
     budget_nested = BILLING_ACCOUNT_SPEND_BUDGETS_PATH.fullmatch(path)
     if budget_nested is not None:

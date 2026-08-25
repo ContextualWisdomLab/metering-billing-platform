@@ -5,7 +5,7 @@ Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
 those drafts as statements, present already-rated spend for one billing
-account and window grouped by product, optional project, optional credential, optional principal, or optional cost center, publish one commercial spend budget for one billing account and window, evaluate that published budget against already-rated spend, issue an immutable commercial invoice snapshot
+account and window grouped by product, optional project, optional credential, optional principal, or optional cost center, publish one commercial spend budget for one billing account and window, evaluate that published budget against already-rated spend, list those evaluations for one billing account, issue an immutable commercial invoice snapshot
 from a stored draft, present that issued invoice, issue an immutable
 commercial credit-note snapshot from a stored credit adjustment, present
 that issued credit note, void one unused issued credit note, publish tax rates, assess tax on a draft, present
@@ -58,6 +58,7 @@ from metering_billing.contracts import (
     SPEND_BUDGET_SCHEMA_NAME,
     SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME,
     SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME,
+    BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME,
     COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME,
     COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME,
     UNAPPLIED_CASH_SCHEMA_NAME,
@@ -112,6 +113,7 @@ from metering_billing.contracts import (
     validate_spend_budget,
     validate_spend_budget_presentment,
     validate_spend_budget_evaluation_presentment,
+    validate_billing_account_budget_status_presentment,
     validate_collection_aging_presentment,
     validate_collection_case_presentment,
     validate_payment_intent_presentment,
@@ -350,6 +352,7 @@ __all__ = (
     "SPEND_BUDGET_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
+    "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
     "TAX_RATE_SCHEMA_NAME",
     "TAX_ASSESSMENT_SCHEMA_NAME",
@@ -576,6 +579,7 @@ __all__ = (
     "validate_spend_budget",
     "validate_spend_budget_presentment",
     "validate_spend_budget_evaluation_presentment",
+    "validate_billing_account_budget_status_presentment",
     "validate_collection_aging_presentment",
     "validate_collection_case_presentment",
     "validate_payment_intent_presentment",

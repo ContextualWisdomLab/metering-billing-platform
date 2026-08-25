@@ -28,6 +28,7 @@ __all__ = (
     "SPEND_BUDGET_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
+    "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
     "TAX_RATE_SCHEMA_NAME",
     "TAX_ASSESSMENT_SCHEMA_NAME",
@@ -92,6 +93,7 @@ __all__ = (
     "validate_credit_adjustment_presentment",
     "validate_spend_budget_presentment",
     "validate_spend_budget_evaluation_presentment",
+    "validate_billing_account_budget_status_presentment",
     "validate_rate_card_presentment",
     "validate_usage_event_presentment",
     "validate_rating_run_presentment",
@@ -163,6 +165,9 @@ SPEND_BUDGET_SCHEMA_NAME = "spend-budget.schema.json"
 SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME = "spend-budget-presentment.schema.json"
 SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME = (
     "spend-budget-evaluation-presentment.schema.json"
+)
+BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME = (
+    "billing-account-budget-status-presentment.schema.json"
 )
 RATE_CARD_PRESENTMENT_SCHEMA_NAME = "rate-card-presentment.schema.json"
 USAGE_EVENT_PRESENTMENT_SCHEMA_NAME = "usage-event-presentment.schema.json"
@@ -1401,6 +1406,98 @@ def validate_spend_budget_evaluation_presentment(
         errors.append("$: spend budget evaluation must not include card_pan")
     if "retained_earnings" in statement:
         errors.append("$: spend budget evaluation must not include retained_earnings")
+    return tuple(errors)
+
+
+def validate_billing_account_budget_status_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate the account-level budget-status page plus remaining/over math."""
+    schema = load_json_schema(
+        BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    if "rated_amount" in statement:
+        errors.append("$: budget status page must not mix currencies into one rated_amount")
+    if "card_pan" in statement:
+        errors.append("$: spend budget status must not include card_pan")
+    if "retained_earnings" in statement:
+        errors.append("$: spend budget status must not include retained_earnings")
+    rows = statement.get("budget_statuses")
+    if isinstance(rows, list):
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                continue
+            errors.extend(
+                _budget_status_row_errors(row, prefix=f"$.budget_statuses[{index}]")
+            )
+    return tuple(errors)
+
+
+def _budget_status_row_errors(row: Mapping[str, Any], prefix: str) -> tuple[str, ...]:
+    """Return remaining/over invariant errors for one budget-status row."""
+    errors: list[str] = []
+    budget_amount = row.get("budget_amount")
+    rated_amount = row.get("rated_amount")
+    remaining_amount = row.get("remaining_amount")
+    over_amount = row.get("over_amount")
+    utilization_status = row.get("utilization_status")
+    action = row.get("next_operator_action")
+    status = row.get("spend_budget_status")
+    parsed_amounts: dict[str, Decimal] = {}
+    for field_name, raw_value in (
+        ("budget_amount", budget_amount),
+        ("rated_amount", rated_amount),
+        ("remaining_amount", remaining_amount),
+        ("over_amount", over_amount),
+    ):
+        if isinstance(raw_value, str):
+            try:
+                parsed = Decimal(raw_value)
+                if parsed < Decimal("0"):
+                    errors.append(f"{prefix}: {field_name} must be a non-negative exact decimal")
+                else:
+                    parsed_amounts[field_name] = parsed
+            except Exception:
+                errors.append(f"{prefix}: {field_name} must be an exact decimal")
+    if "budget_amount" in parsed_amounts and parsed_amounts["budget_amount"] <= Decimal("0"):
+        errors.append(f"{prefix}: budget_amount must be greater than zero")
+    if (
+        "budget_amount" in parsed_amounts
+        and "rated_amount" in parsed_amounts
+        and "remaining_amount" in parsed_amounts
+        and "over_amount" in parsed_amounts
+    ):
+        budget = parsed_amounts["budget_amount"]
+        rated = parsed_amounts["rated_amount"]
+        remaining = parsed_amounts["remaining_amount"]
+        over = parsed_amounts["over_amount"]
+        if rated < budget:
+            expected_remaining = budget - rated
+            expected_over = Decimal("0")
+            expected_status = "under"
+        elif rated == budget:
+            expected_remaining = Decimal("0")
+            expected_over = Decimal("0")
+            expected_status = "at"
+        else:
+            expected_remaining = Decimal("0")
+            expected_over = rated - budget
+            expected_status = "over"
+        if remaining != expected_remaining or over != expected_over:
+            errors.append(
+                f"{prefix}: remaining_amount and over_amount must match budget minus rated"
+            )
+        if utilization_status != expected_status:
+            errors.append(f"{prefix}: utilization_status must match remaining and over")
+    if status == "published" and action != "wait":
+        errors.append(f"{prefix}: published spend budget statuses must wait")
+    if "card_pan" in row:
+        errors.append(f"{prefix}: spend budget status must not include card_pan")
+    if "retained_earnings" in row:
+        errors.append(f"{prefix}: spend budget status must not include retained_earnings")
     return tuple(errors)
 
 

@@ -25,6 +25,7 @@ from metering_billing.contracts import (
     validate_spend_budget,
     validate_spend_budget_presentment,
     validate_spend_budget_evaluation_presentment,
+    validate_billing_account_budget_status_presentment,
     validate_rate_card_presentment,
     validate_usage_event_presentment,
     validate_rating_run_presentment,
@@ -1621,6 +1622,136 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertNotEqual(
             validate_spend_budget_evaluation_presentment(dict(instance, budget_amount=100)),
+            (),
+        )
+
+    def test_billing_account_budget_status_accepts_under_at_over_and_rejects_totals(self) -> None:
+        """An account-level page keeps per-row exact math and never mixes currency."""
+        schema = self._schema("billing-account-budget-status-presentment.schema.json")
+        row = {
+            "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "currency_code": "USD",
+            "budget_amount": "100.00",
+            "rated_amount": "40.00",
+            "remaining_amount": "60.00",
+            "over_amount": "0",
+            "utilization_status": "under",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "spend_budget_status": "published",
+            "next_operator_action": "wait",
+        }
+        instance = {"budget_statuses": [row], "next_cursor": None}
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_billing_account_budget_status_presentment(instance), ())
+        at_row = dict(row, rated_amount="100.00", remaining_amount="0", over_amount="0")
+        at_row["utilization_status"] = "at"
+        self.assertEqual(
+            validate_billing_account_budget_status_presentment(
+                {"budget_statuses": [at_row], "next_cursor": "2026-08-18T15:00:00Z|019d7b92-1aa0-7a7f-b61c-962c0f4bf680"}
+            ),
+            (),
+        )
+        over_row = dict(row, rated_amount="125.00", remaining_amount="0", over_amount="25.00")
+        over_row["utilization_status"] = "over"
+        self.assertEqual(
+            validate_billing_account_budget_status_presentment(
+                {"budget_statuses": [over_row], "next_cursor": None}
+            ),
+            (),
+        )
+        extra = dict(instance, items=[])
+        self.assertIn(
+            "$: additional property is not allowed: items",
+            validate_schema_instance(schema, extra),
+        )
+        mixed = dict(instance, rated_amount="40.00")
+        self.assertIn(
+            "$: budget status page must not mix currencies into one rated_amount",
+            validate_billing_account_budget_status_presentment(mixed),
+        )
+        zeroed = {"budget_statuses": [dict(row, budget_amount="0")], "next_cursor": None}
+        self.assertTrue(
+            any(
+                "budget_amount must be greater than zero" in error
+                for error in validate_billing_account_budget_status_presentment(zeroed)
+            )
+        )
+        negative = {"budget_statuses": [dict(row, remaining_amount="-1")], "next_cursor": None}
+        self.assertTrue(
+            any(
+                "remaining_amount must be a non-negative exact decimal" in error
+                for error in validate_billing_account_budget_status_presentment(negative)
+            )
+        )
+        mismatched = {"budget_statuses": [dict(row, remaining_amount="10.00")], "next_cursor": None}
+        self.assertTrue(
+            any(
+                "remaining_amount and over_amount must match budget minus rated" in error
+                for error in validate_billing_account_budget_status_presentment(mismatched)
+            )
+        )
+        wrong_status = {"budget_statuses": [dict(row, utilization_status="over")], "next_cursor": None}
+        self.assertTrue(
+            any(
+                "utilization_status must match remaining and over" in error
+                for error in validate_billing_account_budget_status_presentment(wrong_status)
+            )
+        )
+        waiting = {"budget_statuses": [dict(row, next_operator_action="collect")], "next_cursor": None}
+        self.assertTrue(
+            any(
+                "published spend budget statuses must wait" in error
+                for error in validate_billing_account_budget_status_presentment(waiting)
+            )
+        )
+        self.assertNotEqual(validate_billing_account_budget_status_presentment([]), ())
+        bad_amount = {"budget_statuses": [dict(row, rated_amount="not-decimal")], "next_cursor": None}
+        self.assertTrue(
+            any(
+                "rated_amount must be an exact decimal" in error
+                for error in validate_billing_account_budget_status_presentment(bad_amount)
+            )
+        )
+        pan = dict(instance, card_pan="4111111111111111")
+        self.assertIn(
+            "$: spend budget status must not include card_pan",
+            validate_billing_account_budget_status_presentment(pan),
+        )
+        earnings = dict(instance, retained_earnings="310100")
+        self.assertIn(
+            "$: spend budget status must not include retained_earnings",
+            validate_billing_account_budget_status_presentment(earnings),
+        )
+        row_pan = {"budget_statuses": [dict(row, card_pan="4111111111111111")], "next_cursor": None}
+        self.assertTrue(
+            any(
+                "spend budget status must not include card_pan" in error
+                for error in validate_billing_account_budget_status_presentment(row_pan)
+            )
+        )
+        row_earnings = {
+            "budget_statuses": [dict(row, retained_earnings="310100")],
+            "next_cursor": None,
+        }
+        self.assertTrue(
+            any(
+                "spend budget status must not include retained_earnings" in error
+                for error in validate_billing_account_budget_status_presentment(row_earnings)
+            )
+        )
+        skipped_row = {"budget_statuses": [row, "skip"], "next_cursor": None}
+        self.assertNotEqual(validate_billing_account_budget_status_presentment(skipped_row), ())
+        self.assertNotEqual(
+            validate_billing_account_budget_status_presentment(
+                {"budget_statuses": [dict(row, budget_amount=100)], "next_cursor": None}
+            ),
+            (),
+        )
+        self.assertNotEqual(
+            validate_billing_account_budget_status_presentment(
+                {"budget_statuses": "nope", "next_cursor": None}
+            ),
             (),
         )
 

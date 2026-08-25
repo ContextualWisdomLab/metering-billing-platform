@@ -400,6 +400,17 @@ python3 -c "from metering_billing import SpendBudgetService, SpendBudgetPresentm
 
 Call `SpendBudgetService.publish_spend_budget` with a tenant, `billing_account_id`, ISO 4217 currency, an exact `budget_amount` greater than zero, and the same half-open ISO 8601 window as rated spend. `POST /v1/billing-accounts/{billing_account_id}/spend-budgets` stays that command and refuses PAN and provider secrets. Replay of the same identity returns the stored `spend_budget_id`. A later distinct amount appends a new row. First successful publish enqueues one existing `spend_budget.published` webhook outbox event. After a `spend_budget` exists, `GET /v1/spend-budgets/{spend_budget_id}` returns the tenant-scoped statement. `GET /v1/spend-budgets` lists `{spend_budgets, next_cursor}`. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Publish the commercial budget, then wait. This path does not compare rated spend, stop rating, or compose a journal.
 
+## Inspect billing-account budget status
+
+```bash
+python3 -c "from metering_billing import SpendBudgetEvaluationPresentmentService"
+# GET /v1/billing-accounts/{billing_account_id}/budget-status?tenant_reference=urn:cwl:tenant_001
+# GET /v1/spend-budgets/{spend_budget_id}/evaluation?tenant_reference=urn:cwl:tenant_001
+# Header: X-CWL-Tenant-Reference: urn:cwl:tenant_001
+```
+
+After one or more `spend_budget` rows exist for that account, `GET /v1/billing-accounts/{billing_account_id}/budget-status` lists `{budget_statuses, next_cursor}` using the same rated-spend plus exact remaining/over math as `GET /v1/spend-budgets/{spend_budget_id}/evaluation`. Order is `published_at` then `spend_budget_id`. `page_limit` defaults to 50 and maxes at 100. Each row keeps its own currency. Missing account is HTTP 404. Cross-tenant account is HTTP 403. Unknown or cross-tenant budgets are omitted. Inspect remaining, then wait. This path does not persist, mutate the budget, stop rating, or compose a journal.
+
 ## Present a dunning notice
 
 ```bash
