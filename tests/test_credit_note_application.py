@@ -155,6 +155,58 @@ class CreditNoteApplicationTests(unittest.TestCase):
         self.assertEqual(issued.issued_credit_note_status, "issued")
         self.assertEqual(len(ledger.issued_credit_notes), 1)
 
+    def test_insert_identity_replay_does_not_reduce_outstanding_again(self) -> None:
+        """A concurrent insert race is duplicate_replay and never double-reduces."""
+        ledger, invoice_draft_id = draft_known_morning()
+        credit = CreditAdjustmentService(ledger).record_credit_adjustment(
+            TENANT_ONE, invoice_draft_id, PARTIAL_CREDIT, "goodwill"
+        )
+        issued = IssuedCreditNoteService(ledger).issue_credit_note(
+            TENANT_ONE, credit.credit_adjustment_id
+        )
+        collection = CollectionCaseService(ledger).open_collection_case(
+            TENANT_ONE, invoice_draft_id
+        )
+        first = CreditNoteApplicationService(
+            ledger, clock=lambda: APPLIED_MORNING
+        ).apply_credit_note(
+            TENANT_ONE, issued.issued_credit_note_id, collection.collection_case_id
+        )
+        remaining = ledger.get_collection_case(collection.collection_case_id).outstanding_amount
+
+        class BlindFindLedger:
+            """Force the insert path used after a concurrent identity race."""
+
+            def __init__(self, inner: object) -> None:
+                self._inner = inner
+
+            def find_credit_note_application(self, *args, **kwargs):
+                return None
+
+            def insert_credit_note_application(self, row):
+                return self._inner.find_credit_note_application(
+                    row.tenant_account_id, row.issued_credit_note_id
+                )
+
+            def __getattr__(self, name: str):
+                return getattr(self._inner, name)
+
+        raced = CreditNoteApplicationService(
+            BlindFindLedger(ledger), clock=lambda: APPLIED_EVENING
+        ).apply_credit_note(
+            TENANT_ONE, issued.issued_credit_note_id, collection.collection_case_id
+        )
+        self.assertEqual(
+            raced.credit_note_application_outcome_code,
+            CreditNoteApplicationOutcomeCode.DUPLICATE_REPLAY,
+        )
+        self.assertEqual(raced.credit_note_application_id, first.credit_note_application_id)
+        self.assertEqual(
+            ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
+            remaining,
+        )
+        self.assertEqual(len(ledger.credit_note_applications), 1)
+
     def test_partial_credit_leaves_residual_outstanding(self) -> None:
         """A smaller issued credit reduces outstanding without inventing a journal."""
         ledger, invoice_draft_id = draft_known_morning()

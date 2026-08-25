@@ -128,6 +128,7 @@ REQUIRED_FILES = (
     "docs/adr/0095-spend-budget-approaching-signal-presentment.md",
     "docs/adr/0096-postgres-issued-credit-note.md",
     "docs/adr/0097-postgres-issued-credit-note-void.md",
+    "docs/adr/0098-postgres-credit-note-application.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

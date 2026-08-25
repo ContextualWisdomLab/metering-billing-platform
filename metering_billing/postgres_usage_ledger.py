@@ -2,7 +2,7 @@
 
 The repository owns catalog rows, immutable usage facts, rating runs, invoice
 drafts, issued invoices, issued credit notes, unused issued-credit-note voids,
-collection cases, payment and
+credit-note applications, collection cases, payment and
 credit facts, journal proposals, published spend budgets, and the atomic
 webhook outbox used by the first commercial path. Every public operation uses
 the supplied PostgreSQL connection; the implementation never falls back to an
@@ -3287,6 +3287,119 @@ class PostgresUsageLedger:
             return None if row is None else self._fetch_credit_note_application(
                 cursor, UUID(str(row[0]))
             )
+
+    def get_credit_note_application(
+        self, credit_note_application_id: UUID
+    ) -> StoredCreditNoteApplication | None:
+        """Return one credit-note application by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT credit_note_application_id
+                FROM billing_core.credit_note_application
+                WHERE credit_note_application_id = %s
+                """,
+                (credit_note_application_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_credit_note_application(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_credit_note_applications_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredCreditNoteApplication, ...]:
+        """Return credit-note applications limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT credit_note_application_id
+                FROM billing_core.credit_note_application
+                WHERE tenant_account_id = %s
+                ORDER BY applied_at, credit_note_application_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_credit_note_application(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_credit_note_application(
+        self, credit_note_application: StoredCreditNoteApplication
+    ) -> StoredCreditNoteApplication:
+        """Persist one applied credit-note application or return its identity replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(credit_note_application.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+            credit_note_application.source_payload_hash
+        ) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+            credit_note_application.issued_credit_note_source_payload_hash
+        ) is None:
+            raise ValueError(
+                "issued_credit_note_source_payload_hash must be a sha256 digest"
+            )
+        if credit_note_application.credit_note_application_status != "applied":
+            raise ValueError("credit_note_application_status must be applied")
+        applied_amount = parse_exact_decimal(
+            format_exact_decimal(credit_note_application.applied_amount)
+        )
+        if applied_amount <= 0:
+            raise ValueError(
+                "credit note application amount must be a positive exact decimal"
+            )
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.credit_note_application
+                    (credit_note_application_id, tenant_account_id,
+                     issued_credit_note_id, collection_case_id, invoice_draft_id,
+                     issued_invoice_id, credit_note_application_contract_version,
+                     issued_credit_note_contract_version, source_payload_hash,
+                     issued_credit_note_source_payload_hash, currency_code,
+                     applied_amount, credit_note_application_status, applied_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING credit_note_application_id
+                """,
+                (
+                    credit_note_application.credit_note_application_id,
+                    credit_note_application.tenant_account_id,
+                    credit_note_application.issued_credit_note_id,
+                    credit_note_application.collection_case_id,
+                    credit_note_application.invoice_draft_id,
+                    credit_note_application.issued_invoice_id,
+                    credit_note_application.credit_note_application_contract_version,
+                    credit_note_application.issued_credit_note_contract_version,
+                    credit_note_application.source_payload_hash,
+                    credit_note_application.issued_credit_note_source_payload_hash,
+                    credit_note_application.currency_code,
+                    applied_amount,
+                    credit_note_application.credit_note_application_status,
+                    credit_note_application.applied_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT credit_note_application_id
+                    FROM billing_core.credit_note_application
+                    WHERE tenant_account_id = %s AND issued_credit_note_id = %s
+                    """,
+                    (
+                        credit_note_application.tenant_account_id,
+                        credit_note_application.issued_credit_note_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        "credit-note application identity conflicts with an existing row"
+                    )
+            return self._fetch_credit_note_application(cursor, UUID(str(row[0])))
 
     def find_spend_budget(
         self,

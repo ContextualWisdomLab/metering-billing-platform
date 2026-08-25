@@ -254,24 +254,36 @@ class CreditNoteApplicationService:
         source_payload_hash = compute_application_payload_hash(
             _canonical_application_snapshot(issued, collection_case)
         )
-        stored = self.ledger.insert_credit_note_application(
-            StoredCreditNoteApplication(
-                credit_note_application_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                issued_credit_note_id=issued.issued_credit_note_id,
-                collection_case_id=collection_case.collection_case_id,
-                invoice_draft_id=issued.invoice_draft_id,
-                issued_invoice_id=issued.issued_invoice_id,
-                credit_note_application_contract_version=CREDIT_NOTE_APPLICATION_CONTRACT_VERSION,
-                issued_credit_note_contract_version=issued.issued_credit_note_contract_version,
-                source_payload_hash=source_payload_hash,
-                issued_credit_note_source_payload_hash=issued.source_payload_hash,
-                currency_code=issued.currency_code,
-                applied_amount=applied_amount,
-                credit_note_application_status=CREDIT_NOTE_APPLICATION_STATUS,
-                applied_at=self._clock(),
-            )
+        candidate = StoredCreditNoteApplication(
+            credit_note_application_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            issued_credit_note_id=issued.issued_credit_note_id,
+            collection_case_id=collection_case.collection_case_id,
+            invoice_draft_id=issued.invoice_draft_id,
+            issued_invoice_id=issued.issued_invoice_id,
+            credit_note_application_contract_version=CREDIT_NOTE_APPLICATION_CONTRACT_VERSION,
+            issued_credit_note_contract_version=issued.issued_credit_note_contract_version,
+            source_payload_hash=source_payload_hash,
+            issued_credit_note_source_payload_hash=issued.source_payload_hash,
+            currency_code=issued.currency_code,
+            applied_amount=applied_amount,
+            credit_note_application_status=CREDIT_NOTE_APPLICATION_STATUS,
+            applied_at=self._clock(),
         )
+        stored = self.ledger.insert_credit_note_application(candidate)
+        if stored.credit_note_application_id != candidate.credit_note_application_id:
+            current_case = require_resolved(
+                self.ledger.get_collection_case(stored.collection_case_id),
+                "collection_case",
+            )
+            result = _from_stored(
+                stored,
+                current_case,
+                tenant.tenant_reference,
+                CreditNoteApplicationOutcomeCode.DUPLICATE_REPLAY,
+            )
+            _enqueue_credit_note_applied(self.ledger, tenant.tenant_reference, result)
+            return result
         updated_case = self.ledger.apply_collection_settlement(
             collection_case.collection_case_id, applied_amount
         )
