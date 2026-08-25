@@ -32,6 +32,8 @@ from metering_billing.contracts import (
     validate_billing_account_budget_status_presentment,
     validate_spend_budget_over_signal,
     validate_spend_budget_approaching_signal,
+    validate_collection_dispute_presentment,
+    validate_collection_dispute_release_presentment,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -144,6 +146,10 @@ SPEND_BUDGET_APPROACHING_FIXTURE_NAMES = (
     + SPEND_BUDGET_APPROACHING_OUTBOX_FIXTURE_NAMES
 )
 SPEND_BUDGET_APPROACHING_MONEY_FIELDS = ("budget_amount", "remaining_amount")
+COLLECTION_DISPUTE_FIXTURE_NAMES = (
+    "held_morning_collection_dispute.json",
+    "released_morning_collection_dispute.json",
+)
 SPEND_BUDGET_MONEY_FIELDS = (
     "budget_amount",
     "rated_amount",
@@ -676,6 +682,43 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertEqual(approaching_outbox["delivery_status"], "pending")
         self.assertEqual(approaching_outbox["next_operator_action"], "run_deliveries")
         self.assertTrue(str(approaching_outbox["payload_hash"]).startswith("sha256:"))
+        held_dispute = self._fixture("held_morning_collection_dispute.json")
+        self.assertEqual(validate_collection_dispute_presentment(held_dispute), ())
+        self.assertEqual(held_dispute["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(held_dispute["collection_dispute_status"], "held")
+        self.assertEqual(held_dispute["collection_case_status"], "disputed")
+        self.assertEqual(held_dispute["remaining_outstanding_amount"], "0.003705")
+        self.assertEqual(held_dispute["next_operator_action"], "wait")
+        self.assertIsInstance(held_dispute["remaining_outstanding_amount"], str)
+        self.assertNotIsInstance(held_dispute["remaining_outstanding_amount"], float)
+        parse_exact_decimal(held_dispute["remaining_outstanding_amount"])
+        self.assertNotIn("collection_dispute_outcome_code", held_dispute)
+        self.assertNotIn("card_pan", held_dispute)
+        self.assertNotIn("legal_invoice_number", held_dispute)
+        released_dispute = self._fixture("released_morning_collection_dispute.json")
+        self.assertEqual(
+            validate_collection_dispute_release_presentment(released_dispute),
+            (),
+        )
+        self.assertEqual(released_dispute["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(released_dispute["collection_dispute_status"], "released")
+        self.assertEqual(released_dispute["collection_case_status"], "open")
+        self.assertEqual(released_dispute["remaining_outstanding_amount"], "0.003705")
+        self.assertEqual(released_dispute["next_operator_action"], "wait")
+        self.assertEqual(
+            released_dispute["collection_dispute_id"],
+            held_dispute["collection_dispute_id"],
+        )
+        self.assertEqual(
+            released_dispute["collection_case_id"],
+            held_dispute["collection_case_id"],
+        )
+        self.assertIsInstance(released_dispute["remaining_outstanding_amount"], str)
+        self.assertNotIsInstance(released_dispute["remaining_outstanding_amount"], float)
+        parse_exact_decimal(released_dispute["remaining_outstanding_amount"])
+        self.assertNotIn("collection_dispute_release_outcome_code", released_dispute)
+        self.assertNotIn("card_pan", released_dispute)
+        self.assertNotIn("legal_invoice_number", released_dispute)
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -723,6 +766,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "BudgetStatus",
             "SpendBudgetOver",
             "SpendBudgetApproaching",
+            "CollectionDispute",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -750,6 +794,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + BUDGET_STATUS_FIXTURE_NAMES
             + SPEND_BUDGET_OVER_FIXTURE_NAMES
             + SPEND_BUDGET_APPROACHING_FIXTURE_NAMES
+            + COLLECTION_DISPUTE_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -799,6 +844,8 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Open the account budget status, then wait", inventory)
         self.assertIn("Observe the spend budget over signal, then wait", inventory)
         self.assertIn("Observe the spend budget approaching signal, then wait", inventory)
+        self.assertIn("Hold the disputed case, then wait", inventory)
+        self.assertIn("Release the hold, then collect or dunn", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

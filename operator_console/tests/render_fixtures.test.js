@@ -131,6 +131,12 @@ import {
   SPEND_BUDGET_APPROACHING_CUSTOMER_COPY,
   SPEND_BUDGET_APPROACHING_TENANT_REFERENCE,
 } from "../src/spend_budget_approaching.js";
+import {
+  renderCollectionDispute,
+  COLLECTION_DISPUTE_CUSTOMER_COPY,
+  COLLECTION_DISPUTE_RELEASE_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCollectionDisputeActionCopy,
+} from "../src/collection_dispute.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -1097,6 +1103,67 @@ test("empty account budget status still pins the commercial tenant and waits", (
   assert.doesNotMatch(missing, /Next cursor/);
 });
 
+test("held morning collection dispute shows remaining and wait", () => {
+  const statement = loadFixture("held_morning_collection_dispute.json");
+  const html = renderCollectionDispute(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /held/);
+  assert.match(html, /disputed/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Hold the disputed case, then wait/);
+  assert.equal(COLLECTION_DISPUTE_CUSTOMER_COPY, "Hold the disputed case, then wait.");
+  assert.equal(
+    COLLECTION_DISPUTE_RELEASE_CUSTOMER_COPY,
+    "Release the hold, then collect or dunn.",
+  );
+  assert.equal(nextCollectionDisputeActionCopy("wait"), "Wait");
+  assert.equal(nextCollectionDisputeActionCopy("collect"), "Collect or dunn");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.collection_dispute_status, "held");
+  assert.equal(statement.collection_case_status, "disputed");
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+  assert.notEqual(typeof statement.remaining_outstanding_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.remaining_outstanding_amount,
+    currency_code: statement.currency_code,
+  }), /0\.003705 USD/);
+  assert.match(renderStatusChip({
+    amount_due: statement.remaining_outstanding_amount,
+    status_label: statement.collection_dispute_status,
+  }), /oc-status-chip--due/);
+  assert.ok(!("collection_dispute_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
+test("released morning collection dispute keeps remaining and fail-closes a later hold", () => {
+  const statement = loadFixture("released_morning_collection_dispute.json");
+  const held = loadFixture("held_morning_collection_dispute.json");
+  const html = renderCollectionDispute(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /released/);
+  assert.match(html, /open/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Release the hold, then collect or dunn/);
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.collection_dispute_status, "released");
+  assert.equal(statement.collection_case_status, "open");
+  assert.equal(statement.collection_dispute_id, held.collection_dispute_id);
+  assert.equal(statement.collection_case_id, held.collection_case_id);
+  assert.equal(statement.remaining_outstanding_amount, held.remaining_outstanding_amount);
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderStatusChip({
+    amount_due: statement.remaining_outstanding_amount,
+    status_label: statement.collection_dispute_status,
+  }), /oc-status-chip--due/);
+  assert.ok(!("collection_dispute_release_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+});
+
 test("project-grouped morning rated spend keeps the stored project URN unmixed", () => {
   const statement = loadFixture("rated_spend_morning_project.json");
   const html = renderRatedSpend(statement);
@@ -1395,6 +1462,10 @@ test("float money fails closed", () => {
         },
         [{ event_type_code: "spend_budget.over", source_id: "019d7b92-1aa0-7a7f-b61c-962c0f4bfe02" }],
       ),
+    TypeError,
+  );
+  assert.throws(
+    () => renderCollectionDispute({ remaining_outstanding_amount: 0.003705 }),
     TypeError,
   );
   assert.throws(
