@@ -776,7 +776,7 @@ class StoredSpendBudget:
     ``(billing_account_id, window_started_at, window_ended_at, currency_code,
     source_payload_hash, spend_budget_contract_version)``.  The internal
     primary key is ``spend_budget_id``, never a provider object identifier
-    and never a statutory number.
+    and never a statutory number.  Status is ``published`` only.
     """
 
     spend_budget_id: UUID
@@ -789,6 +789,7 @@ class StoredSpendBudget:
     window_ended_at: datetime
     source_payload_hash: str
     published_at: datetime
+    spend_budget_status: str = "published"
 
 
 @dataclass(frozen=True)
@@ -2919,6 +2920,13 @@ class MemoryUsageLedger:
             if credit.tenant_account_id == tenant_account_id
         )
 
+    def get_billing_account(self, billing_account_id: UUID) -> BillingAccount | None:
+        """Return one billing account by internal identifier, if present."""
+        for account in self.billing_accounts.values():
+            if account.billing_account_id == billing_account_id:
+                return account
+        return None
+
     def find_spend_budget(
         self,
         tenant_account_id: UUID,
@@ -2960,6 +2968,8 @@ class MemoryUsageLedger:
             raise ValueError("currency_code must be a three-letter ISO code")
         if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(budget.source_payload_hash) is None:
             raise ValueError("source_payload_hash must be a sha256 digest")
+        if budget.spend_budget_status != "published":
+            raise ValueError("spend_budget_status must be published")
         budget_amount = parse_exact_decimal(format_exact_decimal(budget.budget_amount))
         if budget_amount <= 0:
             raise ValueError("budget amount must be a positive exact decimal")
@@ -3000,6 +3010,7 @@ class MemoryUsageLedger:
             window_ended_at=budget.window_ended_at,
             source_payload_hash=budget.source_payload_hash,
             published_at=budget.published_at,
+            spend_budget_status=budget.spend_budget_status,
         )
         self.spend_budgets[persisted.spend_budget_id] = persisted
         self.spend_budget_index[identity] = persisted.spend_budget_id

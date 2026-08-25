@@ -683,6 +683,13 @@ class SpendBudgetTests(unittest.TestCase):
             replace(stored, spend_budget_id=generate_record_id())
         )
         self.assertEqual(identity_replay.spend_budget_id, stored.spend_budget_id)
+        with mock.patch.object(ledger, "find_spend_budget", return_value=None):
+            raced = SpendBudgetService(ledger, clock=lambda: AS_OF).publish_spend_budget(
+                TENANT_ONE, billing_account_id, "USD", BUDGET_AMOUNT, MORNING_WINDOW
+            )
+        self.assertEqual(raced.spend_budget_outcome_code, SpendBudgetOutcomeCode.DUPLICATE_REPLAY)
+        self.assertEqual(raced.spend_budget_id, stored.spend_budget_id)
+        self.assertEqual(len(ledger.spend_budgets), 1)
         reused = replace(
             stored,
             currency_code="EUR",
@@ -710,6 +717,11 @@ class SpendBudgetTests(unittest.TestCase):
                 )
             )
         self.assertIsNone(ledger.get_spend_budget(uuid4()))
+        self.assertEqual(ledger.get_billing_account(billing_account_id).billing_account_id, billing_account_id)
+        self.assertIsNone(ledger.get_billing_account(uuid4()))
+        self.assertEqual(stored.spend_budget_status, "published")
+        with self.assertRaises(ValueError):
+            ledger.insert_spend_budget(replace(stored, spend_budget_status="posted"))
         self.assertEqual(len(ledger.list_spend_budgets()), 2)
         self.assertEqual(len(ledger.list_spend_budgets(stored.tenant_account_id)), 2)
         self.assertEqual(len(ledger.list_spend_budgets(uuid4())), 0)

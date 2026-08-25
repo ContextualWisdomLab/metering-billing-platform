@@ -23,24 +23,35 @@ from metering_billing import (
     IssuedInvoiceService,
     PaymentIntentService,
     PostgresUsageLedger,
+    SpendBudgetEvaluationPresentmentService,
+    SpendBudgetPresentmentService,
+    SpendBudgetService,
     TaxAssessmentService,
     TaxRateService,
     UsageIngestionService,
     WebhookDeliveryService,
     WebhookSubscriptionService,
+    format_exact_decimal,
 )
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_write_off import CollectionWriteOffService
-from metering_billing.errors import RejectionReasonCode, UsageEventConflict
+from metering_billing.errors import (
+    RejectionReasonCode,
+    SpendBudgetPresentmentQueryError,
+    UsageEventConflict,
+)
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.rate_card import RateCardService
+from metering_billing.spend_budget import compute_spend_budget_payload_hash
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_rating import UsageRatingService
-from metering_billing.usage_ledger import StoredWebhookDeliveryAttempt
+from metering_billing.usage_ledger import StoredSpendBudget, StoredWebhookDeliveryAttempt
 from metering_billing.webhook_outbox import (
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+    EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
     enqueue_accepted_fact,
 )
+from tests.test_usage_rating import MORNING_WINDOW
 from scripts.migrate_postgres import (
     MIGRATION_HISTORY_TABLE,
     MigrationDriftError,
@@ -84,8 +95,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 38:
-            raise AssertionError(f"expected 38 migrations, got {len(applied)}")
+        if len(applied) != 39:
+            raise AssertionError(f"expected 39 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -97,6 +108,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.spend_budget,
                 billing_core.journal_proposal_line,
                 billing_core.journal_proposal,
                 billing_core.collection_case_settlement,
@@ -1647,6 +1659,308 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,),
         )
         self.assertEqual(concurrent_replay.webhook_subscription_outcome_code.value, "duplicate_replay")
+
+    def test_published_spend_budget_is_durable(self) -> None:
+        """Persist one published spend_budget and keep existing reads after restart."""
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        account, account_error = self.ledger.resolve_billing_account(tenant, ACCOUNT_ONE)
+        self.assertIsNone(account_error)
+        assert account is not None
+        self.assertEqual(self.ledger.get_billing_account(account.billing_account_id), account)
+        self.assertIsNone(self.ledger.get_billing_account(uuid4()))
+        published_at = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
+        budget_amount = Decimal("100.00")
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+        )
+        accepted = SpendBudgetService(
+            self.ledger, clock=lambda: published_at
+        ).publish_spend_budget(
+            TENANT_ONE,
+            account.billing_account_id,
+            "USD",
+            budget_amount,
+            MORNING_WINDOW,
+        )
+        self.assertEqual(accepted.spend_budget_outcome_code.value, "accepted")
+        assert accepted.spend_budget_id is not None
+        stored = self.ledger.get_spend_budget(accepted.spend_budget_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
+        self.assertEqual(stored.billing_account_id, account.billing_account_id)
+        self.assertEqual(stored.currency_code, "USD")
+        self.assertEqual(stored.budget_amount, budget_amount)
+        self.assertEqual(stored.window_started_at, MORNING_WINDOW.window_started_at)
+        self.assertEqual(stored.window_ended_at, MORNING_WINDOW.window_ended_at)
+        self.assertEqual(stored.published_at, published_at)
+        self.assertEqual(stored.spend_budget_status, "published")
+        self.assertEqual(stored.source_payload_hash, accepted.source_payload_hash)
+        self.assertEqual(stored.spend_budget_contract_version, 1)
+        self.assertIsInstance(stored.budget_amount, Decimal)
+        self.assertNotIsInstance(stored.budget_amount, float)
+        self.assertEqual(
+            self.ledger.find_spend_budget(
+                stored.tenant_account_id,
+                stored.billing_account_id,
+                stored.window_started_at,
+                stored.window_ended_at,
+                stored.currency_code,
+                stored.source_payload_hash,
+                stored.spend_budget_contract_version,
+            ),
+            stored,
+        )
+        self.assertEqual(self.ledger.list_spend_budgets(stored.tenant_account_id), (stored,))
+        self.assertEqual(
+            self.ledger.list_spend_budgets(
+                self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+            ),
+            (),
+        )
+        self.assertIsNone(self.ledger.get_spend_budget(uuid4()))
+        self.assertIsNone(
+            self.ledger.find_spend_budget(
+                stored.tenant_account_id,
+                stored.billing_account_id,
+                stored.window_started_at,
+                stored.window_ended_at,
+                "EUR",
+                stored.source_payload_hash,
+                stored.spend_budget_contract_version,
+            )
+        )
+        row_count = self.connection.execute(
+            "SELECT COUNT(*) FROM billing_core.spend_budget"
+        ).fetchone()[0]
+        self.assertEqual(row_count, 1)
+        status_code = self.connection.execute(
+            "SELECT spend_budget_status FROM billing_core.spend_budget WHERE spend_budget_id = %s",
+            (stored.spend_budget_id,),
+        ).fetchone()[0]
+        self.assertEqual(status_code, "published")
+        outbox_rows = [
+            event
+            for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                stored.tenant_account_id
+            )
+            if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_PUBLISHED
+        ]
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].source_id, stored.spend_budget_id)
+
+        replay = SpendBudgetService(self.ledger, clock=lambda: published_at).publish_spend_budget(
+            TENANT_ONE,
+            account.billing_account_id,
+            "USD",
+            budget_amount,
+            MORNING_WINDOW,
+        )
+        self.assertEqual(replay.spend_budget_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.spend_budget_id, stored.spend_budget_id)
+        self.assertEqual(
+            self.connection.execute("SELECT COUNT(*) FROM billing_core.spend_budget").fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_PUBLISHED
+                ]
+            ),
+            1,
+        )
+
+        rejected = SpendBudgetService(self.ledger).publish_spend_budget(
+            TENANT_ONE, uuid4(), "USD", budget_amount, MORNING_WINDOW
+        )
+        self.assertEqual(rejected.spend_budget_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute("SELECT COUNT(*) FROM billing_core.spend_budget").fetchone()[0],
+            1,
+        )
+        mismatch = SpendBudgetService(self.ledger).publish_spend_budget(
+            TENANT_TWO,
+            account.billing_account_id,
+            "USD",
+            budget_amount,
+            MORNING_WINDOW,
+        )
+        self.assertEqual(mismatch.spend_budget_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute("SELECT COUNT(*) FROM billing_core.spend_budget").fetchone()[0],
+            1,
+        )
+
+        later = SpendBudgetService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 16, 0, tzinfo=UTC)
+        ).publish_spend_budget(
+            TENANT_ONE,
+            account.billing_account_id,
+            "USD",
+            Decimal("250.00"),
+            MORNING_WINDOW,
+        )
+        self.assertEqual(later.spend_budget_outcome_code.value, "accepted")
+        self.assertNotEqual(later.spend_budget_id, stored.spend_budget_id)
+        self.assertEqual(
+            self.connection.execute("SELECT COUNT(*) FROM billing_core.spend_budget").fetchone()[0],
+            2,
+        )
+
+        crash_payload_hash = compute_spend_budget_payload_hash(
+            {
+                "billing_account_id": str(account.billing_account_id),
+                "currency_code": "KRW",
+                "budget_amount": format_exact_decimal(Decimal("1000")),
+                "window_started_at": "2026-08-16T10:00:00Z",
+                "window_ended_at": "2026-08-16T11:00:00Z",
+                "spend_budget_contract_version": 1,
+            }
+        )
+        inserted_without_outbox = self.ledger.insert_spend_budget(
+            StoredSpendBudget(
+                spend_budget_id=uuid4(),
+                tenant_account_id=tenant.tenant_account_id,
+                billing_account_id=account.billing_account_id,
+                spend_budget_contract_version=1,
+                currency_code="KRW",
+                budget_amount=Decimal("1000"),
+                window_started_at=MORNING_WINDOW.window_started_at,
+                window_ended_at=MORNING_WINDOW.window_ended_at,
+                source_payload_hash=crash_payload_hash,
+                published_at=datetime(2026, 8, 18, 17, 0, tzinfo=UTC),
+            )
+        )
+        prior_outbox = len(
+            [
+                event
+                for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                    stored.tenant_account_id
+                )
+                if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_PUBLISHED
+            ]
+        )
+        healed = SpendBudgetService(
+            self.ledger, clock=lambda: published_at
+        ).publish_spend_budget(
+            TENANT_ONE,
+            account.billing_account_id,
+            "KRW",
+            Decimal("1000"),
+            MORNING_WINDOW,
+        )
+        self.assertEqual(healed.spend_budget_outcome_code.value, "duplicate_replay")
+        self.assertEqual(healed.spend_budget_id, inserted_without_outbox.spend_budget_id)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_PUBLISHED
+                ]
+            ),
+            prior_outbox + 1,
+        )
+
+        fresh = PostgresUsageLedger(self.connection)
+        reloaded = fresh.get_spend_budget(stored.spend_budget_id)
+        self.assertEqual(reloaded, stored)
+        presentment = SpendBudgetPresentmentService(fresh).present_spend_budget(
+            TENANT_ONE, stored.spend_budget_id
+        )
+        self.assertEqual(presentment.budget_amount, budget_amount)
+        self.assertEqual(presentment.spend_budget_status, "published")
+        self.assertEqual(presentment.next_operator_action, "wait")
+        evaluation = SpendBudgetEvaluationPresentmentService(fresh).present_spend_budget_evaluation(
+            TENANT_ONE, stored.spend_budget_id
+        )
+        self.assertEqual(evaluation.budget_amount, budget_amount)
+        self.assertEqual(evaluation.utilization_status, "under")
+        self.assertEqual(evaluation.spend_budget_status, "published")
+        statuses = SpendBudgetEvaluationPresentmentService(fresh).list_billing_account_budget_statuses(
+            TENANT_ONE, account.billing_account_id
+        )
+        self.assertGreaterEqual(len(statuses.budget_statuses), 1)
+        self.assertEqual(
+            {row.spend_budget_id for row in statuses.budget_statuses},
+            {
+                stored.spend_budget_id,
+                later.spend_budget_id,
+                inserted_without_outbox.spend_budget_id,
+            },
+        )
+        self.assertEqual(statuses.budget_statuses[0].spend_budget_id, stored.spend_budget_id)
+        # HTTP create_http_app still requires #22 credential methods on the ledger.
+        with self.assertRaises(SpendBudgetPresentmentQueryError) as missing_pin:
+            SpendBudgetPresentmentService(fresh).present_spend_budget(
+                "", stored.spend_budget_id
+            )
+        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(SpendBudgetPresentmentQueryError) as other_pin:
+            SpendBudgetPresentmentService(fresh).present_spend_budget(
+                TENANT_TWO, stored.spend_budget_id
+            )
+        self.assertEqual(other_pin.exception.rejection_reason_code, "spend_budget_not_found")
+
+        self.assertEqual(self.ledger.insert_spend_budget(stored), stored)
+        self.assertEqual(
+            self.ledger.insert_spend_budget(replace(stored, spend_budget_id=uuid4())),
+            stored,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_spend_budget(replace(stored, currency_code="usd"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_spend_budget(replace(stored, source_payload_hash="md5:abc"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_spend_budget(
+                replace(stored, budget_amount=Decimal("0"), spend_budget_id=uuid4())
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_spend_budget(replace(stored, spend_budget_status="posted"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_spend_budget(
+                replace(
+                    stored,
+                    spend_budget_id=later.spend_budget_id,
+                    source_payload_hash="sha256:" + "d" * 64,
+                    currency_code="EUR",
+                    budget_amount=Decimal("5"),
+                )
+            )
+
+        class BlindFindLedger(PostgresUsageLedger):
+            """Force the insert path used after a concurrent identity race."""
+
+            def find_spend_budget(self, *args, **kwargs):
+                return None
+
+        raced = SpendBudgetService(
+            BlindFindLedger(self.connection), clock=lambda: published_at
+        ).publish_spend_budget(
+            TENANT_ONE,
+            account.billing_account_id,
+            "USD",
+            budget_amount,
+            MORNING_WINDOW,
+        )
+        self.assertEqual(raced.spend_budget_outcome_code.value, "duplicate_replay")
+        self.assertEqual(raced.spend_budget_id, stored.spend_budget_id)
 
     def test_transaction_context_and_connection_lifecycle(self) -> None:
         """The outer ingestion transaction avoids a partial receipt and owned connections close."""
