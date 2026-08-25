@@ -1,0 +1,13 @@
+{
+  "issued_invoice_void_presentment_contract_version": 1,
+  "issued_invoice_void_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd90",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd20",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6b0",
+  "currency_code": "USD",
+  "voided_amount": "110.00",
+  "issued_invoice_void_status": "recorded",
+  "voided_at": "2026-08-18T10:00:00Z",
+  "source_payload_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "next_operator_action": "wait"
+}

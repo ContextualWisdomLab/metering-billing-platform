@@ -191,6 +191,7 @@ contextual-orchestrator usage
 - `GET /v1/issued-invoice-voids` lists summaries as `{issued_invoice_voids, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{voided_at}|{issued_invoice_void_id}`.
 - Issued-invoice, collection, payment, credit, write-off, leftover, settlement, statement, and AIS contracts stay unchanged except the additive `voided` collection-case status and settle fail-closed on that status.
 - Operators void an unused issue. Existing subscriptions opt in by including `invoice.voided`. There is no login wall, Stripe, AIS call, journal, second webhook system, or production SPA.
+- `operator_console` Storybook adds one `IssuedInvoiceVoid` story for the unused issued-invoice-void presentment. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Issued-credit-note acceptance
 

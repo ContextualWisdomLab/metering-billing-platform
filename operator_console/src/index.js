@@ -145,6 +145,11 @@ export {
   nextOperatorActionCopy as nextIssuedCreditNoteVoidActionCopy,
 } from "./issued_credit_note_void.js";
 export {
+  renderIssuedInvoiceVoid,
+  ISSUED_INVOICE_VOID_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextIssuedInvoiceVoidActionCopy,
+} from "./issued_invoice_void.js";
+export {
   renderCollectionWriteOff,
   COLLECTION_WRITE_OFF_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionWriteOffActionCopy,
