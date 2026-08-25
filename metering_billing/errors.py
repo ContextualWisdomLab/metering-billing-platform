@@ -913,6 +913,14 @@ class SpendBudgetOutcomeCode(StrEnum):
     REJECTED = "rejected"
 
 
+class SpendBudgetOverSignalOutcomeCode(StrEnum):
+    """Terminal result of observing one published spend budget for over."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
 class SpendBudgetRejectionReasonCode(StrEnum):
     """Why a spend-budget publish was refused without writing a budget."""
 

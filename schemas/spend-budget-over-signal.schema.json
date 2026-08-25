@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/spend-budget-over-signal/v1",
+  "title": "Spend Budget Over Signal",
+  "description": "Write that observes one published commercial spend budget and enqueues spend_budget.over only when utilization_status is over. over_amount and budget_amount are exact-decimal strings. Remaining and rated lines are omitted so currencies stay unmixed. Replays acknowledge the stored spend_budget_id. The document is not a journal, AIS posting, or statutory identifier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spend_budget_over_signal_contract_version",
+    "spend_budget_over_signal_outcome_code"
+  ],
+  "properties": {
+    "spend_budget_over_signal_contract_version": {"type": "integer", "minimum": 1},
+    "spend_budget_over_signal_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "spend_budget_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "billing_account_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "budget_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "over_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "utilization_status": {"type": "string", "enum": ["under", "at", "over"]},
+    "window_started_at": {"type": "string", "format": "date-time"},
+    "window_ended_at": {"type": "string", "format": "date-time"},
+    "spend_budget_status": {"type": "string", "enum": ["published"]},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "spend_budget_contract_version": {"type": "integer", "minimum": 1},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "billing_account_not_found",
+        "billing_account_forbidden",
+        "budget_amount_invalid",
+        "currency_invalid",
+        "request_invalid",
+        "spend_budget_not_found"
+      ]
+    }
+  }
+}

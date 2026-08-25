@@ -23,6 +23,7 @@ from metering_billing.contracts import (
     validate_payment_receipt_presentment,
     validate_credit_adjustment_presentment,
     validate_spend_budget,
+    validate_spend_budget_over_signal,
     validate_spend_budget_presentment,
     validate_spend_budget_evaluation_presentment,
     validate_billing_account_budget_status_presentment,
@@ -1467,6 +1468,118 @@ class RepositoryContractTests(unittest.TestCase):
             "spend_budget_outcome_code": "posted",
         }
         self.assertNotEqual(validate_spend_budget(posted_outcome), ())
+
+    def test_spend_budget_over_signal_accepts_over_and_rejects_remaining(self) -> None:
+        """An over-signal contract records exact over and omits remaining."""
+        schema = self._schema("spend-budget-over-signal.schema.json")
+        instance = {
+            "spend_budget_over_signal_contract_version": 1,
+            "spend_budget_over_signal_outcome_code": "accepted",
+            "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf681",
+            "currency_code": "USD",
+            "budget_amount": "0.001",
+            "over_amount": "12.345",
+            "utilization_status": "over",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "spend_budget_status": "published",
+            "source_payload_hash": "sha256:" + "6" * 64,
+            "spend_budget_contract_version": 1,
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_spend_budget_over_signal(instance), ())
+        floated = dict(instance, over_amount=12.345)
+        self.assertTrue(validate_schema_instance(schema, floated))
+        remaining = dict(instance, remaining_amount="0")
+        self.assertIn(
+            "$: additional property is not allowed: remaining_amount",
+            validate_schema_instance(schema, remaining),
+        )
+        self.assertIn(
+            "$: spend budget over signal must not include remaining_amount",
+            validate_spend_budget_over_signal(remaining),
+        )
+        zeroed = dict(instance, budget_amount="0")
+        self.assertIn(
+            "$: budget_amount must be greater than zero",
+            validate_spend_budget_over_signal(zeroed),
+        )
+        bad_amount = dict(instance, budget_amount="not-decimal")
+        self.assertTrue(
+            any(
+                "budget_amount must be an exact decimal" in error
+                for error in validate_spend_budget_over_signal(bad_amount)
+            )
+        )
+        negative_over = dict(instance, over_amount="-1")
+        self.assertIn(
+            "$: over_amount must be a non-negative exact decimal",
+            validate_spend_budget_over_signal(negative_over),
+        )
+        zero_over = dict(instance, over_amount="0")
+        self.assertIn(
+            "$: over observations must include a positive over_amount",
+            validate_spend_budget_over_signal(zero_over),
+        )
+        under = dict(instance, utilization_status="under", over_amount="0")
+        self.assertEqual(validate_spend_budget_over_signal(under), ())
+        under_with_over = dict(instance, utilization_status="under", over_amount="1")
+        self.assertIn(
+            "$: under and at observations must have zero over_amount",
+            validate_spend_budget_over_signal(under_with_over),
+        )
+        at_row = dict(instance, utilization_status="at", over_amount="0")
+        self.assertEqual(validate_spend_budget_over_signal(at_row), ())
+        waiting = dict(instance, next_operator_action="collect")
+        self.assertIn("$: published spend budgets must wait", validate_spend_budget_over_signal(waiting))
+        rejected = {
+            "spend_budget_over_signal_contract_version": 1,
+            "spend_budget_over_signal_outcome_code": "rejected",
+        }
+        self.assertIn(
+            "$: rejected over signals must include rejection_reason_code",
+            validate_spend_budget_over_signal(rejected),
+        )
+        self.assertNotEqual(validate_spend_budget_over_signal([]), ())
+        missing_id = dict(instance)
+        del missing_id["spend_budget_id"]
+        self.assertIn(
+            "$: accepted over signals must include spend_budget_id",
+            validate_spend_budget_over_signal(missing_id),
+        )
+        pan = dict(instance, card_pan="4111111111111111")
+        self.assertIn(
+            "$: spend budget over signal must not include card_pan",
+            validate_spend_budget_over_signal(pan),
+        )
+        earnings = dict(instance, retained_earnings="1")
+        self.assertIn(
+            "$: spend budget over signal must not include retained_earnings",
+            validate_spend_budget_over_signal(earnings),
+        )
+        replayed = dict(instance, spend_budget_over_signal_outcome_code="duplicate_replay")
+        self.assertEqual(validate_spend_budget_over_signal(replayed), ())
+        rejected_known = {
+            "spend_budget_over_signal_contract_version": 1,
+            "spend_budget_over_signal_outcome_code": "rejected",
+            "rejection_reason_code": "tenant_not_found",
+        }
+        self.assertEqual(validate_spend_budget_over_signal(rejected_known), ())
+        bad_over = dict(instance, over_amount="not-decimal")
+        self.assertTrue(
+            any(
+                "over_amount must be an exact decimal" in error
+                for error in validate_spend_budget_over_signal(bad_over)
+            )
+        )
+        posted_outcome = {
+            "spend_budget_over_signal_contract_version": 1,
+            "spend_budget_over_signal_outcome_code": "posted",
+        }
+        self.assertNotEqual(validate_spend_budget_over_signal(posted_outcome), ())
 
     def test_spend_budget_presentment_accepts_published_row_and_rejects_posted(self) -> None:
         """A spend-budget statement records exact amounts and cannot claim posting."""
