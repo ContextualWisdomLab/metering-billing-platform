@@ -175,6 +175,7 @@ JOURNAL_PROPOSAL_FIXTURE_NAMES = (
     "validated_morning_leftover_journal.json",
     "validated_morning_leftover_apply_journal.json",
     "validated_morning_leftover_refund_journal.json",
+    "validated_morning_write_off_journal.json",
 )
 COLLECTION_WRITE_OFF_MONEY_FIELDS = (
     "write_off_amount",
@@ -1187,6 +1188,75 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("card_pan", leftover_refund_journal)
         self.assertNotIn("retained_earnings", leftover_refund_journal)
         self.assertNotIn("310100", json.dumps(leftover_refund_journal))
+        write_off_journal = self._fixture("validated_morning_write_off_journal.json")
+        leftover_write_off = self._fixture("recorded_leftover_collection_write_off.json")
+        self.assertEqual(validate_journal_proposal(write_off_journal), ())
+        self.assertEqual(write_off_journal["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(write_off_journal["proposal_status"], "validated")
+        self.assertEqual(write_off_journal["transaction_currency"], "USD")
+        self.assertEqual(
+            write_off_journal["source_event_references"],
+            [
+                "urn:cwl:tenant_001:collection_write_off:"
+                f"{leftover_write_off['collection_write_off_id']}"
+            ],
+        )
+        self.assertEqual(
+            write_off_journal["lines"][0]["account_role_code"],
+            "write_off_expense",
+        )
+        self.assertEqual(write_off_journal["lines"][0]["debit_amount"], "0.001")
+        self.assertEqual(write_off_journal["lines"][0]["credit_amount"], "0")
+        self.assertEqual(
+            write_off_journal["lines"][1]["account_role_code"],
+            "accounts_receivable",
+        )
+        self.assertEqual(write_off_journal["lines"][1]["debit_amount"], "0")
+        self.assertEqual(write_off_journal["lines"][1]["credit_amount"], "0.001")
+        self.assertEqual(len(write_off_journal["lines"]), 2)
+        self.assertEqual(
+            write_off_journal["lines"][0]["debit_amount"],
+            leftover_write_off["write_off_amount"],
+        )
+        self.assertEqual(leftover_write_off["remaining_outstanding_amount"], "0")
+        self.assertEqual(leftover_write_off["collection_write_off_status"], "recorded")
+        self.assertEqual(leftover_apply["remaining_outstanding_amount"], "19.999")
+        self.assertNotEqual(
+            write_off_journal["proposal_id"],
+            cash_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            write_off_journal["proposal_id"],
+            morning_draft_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            write_off_journal["proposal_id"],
+            taxed_draft_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            write_off_journal["proposal_id"],
+            leftover_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            write_off_journal["proposal_id"],
+            leftover_apply_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            write_off_journal["proposal_id"],
+            leftover_refund_journal["proposal_id"],
+        )
+        self.assertNotIn("next_operator_action", write_off_journal)
+        for line in write_off_journal["lines"]:
+            for field_name in JOURNAL_PROPOSAL_MONEY_FIELDS:
+                self.assertIsInstance(line[field_name], str)
+                self.assertNotIsInstance(line[field_name], float)
+                parse_exact_decimal(line[field_name])
+        self.assertNotIn("journal_entry_id", write_off_journal)
+        self.assertNotIn("card_pan", write_off_journal)
+        self.assertNotIn("retained_earnings", write_off_journal)
+        self.assertNotIn("310100", json.dumps(write_off_journal))
+        self.assertNotIn("510100", json.dumps(write_off_journal))
+        self.assertNotIn("110100", json.dumps(write_off_journal))
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""

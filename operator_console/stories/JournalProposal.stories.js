@@ -5,6 +5,7 @@ import validatedTaxedInvoiceDraftJournal from "../fixtures/validated_taxed_invoi
 import validatedMorningLeftoverJournal from "../fixtures/validated_morning_leftover_journal.json";
 import validatedMorningLeftoverApplyJournal from "../fixtures/validated_morning_leftover_apply_journal.json";
 import validatedMorningLeftoverRefundJournal from "../fixtures/validated_morning_leftover_refund_journal.json";
+import validatedMorningWriteOffJournal from "../fixtures/validated_morning_write_off_journal.json";
 
 export default {
   title: "JournalProposal",
@@ -32,4 +33,8 @@ export const ValidatedMorningLeftoverApplyWait = {
 
 export const ValidatedMorningLeftoverRefundWait = {
   render: () => renderJournalProposal(validatedMorningLeftoverRefundJournal),
+};
+
+export const ValidatedMorningWriteOffWait = {
+  render: () => renderJournalProposal(validatedMorningWriteOffJournal),
 };
