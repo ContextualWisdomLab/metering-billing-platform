@@ -4387,7 +4387,7 @@ class PostgresUsageLedger:
         source_payload_hash: str,
         proposal_contract_version: int,
     ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped draft proposal identity."""
+        """Return one tenant-scoped draft-only proposal identity."""
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -4397,6 +4397,14 @@ class PostgresUsageLedger:
                   AND invoice_draft_id = %s
                   AND source_payload_hash = %s
                   AND proposal_contract_version = %s
+                  AND payment_receipt_id IS NULL
+                  AND credit_adjustment_id IS NULL
+                  AND collection_write_off_id IS NULL
+                  AND unapplied_cash_refund_id IS NULL
+                  AND unapplied_cash_id IS NULL
+                  AND unapplied_cash_application_id IS NULL
+                  AND issued_invoice_void_id IS NULL
+                  AND issued_credit_note_void_id IS NULL
                 """,
                 (
                     tenant_account_id,
@@ -4657,7 +4665,7 @@ class PostgresUsageLedger:
         journal_proposal: StoredJournalProposal,
         proposal_lines: tuple[StoredJournalProposalLine, ...],
     ) -> StoredJournalProposal:
-        """Persist one balanced cash, credit, write-off, leftover, apply, refund, unused invoice-void, or unused credit-note-void proposal or its replay."""
+        """Persist one balanced invoice-draft, cash, credit, write-off, leftover, apply, refund, unused invoice-void, or unused credit-note-void proposal or its replay."""
         if journal_proposal.proposal_status not in {
             "draft",
             "validated",
@@ -4847,7 +4855,30 @@ class PostgresUsageLedger:
                         ),
                     )
                 else:
-                    raise ValueError("journal proposal requires a supported source identity")
+                    cursor.execute(
+                        """
+                        SELECT journal_proposal_id
+                        FROM billing_core.journal_proposal
+                        WHERE tenant_account_id = %s
+                          AND invoice_draft_id = %s
+                          AND source_payload_hash = %s
+                          AND proposal_contract_version = %s
+                          AND payment_receipt_id IS NULL
+                          AND credit_adjustment_id IS NULL
+                          AND collection_write_off_id IS NULL
+                          AND unapplied_cash_refund_id IS NULL
+                          AND unapplied_cash_id IS NULL
+                          AND unapplied_cash_application_id IS NULL
+                          AND issued_invoice_void_id IS NULL
+                          AND issued_credit_note_void_id IS NULL
+                        """,
+                        (
+                            journal_proposal.tenant_account_id,
+                            journal_proposal.invoice_draft_id,
+                            journal_proposal.source_payload_hash,
+                            journal_proposal.proposal_contract_version,
+                        ),
+                    )
                 row = cursor.fetchone()
                 if row is None:
                     raise ValueError("journal proposal identity conflicts with an existing row")

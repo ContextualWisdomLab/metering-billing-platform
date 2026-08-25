@@ -82,6 +82,7 @@ contextual-orchestrator usage
 - Another tenant cannot see or propose from the first tenant's draft.
 - Missing drafts, zero draft totals, float money, unbalanced lines, and debit or credit amounts with more than six significant fractional digits fail closed. Do not round those amounts into `numeric(38, 6)`.
 - Status stays inside the proposal lifecycle and is never `posted`. Operators hand the proposal to AIS.
+- `PostgresUsageLedger` persists that invoice-draft journal so GET presentment survives process restart. Replay of the same tenant, draft, source hash, and contract version is `duplicate_replay` and does not insert a second row. A crash after insert and before the existing `journal_proposal.validated` outbox enqueue is healed by the next replay. Rejected compose writes zero journal rows.
 
 ## Collection-case acceptance
 

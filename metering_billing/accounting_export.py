@@ -291,9 +291,18 @@ class AccountingExportService:
             PROPOSAL_CONTRACT_VERSION,
         )
         if existing is not None:
-            return _from_stored(
+            result = _from_stored(
                 existing, tenant.tenant_reference, JournalProposalOutcomeCode.DUPLICATE_REPLAY
             )
+            enqueue_accepted_fact(
+                self.ledger,
+                tenant.tenant_reference,
+                EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+                existing.journal_proposal_id,
+                result.as_contract_dict(),
+                existing.proposed_at,
+            )
+            return result
 
         journal_proposal_id = generate_record_id()
         stored_lines = _build_proposal_lines(

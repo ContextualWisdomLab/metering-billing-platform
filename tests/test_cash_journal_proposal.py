@@ -101,6 +101,28 @@ class CashJournalProposalTests(unittest.TestCase):
         self.assertEqual(draft.proposal_lines[0].debit_amount, KNOWN_MORNING_TOTAL)
         self.assertEqual(len(ledger.journal_proposals), 2)
         self.assertEqual(validate_journal_proposal(draft.as_contract_dict()), ())
+        tenant = ledger.require_tenant(TENANT_ONE)
+        cash_stored = ledger.get_journal_proposal(cash.proposal_id)
+        draft_stored = ledger.get_journal_proposal(draft.proposal_id)
+        assert cash_stored is not None
+        assert draft_stored is not None
+        self.assertIsNone(
+            ledger.find_journal_proposal(
+                tenant.tenant_account_id,
+                cash_stored.invoice_draft_id,
+                cash_stored.source_payload_hash,
+                cash_stored.proposal_contract_version,
+            )
+        )
+        self.assertEqual(
+            ledger.find_journal_proposal(
+                tenant.tenant_account_id,
+                draft_stored.invoice_draft_id,
+                draft_stored.source_payload_hash,
+                draft_stored.proposal_contract_version,
+            ),
+            draft_stored,
+        )
 
     def test_second_propose_of_the_same_receipt_is_a_replay(self) -> None:
         """The same tenant, receipt, hash, and contract version reuse proposal_id."""

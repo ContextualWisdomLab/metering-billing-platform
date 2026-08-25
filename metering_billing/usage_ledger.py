@@ -606,6 +606,20 @@ class StoredJournalProposal:
     issued_invoice_void_id: UUID | None = None
     issued_credit_note_void_id: UUID | None = None
 
+    def is_draft_only_journal(self) -> bool:
+        """Return True when this proposal is the invoice-draft identity."""
+        specialized_ids = (
+            self.payment_receipt_id,
+            self.credit_adjustment_id,
+            self.collection_write_off_id,
+            self.unapplied_cash_refund_id,
+            self.unapplied_cash_id,
+            self.unapplied_cash_application_id,
+            self.issued_invoice_void_id,
+            self.issued_credit_note_void_id,
+        )
+        return all(specialized_id is None for specialized_id in specialized_ids)
+
 
 @dataclass(frozen=True)
 class StoredCollectionDunningEvent:
@@ -3036,7 +3050,7 @@ class MemoryUsageLedger:
         source_payload_hash: str,
         proposal_contract_version: int,
     ) -> StoredJournalProposal | None:
-        """Return the proposal for one tenant-scoped draft identity, if it exists."""
+        """Return the draft-only proposal for one tenant-scoped draft identity, if it exists."""
         journal_proposal_id = self.journal_proposal_index.get(
             (
                 tenant_account_id,
@@ -3047,7 +3061,10 @@ class MemoryUsageLedger:
         )
         if journal_proposal_id is None:
             return None
-        return self.journal_proposals[journal_proposal_id]
+        proposal = self.journal_proposals[journal_proposal_id]
+        if not proposal.is_draft_only_journal():
+            return None
+        return proposal
 
     def find_journal_proposal_for_receipt(
         self,
@@ -3197,17 +3214,7 @@ class MemoryUsageLedger:
                 continue
             if proposal.invoice_draft_id != invoice_draft_id:
                 continue
-            specialized_ids = (
-                proposal.payment_receipt_id,
-                proposal.credit_adjustment_id,
-                proposal.collection_write_off_id,
-                proposal.unapplied_cash_refund_id,
-                proposal.unapplied_cash_id,
-                proposal.unapplied_cash_application_id,
-                proposal.issued_invoice_void_id,
-                proposal.issued_credit_note_void_id,
-            )
-            if any(specialized_id is not None for specialized_id in specialized_ids):
+            if not proposal.is_draft_only_journal():
                 continue
             return proposal
         return None
