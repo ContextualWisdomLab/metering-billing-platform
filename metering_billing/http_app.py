@@ -140,6 +140,13 @@ The application is a thin WSGI adapter:
     belongs to another commercial ``tenant_account`` is HTTP 403.  under
     and over write zero approaching-signal rows.  The write does not
     persist an evaluation snapshot, hard-stop, or compose a journal.
+    ``GET /v1/spend-budgets/{spend_budget_id}/approaching-signal`` presents
+    the live approaching-signal envelope plus zero or one stored
+    ``spend_budget.approaching`` webhook-outbox presentment.  Same tenant
+    is HTTP 200.  Unknown or cross-tenant is HTTP 404.  Missing tenant pin
+    is HTTP 422.  A budget whose billing account belongs to another
+    commercial ``tenant_account`` is HTTP 403.  The read does not enqueue,
+    persist, hard-stop, or compose a journal.
     ``GET /v1/billing-accounts/{billing_account_id}/budget-status`` evaluates
     every published commercial ``spend_budget`` on that same-tenant account.
     The envelope is ``{budget_statuses, next_cursor}``.  Same tenant is
@@ -292,6 +299,7 @@ from metering_billing.errors import (
     RatedSpendPresentmentQueryError,
     SpendBudgetEvaluationPresentmentQueryError,
     SpendBudgetOverSignalPresentmentQueryError,
+    SpendBudgetApproachingSignalPresentmentQueryError,
     SpendBudgetPresentmentQueryError,
     CollectionAgingPresentmentQueryError,
     CollectionCasePresentmentQueryError,
@@ -393,6 +401,9 @@ from metering_billing.spend_budget_over_signal_presentment import (
 )
 from metering_billing.spend_budget_approaching_signal import (
     SpendBudgetApproachingSignalService,
+)
+from metering_billing.spend_budget_approaching_signal_presentment import (
+    SpendBudgetApproachingSignalPresentmentService,
 )
 from metering_billing.collection_aging_presentment import (
     Clock,
@@ -731,6 +742,9 @@ def create_http_app(
     )
     spend_budget_approaching_signals = SpendBudgetApproachingSignalService(
         shared_ledger, clock=clock
+    )
+    spend_budget_approaching_signal_presentments = (
+        SpendBudgetApproachingSignalPresentmentService(shared_ledger)
     )
     dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
@@ -1709,6 +1723,37 @@ def create_http_app(
                 )
                 return _send_json(start_response, 200, result.as_contract_dict())
             except SpendBudgetOverSignalPresentmentQueryError as error:
+                if error.rejection_reason_code == "spend_budget_not_found":
+                    status_code = 404
+                elif error.rejection_reason_code == "billing_account_not_found":
+                    status_code = 404
+                elif error.rejection_reason_code == "billing_account_forbidden":
+                    status_code = 403
+                else:
+                    status_code = 422
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "get_spend_budget_approaching_signal":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                result = spend_budget_approaching_signal_presentments.present_spend_budget_approaching_signal(
+                    tenant_reference,
+                    _parse_uuid(path_values["spend_budget_id"], "spend_budget_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except SpendBudgetApproachingSignalPresentmentQueryError as error:
                 if error.rejection_reason_code == "spend_budget_not_found":
                     status_code = 404
                 elif error.rejection_reason_code == "billing_account_not_found":
@@ -2958,6 +3003,10 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         return "method_not_allowed", {}
     budget_approaching_signal_match = SPEND_BUDGET_APPROACHING_SIGNAL_PATH.fullmatch(path)
     if budget_approaching_signal_match is not None:
+        if method == "GET":
+            return "get_spend_budget_approaching_signal", {
+                "spend_budget_id": budget_approaching_signal_match.group(1)
+            }
         if method == "POST":
             return "spend_budget_approaching_signals", {
                 "spend_budget_id": budget_approaching_signal_match.group(1)
