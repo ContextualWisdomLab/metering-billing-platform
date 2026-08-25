@@ -25,6 +25,7 @@ from metering_billing.errors import (
     JournalProposalRejectionReasonCode,
 )
 from metering_billing.usage_ledger import generate_record_id
+from metering_billing.webhook_outbox import EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED
 from test_usage_ingestion import ACCOUNT_TWO, TENANT_ONE, TENANT_TWO
 from test_usage_rating import (
     KNOWN_MORNING_TOTAL,
@@ -98,6 +99,42 @@ class JournalProposalTests(unittest.TestCase):
         self.assertEqual(second.proposal_lines[0].debit_amount, KNOWN_MORNING_TOTAL)
         self.assertEqual(len(ledger.journal_proposals), 1)
         self.assertEqual(validate_journal_proposal(second.as_contract_dict()), ())
+
+    def test_replay_heals_missing_journal_proposal_validated_outbox(self) -> None:
+        """A crash after insert and before outbox enqueue is healed by replay."""
+        ledger, invoice_draft_id = draft_known_morning()
+        first = AccountingExportService(ledger).propose_journal(TENANT_ONE, invoice_draft_id)
+        tenant = ledger.require_tenant(TENANT_ONE)
+        outbox_rows = [
+            event
+            for event in ledger.list_webhook_outbox_events_for_tenant(tenant.tenant_account_id)
+            if event.event_type_code == EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED
+            and event.source_id == first.proposal_id
+        ]
+        self.assertEqual(len(outbox_rows), 1)
+        stored_outbox = outbox_rows[0]
+        del ledger.webhook_outbox_events[stored_outbox.outbox_event_id]
+        del ledger.webhook_outbox_identity_index[
+            (
+                stored_outbox.tenant_account_id,
+                stored_outbox.event_type_code,
+                stored_outbox.source_id,
+                stored_outbox.payload_hash,
+            )
+        ]
+        healed = AccountingExportService(ledger).propose_journal(TENANT_ONE, invoice_draft_id)
+        self.assertEqual(
+            healed.journal_proposal_outcome_code, JournalProposalOutcomeCode.DUPLICATE_REPLAY
+        )
+        self.assertEqual(healed.proposal_id, first.proposal_id)
+        healed_rows = [
+            event
+            for event in ledger.list_webhook_outbox_events_for_tenant(tenant.tenant_account_id)
+            if event.event_type_code == EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED
+            and event.source_id == first.proposal_id
+        ]
+        self.assertEqual(len(healed_rows), 1)
+        self.assertEqual(len(ledger.journal_proposals), 1)
 
     def test_other_tenant_cannot_see_or_propose_the_first_draft(self) -> None:
         """A tenant cannot propose or list another tenant's invoice draft."""
