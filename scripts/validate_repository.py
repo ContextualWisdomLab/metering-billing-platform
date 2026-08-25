@@ -132,6 +132,7 @@ REQUIRED_FILES = (
     "docs/adr/0099-postgres-issued-invoice-void.md",
     "docs/adr/0100-postgres-unapplied-cash.md",
     "docs/adr/0101-postgres-unapplied-cash-application.md",
+    "docs/adr/0102-postgres-unapplied-cash-refund.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

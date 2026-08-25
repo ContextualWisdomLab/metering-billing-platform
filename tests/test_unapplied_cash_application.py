@@ -33,6 +33,7 @@ from metering_billing.errors import (
 from metering_billing.unapplied_cash_application import (
     UNAPPLIED_CASH_APPLICATION_CONTRACT_VERSION,
     UnappliedCashApplicationResult,
+    compute_unapplied_cash_application_payload_hash,
     _enqueue_unapplied_cash_applied,
     _format_applied_at,
     _rejected,
@@ -163,6 +164,70 @@ class UnappliedCashApplicationTests(unittest.TestCase):
             validate_unapplied_cash_application_presentment(presented.as_contract_dict()),
             (),
         )
+
+    def test_replay_heals_insert_without_outstanding_reduction(self) -> None:
+        """A crash after apply insert and before reduce is healed on replay."""
+        ledger, parked, collection, _source_case_id, _payment_receipt_id = (
+            park_leftover_and_open_second_case()
+        )
+        leftover = ledger.get_unapplied_cash(parked.unapplied_cash_id)
+        self.assertIsNotNone(leftover)
+        remaining_before = collection.outstanding_amount
+        crash_hash = compute_unapplied_cash_application_payload_hash(
+            {
+                "unapplied_cash_id": str(leftover.unapplied_cash_id),
+                "collection_case_id": str(collection.collection_case_id),
+                "payment_receipt_id": str(leftover.payment_receipt_id),
+                "currency_code": leftover.currency_code,
+                "applied_amount": format_exact_decimal(LEFTOVER),
+                "unapplied_amount": format_exact_decimal(leftover.unapplied_amount),
+                "unapplied_cash_application_contract_version": 1,
+            }
+        )
+        inserted = ledger.insert_unapplied_cash_application(
+            StoredUnappliedCashApplication(
+                unapplied_cash_application_id=generate_record_id(),
+                tenant_account_id=leftover.tenant_account_id,
+                unapplied_cash_id=leftover.unapplied_cash_id,
+                collection_case_id=collection.collection_case_id,
+                payment_receipt_id=leftover.payment_receipt_id,
+                invoice_draft_id=collection.invoice_draft_id,
+                unapplied_cash_application_contract_version=1,
+                source_payload_hash=crash_hash,
+                currency_code=leftover.currency_code,
+                applied_amount=LEFTOVER,
+                unapplied_cash_application_status="applied",
+                applied_at=APPLIED_MORNING,
+            )
+        )
+        unreduced = ledger.get_collection_case(collection.collection_case_id)
+        self.assertEqual(unreduced.outstanding_amount, remaining_before)
+        self.assertEqual(unreduced.collection_case_status, "open")
+        healed = UnappliedCashApplicationService(ledger).apply_unapplied_cash(
+            TENANT_ONE, parked.unapplied_cash_id, collection.collection_case_id
+        )
+        self.assertEqual(
+            healed.unapplied_cash_application_outcome_code,
+            UnappliedCashApplicationOutcomeCode.DUPLICATE_REPLAY,
+        )
+        self.assertEqual(
+            healed.unapplied_cash_application_id, inserted.unapplied_cash_application_id
+        )
+        reduced = ledger.get_collection_case(collection.collection_case_id)
+        self.assertEqual(reduced.outstanding_amount, remaining_before - LEFTOVER)
+        self.assertEqual(reduced.collection_case_status, "open")
+        self.assertEqual(healed.remaining_outstanding_amount, remaining_before - LEFTOVER)
+        already_healed = UnappliedCashApplicationService(ledger).apply_unapplied_cash(
+            TENANT_ONE, parked.unapplied_cash_id, collection.collection_case_id
+        )
+        self.assertEqual(
+            already_healed.unapplied_cash_application_outcome_code,
+            UnappliedCashApplicationOutcomeCode.DUPLICATE_REPLAY,
+        )
+        still_reduced = ledger.get_collection_case(collection.collection_case_id)
+        self.assertEqual(still_reduced.outstanding_amount, remaining_before - LEFTOVER)
+        self.assertEqual(still_reduced.collection_case_status, "open")
+        self.assertEqual(len(ledger.unapplied_cash_applications), 1)
 
     def test_zeroing_remaining_does_not_auto_settle(self) -> None:
         """Exact leftover that zeros remaining leaves settle to #46."""

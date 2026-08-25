@@ -238,23 +238,36 @@ class UnappliedCashRefundService:
         source_payload_hash = compute_unapplied_cash_refund_payload_hash(
             _canonical_refund_snapshot(leftover, recorded_amount)
         )
-        stored = self.ledger.insert_unapplied_cash_refund(
-            StoredUnappliedCashRefund(
-                unapplied_cash_refund_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                unapplied_cash_id=leftover.unapplied_cash_id,
-                payment_receipt_id=leftover.payment_receipt_id,
-                payment_intent_id=leftover.payment_intent_id,
-                collection_case_id=leftover.collection_case_id,
-                unapplied_cash_refund_contract_version=UNAPPLIED_CASH_REFUND_CONTRACT_VERSION,
-                source_payload_hash=source_payload_hash,
-                currency_code=leftover.currency_code,
-                refund_amount=recorded_amount,
-                unapplied_amount=leftover.unapplied_amount,
-                unapplied_cash_refund_status=UNAPPLIED_CASH_REFUND_STATUS,
-                refunded_at=self._clock(),
-            )
+        candidate = StoredUnappliedCashRefund(
+            unapplied_cash_refund_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            unapplied_cash_id=leftover.unapplied_cash_id,
+            payment_receipt_id=leftover.payment_receipt_id,
+            payment_intent_id=leftover.payment_intent_id,
+            collection_case_id=leftover.collection_case_id,
+            unapplied_cash_refund_contract_version=UNAPPLIED_CASH_REFUND_CONTRACT_VERSION,
+            source_payload_hash=source_payload_hash,
+            currency_code=leftover.currency_code,
+            refund_amount=recorded_amount,
+            unapplied_amount=leftover.unapplied_amount,
+            unapplied_cash_refund_status=UNAPPLIED_CASH_REFUND_STATUS,
+            refunded_at=self._clock(),
         )
+        stored = self.ledger.insert_unapplied_cash_refund(candidate)
+        if stored.unapplied_cash_refund_id != candidate.unapplied_cash_refund_id:
+            current_leftover = self.ledger.get_unapplied_cash(stored.unapplied_cash_id)
+            if current_leftover is None:
+                return _rejected(
+                    UnappliedCashRefundRejectionReasonCode.UNAPPLIED_CASH_NOT_FOUND
+                )
+            result = _from_stored(
+                stored,
+                current_leftover,
+                tenant.tenant_reference,
+                UnappliedCashRefundOutcomeCode.DUPLICATE_REPLAY,
+            )
+            _enqueue_refund_recorded(self.ledger, tenant.tenant_reference, result)
+            return result
         result = _from_stored(
             stored,
             leftover,

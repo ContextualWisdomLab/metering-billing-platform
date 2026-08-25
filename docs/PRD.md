@@ -404,7 +404,7 @@ contextual-orchestrator usage
 
 ## Unapplied-cash-refund acceptance
 
-- `POST /v1/unapplied-cash/{unapplied_cash_id}/refunds` records one commercial refund of parked leftover. Replay of the same tenant and leftover returns the same `unapplied_cash_refund_id` as `duplicate_replay`.
+- `POST /v1/unapplied-cash/{unapplied_cash_id}/refunds` records one commercial refund of parked leftover. Replay of the same tenant and leftover returns the same `unapplied_cash_refund_id` as `duplicate_replay`. `PostgresUsageLedger` persists that leftover refund so GET presentment survives process restart.
 - The refund uses the full parked amount. Omitting `refund_amount` uses the parked leftover. A supplied amount must equal the parked leftover.
 - The parked leftover row stays `parked`. Refund uniqueness consumes it. Apply fail-closes when a refund already exists.
 - A known stored refund presents one tenant-scoped statement with `refund_amount`, parked leftover snapshot, `unapplied_cash_refund_status` (`recorded`), and `next_operator_action` (`wait`).

@@ -3,8 +3,8 @@
 The repository owns catalog rows, immutable usage facts, rating runs, invoice
 drafts, issued invoices, unused issued-invoice voids, issued credit notes,
 unused issued-credit-note voids, credit-note applications, parked leftover
-``unapplied_cash``, leftover-apply ``unapplied_cash_application``, collection
-cases, payment and
+``unapplied_cash``, leftover-apply ``unapplied_cash_application``, leftover
+refund ``unapplied_cash_refund``, collection cases, payment and
 credit facts, journal proposals, published spend budgets, and the atomic
 webhook outbox used by the first commercial path. Every public operation uses
 the supplied PostgreSQL connection; the implementation never falls back to an
@@ -3170,12 +3170,7 @@ class PostgresUsageLedger:
     def find_unapplied_cash_refund(
         self, tenant_account_id: UUID, unapplied_cash_id: UUID
     ) -> StoredUnappliedCashRefund | None:
-        """Return the leftover refund for one tenant parked leftover, if any.
-
-        Leftover-refund persist remains a later #84 slice. Leftover-apply
-        still fail-closes on this lookup; the table stays empty until that
-        later persist.
-        """
+        """Return the leftover refund for one tenant parked leftover, if any."""
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -3185,8 +3180,120 @@ class PostgresUsageLedger:
                 """,
                 (tenant_account_id, unapplied_cash_id),
             )
-            cursor.fetchone()
-            return None
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_unapplied_cash_refund(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_unapplied_cash_refund(
+        self, unapplied_cash_refund_id: UUID
+    ) -> StoredUnappliedCashRefund | None:
+        """Return one leftover refund by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT unapplied_cash_refund_id
+                FROM billing_core.unapplied_cash_refund
+                WHERE unapplied_cash_refund_id = %s
+                """,
+                (unapplied_cash_refund_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_unapplied_cash_refund(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_unapplied_cash_refunds_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredUnappliedCashRefund, ...]:
+        """Return leftover refunds limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT unapplied_cash_refund_id
+                FROM billing_core.unapplied_cash_refund
+                WHERE tenant_account_id = %s
+                ORDER BY refunded_at, unapplied_cash_refund_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_unapplied_cash_refund(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_unapplied_cash_refund(
+        self, unapplied_cash_refund: StoredUnappliedCashRefund
+    ) -> StoredUnappliedCashRefund:
+        """Persist one leftover refund or return its identity replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash_refund.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+            unapplied_cash_refund.source_payload_hash
+        ) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if unapplied_cash_refund.unapplied_cash_refund_status != "recorded":
+            raise ValueError("unapplied_cash_refund_status must be recorded")
+        refund_amount = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash_refund.refund_amount)
+        )
+        if refund_amount <= 0:
+            raise ValueError("unapplied cash refund amount must be a positive exact decimal")
+        unapplied_amount = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash_refund.unapplied_amount)
+        )
+        if unapplied_amount <= 0:
+            raise ValueError("unapplied cash amount must be a positive exact decimal")
+        if refund_amount != unapplied_amount:
+            raise ValueError("unapplied cash refund amount must equal the parked leftover")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.unapplied_cash_refund
+                    (unapplied_cash_refund_id, tenant_account_id, unapplied_cash_id,
+                     payment_receipt_id, payment_intent_id, collection_case_id,
+                     unapplied_cash_refund_contract_version, source_payload_hash,
+                     currency_code, refund_amount, unapplied_amount,
+                     unapplied_cash_refund_status, refunded_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING unapplied_cash_refund_id
+                """,
+                (
+                    unapplied_cash_refund.unapplied_cash_refund_id,
+                    unapplied_cash_refund.tenant_account_id,
+                    unapplied_cash_refund.unapplied_cash_id,
+                    unapplied_cash_refund.payment_receipt_id,
+                    unapplied_cash_refund.payment_intent_id,
+                    unapplied_cash_refund.collection_case_id,
+                    unapplied_cash_refund.unapplied_cash_refund_contract_version,
+                    unapplied_cash_refund.source_payload_hash,
+                    unapplied_cash_refund.currency_code,
+                    refund_amount,
+                    unapplied_amount,
+                    unapplied_cash_refund.unapplied_cash_refund_status,
+                    unapplied_cash_refund.refunded_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT unapplied_cash_refund_id
+                    FROM billing_core.unapplied_cash_refund
+                    WHERE tenant_account_id = %s AND unapplied_cash_id = %s
+                    """,
+                    (
+                        unapplied_cash_refund.tenant_account_id,
+                        unapplied_cash_refund.unapplied_cash_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        "unapplied cash refund identity conflicts with an existing row"
+                    )
+            return self._fetch_unapplied_cash_refund(cursor, UUID(str(row[0])))
 
     def apply_unapplied_cash_to_collection_case(
         self, collection_case_id: UUID, applied_amount: Any
@@ -5400,6 +5507,48 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(unapplied_cash_application_id)
         return self._unapplied_cash_application_from_row(row)
+
+    @staticmethod
+    def _unapplied_cash_refund_from_row(
+        row: tuple[Any, ...],
+    ) -> StoredUnappliedCashRefund:
+        """Decode one normalized leftover-refund row."""
+        return StoredUnappliedCashRefund(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            UUID(str(row[4])),
+            UUID(str(row[5])),
+            row[6],
+            row[7],
+            row[8],
+            parse_exact_decimal(format_exact_decimal(row[9])),
+            parse_exact_decimal(format_exact_decimal(row[10])),
+            row[11],
+            row[12],
+        )
+
+    def _fetch_unapplied_cash_refund(
+        self, cursor: Any, unapplied_cash_refund_id: UUID
+    ) -> StoredUnappliedCashRefund:
+        """Hydrate one leftover refund."""
+        cursor.execute(
+            """
+            SELECT unapplied_cash_refund_id, tenant_account_id, unapplied_cash_id,
+                   payment_receipt_id, payment_intent_id, collection_case_id,
+                   unapplied_cash_refund_contract_version, source_payload_hash,
+                   currency_code, refund_amount, unapplied_amount,
+                   unapplied_cash_refund_status, refunded_at
+            FROM billing_core.unapplied_cash_refund
+            WHERE unapplied_cash_refund_id = %s
+            """,
+            (unapplied_cash_refund_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(unapplied_cash_refund_id)
+        return self._unapplied_cash_refund_from_row(row)
 
     @staticmethod
     def _credit_adjustment_from_row(row: tuple[Any, ...]) -> StoredCreditAdjustment:
