@@ -1,0 +1,15 @@
+{
+  "issued_credit_note_void_presentment_contract_version": 1,
+  "issued_credit_note_void_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd32",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "issued_credit_note_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd21",
+  "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf661",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf621",
+  "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd11",
+  "currency_code": "USD",
+  "voided_amount": "11.00",
+  "issued_credit_note_void_status": "recorded",
+  "voided_at": "2026-08-18T10:00:00Z",
+  "source_payload_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "next_operator_action": "wait"
+}
