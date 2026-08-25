@@ -244,6 +244,7 @@ REQUIRED_FILES = (
     "metering_billing/spend_budget.py",
     "metering_billing/spend_budget_presentment.py",
     "metering_billing/spend_budget_evaluation_presentment.py",
+    "metering_billing/spend_budget_over_signal.py",
     "metering_billing/rate_card.py",
     "metering_billing/tax_rate.py",
     "metering_billing/tax_assessment.py",
