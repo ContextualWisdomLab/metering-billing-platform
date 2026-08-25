@@ -27,6 +27,7 @@ __all__ = (
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_SCHEMA_NAME",
     "SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME",
+    "SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
     "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
@@ -138,6 +139,7 @@ __all__ = (
     "validate_credit_adjustment",
     "validate_spend_budget",
     "validate_spend_budget_over_signal",
+    "validate_spend_budget_over_signal_presentment",
     "validate_rate_card",
     "validate_tax_rate",
     "validate_tax_assessment",
@@ -165,6 +167,9 @@ PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.js
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
 SPEND_BUDGET_SCHEMA_NAME = "spend-budget.schema.json"
 SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME = "spend-budget-over-signal.schema.json"
+SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME = (
+    "spend-budget-over-signal-presentment.schema.json"
+)
 SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME = "spend-budget-presentment.schema.json"
 SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME = (
     "spend-budget-evaluation-presentment.schema.json"
@@ -1633,6 +1638,56 @@ def _missing_success_spend_budget_over_signal_fields(
         if field_name not in over_signal:
             missing.append(f"$: {outcome} over signals must include {field_name}")
     return tuple(missing)
+
+
+def validate_spend_budget_over_signal_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate live over-signal presentment plus nested existing envelopes."""
+    schema = load_json_schema(
+        SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    if "remaining_amount" in statement:
+        errors.append("$: over-signal presentment must not include remaining_amount")
+    if "card_pan" in statement:
+        errors.append("$: over-signal presentment must not include card_pan")
+    if "retained_earnings" in statement:
+        errors.append("$: over-signal presentment must not include retained_earnings")
+    if "payload_json" in statement:
+        errors.append("$: over-signal presentment must not include payload_json")
+    over_signal = statement.get("over_signal")
+    spend_budget_id = None
+    if isinstance(over_signal, Mapping):
+        errors.extend(validate_spend_budget_over_signal(over_signal, schemas_directory))
+        raw_budget_id = over_signal.get("spend_budget_id")
+        if isinstance(raw_budget_id, str):
+            spend_budget_id = raw_budget_id
+    rows = statement.get("webhook_outbox_events")
+    if isinstance(rows, list):
+        if len(rows) > 1:
+            errors.append("$: over-signal presentment has at most one spend_budget.over row")
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                continue
+            errors.extend(validate_webhook_outbox_event_presentment(row, schemas_directory))
+            event_type = row.get("event_type_code")
+            if event_type is not None and event_type != "spend_budget.over":
+                errors.append(
+                    f"$.webhook_outbox_events[{index}]: event_type_code must be spend_budget.over"
+                )
+            source_id = row.get("source_id")
+            if (
+                spend_budget_id is not None
+                and source_id is not None
+                and source_id != spend_budget_id
+            ):
+                errors.append(
+                    f"$.webhook_outbox_events[{index}]: source_id must match over_signal.spend_budget_id"
+                )
+    return tuple(errors)
 
 
 def _missing_success_spend_budget_fields(
