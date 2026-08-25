@@ -221,29 +221,29 @@ class IssuedCreditNoteVoidService:
         source_payload_hash = compute_issued_credit_note_void_payload_hash(
             _canonical_void_snapshot(issued)
         )
-        stored = self.ledger.insert_issued_credit_note_void(
-            StoredIssuedCreditNoteVoid(
-                issued_credit_note_void_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                issued_credit_note_id=issued.issued_credit_note_id,
-                credit_adjustment_id=issued.credit_adjustment_id,
-                invoice_draft_id=issued.invoice_draft_id,
-                issued_invoice_id=issued.issued_invoice_id,
-                issued_credit_note_void_contract_version=(
-                    ISSUED_CREDIT_NOTE_VOID_CONTRACT_VERSION
-                ),
-                source_payload_hash=source_payload_hash,
-                currency_code=issued.currency_code,
-                voided_amount=issued.tax_inclusive_amount,
-                issued_credit_note_void_status=ISSUED_CREDIT_NOTE_VOID_STATUS,
-                voided_at=self._clock(),
-            )
+        candidate = StoredIssuedCreditNoteVoid(
+            issued_credit_note_void_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            issued_credit_note_id=issued.issued_credit_note_id,
+            credit_adjustment_id=issued.credit_adjustment_id,
+            invoice_draft_id=issued.invoice_draft_id,
+            issued_invoice_id=issued.issued_invoice_id,
+            issued_credit_note_void_contract_version=(
+                ISSUED_CREDIT_NOTE_VOID_CONTRACT_VERSION
+            ),
+            source_payload_hash=source_payload_hash,
+            currency_code=issued.currency_code,
+            voided_amount=issued.tax_inclusive_amount,
+            issued_credit_note_void_status=ISSUED_CREDIT_NOTE_VOID_STATUS,
+            voided_at=self._clock(),
         )
-        result = _from_stored(
-            stored,
-            tenant.tenant_reference,
-            IssuedCreditNoteVoidOutcomeCode.ACCEPTED,
+        stored = self.ledger.insert_issued_credit_note_void(candidate)
+        outcome = (
+            IssuedCreditNoteVoidOutcomeCode.ACCEPTED
+            if stored.issued_credit_note_void_id == candidate.issued_credit_note_void_id
+            else IssuedCreditNoteVoidOutcomeCode.DUPLICATE_REPLAY
         )
+        result = _from_stored(stored, tenant.tenant_reference, outcome)
         _enqueue_credit_note_voided(self.ledger, tenant.tenant_reference, result)
         return result
 

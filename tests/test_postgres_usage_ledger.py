@@ -22,6 +22,8 @@ from metering_billing import (
     InvoiceDraftService,
     IssuedCreditNotePresentmentService,
     IssuedCreditNoteService,
+    IssuedCreditNoteVoidPresentmentService,
+    IssuedCreditNoteVoidService,
     IssuedInvoiceService,
     PaymentIntentService,
     PostgresUsageLedger,
@@ -43,11 +45,15 @@ from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_write_off import CollectionWriteOffService
 from metering_billing.errors import (
     IssuedCreditNotePresentmentQueryError,
+    IssuedCreditNoteVoidPresentmentQueryError,
     RejectionReasonCode,
     SpendBudgetPresentmentQueryError,
     UsageEventConflict,
 )
 from metering_billing.issued_credit_note import compute_issued_credit_note_payload_hash
+from metering_billing.issued_credit_note_void import (
+    compute_issued_credit_note_void_payload_hash,
+)
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.rate_card import RateCardService
 from metering_billing.spend_budget import compute_spend_budget_payload_hash
@@ -55,11 +61,13 @@ from metering_billing.time_window import TimeWindow
 from metering_billing.usage_rating import UsageRatingService
 from metering_billing.usage_ledger import (
     StoredIssuedCreditNote,
+    StoredIssuedCreditNoteVoid,
     StoredSpendBudget,
     StoredWebhookDeliveryAttempt,
 )
 from metering_billing.webhook_outbox import (
     EVENT_TYPE_CREDIT_NOTE_ISSUED,
+    EVENT_TYPE_CREDIT_NOTE_VOIDED,
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
     EVENT_TYPE_SPEND_BUDGET_APPROACHING,
     EVENT_TYPE_SPEND_BUDGET_OVER,
@@ -2446,6 +2454,406 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).issue_credit_note(TENANT_ONE, credit.credit_adjustment_id)
         self.assertEqual(raced.issued_credit_note_outcome_code.value, "duplicate_replay")
         self.assertEqual(raced.issued_credit_note_id, stored.issued_credit_note_id)
+
+    def test_issued_credit_note_void_is_durable(self) -> None:
+        """Persist one issued_credit_note_void and keep GET presentment after restart."""
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        first_credit_amount = Decimal("0.001")
+        later_credit_amount = Decimal("0.0005")
+        crash_credit_amount = Decimal("0.00025")
+        credit = CreditAdjustmentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).record_credit_adjustment(
+            TENANT_ONE, draft.invoice_draft_id, first_credit_amount, "goodwill"
+        )
+        self.assertEqual(credit.credit_adjustment_outcome_code.value, "accepted")
+        assert credit.credit_adjustment_id is not None
+        issued_at = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
+        issued_note = IssuedCreditNoteService(
+            self.ledger, clock=lambda: issued_at
+        ).issue_credit_note(TENANT_ONE, credit.credit_adjustment_id)
+        self.assertEqual(issued_note.issued_credit_note_outcome_code.value, "accepted")
+        assert issued_note.issued_credit_note_id is not None
+        voided_at = datetime(2026, 8, 18, 15, 30, tzinfo=UTC)
+        accepted = IssuedCreditNoteVoidService(
+            self.ledger, clock=lambda: voided_at
+        ).void_issued_credit_note(TENANT_ONE, issued_note.issued_credit_note_id)
+        self.assertEqual(accepted.issued_credit_note_void_outcome_code.value, "accepted")
+        assert accepted.issued_credit_note_void_id is not None
+        stored = self.ledger.get_issued_credit_note_void(accepted.issued_credit_note_void_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
+        self.assertEqual(stored.issued_credit_note_id, issued_note.issued_credit_note_id)
+        self.assertEqual(stored.credit_adjustment_id, credit.credit_adjustment_id)
+        self.assertEqual(stored.invoice_draft_id, draft.invoice_draft_id)
+        self.assertIsNone(stored.issued_invoice_id)
+        self.assertEqual(stored.currency_code, "USD")
+        self.assertEqual(stored.voided_amount, first_credit_amount)
+        self.assertEqual(stored.issued_credit_note_void_status, "recorded")
+        self.assertEqual(stored.voided_at, voided_at)
+        self.assertEqual(stored.source_payload_hash, accepted.source_payload_hash)
+        self.assertIsInstance(stored.voided_amount, Decimal)
+        self.assertNotIsInstance(stored.voided_amount, float)
+        reloaded_note = self.ledger.get_issued_credit_note(issued_note.issued_credit_note_id)
+        assert reloaded_note is not None
+        self.assertEqual(reloaded_note.issued_credit_note_status, "issued")
+        self.assertEqual(
+            self.ledger.find_issued_credit_note_void(
+                stored.tenant_account_id, stored.issued_credit_note_id
+            ),
+            stored,
+        )
+        self.assertEqual(
+            self.ledger.list_issued_credit_note_voids_for_tenant(stored.tenant_account_id),
+            (stored,),
+        )
+        self.assertEqual(
+            self.ledger.list_issued_credit_note_voids_for_tenant(
+                self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+            ),
+            (),
+        )
+        self.assertIsNone(self.ledger.get_issued_credit_note_void(uuid4()))
+        self.assertIsNone(
+            self.ledger.find_issued_credit_note_void(stored.tenant_account_id, uuid4())
+        )
+        self.assertIsNone(
+            self.ledger.find_credit_note_application(
+                stored.tenant_account_id, stored.issued_credit_note_id
+            )
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
+            ).fetchone()[0],
+            1,
+        )
+        outbox_rows = [
+            event
+            for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                stored.tenant_account_id
+            )
+            if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_VOIDED
+        ]
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].source_id, stored.issued_credit_note_void_id)
+
+        replay = IssuedCreditNoteVoidService(
+            self.ledger, clock=lambda: voided_at
+        ).void_issued_credit_note(TENANT_ONE, issued_note.issued_credit_note_id)
+        self.assertEqual(replay.issued_credit_note_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.issued_credit_note_void_id, stored.issued_credit_note_void_id)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_VOIDED
+                ]
+            ),
+            1,
+        )
+
+        rejected = IssuedCreditNoteVoidService(self.ledger).void_issued_credit_note(
+            TENANT_ONE, uuid4()
+        )
+        self.assertEqual(rejected.issued_credit_note_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
+            ).fetchone()[0],
+            1,
+        )
+        mismatch = IssuedCreditNoteVoidService(self.ledger).void_issued_credit_note(
+            TENANT_TWO, issued_note.issued_credit_note_id
+        )
+        self.assertEqual(mismatch.issued_credit_note_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
+            ).fetchone()[0],
+            1,
+        )
+        issued = IssuedInvoiceService(self.ledger, clock=lambda: issued_at).issue_invoice(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        later_credit = CreditAdjustmentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).record_credit_adjustment(
+            TENANT_ONE, draft.invoice_draft_id, later_credit_amount, "billing_error"
+        )
+        self.assertEqual(later_credit.credit_adjustment_outcome_code.value, "accepted")
+        assert later_credit.credit_adjustment_id is not None
+        later_note = IssuedCreditNoteService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 16, 0, tzinfo=UTC)
+        ).issue_credit_note(TENANT_ONE, later_credit.credit_adjustment_id)
+        self.assertEqual(later_note.issued_credit_note_outcome_code.value, "accepted")
+        assert later_note.issued_credit_note_id is not None
+        currency_mismatch = IssuedCreditNoteVoidService(self.ledger).void_issued_credit_note(
+            TENANT_ONE, later_note.issued_credit_note_id, currency_code="EUR"
+        )
+        self.assertEqual(currency_mismatch.issued_credit_note_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
+            ).fetchone()[0],
+            1,
+        )
+        later = IssuedCreditNoteVoidService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 16, 30, tzinfo=UTC)
+        ).void_issued_credit_note(TENANT_ONE, later_note.issued_credit_note_id)
+        self.assertEqual(later.issued_credit_note_void_outcome_code.value, "accepted")
+        assert later.issued_credit_note_void_id is not None
+        later_stored = self.ledger.get_issued_credit_note_void(later.issued_credit_note_void_id)
+        assert later_stored is not None
+        self.assertEqual(later_stored.issued_invoice_id, issued.issued_invoice_id)
+        self.assertEqual(later_stored.voided_amount, later_credit_amount)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
+            ).fetchone()[0],
+            2,
+        )
+
+        crash_credit = CreditAdjustmentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).record_credit_adjustment(
+            TENANT_ONE, draft.invoice_draft_id, crash_credit_amount, "rating_correction"
+        )
+        self.assertEqual(crash_credit.credit_adjustment_outcome_code.value, "accepted")
+        assert crash_credit.credit_adjustment_id is not None
+        crash_note = IssuedCreditNoteService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 17, 0, tzinfo=UTC)
+        ).issue_credit_note(TENANT_ONE, crash_credit.credit_adjustment_id)
+        self.assertEqual(crash_note.issued_credit_note_outcome_code.value, "accepted")
+        assert crash_note.issued_credit_note_id is not None
+        stored_crash_note = self.ledger.get_issued_credit_note(crash_note.issued_credit_note_id)
+        assert stored_crash_note is not None
+        crash_hash = compute_issued_credit_note_void_payload_hash(
+            {
+                "issued_credit_note_id": str(stored_crash_note.issued_credit_note_id),
+                "credit_adjustment_id": str(stored_crash_note.credit_adjustment_id),
+                "invoice_draft_id": str(stored_crash_note.invoice_draft_id),
+                "currency_code": stored_crash_note.currency_code,
+                "voided_amount": format_exact_decimal(stored_crash_note.tax_inclusive_amount),
+                "issued_credit_note_void_contract_version": 1,
+            }
+        )
+        inserted_without_outbox = self.ledger.insert_issued_credit_note_void(
+            StoredIssuedCreditNoteVoid(
+                issued_credit_note_void_id=uuid4(),
+                tenant_account_id=tenant.tenant_account_id,
+                issued_credit_note_id=stored_crash_note.issued_credit_note_id,
+                credit_adjustment_id=stored_crash_note.credit_adjustment_id,
+                invoice_draft_id=stored_crash_note.invoice_draft_id,
+                issued_invoice_id=stored_crash_note.issued_invoice_id,
+                issued_credit_note_void_contract_version=1,
+                source_payload_hash=crash_hash,
+                currency_code=stored_crash_note.currency_code,
+                voided_amount=stored_crash_note.tax_inclusive_amount,
+                issued_credit_note_void_status="recorded",
+                voided_at=datetime(2026, 8, 18, 17, 30, tzinfo=UTC),
+            )
+        )
+        prior_outbox = len(
+            [
+                event
+                for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                    stored.tenant_account_id
+                )
+                if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_VOIDED
+            ]
+        )
+        healed = IssuedCreditNoteVoidService(
+            self.ledger, clock=lambda: voided_at
+        ).void_issued_credit_note(TENANT_ONE, crash_note.issued_credit_note_id)
+        self.assertEqual(healed.issued_credit_note_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            healed.issued_credit_note_void_id, inserted_without_outbox.issued_credit_note_void_id
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_CREDIT_NOTE_VOIDED
+                ]
+            ),
+            prior_outbox + 1,
+        )
+
+        applied_credit = CreditAdjustmentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).record_credit_adjustment(
+            TENANT_ONE, draft.invoice_draft_id, Decimal("0.0001"), "goodwill"
+        )
+        self.assertEqual(applied_credit.credit_adjustment_outcome_code.value, "accepted")
+        assert applied_credit.credit_adjustment_id is not None
+        applied_note = IssuedCreditNoteService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 18, 0, tzinfo=UTC)
+        ).issue_credit_note(TENANT_ONE, applied_credit.credit_adjustment_id)
+        self.assertEqual(applied_note.issued_credit_note_outcome_code.value, "accepted")
+        assert applied_note.issued_credit_note_id is not None
+        collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
+        self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
+        assert collection.collection_case_id is not None
+        self.connection.execute(
+            """
+            INSERT INTO billing_core.credit_note_application
+                (credit_note_application_id, tenant_account_id, issued_credit_note_id,
+                 collection_case_id, invoice_draft_id, issued_invoice_id,
+                 credit_note_application_contract_version,
+                 issued_credit_note_contract_version, source_payload_hash,
+                 issued_credit_note_source_payload_hash, currency_code,
+                 applied_amount, credit_note_application_status, applied_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 1, 1, %s, %s, 'USD', %s, 'applied', %s)
+            """,
+            (
+                uuid4(),
+                tenant.tenant_account_id,
+                applied_note.issued_credit_note_id,
+                collection.collection_case_id,
+                draft.invoice_draft_id,
+                issued.issued_invoice_id,
+                "sha256:" + "a" * 64,
+                "sha256:" + "b" * 64,
+                Decimal("0.0001"),
+                datetime(2026, 8, 18, 18, 15, tzinfo=UTC),
+            ),
+        )
+        self.connection.commit()
+        applied = self.ledger.find_credit_note_application(
+            tenant.tenant_account_id, applied_note.issued_credit_note_id
+        )
+        self.assertIsNotNone(applied)
+        already_applied = IssuedCreditNoteVoidService(self.ledger).void_issued_credit_note(
+            TENANT_ONE, applied_note.issued_credit_note_id
+        )
+        self.assertEqual(already_applied.issued_credit_note_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            already_applied.rejection_reason_code.value, "credit_note_already_applied"
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
+            ).fetchone()[0],
+            3,
+        )
+
+        fresh = PostgresUsageLedger(self.connection)
+        reloaded = fresh.get_issued_credit_note_void(stored.issued_credit_note_void_id)
+        self.assertEqual(reloaded, stored)
+        presentment = IssuedCreditNoteVoidPresentmentService(fresh).present_issued_credit_note_void(
+            TENANT_ONE, stored.issued_credit_note_void_id
+        )
+        self.assertEqual(presentment.voided_amount, first_credit_amount)
+        self.assertEqual(presentment.issued_credit_note_void_status, "recorded")
+        self.assertEqual(presentment.next_operator_action, "wait")
+        self.assertIsNone(presentment.issued_invoice_id)
+        page = IssuedCreditNoteVoidPresentmentService(fresh).list_issued_credit_note_voids(
+            TENANT_ONE
+        )
+        self.assertEqual(
+            {row.issued_credit_note_void_id for row in page.issued_credit_note_voids},
+            {
+                stored.issued_credit_note_void_id,
+                later.issued_credit_note_void_id,
+                inserted_without_outbox.issued_credit_note_void_id,
+            },
+        )
+        later_presentment = IssuedCreditNoteVoidPresentmentService(
+            fresh
+        ).present_issued_credit_note_void(TENANT_ONE, later.issued_credit_note_void_id)
+        self.assertEqual(later_presentment.issued_invoice_id, issued.issued_invoice_id)
+        reloaded_presentment = IssuedCreditNoteVoidPresentmentService(
+            PostgresUsageLedger(self.connection)
+        ).present_issued_credit_note_void(TENANT_ONE, stored.issued_credit_note_void_id)
+        self.assertEqual(
+            reloaded_presentment.issued_credit_note_void_id,
+            presentment.issued_credit_note_void_id,
+        )
+        with self.assertRaises(IssuedCreditNoteVoidPresentmentQueryError) as missing_pin:
+            IssuedCreditNoteVoidPresentmentService(fresh).present_issued_credit_note_void(
+                "", stored.issued_credit_note_void_id
+            )
+        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(IssuedCreditNoteVoidPresentmentQueryError) as other_pin:
+            IssuedCreditNoteVoidPresentmentService(fresh).present_issued_credit_note_void(
+                TENANT_TWO, stored.issued_credit_note_void_id
+            )
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "issued_credit_note_void_not_found"
+        )
+
+        self.assertEqual(self.ledger.insert_issued_credit_note_void(stored), stored)
+        self.assertEqual(
+            self.ledger.insert_issued_credit_note_void(
+                replace(stored, issued_credit_note_void_id=uuid4())
+            ),
+            stored,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_credit_note_void(replace(stored, currency_code="usd"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_credit_note_void(
+                replace(stored, source_payload_hash="md5:abc")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_credit_note_void(
+                replace(stored, issued_credit_note_void_status="posted")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_credit_note_void(
+                replace(stored, voided_amount=Decimal("0"), issued_credit_note_void_id=uuid4())
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_credit_note_void(
+                replace(
+                    stored,
+                    issued_credit_note_void_id=later.issued_credit_note_void_id,
+                    issued_credit_note_id=uuid4(),
+                    source_payload_hash="sha256:" + "d" * 64,
+                )
+            )
+
+        class BlindFindLedger(PostgresUsageLedger):
+            """Force the insert path used after a concurrent identity race."""
+
+            def find_issued_credit_note_void(self, *args, **kwargs):
+                return None
+
+        raced = IssuedCreditNoteVoidService(
+            BlindFindLedger(self.connection), clock=lambda: voided_at
+        ).void_issued_credit_note(TENANT_ONE, issued_note.issued_credit_note_id)
+        self.assertEqual(raced.issued_credit_note_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(raced.issued_credit_note_void_id, stored.issued_credit_note_void_id)
 
     def test_transaction_context_and_connection_lifecycle(self) -> None:
         """The outer ingestion transaction avoids a partial receipt and owned connections close."""

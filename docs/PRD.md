@@ -208,8 +208,8 @@ contextual-orchestrator usage
 
 ## Issued-credit-note-void acceptance
 
-- A known unused same-tenant issued credit note voids once. `voided_amount` is the issued tax-inclusive credit in the same currency. Status is `recorded`. The issued snapshot stays `issued`.
-- A second void of the same tenant and `issued_credit_note_id` returns the same `issued_credit_note_void_id` as `duplicate_replay`.
+- A known unused same-tenant issued credit note voids once. `voided_amount` is the issued tax-inclusive credit in the same currency. Status is `recorded`. The issued snapshot stays `issued`. `PostgresUsageLedger` persists that unused void so GET presentment survives process restart.
+- A second void of the same tenant and `issued_credit_note_id` returns the same `issued_credit_note_void_id` as `duplicate_replay` and does not insert a second row.
 - `issued_credit_note_void_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, a journal, VAT register, NTS filing, 연말정산, statutory account, negative invoice, or AIS call.
 - First successful void enqueues one existing #24 `credit_note.voided` outbox event. `source_id` is `issued_credit_note_void_id`. Replay does not enqueue a second row. Rejected void writes zero outbox rows. HMAC, SSRF, and delivery contracts stay unchanged.
 - Fail closed when the note has already been applied; the note is missing or cross-tenant; currency mismatches; or the tenant is missing.
