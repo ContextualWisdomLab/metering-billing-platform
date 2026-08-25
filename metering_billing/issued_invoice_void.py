@@ -240,24 +240,39 @@ class IssuedInvoiceVoidService:
         source_payload_hash = compute_issued_invoice_void_payload_hash(
             _canonical_void_snapshot(issued_invoice)
         )
-        stored = self.ledger.insert_issued_invoice_void(
-            StoredIssuedInvoiceVoid(
-                issued_invoice_void_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                issued_invoice_id=issued_invoice.issued_invoice_id,
-                invoice_draft_id=issued_invoice.invoice_draft_id,
-                collection_case_id=(
-                    collection_case.collection_case_id if collection_case is not None else None
-                ),
-                issued_invoice_void_contract_version=ISSUED_INVOICE_VOID_CONTRACT_VERSION,
-                source_payload_hash=source_payload_hash,
-                currency_code=issued_invoice.currency_code,
-                voided_amount=issued_invoice.tax_inclusive_amount,
-                remaining_outstanding_amount=ZERO,
-                issued_invoice_void_status=ISSUED_INVOICE_VOID_STATUS,
-                voided_at=self._clock(),
-            )
+        candidate = StoredIssuedInvoiceVoid(
+            issued_invoice_void_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            issued_invoice_id=issued_invoice.issued_invoice_id,
+            invoice_draft_id=issued_invoice.invoice_draft_id,
+            collection_case_id=(
+                collection_case.collection_case_id if collection_case is not None else None
+            ),
+            issued_invoice_void_contract_version=ISSUED_INVOICE_VOID_CONTRACT_VERSION,
+            source_payload_hash=source_payload_hash,
+            currency_code=issued_invoice.currency_code,
+            voided_amount=issued_invoice.tax_inclusive_amount,
+            remaining_outstanding_amount=ZERO,
+            issued_invoice_void_status=ISSUED_INVOICE_VOID_STATUS,
+            voided_at=self._clock(),
         )
+        stored = self.ledger.insert_issued_invoice_void(candidate)
+        if stored.issued_invoice_void_id != candidate.issued_invoice_void_id:
+            current_case = None
+            if stored.collection_case_id is not None:
+                current_case = self.ledger.get_collection_case(stored.collection_case_id)
+                if current_case is None:
+                    return _rejected(
+                        IssuedInvoiceVoidRejectionReasonCode.ISSUED_INVOICE_NOT_FOUND
+                    )
+            result = _from_stored(
+                stored,
+                current_case,
+                tenant.tenant_reference,
+                IssuedInvoiceVoidOutcomeCode.DUPLICATE_REPLAY,
+            )
+            _enqueue_invoice_voided(self.ledger, tenant.tenant_reference, result)
+            return result
         updated_case = None
         if collection_case is not None:
             updated_case = self.ledger.mark_collection_case_voided(

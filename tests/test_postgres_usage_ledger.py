@@ -27,6 +27,8 @@ from metering_billing import (
     IssuedCreditNoteVoidPresentmentService,
     IssuedCreditNoteVoidService,
     IssuedInvoiceService,
+    IssuedInvoiceVoidPresentmentService,
+    IssuedInvoiceVoidService,
     PaymentIntentService,
     PostgresUsageLedger,
     SpendBudgetEvaluationPresentmentService,
@@ -50,6 +52,7 @@ from metering_billing.errors import (
     CreditNoteApplicationPresentmentQueryError,
     IssuedCreditNotePresentmentQueryError,
     IssuedCreditNoteVoidPresentmentQueryError,
+    IssuedInvoiceVoidPresentmentQueryError,
     RejectionReasonCode,
     SpendBudgetPresentmentQueryError,
     UsageEventConflict,
@@ -57,6 +60,9 @@ from metering_billing.errors import (
 from metering_billing.issued_credit_note import compute_issued_credit_note_payload_hash
 from metering_billing.issued_credit_note_void import (
     compute_issued_credit_note_void_payload_hash,
+)
+from metering_billing.issued_invoice_void import (
+    compute_issued_invoice_void_payload_hash,
 )
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.rate_card import RateCardService
@@ -67,6 +73,7 @@ from metering_billing.usage_ledger import (
     StoredCreditNoteApplication,
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
+    StoredIssuedInvoiceVoid,
     StoredSpendBudget,
     StoredWebhookDeliveryAttempt,
 )
@@ -74,13 +81,14 @@ from metering_billing.webhook_outbox import (
     EVENT_TYPE_CREDIT_NOTE_APPLIED,
     EVENT_TYPE_CREDIT_NOTE_ISSUED,
     EVENT_TYPE_CREDIT_NOTE_VOIDED,
+    EVENT_TYPE_INVOICE_VOIDED,
     EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
     EVENT_TYPE_SPEND_BUDGET_APPROACHING,
     EVENT_TYPE_SPEND_BUDGET_OVER,
     EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
     enqueue_accepted_fact,
 )
-from tests.test_usage_rating import MORNING_WINDOW
+from tests.test_usage_rating import KNOWN_MORNING_TOTAL, MORNING_WINDOW
 from scripts.migrate_postgres import (
     MIGRATION_HISTORY_TABLE,
     MigrationDriftError,
@@ -147,6 +155,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 billing_core.webhook_subscription,
                 billing_core.payment_receipt,
                 billing_core.payment_intent,
+                billing_core.issued_invoice_void,
                 billing_core.issued_credit_note_void,
                 billing_core.credit_note_application,
                 billing_core.issued_credit_note,
@@ -3256,6 +3265,490 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
             remaining_after_first - later_credit_amount,
+        )
+
+    def test_issued_invoice_void_is_durable(self) -> None:
+        """Persist one issued_invoice_void and keep GET presentment after restart."""
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        issued_at = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+        issued = IssuedInvoiceService(self.ledger, clock=lambda: issued_at).issue_invoice(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        assert issued.issued_invoice_id is not None
+        first_voided_amount = issued.tax_inclusive_amount
+        self.assertGreater(first_voided_amount, Decimal("0"))
+        self.assertNotEqual(first_voided_amount, KNOWN_MORNING_TOTAL)
+        collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
+        self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
+        assert collection.collection_case_id is not None
+        voided_at = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
+        accepted = IssuedInvoiceVoidService(
+            self.ledger, clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, issued.issued_invoice_id)
+        self.assertEqual(accepted.issued_invoice_void_outcome_code.value, "accepted")
+        assert accepted.issued_invoice_void_id is not None
+        stored = self.ledger.get_issued_invoice_void(accepted.issued_invoice_void_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
+        self.assertEqual(stored.issued_invoice_id, issued.issued_invoice_id)
+        self.assertEqual(stored.invoice_draft_id, draft.invoice_draft_id)
+        self.assertEqual(stored.collection_case_id, collection.collection_case_id)
+        self.assertEqual(stored.currency_code, "USD")
+        self.assertEqual(stored.voided_amount, first_voided_amount)
+        self.assertEqual(stored.remaining_outstanding_amount, Decimal("0"))
+        self.assertEqual(stored.issued_invoice_void_status, "recorded")
+        self.assertEqual(stored.voided_at, voided_at)
+        self.assertEqual(stored.source_payload_hash, accepted.source_payload_hash)
+        self.assertIsInstance(stored.voided_amount, Decimal)
+        self.assertNotIsInstance(stored.voided_amount, float)
+        reloaded_invoice = self.ledger.get_issued_invoice(issued.issued_invoice_id)
+        assert reloaded_invoice is not None
+        self.assertEqual(reloaded_invoice.issued_invoice_status, "issued")
+        voided_case = self.ledger.get_collection_case(collection.collection_case_id)
+        assert voided_case is not None
+        self.assertEqual(voided_case.collection_case_status, "voided")
+        self.assertEqual(voided_case.outstanding_amount, Decimal("0"))
+        self.assertEqual(
+            self.ledger.find_issued_invoice_void(
+                stored.tenant_account_id, stored.issued_invoice_id
+            ),
+            stored,
+        )
+        self.assertEqual(
+            self.ledger.list_issued_invoice_voids_for_tenant(stored.tenant_account_id),
+            (stored,),
+        )
+        self.assertEqual(
+            self.ledger.list_issued_invoice_voids_for_tenant(
+                self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+            ),
+            (),
+        )
+        self.assertIsNone(self.ledger.get_issued_invoice_void(uuid4()))
+        self.assertIsNone(
+            self.ledger.find_issued_invoice_void(stored.tenant_account_id, uuid4())
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
+            ).fetchone()[0],
+            1,
+        )
+        outbox_rows = [
+            event
+            for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                stored.tenant_account_id
+            )
+            if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+        ]
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].source_id, stored.issued_invoice_void_id)
+
+        replay = IssuedInvoiceVoidService(
+            self.ledger, clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, issued.issued_invoice_id)
+        self.assertEqual(replay.issued_invoice_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.issued_invoice_void_id, stored.issued_invoice_void_id)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+                ]
+            ),
+            1,
+        )
+        replayed_case = self.ledger.get_collection_case(collection.collection_case_id)
+        assert replayed_case is not None
+        self.assertEqual(replayed_case.collection_case_status, "voided")
+        self.assertEqual(replayed_case.outstanding_amount, Decimal("0"))
+
+        rejected = IssuedInvoiceVoidService(self.ledger).void_issued_invoice(
+            TENANT_ONE, uuid4()
+        )
+        self.assertEqual(rejected.issued_invoice_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
+            ).fetchone()[0],
+            1,
+        )
+        mismatch = IssuedInvoiceVoidService(self.ledger).void_issued_invoice(
+            TENANT_TWO, issued.issued_invoice_id
+        )
+        self.assertEqual(mismatch.issued_invoice_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
+            ).fetchone()[0],
+            1,
+        )
+
+        afternoon = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf71c",
+            source_event_key="workflow_381:step_06:attempt_01",
+            occurred_at="2026-08-16T11:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "500",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(afternoon)
+        afternoon_window = TimeWindow.from_iso8601(
+            "2026-08-16T11:00:00Z", "2026-08-16T12:00:00Z"
+        )
+        afternoon_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, afternoon_window, 1, rate_card_code="cwl_standard"
+        )
+        afternoon_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, afternoon_rating.rating_run_id
+        )
+        afternoon_issued = IssuedInvoiceService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 16, 0, tzinfo=UTC)
+        ).issue_invoice(TENANT_ONE, afternoon_draft.invoice_draft_id)
+        self.assertEqual(afternoon_issued.issued_invoice_outcome_code.value, "accepted")
+        assert afternoon_issued.issued_invoice_id is not None
+        currency_mismatch = IssuedInvoiceVoidService(self.ledger).void_issued_invoice(
+            TENANT_ONE, afternoon_issued.issued_invoice_id, currency_code="EUR"
+        )
+        self.assertEqual(currency_mismatch.issued_invoice_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
+            ).fetchone()[0],
+            1,
+        )
+        stored_afternoon = self.ledger.get_issued_invoice(afternoon_issued.issued_invoice_id)
+        assert stored_afternoon is not None
+        crash_hash = compute_issued_invoice_void_payload_hash(
+            {
+                "issued_invoice_id": str(stored_afternoon.issued_invoice_id),
+                "invoice_draft_id": str(stored_afternoon.invoice_draft_id),
+                "currency_code": stored_afternoon.currency_code,
+                "voided_amount": format_exact_decimal(stored_afternoon.tax_inclusive_amount),
+                "issued_invoice_void_contract_version": 1,
+            }
+        )
+        inserted_without_outbox = self.ledger.insert_issued_invoice_void(
+            StoredIssuedInvoiceVoid(
+                issued_invoice_void_id=uuid4(),
+                tenant_account_id=tenant.tenant_account_id,
+                issued_invoice_id=stored_afternoon.issued_invoice_id,
+                invoice_draft_id=stored_afternoon.invoice_draft_id,
+                collection_case_id=None,
+                issued_invoice_void_contract_version=1,
+                source_payload_hash=crash_hash,
+                currency_code=stored_afternoon.currency_code,
+                voided_amount=stored_afternoon.tax_inclusive_amount,
+                remaining_outstanding_amount=Decimal("0"),
+                issued_invoice_void_status="recorded",
+                voided_at=datetime(2026, 8, 18, 16, 30, tzinfo=UTC),
+            )
+        )
+        prior_outbox = len(
+            [
+                event
+                for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                    stored.tenant_account_id
+                )
+                if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+            ]
+        )
+        healed = IssuedInvoiceVoidService(
+            self.ledger, clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, afternoon_issued.issued_invoice_id)
+        self.assertEqual(healed.issued_invoice_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            healed.issued_invoice_void_id, inserted_without_outbox.issued_invoice_void_id
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_INVOICE_VOIDED
+                ]
+            ),
+            prior_outbox + 1,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
+            ).fetchone()[0],
+            2,
+        )
+
+        evening = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf81c",
+            source_event_key="workflow_381:step_07:attempt_01",
+            occurred_at="2026-08-16T12:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "200",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(evening)
+        evening_window = TimeWindow.from_iso8601(
+            "2026-08-16T12:00:00Z", "2026-08-16T13:00:00Z"
+        )
+        evening_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, evening_window, 1, rate_card_code="cwl_standard"
+        )
+        evening_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, evening_rating.rating_run_id
+        )
+        evening_issued = IssuedInvoiceService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 17, 0, tzinfo=UTC)
+        ).issue_invoice(TENANT_ONE, evening_draft.invoice_draft_id)
+        self.assertEqual(evening_issued.issued_invoice_outcome_code.value, "accepted")
+        evening_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, evening_draft.invoice_draft_id)
+        self.assertEqual(evening_collection.collection_case_outcome_code.value, "accepted")
+        assert evening_collection.collection_case_id is not None
+        evening_amount = evening_issued.tax_inclusive_amount
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_voided(uuid4(), evening_amount)
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_voided(
+                evening_collection.collection_case_id, Decimal("1.00")
+            )
+        already_voided = self.ledger.mark_collection_case_voided(
+            collection.collection_case_id, first_voided_amount
+        )
+        self.assertEqual(already_voided.collection_case_status, "voided")
+        self.ledger.apply_collection_settlement(
+            evening_collection.collection_case_id, evening_amount
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.mark_collection_case_voided(
+                evening_collection.collection_case_id, evening_amount
+            )
+
+        fresh = PostgresUsageLedger(self.connection)
+        reloaded = fresh.get_issued_invoice_void(stored.issued_invoice_void_id)
+        self.assertEqual(reloaded, stored)
+        presentment = IssuedInvoiceVoidPresentmentService(fresh).present_issued_invoice_void(
+            TENANT_ONE, stored.issued_invoice_void_id
+        )
+        self.assertEqual(presentment.voided_amount, first_voided_amount)
+        self.assertEqual(presentment.remaining_outstanding_amount, Decimal("0"))
+        self.assertEqual(presentment.issued_invoice_void_status, "recorded")
+        self.assertEqual(presentment.collection_case_status, "voided")
+        self.assertEqual(presentment.next_operator_action, "wait")
+        page = IssuedInvoiceVoidPresentmentService(fresh).list_issued_invoice_voids(TENANT_ONE)
+        self.assertEqual(
+            {row.issued_invoice_void_id for row in page.issued_invoice_voids},
+            {
+                stored.issued_invoice_void_id,
+                inserted_without_outbox.issued_invoice_void_id,
+            },
+        )
+        reloaded_presentment = IssuedInvoiceVoidPresentmentService(
+            PostgresUsageLedger(self.connection)
+        ).present_issued_invoice_void(TENANT_ONE, stored.issued_invoice_void_id)
+        self.assertEqual(
+            reloaded_presentment.issued_invoice_void_id,
+            presentment.issued_invoice_void_id,
+        )
+        with self.assertRaises(IssuedInvoiceVoidPresentmentQueryError) as missing_pin:
+            IssuedInvoiceVoidPresentmentService(fresh).present_issued_invoice_void(
+                "", stored.issued_invoice_void_id
+            )
+        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(IssuedInvoiceVoidPresentmentQueryError) as other_pin:
+            IssuedInvoiceVoidPresentmentService(fresh).present_issued_invoice_void(
+                TENANT_TWO, stored.issued_invoice_void_id
+            )
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "issued_invoice_void_not_found"
+        )
+
+        self.assertEqual(self.ledger.insert_issued_invoice_void(stored), stored)
+        self.assertEqual(
+            self.ledger.insert_issued_invoice_void(
+                replace(stored, issued_invoice_void_id=uuid4())
+            ),
+            stored,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_invoice_void(replace(stored, currency_code="usd"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_invoice_void(
+                replace(stored, source_payload_hash="md5:abc")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_invoice_void(
+                replace(stored, issued_invoice_void_status="posted")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_invoice_void(
+                replace(
+                    stored,
+                    remaining_outstanding_amount=Decimal("1"),
+                    issued_invoice_void_id=uuid4(),
+                    issued_invoice_id=uuid4(),
+                )
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_invoice_void(
+                replace(stored, voided_amount=Decimal("0"), issued_invoice_void_id=uuid4())
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_invoice_void(
+                replace(
+                    stored,
+                    issued_invoice_void_id=inserted_without_outbox.issued_invoice_void_id,
+                    issued_invoice_id=uuid4(),
+                    source_payload_hash="sha256:" + "d" * 64,
+                )
+            )
+
+        race_event = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf91c",
+            source_event_key="workflow_381:step_08:attempt_01",
+            occurred_at="2026-08-16T13:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "100",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(race_event)
+        race_window = TimeWindow.from_iso8601(
+            "2026-08-16T13:00:00Z", "2026-08-16T14:00:00Z"
+        )
+        race_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, race_window, 1, rate_card_code="cwl_standard"
+        )
+        race_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, race_rating.rating_run_id
+        )
+        race_issued = IssuedInvoiceService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 18, 0, tzinfo=UTC)
+        ).issue_invoice(TENANT_ONE, race_draft.invoice_draft_id)
+        self.assertEqual(race_issued.issued_invoice_outcome_code.value, "accepted")
+        assert race_issued.issued_invoice_id is not None
+        race_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, race_draft.invoice_draft_id)
+        self.assertEqual(race_collection.collection_case_outcome_code.value, "accepted")
+        assert race_collection.collection_case_id is not None
+        stored_race_invoice = self.ledger.get_issued_invoice(race_issued.issued_invoice_id)
+        assert stored_race_invoice is not None
+        race_hash = compute_issued_invoice_void_payload_hash(
+            {
+                "issued_invoice_id": str(stored_race_invoice.issued_invoice_id),
+                "invoice_draft_id": str(stored_race_invoice.invoice_draft_id),
+                "currency_code": stored_race_invoice.currency_code,
+                "voided_amount": format_exact_decimal(
+                    stored_race_invoice.tax_inclusive_amount
+                ),
+                "issued_invoice_void_contract_version": 1,
+            }
+        )
+        raced_inserted = self.ledger.insert_issued_invoice_void(
+            StoredIssuedInvoiceVoid(
+                issued_invoice_void_id=uuid4(),
+                tenant_account_id=tenant.tenant_account_id,
+                issued_invoice_id=stored_race_invoice.issued_invoice_id,
+                invoice_draft_id=stored_race_invoice.invoice_draft_id,
+                collection_case_id=race_collection.collection_case_id,
+                issued_invoice_void_contract_version=1,
+                source_payload_hash=race_hash,
+                currency_code=stored_race_invoice.currency_code,
+                voided_amount=stored_race_invoice.tax_inclusive_amount,
+                remaining_outstanding_amount=Decimal("0"),
+                issued_invoice_void_status="recorded",
+                voided_at=datetime(2026, 8, 18, 18, 30, tzinfo=UTC),
+            )
+        )
+        open_race_case = self.ledger.get_collection_case(race_collection.collection_case_id)
+        assert open_race_case is not None
+        self.assertEqual(open_race_case.collection_case_status, "open")
+
+        class BlindFindLedger(PostgresUsageLedger):
+            """Force the insert path used after a concurrent identity race."""
+
+            def find_issued_invoice_void(self, *args, **kwargs):
+                return None
+
+        raced = IssuedInvoiceVoidService(
+            BlindFindLedger(self.connection), clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, race_issued.issued_invoice_id)
+        self.assertEqual(raced.issued_invoice_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(raced.issued_invoice_void_id, raced_inserted.issued_invoice_void_id)
+        raced_case = self.ledger.get_collection_case(race_collection.collection_case_id)
+        assert raced_case is not None
+        self.assertEqual(raced_case.collection_case_status, "open")
+        raced_without_case = IssuedInvoiceVoidService(
+            BlindFindLedger(self.connection), clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, afternoon_issued.issued_invoice_id)
+        self.assertEqual(
+            raced_without_case.issued_invoice_void_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            raced_without_case.issued_invoice_void_id,
+            inserted_without_outbox.issued_invoice_void_id,
+        )
+
+        class BlindFindMissingCaseLedger(PostgresUsageLedger):
+            """Force the insert race when the stored case cannot be loaded."""
+
+            def find_issued_invoice_void(self, *args, **kwargs):
+                return None
+
+            def get_collection_case(self, *args, **kwargs):
+                return None
+
+        missing_case = IssuedInvoiceVoidService(
+            BlindFindMissingCaseLedger(self.connection), clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, race_issued.issued_invoice_id)
+        self.assertEqual(missing_case.issued_invoice_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
+            ).fetchone()[0],
+            3,
         )
 
     def test_transaction_context_and_connection_lifecycle(self) -> None:

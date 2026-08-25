@@ -1,8 +1,9 @@
 """PostgreSQL repository for the durable usage-to-invoice vertical slice.
 
 The repository owns catalog rows, immutable usage facts, rating runs, invoice
-drafts, issued invoices, issued credit notes, unused issued-credit-note voids,
-credit-note applications, collection cases, payment and
+drafts, issued invoices, unused issued-invoice voids, issued credit notes,
+unused issued-credit-note voids, credit-note applications, collection cases,
+payment and
 credit facts, journal proposals, published spend budgets, and the atomic
 webhook outbox used by the first commercial path. Every public operation uses
 the supplied PostgreSQL connection; the implementation never falls back to an
@@ -48,6 +49,8 @@ from metering_billing.usage_ledger import (
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoice,
     StoredIssuedInvoiceLine,
+    StoredIssuedInvoiceVoid,
+    StoredUnappliedCashApplication,
     StoredJournalProposal,
     StoredJournalProposalLine,
     StoredRateCard,
@@ -2411,6 +2414,27 @@ class PostgresUsageLedger:
                     raise ValueError("collection write-off identity conflicts with an existing row")
             return self._fetch_collection_write_off(cursor, UUID(str(row[0])))
 
+    def list_unapplied_cash_applications_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredUnappliedCashApplication, ...]:
+        """Return leftover applications limited to one tenant.
+
+        Leftover-apply persist remains a later #84 slice. Unused-invoice
+        void still fail-closes on payment receipts, credit applies, and
+        write-offs that already reload.
+        """
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT unapplied_cash_application_id
+                FROM billing_core.unapplied_cash_application
+                WHERE tenant_account_id = %s
+                """,
+                (tenant_account_id,),
+            )
+            cursor.fetchall()
+            return ()
+
     def apply_collection_write_off(
         self, collection_case_id: UUID, write_off_amount: Any
     ) -> StoredCollectionCase:
@@ -2599,6 +2623,47 @@ class PostgresUsageLedger:
             updated = cursor.fetchone()
             if updated is None:  # pragma: no cover - the row is locked above
                 raise ValueError("collection settlement requires a stored collection case")
+            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
+
+    def mark_collection_case_voided(
+        self, collection_case_id: UUID, expected_outstanding: Any
+    ) -> StoredCollectionCase:
+        """Close an unused open or dunning case as ``voided`` at exact zero."""
+        expected = parse_exact_decimal(format_exact_decimal(expected_outstanding))
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
+                       currency_code, collection_case_status, outstanding_amount, opened_at
+                FROM billing_core.collection_case
+                WHERE collection_case_id = %s
+                FOR UPDATE
+                """,
+                (collection_case_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("collection void requires a stored collection case")
+            stored = self._collection_case_from_row(row)
+            if stored.collection_case_status == "voided":
+                return stored
+            if stored.collection_case_status not in {"open", "dunning"}:
+                raise ValueError("only open or dunning collection cases can void")
+            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+            if remaining != expected:
+                raise ValueError("collection void remaining must equal the issued amount")
+            cursor.execute(
+                """
+                UPDATE billing_core.collection_case
+                SET collection_case_status = 'voided', outstanding_amount = 0
+                WHERE collection_case_id = %s
+                RETURNING collection_case_id
+                """,
+                (collection_case_id,),
+            )
+            updated = cursor.fetchone()
+            if updated is None:  # pragma: no cover - the row is locked above
+                raise ValueError("collection void requires a stored collection case")
             return self._fetch_collection_case(cursor, UUID(str(updated[0])))
 
     def get_payment_intent(self, payment_intent_id: UUID) -> StoredPaymentIntent | None:
@@ -3147,6 +3212,131 @@ class PostgresUsageLedger:
                 if row is None:
                     raise ValueError("issued credit note identity conflicts with an existing row")
             return self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
+
+    def find_issued_invoice_void(
+        self, tenant_account_id: UUID, issued_invoice_id: UUID
+    ) -> StoredIssuedInvoiceVoid | None:
+        """Return the void row for one tenant issued invoice, if any."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_invoice_void_id
+                FROM billing_core.issued_invoice_void
+                WHERE tenant_account_id = %s AND issued_invoice_id = %s
+                """,
+                (tenant_account_id, issued_invoice_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_issued_invoice_void(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_issued_invoice_void(
+        self, issued_invoice_void_id: UUID
+    ) -> StoredIssuedInvoiceVoid | None:
+        """Return one issued-invoice void by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_invoice_void_id
+                FROM billing_core.issued_invoice_void
+                WHERE issued_invoice_void_id = %s
+                """,
+                (issued_invoice_void_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_issued_invoice_void(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_issued_invoice_voids_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredIssuedInvoiceVoid, ...]:
+        """Return issued-invoice voids limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_invoice_void_id
+                FROM billing_core.issued_invoice_void
+                WHERE tenant_account_id = %s
+                ORDER BY voided_at, issued_invoice_void_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_issued_invoice_void(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_issued_invoice_void(
+        self, issued_invoice_void: StoredIssuedInvoiceVoid
+    ) -> StoredIssuedInvoiceVoid:
+        """Persist one unused issued-invoice void or return its identity replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(issued_invoice_void.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+            issued_invoice_void.source_payload_hash
+        ) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if issued_invoice_void.issued_invoice_void_status != "recorded":
+            raise ValueError("issued_invoice_void_status must be recorded")
+        remaining = parse_exact_decimal(
+            format_exact_decimal(issued_invoice_void.remaining_outstanding_amount)
+        )
+        if remaining != 0:
+            raise ValueError("issued-invoice void remaining must be exact zero")
+        voided_amount = parse_exact_decimal(
+            format_exact_decimal(issued_invoice_void.voided_amount)
+        )
+        if voided_amount <= 0:
+            raise ValueError("issued-invoice void amount must be a positive exact decimal")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.issued_invoice_void
+                    (issued_invoice_void_id, tenant_account_id, issued_invoice_id,
+                     invoice_draft_id, collection_case_id,
+                     issued_invoice_void_contract_version, source_payload_hash,
+                     currency_code, voided_amount, remaining_outstanding_amount,
+                     issued_invoice_void_status, voided_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING issued_invoice_void_id
+                """,
+                (
+                    issued_invoice_void.issued_invoice_void_id,
+                    issued_invoice_void.tenant_account_id,
+                    issued_invoice_void.issued_invoice_id,
+                    issued_invoice_void.invoice_draft_id,
+                    issued_invoice_void.collection_case_id,
+                    issued_invoice_void.issued_invoice_void_contract_version,
+                    issued_invoice_void.source_payload_hash,
+                    issued_invoice_void.currency_code,
+                    voided_amount,
+                    remaining,
+                    issued_invoice_void.issued_invoice_void_status,
+                    issued_invoice_void.voided_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT issued_invoice_void_id
+                    FROM billing_core.issued_invoice_void
+                    WHERE tenant_account_id = %s AND issued_invoice_id = %s
+                    """,
+                    (
+                        issued_invoice_void.tenant_account_id,
+                        issued_invoice_void.issued_invoice_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        "issued-invoice void identity conflicts with an existing row"
+                    )
+            return self._fetch_issued_invoice_void(cursor, UUID(str(row[0])))
 
     def find_issued_credit_note_void(
         self, tenant_account_id: UUID, issued_credit_note_id: UUID
@@ -4921,6 +5111,45 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(issued_credit_note_id)
         return self._issued_credit_note_from_row(row)
+
+    @staticmethod
+    def _issued_invoice_void_from_row(row: tuple[Any, ...]) -> StoredIssuedInvoiceVoid:
+        """Decode one normalized unused issued-invoice void row."""
+        return StoredIssuedInvoiceVoid(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            None if row[4] is None else UUID(str(row[4])),
+            row[5],
+            row[6],
+            row[7],
+            parse_exact_decimal(format_exact_decimal(row[8])),
+            parse_exact_decimal(format_exact_decimal(row[9])),
+            row[10],
+            row[11],
+        )
+
+    def _fetch_issued_invoice_void(
+        self, cursor: Any, issued_invoice_void_id: UUID
+    ) -> StoredIssuedInvoiceVoid:
+        """Hydrate one unused issued-invoice void."""
+        cursor.execute(
+            """
+            SELECT issued_invoice_void_id, tenant_account_id, issued_invoice_id,
+                   invoice_draft_id, collection_case_id,
+                   issued_invoice_void_contract_version, source_payload_hash,
+                   currency_code, voided_amount, remaining_outstanding_amount,
+                   issued_invoice_void_status, voided_at
+            FROM billing_core.issued_invoice_void
+            WHERE issued_invoice_void_id = %s
+            """,
+            (issued_invoice_void_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(issued_invoice_void_id)
+        return self._issued_invoice_void_from_row(row)
 
     @staticmethod
     def _issued_credit_note_void_from_row(
