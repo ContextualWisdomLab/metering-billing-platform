@@ -1659,6 +1659,51 @@ test("validated morning leftover-refund journal shows exact unapplied-cash debit
   assert.ok(!("retained_earnings" in statement));
 });
 
+test("validated morning write-off journal shows exact write-off-expense debit and wait", () => {
+  const statement = loadFixture("validated_morning_write_off_journal.json");
+  const leftoverWriteOff = loadFixture("recorded_leftover_collection_write_off.json");
+  const leftoverRefundJournal = loadFixture("validated_morning_leftover_refund_journal.json");
+  const leftoverApply = loadFixture("applied_morning_unapplied_cash.json");
+  const html = renderJournalProposal(statement);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, /validated/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Let AIS pull the validated journal/);
+  assert.equal(statement.proposal_status, "validated");
+  assert.equal(journalProposalAmount(statement), "0.001");
+  assert.equal(statement.lines[0].account_role_code, "write_off_expense");
+  assert.equal(statement.lines[0].debit_amount, leftoverWriteOff.write_off_amount);
+  assert.equal(statement.lines[0].credit_amount, "0");
+  assert.equal(statement.lines[1].account_role_code, "accounts_receivable");
+  assert.equal(statement.lines[1].debit_amount, "0");
+  assert.equal(statement.lines[1].credit_amount, leftoverWriteOff.write_off_amount);
+  assert.equal(statement.lines.length, 2);
+  assert.equal(
+    statement.source_event_references[0],
+    `urn:cwl:tenant_001:collection_write_off:${leftoverWriteOff.collection_write_off_id}`,
+  );
+  assert.equal(leftoverWriteOff.remaining_outstanding_amount, "0");
+  assert.equal(leftoverWriteOff.collection_write_off_status, "recorded");
+  assert.equal(leftoverApply.remaining_outstanding_amount, "19.999");
+  assert.notEqual(statement.proposal_id, leftoverRefundJournal.proposal_id);
+  assert.ok(!("next_operator_action" in statement));
+  assert.equal(typeof statement.lines[0].debit_amount, "string");
+  assert.notEqual(typeof statement.lines[0].debit_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: journalProposalAmount(statement),
+    currency_code: statement.transaction_currency,
+  }), /0\.001 USD/);
+  assert.match(renderStatusChip({
+    amount_due: journalProposalAmount(statement),
+    tax_amount: "0",
+    status_label: statement.proposal_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("journal_entry_id" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
 test("validated morning cash journal shows exact received amount and wait", () => {
   const statement = loadFixture("validated_morning_cash_journal.json");
   const fullReceipt = loadFixture("applied_full_payment_receipt.json");
