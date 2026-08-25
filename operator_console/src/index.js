@@ -154,3 +154,9 @@ export {
   COLLECTION_WRITE_OFF_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionWriteOffActionCopy,
 } from "./collection_write_off.js";
+export {
+  renderJournalProposal,
+  JOURNAL_PROPOSAL_CUSTOMER_COPY,
+  journalProposalAmount,
+  nextOperatorActionCopy as nextJournalProposalActionCopy,
+} from "./journal_proposal.js";

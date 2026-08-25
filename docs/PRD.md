@@ -135,6 +135,7 @@ contextual-orchestrator usage
 - Cash, AR, and credit proposals share `journal_proposal` and appear in the same list. There is no cash-specific GET route.
 - HTTP 200 is a successful read. HTTP 422 is a missing tenant or illegal filter. HTTP 404 is an unknown route or unknown/cross-tenant proposal.
 - Query never mutates `proposal_status` and never emits `posted`. AIS pulls validated proposals and owns `posting_receipt`.
+- `operator_console` Storybook adds one `JournalProposal` story for the validated morning cash-journal GET. There is no login wall, Stripe, AIS call, journal compose, or production SPA.
 
 ## Posting-receipt observation acceptance
 

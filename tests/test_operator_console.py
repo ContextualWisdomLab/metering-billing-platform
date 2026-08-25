@@ -40,6 +40,7 @@ from metering_billing.contracts import (
     validate_issued_credit_note_void_presentment,
     validate_issued_invoice_void_presentment,
     validate_collection_write_off_presentment,
+    validate_journal_proposal,
 )
 from metering_billing.exact_decimal import parse_exact_decimal
 
@@ -167,10 +168,12 @@ UNAPPLIED_CASH_FIXTURE_NAMES = (
 ISSUED_CREDIT_NOTE_VOID_FIXTURE_NAMES = ("voided_unused_issued_credit_note.json",)
 ISSUED_INVOICE_VOID_FIXTURE_NAMES = ("voided_unused_issued_invoice.json",)
 COLLECTION_WRITE_OFF_FIXTURE_NAMES = ("recorded_leftover_collection_write_off.json",)
+JOURNAL_PROPOSAL_FIXTURE_NAMES = ("validated_morning_cash_journal.json",)
 COLLECTION_WRITE_OFF_MONEY_FIELDS = (
     "write_off_amount",
     "remaining_outstanding_amount",
 )
+JOURNAL_PROPOSAL_MONEY_FIELDS = ("debit_amount", "credit_amount")
 UNAPPLIED_CASH_MONEY_FIELDS = (
     "unapplied_amount",
     "received_amount",
@@ -897,6 +900,30 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("collection_write_off_outcome_code", leftover_write_off)
         self.assertNotIn("card_pan", leftover_write_off)
         self.assertNotIn("legal_invoice_number", leftover_write_off)
+        cash_journal = self._fixture("validated_morning_cash_journal.json")
+        full_receipt = self._fixture("applied_full_payment_receipt.json")
+        pending_outbox = self._fixture("pending_journal_validated.json")
+        self.assertEqual(validate_journal_proposal(cash_journal), ())
+        self.assertEqual(cash_journal["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(cash_journal["proposal_status"], "validated")
+        self.assertEqual(cash_journal["transaction_currency"], "USD")
+        self.assertEqual(cash_journal["lines"][0]["debit_amount"], "0.003705")
+        self.assertEqual(cash_journal["lines"][1]["credit_amount"], "0.003705")
+        self.assertEqual(
+            cash_journal["source_event_references"],
+            [f"urn:cwl:tenant_001:cash_receipt:{full_receipt['payment_receipt_id']}"],
+        )
+        self.assertEqual(cash_journal["proposal_id"], pending_outbox["source_id"])
+        self.assertNotIn("next_operator_action", cash_journal)
+        for line in cash_journal["lines"]:
+            for field_name in JOURNAL_PROPOSAL_MONEY_FIELDS:
+                self.assertIsInstance(line[field_name], str)
+                self.assertNotIsInstance(line[field_name], float)
+                parse_exact_decimal(line[field_name])
+        self.assertNotIn("journal_entry_id", cash_journal)
+        self.assertNotIn("card_pan", cash_journal)
+        self.assertNotIn("retained_earnings", cash_journal)
+        self.assertNotIn("310100", json.dumps(cash_journal))
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
@@ -949,6 +976,7 @@ class OperatorConsoleTests(unittest.TestCase):
             "IssuedCreditNoteVoid",
             "IssuedInvoiceVoid",
             "CollectionWriteOff",
+            "JournalProposal",
         ):
             self.assertIn(story_name, inventory)
         for fixture_name in (
@@ -981,6 +1009,7 @@ class OperatorConsoleTests(unittest.TestCase):
             + ISSUED_CREDIT_NOTE_VOID_FIXTURE_NAMES
             + ISSUED_INVOICE_VOID_FIXTURE_NAMES
             + COLLECTION_WRITE_OFF_FIXTURE_NAMES
+            + JOURNAL_PROPOSAL_FIXTURE_NAMES
         ):
             self.assertIn(fixture_name, inventory)
         self.assertIn("Collect or credit", inventory)
@@ -1038,6 +1067,7 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Void an unused issued credit note, then wait", inventory)
         self.assertIn("Void an unused issued invoice, then wait", inventory)
         self.assertIn("Write off leftover remaining, then settle", inventory)
+        self.assertIn("Let AIS pull the validated journal", inventory)
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""

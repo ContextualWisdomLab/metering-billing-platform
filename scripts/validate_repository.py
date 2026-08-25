@@ -140,6 +140,7 @@ REQUIRED_FILES = (
     "docs/adr/0107-operator-collection-write-off-storybook.md",
     "docs/adr/0108-operator-collection-case-settlement-storybook.md",
     "docs/adr/0109-operator-issued-invoice-void-storybook.md",
+    "docs/adr/0110-operator-journal-proposal-storybook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

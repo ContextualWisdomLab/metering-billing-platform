@@ -159,6 +159,12 @@ import {
   COLLECTION_WRITE_OFF_CUSTOMER_COPY,
   nextOperatorActionCopy as nextCollectionWriteOffActionCopy,
 } from "../src/collection_write_off.js";
+import {
+  renderJournalProposal,
+  JOURNAL_PROPOSAL_CUSTOMER_COPY,
+  journalProposalAmount,
+  nextOperatorActionCopy as nextJournalProposalActionCopy,
+} from "../src/journal_proposal.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -1444,6 +1450,47 @@ test("recorded leftover remaining write-off shows exact zero remaining and settl
   assert.ok(!("retained_earnings" in statement));
 });
 
+test("validated morning cash journal shows exact received amount and wait", () => {
+  const statement = loadFixture("validated_morning_cash_journal.json");
+  const fullReceipt = loadFixture("applied_full_payment_receipt.json");
+  const pendingOutbox = loadFixture("pending_journal_validated.json");
+  const html = renderJournalProposal(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /validated/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Let AIS pull the validated journal/);
+  assert.equal(
+    JOURNAL_PROPOSAL_CUSTOMER_COPY,
+    "Let AIS pull the validated journal.",
+  );
+  assert.equal(nextJournalProposalActionCopy("wait"), "Wait");
+  assert.equal(nextJournalProposalActionCopy("collect"), "Let AIS pull");
+  assert.equal(statement.proposal_status, "validated");
+  assert.equal(journalProposalAmount(statement), "0.003705");
+  assert.equal(statement.lines[0].debit_amount, fullReceipt.received_amount);
+  assert.equal(
+    statement.source_event_references[0],
+    `urn:cwl:tenant_001:cash_receipt:${fullReceipt.payment_receipt_id}`,
+  );
+  assert.equal(statement.proposal_id, pendingOutbox.source_id);
+  assert.ok(!("next_operator_action" in statement));
+  assert.equal(typeof statement.lines[0].debit_amount, "string");
+  assert.notEqual(typeof statement.lines[0].debit_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: journalProposalAmount(statement),
+    currency_code: statement.transaction_currency,
+  }), /0\.003705 USD/);
+  assert.match(renderStatusChip({
+    amount_due: journalProposalAmount(statement),
+    tax_amount: "0",
+    status_label: statement.proposal_status,
+  }), /oc-status-chip--draft/);
+  assert.ok(!("journal_entry_id" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
 test("project-grouped morning rated spend keeps the stored project URN unmixed", () => {
   const statement = loadFixture("rated_spend_morning_project.json");
   const html = renderRatedSpend(statement);
@@ -1783,6 +1830,21 @@ test("float money fails closed", () => {
       renderCollectionWriteOff({
         write_off_amount: 0.001,
         remaining_outstanding_amount: "0",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderJournalProposal({
+        transaction_currency: "USD",
+        proposal_status: "validated",
+        lines: [
+          {
+            account_role_code: "cash_receipt",
+            debit_amount: 0.003705,
+            credit_amount: "0",
+          },
+        ],
       }),
     TypeError,
   );
