@@ -183,23 +183,28 @@ class UnappliedCashService:
         source_payload_hash = compute_unapplied_cash_payload_hash(
             _canonical_unapplied_snapshot(payment_receipt, leftover)
         )
-        stored = self.ledger.insert_unapplied_cash(
-            StoredUnappliedCash(
-                unapplied_cash_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                payment_receipt_id=payment_receipt.payment_receipt_id,
-                payment_intent_id=payment_receipt.payment_intent_id,
-                collection_case_id=payment_receipt.collection_case_id,
-                unapplied_cash_contract_version=UNAPPLIED_CASH_CONTRACT_VERSION,
-                source_payload_hash=source_payload_hash,
-                currency_code=payment_receipt.currency_code,
-                unapplied_amount=leftover,
-                received_amount=payment_receipt.received_amount,
-                applied_amount=applied_amount,
-                unapplied_cash_status=UNAPPLIED_CASH_STATUS,
-                parked_at=self._clock(),
-            )
+        candidate = StoredUnappliedCash(
+            unapplied_cash_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            payment_receipt_id=payment_receipt.payment_receipt_id,
+            payment_intent_id=payment_receipt.payment_intent_id,
+            collection_case_id=payment_receipt.collection_case_id,
+            unapplied_cash_contract_version=UNAPPLIED_CASH_CONTRACT_VERSION,
+            source_payload_hash=source_payload_hash,
+            currency_code=payment_receipt.currency_code,
+            unapplied_amount=leftover,
+            received_amount=payment_receipt.received_amount,
+            applied_amount=applied_amount,
+            unapplied_cash_status=UNAPPLIED_CASH_STATUS,
+            parked_at=self._clock(),
         )
+        stored = self.ledger.insert_unapplied_cash(candidate)
+        if stored.unapplied_cash_id != candidate.unapplied_cash_id:
+            return _from_stored(
+                stored,
+                tenant.tenant_reference,
+                UnappliedCashOutcomeCode.DUPLICATE_REPLAY,
+            )
         return _from_stored(
             stored, tenant.tenant_reference, UnappliedCashOutcomeCode.ACCEPTED
         )

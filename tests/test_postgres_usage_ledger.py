@@ -31,6 +31,8 @@ from metering_billing import (
     IssuedInvoiceVoidService,
     PaymentIntentService,
     PostgresUsageLedger,
+    UnappliedCashPresentmentService,
+    UnappliedCashService,
     SpendBudgetEvaluationPresentmentService,
     SpendBudgetApproachingSignalPresentmentService,
     SpendBudgetApproachingSignalService,
@@ -55,6 +57,7 @@ from metering_billing.errors import (
     IssuedInvoiceVoidPresentmentQueryError,
     RejectionReasonCode,
     SpendBudgetPresentmentQueryError,
+    UnappliedCashPresentmentQueryError,
     UsageEventConflict,
 )
 from metering_billing.issued_credit_note import compute_issued_credit_note_payload_hash
@@ -74,6 +77,7 @@ from metering_billing.usage_ledger import (
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
+    StoredUnappliedCash,
     StoredSpendBudget,
     StoredWebhookDeliveryAttempt,
 )
@@ -153,6 +157,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 billing_core.webhook_delivery_attempt,
                 billing_core.webhook_outbox_event,
                 billing_core.webhook_subscription,
+                billing_core.unapplied_cash_application,
+                billing_core.unapplied_cash,
                 billing_core.payment_receipt,
                 billing_core.payment_intent,
                 billing_core.issued_invoice_void,
@@ -3750,6 +3756,315 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             3,
         )
+
+    def test_unapplied_cash_is_durable(self) -> None:
+        """Persist one parked leftover and keep GET presentment after restart."""
+        leftover = Decimal("0.001")
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
+        self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
+        assert collection.collection_case_id is not None
+        intent = PaymentIntentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).project_payment_intent(TENANT_ONE, collection.collection_case_id)
+        self.assertEqual(intent.payment_intent_outcome_code.value, "accepted")
+        assert intent.payment_intent_id is not None
+        received = self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount
+        self.assertGreater(received, leftover)
+        self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
+        remaining_before = received
+        receipt = PaymentSettlementService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).record_payment_receipt(TENANT_ONE, intent.payment_intent_id, received)
+        self.assertEqual(receipt.payment_settlement_outcome_code.value, "accepted")
+        assert receipt.payment_receipt_id is not None
+        prior_outbox = len(
+            self.ledger.list_webhook_outbox_events_for_tenant(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+            )
+        )
+        parked_at = datetime(2026, 8, 18, 13, 0, tzinfo=UTC)
+        accepted = UnappliedCashService(
+            self.ledger, clock=lambda: parked_at
+        ).park_unapplied_cash(TENANT_ONE, receipt.payment_receipt_id, leftover)
+        self.assertEqual(accepted.unapplied_cash_outcome_code.value, "accepted")
+        assert accepted.unapplied_cash_id is not None
+        stored = self.ledger.get_unapplied_cash(accepted.unapplied_cash_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
+        self.assertEqual(stored.payment_receipt_id, receipt.payment_receipt_id)
+        self.assertEqual(stored.payment_intent_id, intent.payment_intent_id)
+        self.assertEqual(stored.collection_case_id, collection.collection_case_id)
+        self.assertEqual(stored.currency_code, "USD")
+        self.assertEqual(stored.unapplied_amount, leftover)
+        self.assertEqual(stored.received_amount, received)
+        self.assertEqual(stored.applied_amount, received)
+        self.assertEqual(stored.unapplied_cash_status, "parked")
+        self.assertEqual(stored.parked_at, parked_at)
+        self.assertEqual(stored.source_payload_hash, accepted.source_payload_hash)
+        self.assertIsInstance(stored.unapplied_amount, Decimal)
+        self.assertNotIsInstance(stored.unapplied_amount, float)
+        reloaded_receipt = self.ledger.get_payment_receipt(receipt.payment_receipt_id)
+        assert reloaded_receipt is not None
+        self.assertEqual(reloaded_receipt.received_amount, received)
+        parked_case = self.ledger.get_collection_case(collection.collection_case_id)
+        assert parked_case is not None
+        self.assertEqual(parked_case.outstanding_amount, remaining_before - received)
+        self.assertEqual(
+            self.ledger.find_unapplied_cash(stored.tenant_account_id, stored.payment_receipt_id),
+            stored,
+        )
+        self.assertEqual(
+            self.ledger.list_unapplied_cash_for_tenant(stored.tenant_account_id),
+            (stored,),
+        )
+        self.assertEqual(
+            self.ledger.list_unapplied_cash_for_tenant(
+                self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+            ),
+            (),
+        )
+        self.assertIsNone(self.ledger.get_unapplied_cash(uuid4()))
+        self.assertIsNone(self.ledger.find_unapplied_cash(stored.tenant_account_id, uuid4()))
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.unapplied_cash"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            len(self.ledger.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)),
+            prior_outbox,
+        )
+
+        replay = UnappliedCashService(
+            self.ledger, clock=lambda: parked_at
+        ).park_unapplied_cash(TENANT_ONE, receipt.payment_receipt_id, leftover)
+        self.assertEqual(replay.unapplied_cash_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.unapplied_cash_id, stored.unapplied_cash_id)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.unapplied_cash"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
+            remaining_before - received,
+        )
+        self.assertEqual(
+            len(self.ledger.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)),
+            prior_outbox,
+        )
+
+        rejected = UnappliedCashService(self.ledger).park_unapplied_cash(
+            TENANT_ONE, uuid4(), leftover
+        )
+        self.assertEqual(rejected.unapplied_cash_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.unapplied_cash"
+            ).fetchone()[0],
+            1,
+        )
+        mismatch = UnappliedCashService(self.ledger).park_unapplied_cash(
+            TENANT_TWO, receipt.payment_receipt_id, leftover
+        )
+        self.assertEqual(mismatch.unapplied_cash_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.unapplied_cash"
+            ).fetchone()[0],
+            1,
+        )
+        afternoon = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf71c",
+            source_event_key="workflow_381:step_06:attempt_01",
+            occurred_at="2026-08-16T11:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "500",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(afternoon)
+        afternoon_window = TimeWindow.from_iso8601(
+            "2026-08-16T11:00:00Z", "2026-08-16T12:00:00Z"
+        )
+        afternoon_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, afternoon_window, 1, rate_card_code="cwl_standard"
+        )
+        afternoon_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, afternoon_rating.rating_run_id
+        )
+        afternoon_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, afternoon_draft.invoice_draft_id)
+        assert afternoon_collection.collection_case_id is not None
+        afternoon_intent = PaymentIntentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).project_payment_intent(TENANT_ONE, afternoon_collection.collection_case_id)
+        assert afternoon_intent.payment_intent_id is not None
+        afternoon_received = self.ledger.get_collection_case(
+            afternoon_collection.collection_case_id
+        ).outstanding_amount
+        afternoon_receipt = PaymentSettlementService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 16, 0, tzinfo=UTC)
+        ).record_payment_receipt(
+            TENANT_ONE, afternoon_intent.payment_intent_id, afternoon_received
+        )
+        self.assertEqual(afternoon_receipt.payment_settlement_outcome_code.value, "accepted")
+        assert afternoon_receipt.payment_receipt_id is not None
+        omitted = UnappliedCashService(self.ledger).park_unapplied_cash(
+            TENANT_ONE, afternoon_receipt.payment_receipt_id
+        )
+        self.assertEqual(omitted.unapplied_cash_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.unapplied_cash"
+            ).fetchone()[0],
+            1,
+        )
+        currency_mismatch = UnappliedCashService(self.ledger).park_unapplied_cash(
+            TENANT_ONE,
+            afternoon_receipt.payment_receipt_id,
+            leftover,
+            currency_code="EUR",
+        )
+        self.assertEqual(currency_mismatch.unapplied_cash_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.unapplied_cash"
+            ).fetchone()[0],
+            1,
+        )
+        later = UnappliedCashService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 21, 0, tzinfo=UTC)
+        ).park_unapplied_cash(TENANT_ONE, afternoon_receipt.payment_receipt_id, leftover)
+        self.assertEqual(later.unapplied_cash_outcome_code.value, "accepted")
+        assert later.unapplied_cash_id is not None
+        later_stored = self.ledger.get_unapplied_cash(later.unapplied_cash_id)
+        assert later_stored is not None
+        self.assertEqual(later_stored.payment_receipt_id, afternoon_receipt.payment_receipt_id)
+        self.assertEqual(later_stored.unapplied_amount, leftover)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.unapplied_cash"
+            ).fetchone()[0],
+            2,
+        )
+
+        self.assertEqual(self.ledger.insert_unapplied_cash(stored), stored)
+        self.assertEqual(
+            self.ledger.insert_unapplied_cash(replace(stored, unapplied_cash_id=uuid4())),
+            stored,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_unapplied_cash(replace(stored, currency_code="usd"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_unapplied_cash(replace(stored, source_payload_hash="md5:abc"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_unapplied_cash(
+                replace(stored, unapplied_cash_status="applied")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_unapplied_cash(
+                replace(stored, unapplied_amount=Decimal("0"), unapplied_cash_id=uuid4())
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_unapplied_cash(
+                replace(
+                    stored,
+                    unapplied_amount=received + leftover,
+                    unapplied_cash_id=uuid4(),
+                )
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_unapplied_cash(
+                replace(stored, received_amount=Decimal("0"), unapplied_cash_id=uuid4())
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_unapplied_cash(
+                replace(stored, applied_amount=Decimal("0"), unapplied_cash_id=uuid4())
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_unapplied_cash(
+                replace(
+                    stored,
+                    unapplied_cash_id=later.unapplied_cash_id,
+                    payment_receipt_id=uuid4(),
+                    source_payload_hash="sha256:" + "d" * 64,
+                )
+            )
+
+        class BlindFindLedger(PostgresUsageLedger):
+            """Force the insert path used after a concurrent identity race."""
+
+            def find_unapplied_cash(self, *args, **kwargs):
+                return None
+
+        raced = UnappliedCashService(
+            BlindFindLedger(self.connection), clock=lambda: parked_at
+        ).park_unapplied_cash(TENANT_ONE, receipt.payment_receipt_id, leftover)
+        self.assertEqual(raced.unapplied_cash_outcome_code.value, "duplicate_replay")
+        self.assertEqual(raced.unapplied_cash_id, stored.unapplied_cash_id)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.unapplied_cash"
+            ).fetchone()[0],
+            2,
+        )
+
+        fresh = PostgresUsageLedger(self.connection)
+        reloaded = fresh.get_unapplied_cash(stored.unapplied_cash_id)
+        self.assertEqual(reloaded, stored)
+        presentment = UnappliedCashPresentmentService(fresh).present_unapplied_cash(
+            TENANT_ONE, stored.unapplied_cash_id
+        )
+        self.assertEqual(presentment.unapplied_amount, leftover)
+        self.assertEqual(presentment.unapplied_cash_status, "parked")
+        self.assertEqual(presentment.next_operator_action, "wait")
+        self.assertEqual(presentment.received_amount, received)
+        page = UnappliedCashPresentmentService(fresh).list_unapplied_cash(TENANT_ONE)
+        self.assertEqual(
+            {row.unapplied_cash_id for row in page.unapplied_cash},
+            {stored.unapplied_cash_id, later.unapplied_cash_id},
+        )
+        reloaded_presentment = UnappliedCashPresentmentService(
+            PostgresUsageLedger(self.connection)
+        ).present_unapplied_cash(TENANT_ONE, stored.unapplied_cash_id)
+        self.assertEqual(
+            reloaded_presentment.unapplied_cash_id, presentment.unapplied_cash_id
+        )
+        with self.assertRaises(UnappliedCashPresentmentQueryError) as missing_pin:
+            UnappliedCashPresentmentService(fresh).present_unapplied_cash(
+                "", stored.unapplied_cash_id
+            )
+        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(UnappliedCashPresentmentQueryError) as other_pin:
+            UnappliedCashPresentmentService(fresh).present_unapplied_cash(
+                TENANT_TWO, stored.unapplied_cash_id
+            )
+        self.assertEqual(other_pin.exception.rejection_reason_code, "unapplied_cash_not_found")
 
     def test_transaction_context_and_connection_lifecycle(self) -> None:
         """The outer ingestion transaction avoids a partial receipt and owned connections close."""
