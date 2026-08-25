@@ -1,9 +1,9 @@
 {
   "name": "@cwl/operator-console",
-  "version": "0.39.0",
+  "version": "0.40.0",
   "private": true,
   "type": "module",
-  "description": "Operator presentment Storybook for invoice-draft, issued-invoice, collection-case, collection-aging, account-statement, rated-spend, spend-budget, budget-status, spend-budget-over, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, tax-assessment, posting-receipt-observation, webhook-delivery, tenant-api-credential, webhook-subscription, dunning-notice, and webhook-outbox-event statement contracts.",
+  "description": "Operator presentment Storybook for invoice-draft, issued-invoice, collection-case, collection-aging, account-statement, rated-spend, spend-budget, budget-status, spend-budget-over, spend-budget-approaching, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, tax-assessment, posting-receipt-observation, webhook-delivery, tenant-api-credential, webhook-subscription, dunning-notice, and webhook-outbox-event statement contracts.",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
