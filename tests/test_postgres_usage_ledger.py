@@ -3734,7 +3734,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(raced.issued_invoice_void_id, raced_inserted.issued_invoice_void_id)
         raced_case = self.ledger.get_collection_case(race_collection.collection_case_id)
         assert raced_case is not None
-        self.assertEqual(raced_case.collection_case_status, "open")
+        self.assertEqual(raced_case.collection_case_status, "voided")
+        self.assertEqual(raced_case.outstanding_amount, Decimal("0"))
+        self.assertEqual(raced.collection_case_status, "voided")
+        self.assertEqual(raced.remaining_outstanding_amount, Decimal("0"))
         raced_without_case = IssuedInvoiceVoidService(
             BlindFindLedger(self.connection), clock=lambda: voided_at
         ).void_issued_invoice(TENANT_ONE, afternoon_issued.issued_invoice_id)
@@ -3764,6 +3767,107 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
             ).fetchone()[0],
             3,
+        )
+
+        night = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bfa1c",
+            source_event_key="workflow_381:step_09:attempt_01",
+            occurred_at="2026-08-16T14:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "250",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(night)
+        night_window = TimeWindow.from_iso8601(
+            "2026-08-16T14:00:00Z", "2026-08-16T15:00:00Z"
+        )
+        night_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, night_window, 1, rate_card_code="cwl_standard"
+        )
+        night_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, night_rating.rating_run_id
+        )
+        night_issued = IssuedInvoiceService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 19, 0, tzinfo=UTC)
+        ).issue_invoice(TENANT_ONE, night_draft.invoice_draft_id)
+        self.assertEqual(night_issued.issued_invoice_outcome_code.value, "accepted")
+        assert night_issued.issued_invoice_id is not None
+        night_collection = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, night_draft.invoice_draft_id)
+        self.assertEqual(night_collection.collection_case_outcome_code.value, "accepted")
+        assert night_collection.collection_case_id is not None
+        stored_night_invoice = self.ledger.get_issued_invoice(night_issued.issued_invoice_id)
+        assert stored_night_invoice is not None
+        night_hash = compute_issued_invoice_void_payload_hash(
+            {
+                "issued_invoice_id": str(stored_night_invoice.issued_invoice_id),
+                "invoice_draft_id": str(stored_night_invoice.invoice_draft_id),
+                "currency_code": stored_night_invoice.currency_code,
+                "voided_amount": format_exact_decimal(
+                    stored_night_invoice.tax_inclusive_amount
+                ),
+                "issued_invoice_void_contract_version": 1,
+            }
+        )
+        inserted_without_close = self.ledger.insert_issued_invoice_void(
+            StoredIssuedInvoiceVoid(
+                issued_invoice_void_id=uuid4(),
+                tenant_account_id=tenant.tenant_account_id,
+                issued_invoice_id=stored_night_invoice.issued_invoice_id,
+                invoice_draft_id=stored_night_invoice.invoice_draft_id,
+                collection_case_id=night_collection.collection_case_id,
+                issued_invoice_void_contract_version=1,
+                source_payload_hash=night_hash,
+                currency_code=stored_night_invoice.currency_code,
+                voided_amount=stored_night_invoice.tax_inclusive_amount,
+                remaining_outstanding_amount=Decimal("0"),
+                issued_invoice_void_status="recorded",
+                voided_at=datetime(2026, 8, 18, 19, 30, tzinfo=UTC),
+            )
+        )
+        unclosed_case = self.ledger.get_collection_case(night_collection.collection_case_id)
+        assert unclosed_case is not None
+        self.assertEqual(unclosed_case.collection_case_status, "open")
+        self.assertEqual(
+            unclosed_case.outstanding_amount, stored_night_invoice.tax_inclusive_amount
+        )
+        healed_case = IssuedInvoiceVoidService(
+            self.ledger, clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, night_issued.issued_invoice_id)
+        self.assertEqual(healed_case.issued_invoice_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            healed_case.issued_invoice_void_id,
+            inserted_without_close.issued_invoice_void_id,
+        )
+        self.assertEqual(healed_case.collection_case_status, "voided")
+        self.assertEqual(healed_case.remaining_outstanding_amount, Decimal("0"))
+        closed_night = self.ledger.get_collection_case(night_collection.collection_case_id)
+        assert closed_night is not None
+        self.assertEqual(closed_night.collection_case_status, "voided")
+        self.assertEqual(closed_night.outstanding_amount, Decimal("0"))
+        already_healed = IssuedInvoiceVoidService(
+            self.ledger, clock=lambda: voided_at
+        ).void_issued_invoice(TENANT_ONE, night_issued.issued_invoice_id)
+        self.assertEqual(
+            already_healed.issued_invoice_void_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(already_healed.collection_case_status, "voided")
+        self.assertEqual(already_healed.remaining_outstanding_amount, Decimal("0"))
+        still_voided = self.ledger.get_collection_case(night_collection.collection_case_id)
+        assert still_voided is not None
+        self.assertEqual(still_voided.collection_case_status, "voided")
+        self.assertEqual(still_voided.outstanding_amount, Decimal("0"))
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
+            ).fetchone()[0],
+            4,
         )
 
     def test_unapplied_cash_is_durable(self) -> None:

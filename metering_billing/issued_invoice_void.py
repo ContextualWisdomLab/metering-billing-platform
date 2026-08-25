@@ -9,7 +9,10 @@ The service is the buyer-facing void path:
 4. Close an unused open or dunning case as ``voided`` at exact-zero remaining.
 
 Replay of the same tenant and ``issued_invoice_id`` returns the stored void
-and never re-closes the case.  First successful void enqueues one
+and does not insert a second row.  Already-``voided`` cases stay as-is.
+A crash after insert and before ``mark_collection_case_voided`` is healed
+when the stored void's case is still ``open`` or ``dunning`` and remaining
+still equals the issued amount.  First successful void enqueues one
 ``invoice.voided`` outbox event; replay is ``duplicate_replay`` with
 crash-heal enqueue.  The path does not emit a journal, refund, write-off,
 settlement, or AIS call.  The issued snapshot stays ``issued``; history is
@@ -194,11 +197,13 @@ class IssuedInvoiceVoidService:
         """Void one same-tenant issued invoice when its case is unused.
 
         Replay of the same tenant and ``issued_invoice_id`` returns the
-        stored ``issued_invoice_void_id`` and does not close the case
-        again.  Another tenant cannot see or void that invoice.  The
-        issued snapshot stays ``issued``.  First successful void
-        enqueues one ``invoice.voided`` outbox event.  Replay of that
-        void does not enqueue a second row.
+        stored ``issued_invoice_void_id`` and does not insert a second
+        row.  Already-``voided`` cases stay as-is.  A recorded void whose
+        case is still ``open`` or ``dunning`` at the issued remaining is
+        closed as ``voided`` at exact zero.  Another tenant cannot see
+        or void that invoice.  The issued snapshot stays ``issued``.
+        First successful void enqueues one ``invoice.voided`` outbox
+        event.  Replay of that void does not enqueue a second row.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -215,6 +220,9 @@ class IssuedInvoiceVoidService:
                     return _rejected(
                         IssuedInvoiceVoidRejectionReasonCode.ISSUED_INVOICE_NOT_FOUND
                     )
+            current_case = _heal_open_case_after_recorded_void(
+                self.ledger, existing, current_case
+            )
             result = _from_stored(
                 existing,
                 current_case,
@@ -265,6 +273,9 @@ class IssuedInvoiceVoidService:
                     return _rejected(
                         IssuedInvoiceVoidRejectionReasonCode.ISSUED_INVOICE_NOT_FOUND
                     )
+            current_case = _heal_open_case_after_recorded_void(
+                self.ledger, stored, current_case
+            )
             result = _from_stored(
                 stored,
                 current_case,
@@ -287,6 +298,37 @@ class IssuedInvoiceVoidService:
         )
         _enqueue_invoice_voided(self.ledger, tenant.tenant_reference, result)
         return result
+
+
+def _heal_open_case_after_recorded_void(
+    ledger: MemoryUsageLedger,
+    stored: StoredIssuedInvoiceVoid,
+    collection_case: StoredCollectionCase | None,
+) -> StoredCollectionCase | None:
+    """Close an unused open or dunning case left open after a recorded void.
+
+    Already-``voided`` cases stay as-is.  Replay does not reuse
+    ``settled``.  Only remaining that still equals the issued voided
+    amount is closed at exact zero.
+    """
+    if collection_case is None:
+        return None
+    if collection_case.collection_case_status == COLLECTION_CASE_VOIDED_STATUS:
+        return collection_case
+    if collection_case.collection_case_status not in {
+        COLLECTION_CASE_OPEN_STATUS,
+        COLLECTION_CASE_DUNNING_STATUS,
+    }:
+        return collection_case
+    remaining = collection_case.outstanding_amount
+    if remaining == 0:
+        remaining = ZERO
+    if remaining != stored.voided_amount:
+        return collection_case
+    return ledger.mark_collection_case_voided(
+        collection_case.collection_case_id,
+        stored.voided_amount,
+    )
 
 
 def _enqueue_invoice_voided(
