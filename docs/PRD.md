@@ -383,7 +383,7 @@ contextual-orchestrator usage
 
 ## Unapplied-cash acceptance
 
-- `POST /v1/payment-receipts/{payment_receipt_id}/unapplied-cash` parks leftover remittance against one same-tenant stored receipt. Replay of the same tenant and receipt returns the same `unapplied_cash_id`. PAN, CVC, and provider secrets are refused.
+- `POST /v1/payment-receipts/{payment_receipt_id}/unapplied-cash` parks leftover remittance against one same-tenant stored receipt. Replay of the same tenant and receipt returns the same `unapplied_cash_id`. `PostgresUsageLedger` persists that leftover so GET presentment survives process restart. PAN, CVC, and provider secrets are refused.
 - #12 still rejects overpay. Omitting leftover fail-closes as `payment_receipt_already_consumed`. A supplied leftover must be a positive exact decimal that does not exceed the stored receipt.
 - A known stored leftover presents one tenant-scoped statement with `unapplied_amount`, receipt snapshots, `unapplied_cash_status` (`parked`), and `next_operator_action` (`wait`).
 - `GET /v1/unapplied-cash/{unapplied_cash_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
