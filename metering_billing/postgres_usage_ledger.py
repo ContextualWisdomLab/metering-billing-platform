@@ -1,7 +1,8 @@
 """PostgreSQL repository for the durable usage-to-invoice vertical slice.
 
 The repository owns catalog rows, immutable usage facts, rating runs, invoice
-drafts, issued invoices, issued credit notes, collection cases, payment and
+drafts, issued invoices, issued credit notes, unused issued-credit-note voids,
+collection cases, payment and
 credit facts, journal proposals, published spend budgets, and the atomic
 webhook outbox used by the first commercial path. Every public operation uses
 the supplied PostgreSQL connection; the implementation never falls back to an
@@ -42,7 +43,9 @@ from metering_billing.usage_ledger import (
     StoredInvoiceDraft,
     StoredInvoiceDraftLine,
     StoredIngestionReceipt,
+    StoredCreditNoteApplication,
     StoredIssuedCreditNote,
+    StoredIssuedCreditNoteVoid,
     StoredIssuedInvoice,
     StoredIssuedInvoiceLine,
     StoredJournalProposal,
@@ -3145,6 +3148,146 @@ class PostgresUsageLedger:
                     raise ValueError("issued credit note identity conflicts with an existing row")
             return self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
 
+    def find_issued_credit_note_void(
+        self, tenant_account_id: UUID, issued_credit_note_id: UUID
+    ) -> StoredIssuedCreditNoteVoid | None:
+        """Return the void row for one tenant issued credit note, if any."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_credit_note_void_id
+                FROM billing_core.issued_credit_note_void
+                WHERE tenant_account_id = %s AND issued_credit_note_id = %s
+                """,
+                (tenant_account_id, issued_credit_note_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_issued_credit_note_void(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_issued_credit_note_void(
+        self, issued_credit_note_void_id: UUID
+    ) -> StoredIssuedCreditNoteVoid | None:
+        """Return one issued-credit-note void by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_credit_note_void_id
+                FROM billing_core.issued_credit_note_void
+                WHERE issued_credit_note_void_id = %s
+                """,
+                (issued_credit_note_void_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_issued_credit_note_void(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_issued_credit_note_voids_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredIssuedCreditNoteVoid, ...]:
+        """Return issued-credit-note voids limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_credit_note_void_id
+                FROM billing_core.issued_credit_note_void
+                WHERE tenant_account_id = %s
+                ORDER BY voided_at, issued_credit_note_void_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_issued_credit_note_void(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_issued_credit_note_void(
+        self, issued_credit_note_void: StoredIssuedCreditNoteVoid
+    ) -> StoredIssuedCreditNoteVoid:
+        """Persist one unused issued-credit-note void or return its identity replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(issued_credit_note_void.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+            issued_credit_note_void.source_payload_hash
+        ) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if issued_credit_note_void.issued_credit_note_void_status != "recorded":
+            raise ValueError("issued_credit_note_void_status must be recorded")
+        voided_amount = parse_exact_decimal(
+            format_exact_decimal(issued_credit_note_void.voided_amount)
+        )
+        if voided_amount <= 0:
+            raise ValueError(
+                "issued-credit-note void amount must be a positive exact decimal"
+            )
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.issued_credit_note_void
+                    (issued_credit_note_void_id, tenant_account_id,
+                     issued_credit_note_id, credit_adjustment_id, invoice_draft_id,
+                     issued_invoice_id, issued_credit_note_void_contract_version,
+                     source_payload_hash, currency_code, voided_amount,
+                     issued_credit_note_void_status, voided_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING issued_credit_note_void_id
+                """,
+                (
+                    issued_credit_note_void.issued_credit_note_void_id,
+                    issued_credit_note_void.tenant_account_id,
+                    issued_credit_note_void.issued_credit_note_id,
+                    issued_credit_note_void.credit_adjustment_id,
+                    issued_credit_note_void.invoice_draft_id,
+                    issued_credit_note_void.issued_invoice_id,
+                    issued_credit_note_void.issued_credit_note_void_contract_version,
+                    issued_credit_note_void.source_payload_hash,
+                    issued_credit_note_void.currency_code,
+                    voided_amount,
+                    issued_credit_note_void.issued_credit_note_void_status,
+                    issued_credit_note_void.voided_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT issued_credit_note_void_id
+                    FROM billing_core.issued_credit_note_void
+                    WHERE tenant_account_id = %s AND issued_credit_note_id = %s
+                    """,
+                    (
+                        issued_credit_note_void.tenant_account_id,
+                        issued_credit_note_void.issued_credit_note_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        "issued-credit-note void identity conflicts with an existing row"
+                    )
+            return self._fetch_issued_credit_note_void(cursor, UUID(str(row[0])))
+
+    def find_credit_note_application(
+        self, tenant_account_id: UUID, issued_credit_note_id: UUID
+    ) -> StoredCreditNoteApplication | None:
+        """Return the application for one tenant issued credit note, if any."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT credit_note_application_id
+                FROM billing_core.credit_note_application
+                WHERE tenant_account_id = %s AND issued_credit_note_id = %s
+                """,
+                (tenant_account_id, issued_credit_note_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_credit_note_application(
+                cursor, UUID(str(row[0]))
+            )
+
     def find_spend_budget(
         self,
         tenant_account_id: UUID,
@@ -4665,6 +4808,91 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(issued_credit_note_id)
         return self._issued_credit_note_from_row(row)
+
+    @staticmethod
+    def _issued_credit_note_void_from_row(
+        row: tuple[Any, ...],
+    ) -> StoredIssuedCreditNoteVoid:
+        """Decode one normalized unused issued-credit-note void row."""
+        return StoredIssuedCreditNoteVoid(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            UUID(str(row[4])),
+            None if row[5] is None else UUID(str(row[5])),
+            row[6],
+            row[7],
+            row[8],
+            parse_exact_decimal(format_exact_decimal(row[9])),
+            row[10],
+            row[11],
+        )
+
+    def _fetch_issued_credit_note_void(
+        self, cursor: Any, issued_credit_note_void_id: UUID
+    ) -> StoredIssuedCreditNoteVoid:
+        """Hydrate one unused issued-credit-note void."""
+        cursor.execute(
+            """
+            SELECT issued_credit_note_void_id, tenant_account_id,
+                   issued_credit_note_id, credit_adjustment_id, invoice_draft_id,
+                   issued_invoice_id, issued_credit_note_void_contract_version,
+                   source_payload_hash, currency_code, voided_amount,
+                   issued_credit_note_void_status, voided_at
+            FROM billing_core.issued_credit_note_void
+            WHERE issued_credit_note_void_id = %s
+            """,
+            (issued_credit_note_void_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(issued_credit_note_void_id)
+        return self._issued_credit_note_void_from_row(row)
+
+    @staticmethod
+    def _credit_note_application_from_row(
+        row: tuple[Any, ...],
+    ) -> StoredCreditNoteApplication:
+        """Decode one normalized credit-note application row."""
+        return StoredCreditNoteApplication(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            UUID(str(row[4])),
+            None if row[5] is None else UUID(str(row[5])),
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+            row[10],
+            parse_exact_decimal(format_exact_decimal(row[11])),
+            row[12],
+            row[13],
+        )
+
+    def _fetch_credit_note_application(
+        self, cursor: Any, credit_note_application_id: UUID
+    ) -> StoredCreditNoteApplication:
+        """Hydrate one credit-note application."""
+        cursor.execute(
+            """
+            SELECT credit_note_application_id, tenant_account_id,
+                   issued_credit_note_id, collection_case_id, invoice_draft_id,
+                   issued_invoice_id, credit_note_application_contract_version,
+                   issued_credit_note_contract_version, source_payload_hash,
+                   issued_credit_note_source_payload_hash, currency_code,
+                   applied_amount, credit_note_application_status, applied_at
+            FROM billing_core.credit_note_application
+            WHERE credit_note_application_id = %s
+            """,
+            (credit_note_application_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(credit_note_application_id)
+        return self._credit_note_application_from_row(row)
 
     @staticmethod
     def _spend_budget_from_row(row: tuple[Any, ...]) -> StoredSpendBudget:
