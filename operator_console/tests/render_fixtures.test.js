@@ -707,6 +707,42 @@ test("settled morning zero shows exact-zero remaining and wait", () => {
   assert.ok(!("card_pan" in statement));
 });
 
+test("settled leftover write-off zero settles the same leftover case and waits", () => {
+  const statement = loadFixture("settled_leftover_write_off_zero.json");
+  const leftoverWriteOff = loadFixture("recorded_leftover_collection_write_off.json");
+  const html = renderCollectionCaseSettlement(statement);
+  assert.match(html, /0 USD/);
+  assert.match(html, /settled/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Settle the zero-outstanding case, then wait/);
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.collection_case_settlement_status, "settled");
+  assert.equal(statement.collection_case_status, "settled");
+  assert.equal(statement.remaining_outstanding_amount, "0");
+  assert.equal(statement.tenant_reference, "urn:cwl:tenant_001");
+  assert.equal(statement.collection_case_id, leftoverWriteOff.collection_case_id);
+  assert.equal(statement.invoice_draft_id, leftoverWriteOff.invoice_draft_id);
+  assert.equal(leftoverWriteOff.remaining_outstanding_amount, "0");
+  assert.equal(leftoverWriteOff.next_operator_action, "settle");
+  assert.equal(typeof statement.remaining_outstanding_amount, "string");
+  assert.notEqual(typeof statement.remaining_outstanding_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.remaining_outstanding_amount,
+    currency_code: statement.currency_code,
+  }), /0 USD/);
+  assert.match(renderStatusChip({
+    amount_due: statement.remaining_outstanding_amount,
+    tax_amount: "0",
+    status_label: statement.collection_case_settlement_status,
+  }), /oc-status-chip--settled/);
+  assert.ok(!("write_off_amount" in statement));
+  assert.ok(!("collection_case_settlement_outcome_code" in statement));
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("legal_invoice_number" in statement));
+  assert.ok(!("retained_earnings" in statement));
+});
+
 test("issued taxed credit note freezes inclusive 11.00", () => {
   const statement = loadFixture("issued_taxed_credit_note.json");
   const html = renderIssuedCreditNote(statement);

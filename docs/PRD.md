@@ -246,7 +246,7 @@ contextual-orchestrator usage
 - `GET /v1/collection-case-settlements/{collection_case_settlement_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/collection-case-settlements` lists summaries as `{collection_case_settlements, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{settled_at}|{collection_case_settlement_id}`.
 - Payment-receipt, credit-note-application, collection-open, journal, and AIS contracts stay unchanged. `proposal_status` stays `validated`. Implicit #12/#17/#45 settle-when-zero on positive apply paths stays. First successful settle enqueues one existing #24 `collection.settled` outbox event. HMAC, SSRF, and delivery contracts stay unchanged. Cases already settled by #12/#45 without a settlement row are not backfilled.
-- Operators settle the zero-outstanding case, then wait. `operator_console` Storybook adds one `CollectionCaseSettlement` story. There is no login wall, Stripe, AIS call, or production SPA.
+- Operators settle the zero-outstanding case, then wait. `operator_console` Storybook adds one `CollectionCaseSettlement` story for the leftover write-off settle-when-zero presentment. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Collection-dispute-hold acceptance
 

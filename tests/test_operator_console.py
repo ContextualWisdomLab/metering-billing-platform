@@ -112,7 +112,10 @@ ISSUED_CREDIT_NOTE_FIXTURE_NAMES = (
     "issued_taxed_credit_note.json",
 )
 CREDIT_NOTE_APPLICATION_FIXTURE_NAMES = ("applied_morning_credit_note.json",)
-COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES = ("settled_morning_zero.json",)
+COLLECTION_CASE_SETTLEMENT_FIXTURE_NAMES = (
+    "settled_morning_zero.json",
+    "settled_leftover_write_off_zero.json",
+)
 ACCOUNT_STATEMENT_FIXTURE_NAMES = (
     "settled_account_statement.json",
     "voided_account_statement.json",
@@ -471,6 +474,23 @@ class OperatorConsoleTests(unittest.TestCase):
             self._fixture("settled_morning_zero.json")["next_operator_action"],
             "wait",
         )
+        leftover_settlement = self._fixture("settled_leftover_write_off_zero.json")
+        leftover_write_off = self._fixture("recorded_leftover_collection_write_off.json")
+        self.assertEqual(leftover_settlement["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(leftover_settlement["collection_case_settlement_status"], "settled")
+        self.assertEqual(leftover_settlement["collection_case_status"], "settled")
+        self.assertEqual(leftover_settlement["remaining_outstanding_amount"], "0")
+        self.assertEqual(leftover_settlement["next_operator_action"], "wait")
+        self.assertEqual(
+            leftover_settlement["collection_case_id"],
+            leftover_write_off["collection_case_id"],
+        )
+        self.assertEqual(
+            leftover_settlement["invoice_draft_id"],
+            leftover_write_off["invoice_draft_id"],
+        )
+        self.assertEqual(leftover_write_off["remaining_outstanding_amount"], "0")
+        self.assertEqual(leftover_write_off["next_operator_action"], "settle")
         for fixture_name in ACCOUNT_STATEMENT_FIXTURE_NAMES:
             payload = self._fixture(fixture_name)
             self.assertEqual(validate_account_statement_presentment(payload), ())
@@ -822,7 +842,14 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("issued_credit_note_lines", unused_void)
         leftover_write_off = self._fixture("recorded_leftover_collection_write_off.json")
         leftover_apply = self._fixture("applied_morning_unapplied_cash.json")
+        leftover_settlement = self._fixture("settled_leftover_write_off_zero.json")
         self.assertEqual(validate_collection_write_off_presentment(leftover_write_off), ())
+        self.assertEqual(
+            leftover_settlement["collection_case_id"],
+            leftover_write_off["collection_case_id"],
+        )
+        self.assertEqual(leftover_settlement["remaining_outstanding_amount"], "0")
+        self.assertEqual(leftover_settlement["next_operator_action"], "wait")
         self.assertEqual(leftover_write_off["tenant_reference"], "urn:cwl:tenant_001")
         self.assertEqual(leftover_write_off["collection_write_off_status"], "recorded")
         self.assertEqual(leftover_write_off["collection_case_status"], "open")

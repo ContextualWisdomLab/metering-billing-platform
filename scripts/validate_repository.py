@@ -138,6 +138,7 @@ REQUIRED_FILES = (
     "docs/adr/0105-operator-unapplied-cash-storybook.md",
     "docs/adr/0106-operator-issued-credit-note-void-storybook.md",
     "docs/adr/0107-operator-collection-write-off-storybook.md",
+    "docs/adr/0108-operator-collection-case-settlement-storybook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
