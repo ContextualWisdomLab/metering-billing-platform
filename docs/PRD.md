@@ -600,7 +600,7 @@ contextual-orchestrator usage
 
 ## Credit-note-void-journal-proposal acceptance
 
-- A stored unused issued-credit-note void composes one balanced reverse `accounting_journal_proposal` through `AccountingExportService.propose_credit_note_void_journal`.
+- A stored unused issued-credit-note void composes one balanced reverse `accounting_journal_proposal` through `AccountingExportService.propose_credit_note_void_journal`. `PostgresUsageLedger` persists that unused credit-note-void journal so GET presentment survives process restart.
 - Identity is `(tenant_account_id, issued_credit_note_void_id)`. A second compose returns the same `proposal_id` as `duplicate_replay`.
 - Untaxed lines debit semantic `accounts_receivable` and credit semantic `usage_revenue` for the exact tax-inclusive voided amount. Taxed unused notes also credit `tax_payable` on the same journal for the issued exclusive/tax split.
 - The original credit journal is bound by Billing `proposal_id` plus `credit_adjustment_id` / `issued_credit_note_id` only. Missing original Billing proposal fails closed. The payload never includes `journal_entry_id` or a statutory account ID.
