@@ -107,6 +107,11 @@ import {
   renderAccountStatement,
   ACCOUNT_STATEMENT_CUSTOMER_COPY,
 } from "../src/account_statement.js";
+import {
+  renderSpendBudget,
+  SPEND_BUDGET_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextSpendBudgetActionCopy,
+} from "../src/spend_budget.js";
 
 const fixturesDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -672,6 +677,86 @@ test("issued taxed credit note freezes inclusive 11.00", () => {
   assert.equal(statement.issued_invoice_id, "019d7b92-1aa0-7a7f-b61c-962c0f4bfd11");
 });
 
+test("published under budget shows remaining and wait", () => {
+  const statement = loadFixture("published_under_budget.json");
+  const html = renderSpendBudget(statement);
+  assert.match(html, /99\.996295 USD/);
+  assert.match(html, /100\.00 USD/);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, />Wait</);
+  assert.match(html, /oc-status-chip--settled/);
+  assert.match(html, /under/);
+  assert.match(html, /Publish a commercial spend budget, then wait/);
+  assert.equal(
+    SPEND_BUDGET_CUSTOMER_COPY,
+    "Publish a commercial spend budget, then wait.",
+  );
+  assert.equal(nextSpendBudgetActionCopy("wait"), "Wait");
+  assert.equal(nextSpendBudgetActionCopy("unknown"), "Wait");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(statement.utilization_status, "under");
+  assert.equal(statement.spend_budget_status, "published");
+  assert.equal(typeof statement.budget_amount, "string");
+  assert.equal(typeof statement.rated_amount, "string");
+  assert.equal(typeof statement.remaining_amount, "string");
+  assert.equal(typeof statement.over_amount, "string");
+  assert.notEqual(typeof statement.budget_amount, "number");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderAmountDue({
+    amount_due: statement.remaining_amount,
+    currency_code: statement.currency_code,
+  }), /99\.996295 USD/);
+  assert.match(renderStatusChip({
+    amount_due: "0",
+    status_label: statement.utilization_status,
+  }), /oc-status-chip--settled/);
+  assert.ok(!("card_pan" in statement));
+  assert.ok(!("retained_earnings" in statement));
+  assert.ok(!("statutory_account_id" in statement));
+  assert.ok(!("journal_entry_id" in statement));
+});
+
+test("published at budget shows exact-zero remaining and wait", () => {
+  const statement = loadFixture("published_at_budget.json");
+  const html = renderSpendBudget(statement);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, />Wait</);
+  assert.match(html, /oc-status-chip--settled/);
+  assert.match(html, /at/);
+  assert.equal(statement.utilization_status, "at");
+  assert.equal(statement.remaining_amount, "0");
+  assert.equal(statement.over_amount, "0");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(typeof statement.budget_amount, "string");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderStatusChip({
+    amount_due: statement.remaining_amount,
+    status_label: statement.utilization_status,
+  }), /oc-status-chip--settled/);
+  assert.ok(!("card_pan" in statement));
+});
+
+test("published over budget shows complementary over amount and wait", () => {
+  const statement = loadFixture("published_over_budget.json");
+  const html = renderSpendBudget(statement);
+  assert.match(html, /0\.002705 USD/);
+  assert.match(html, /0\.001 USD/);
+  assert.match(html, />Wait</);
+  assert.match(html, /oc-status-chip--due/);
+  assert.match(html, /over/);
+  assert.equal(statement.utilization_status, "over");
+  assert.equal(statement.remaining_amount, "0");
+  assert.equal(statement.over_amount, "0.002705");
+  assert.equal(statement.next_operator_action, "wait");
+  assert.equal(typeof statement.over_amount, "string");
+  assert.match(renderTenantPin(statement), /urn:cwl:tenant_001/);
+  assert.match(renderStatusChip({
+    amount_due: statement.over_amount,
+    status_label: statement.utilization_status,
+  }), /oc-status-chip--due/);
+  assert.ok(!("card_pan" in statement));
+});
+
 test("float money fails closed", () => {
   assert.throws(() => renderAmountDue({ amount_due: 99.0, currency_code: "USD" }), TypeError);
   assert.throws(
@@ -737,6 +822,39 @@ test("float money fails closed", () => {
     () =>
       renderAccountStatement({
         currencies: [{ currency_code: "USD", open_collection_remaining: 0.0, voided_invoice_total: "0" }],
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderSpendBudget({
+        budget_amount: 100.0,
+        rated_amount: "0.003705",
+        remaining_amount: "99.996295",
+        over_amount: "0",
+        utilization_status: "under",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderSpendBudget({
+        budget_amount: "100.00",
+        rated_amount: 0.003705,
+        remaining_amount: "99.996295",
+        over_amount: "0",
+        utilization_status: "under",
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      renderSpendBudget({
+        budget_amount: "100.00",
+        rated_amount: "0.003705",
+        remaining_amount: "99.996295",
+        over_amount: "0",
+        utilization_status: "unknown",
       }),
     TypeError,
   );

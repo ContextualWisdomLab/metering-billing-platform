@@ -115,6 +115,7 @@ REQUIRED_FILES = (
     "docs/adr/0082-spend-budget-evaluation.md",
     "docs/adr/0083-journal-compose-six-place-scale.md",
     "docs/adr/0084-spend-budget-published-webhook.md",
+    "docs/adr/0085-operator-spend-budget-storybook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

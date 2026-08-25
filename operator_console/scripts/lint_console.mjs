@@ -21,6 +21,10 @@ const moneyFields = [
   "credit_amount",
   "rated_total_amount",
   "tax_rate",
+  "budget_amount",
+  "rated_amount",
+  "remaining_amount",
+  "over_amount",
 ];
 const currencyMoneyFields = [
   "issued_invoice_total",

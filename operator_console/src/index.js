@@ -102,3 +102,8 @@ export {
   renderAccountStatement,
   ACCOUNT_STATEMENT_CUSTOMER_COPY,
 } from "./account_statement.js";
+export {
+  renderSpendBudget,
+  SPEND_BUDGET_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextSpendBudgetActionCopy,
+} from "./spend_budget.js";
