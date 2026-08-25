@@ -168,7 +168,11 @@ UNAPPLIED_CASH_FIXTURE_NAMES = (
 ISSUED_CREDIT_NOTE_VOID_FIXTURE_NAMES = ("voided_unused_issued_credit_note.json",)
 ISSUED_INVOICE_VOID_FIXTURE_NAMES = ("voided_unused_issued_invoice.json",)
 COLLECTION_WRITE_OFF_FIXTURE_NAMES = ("recorded_leftover_collection_write_off.json",)
-JOURNAL_PROPOSAL_FIXTURE_NAMES = ("validated_morning_cash_journal.json",)
+JOURNAL_PROPOSAL_FIXTURE_NAMES = (
+    "validated_morning_cash_journal.json",
+    "validated_morning_invoice_draft_journal.json",
+    "validated_taxed_invoice_draft_journal.json",
+)
 COLLECTION_WRITE_OFF_MONEY_FIELDS = (
     "write_off_amount",
     "remaining_outstanding_amount",
@@ -924,6 +928,94 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("card_pan", cash_journal)
         self.assertNotIn("retained_earnings", cash_journal)
         self.assertNotIn("310100", json.dumps(cash_journal))
+        morning_draft_journal = self._fixture("validated_morning_invoice_draft_journal.json")
+        morning_draft = self._fixture("untaxed_morning.json")
+        self.assertEqual(validate_journal_proposal(morning_draft_journal), ())
+        self.assertEqual(morning_draft_journal["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(morning_draft_journal["proposal_status"], "validated")
+        self.assertEqual(morning_draft_journal["transaction_currency"], "USD")
+        self.assertEqual(
+            morning_draft_journal["source_event_references"],
+            [f"urn:cwl:tenant_001:invoice_draft:{morning_draft['invoice_draft_id']}"],
+        )
+        self.assertEqual(
+            morning_draft_journal["lines"][0]["account_role_code"],
+            "accounts_receivable",
+        )
+        self.assertEqual(morning_draft_journal["lines"][0]["debit_amount"], "0.003705")
+        self.assertEqual(morning_draft_journal["lines"][0]["credit_amount"], "0")
+        self.assertEqual(
+            morning_draft_journal["lines"][1]["account_role_code"],
+            "usage_revenue",
+        )
+        self.assertEqual(morning_draft_journal["lines"][1]["debit_amount"], "0")
+        self.assertEqual(morning_draft_journal["lines"][1]["credit_amount"], "0.003705")
+        self.assertEqual(len(morning_draft_journal["lines"]), 2)
+        self.assertNotEqual(
+            morning_draft_journal["proposal_id"],
+            cash_journal["proposal_id"],
+        )
+        self.assertNotIn("next_operator_action", morning_draft_journal)
+        for line in morning_draft_journal["lines"]:
+            for field_name in JOURNAL_PROPOSAL_MONEY_FIELDS:
+                self.assertIsInstance(line[field_name], str)
+                self.assertNotIsInstance(line[field_name], float)
+                parse_exact_decimal(line[field_name])
+        self.assertNotIn("journal_entry_id", morning_draft_journal)
+        self.assertNotIn("card_pan", morning_draft_journal)
+        self.assertNotIn("retained_earnings", morning_draft_journal)
+        self.assertNotIn("310100", json.dumps(morning_draft_journal))
+        taxed_draft_journal = self._fixture("validated_taxed_invoice_draft_journal.json")
+        taxed_issued = self._fixture("issued_taxed_hundred.json")
+        assessed_vat = self._fixture("assessed_morning_vat.json")
+        self.assertEqual(validate_journal_proposal(taxed_draft_journal), ())
+        self.assertEqual(taxed_draft_journal["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(taxed_draft_journal["proposal_status"], "validated")
+        self.assertEqual(
+            taxed_draft_journal["source_event_references"],
+            [f"urn:cwl:tenant_001:invoice_draft:{taxed_issued['invoice_draft_id']}"],
+        )
+        self.assertEqual(
+            taxed_draft_journal["source_event_references"],
+            [f"urn:cwl:tenant_001:invoice_draft:{assessed_vat['invoice_draft_id']}"],
+        )
+        self.assertEqual(
+            taxed_draft_journal["lines"][0]["account_role_code"],
+            "accounts_receivable",
+        )
+        self.assertEqual(taxed_draft_journal["lines"][0]["debit_amount"], "110.00")
+        self.assertEqual(taxed_draft_journal["lines"][0]["credit_amount"], "0")
+        self.assertEqual(
+            taxed_draft_journal["lines"][1]["account_role_code"],
+            "usage_revenue",
+        )
+        self.assertEqual(taxed_draft_journal["lines"][1]["debit_amount"], "0")
+        self.assertEqual(taxed_draft_journal["lines"][1]["credit_amount"], "100.00")
+        self.assertEqual(
+            taxed_draft_journal["lines"][2]["account_role_code"],
+            "tax_payable",
+        )
+        self.assertEqual(taxed_draft_journal["lines"][2]["debit_amount"], "0")
+        self.assertEqual(taxed_draft_journal["lines"][2]["credit_amount"], "10.00")
+        self.assertEqual(len(taxed_draft_journal["lines"]), 3)
+        self.assertNotEqual(
+            taxed_draft_journal["proposal_id"],
+            morning_draft_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            taxed_draft_journal["proposal_id"],
+            cash_journal["proposal_id"],
+        )
+        self.assertNotIn("next_operator_action", taxed_draft_journal)
+        for line in taxed_draft_journal["lines"]:
+            for field_name in JOURNAL_PROPOSAL_MONEY_FIELDS:
+                self.assertIsInstance(line[field_name], str)
+                self.assertNotIsInstance(line[field_name], float)
+                parse_exact_decimal(line[field_name])
+        self.assertNotIn("journal_entry_id", taxed_draft_journal)
+        self.assertNotIn("card_pan", taxed_draft_journal)
+        self.assertNotIn("retained_earnings", taxed_draft_journal)
+        self.assertNotIn("310100", json.dumps(taxed_draft_journal))
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""

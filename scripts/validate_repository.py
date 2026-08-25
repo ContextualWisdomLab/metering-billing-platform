@@ -148,6 +148,7 @@ REQUIRED_FILES = (
     "docs/adr/0115-postgres-issued-invoice-void-journal.md",
     "docs/adr/0116-postgres-issued-credit-note-void-journal.md",
     "docs/adr/0117-postgres-invoice-draft-journal.md",
+    "docs/adr/0118-operator-invoice-draft-journal-storybook.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",

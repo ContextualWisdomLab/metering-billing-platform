@@ -91,11 +91,19 @@ for (const fileName of readdirSync(fixturesDirectory).filter((name) => name.ends
   const catalogLines = Array.isArray(payload.lines) ? payload.lines : [];
   for (const [index, line] of catalogLines.entries()) {
     const value = line.unit_amount;
-    if (value === undefined) {
-      continue;
+    if (value !== undefined) {
+      if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
+        fail(`${fileName}: lines[${index}].unit_amount must be an exact-decimal string`);
+      }
     }
-    if (typeof value !== "string" || !EXACT_DECIMAL_PATTERN.test(value)) {
-      fail(`${fileName}: lines[${index}].unit_amount must be an exact-decimal string`);
+    for (const fieldName of ["debit_amount", "credit_amount"]) {
+      const journalValue = line[fieldName];
+      if (journalValue === undefined) {
+        continue;
+      }
+      if (typeof journalValue !== "string" || !EXACT_DECIMAL_PATTERN.test(journalValue)) {
+        fail(`${fileName}: lines[${index}].${fieldName} must be an exact-decimal string`);
+      }
     }
   }
   const measurements = Array.isArray(payload.measurements) ? payload.measurements : [];
