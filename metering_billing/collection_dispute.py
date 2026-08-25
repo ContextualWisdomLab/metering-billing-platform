@@ -7,11 +7,13 @@ The service is the buyer-facing hold path:
 3. Flip case status to ``disputed`` without changing remaining outstanding.
 
 Replay of the same tenant and ``collection_case_id`` returns the stored
-hold and never re-flips status.  First successful hold enqueues one
-``dispute.held`` outbox event.  Replay of that hold does not enqueue a
-second row.  The path does not emit a journal, unwind tax, capture
-payment, call AIS, write off, settle, or void.  Release is the sibling
-command on the same hold row.
+hold and never re-flips remaining outstanding.  A crash after insert and
+before ``mark_collection_case_disputed`` is healed by the next replay
+when the stored hold's case is still ``open`` or ``dunning``.  First
+successful hold enqueues one ``dispute.held`` outbox event.  Replay of
+that hold does not enqueue a second row.  The path does not emit a
+journal, unwind tax, capture payment, call AIS, write off, settle, or
+void.  Release is the sibling command on the same hold row.
 """
 
 from __future__ import annotations
@@ -214,6 +216,7 @@ class CollectionDisputeService:
                 return _rejected(
                     CollectionDisputeRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
                 )
+            current_case = _heal_case_after_recorded_hold(self.ledger, current_case)
             result = _from_stored(
                 existing,
                 current_case,
@@ -253,21 +256,39 @@ class CollectionDisputeService:
         source_payload_hash = compute_dispute_payload_hash(
             _canonical_dispute_snapshot(collection_case, issued_invoice_id, remaining)
         )
-        stored = self.ledger.insert_collection_dispute(
-            StoredCollectionDispute(
-                collection_dispute_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                collection_case_id=collection_case.collection_case_id,
-                invoice_draft_id=collection_case.invoice_draft_id,
-                issued_invoice_id=issued_invoice_id,
-                collection_dispute_contract_version=COLLECTION_DISPUTE_CONTRACT_VERSION,
-                source_payload_hash=source_payload_hash,
-                currency_code=collection_case.currency_code,
-                remaining_outstanding_amount=remaining,
-                collection_dispute_status=COLLECTION_DISPUTE_STATUS,
-                held_at=self._clock(),
-            )
+        candidate = StoredCollectionDispute(
+            collection_dispute_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            collection_case_id=collection_case.collection_case_id,
+            invoice_draft_id=collection_case.invoice_draft_id,
+            issued_invoice_id=issued_invoice_id,
+            collection_dispute_contract_version=COLLECTION_DISPUTE_CONTRACT_VERSION,
+            source_payload_hash=source_payload_hash,
+            currency_code=collection_case.currency_code,
+            remaining_outstanding_amount=remaining,
+            collection_dispute_status=COLLECTION_DISPUTE_STATUS,
+            held_at=self._clock(),
         )
+        stored = self.ledger.insert_collection_dispute(candidate)
+        if stored.collection_dispute_id != candidate.collection_dispute_id:
+            current_case = self.ledger.get_collection_case(stored.collection_case_id)
+            if current_case is None:
+                return _rejected(
+                    CollectionDisputeRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
+                )
+            if stored.collection_dispute_status != COLLECTION_DISPUTE_STATUS:
+                return _rejected(
+                    CollectionDisputeRejectionReasonCode.COLLECTION_DISPUTE_RELEASED
+                )
+            current_case = _heal_case_after_recorded_hold(self.ledger, current_case)
+            result = _from_stored(
+                stored,
+                current_case,
+                tenant.tenant_reference,
+                CollectionDisputeOutcomeCode.DUPLICATE_REPLAY,
+            )
+            _enqueue_dispute_held(self.ledger, tenant.tenant_reference, result)
+            return result
         updated_case = self.ledger.mark_collection_case_disputed(
             collection_case.collection_case_id
         )
@@ -279,6 +300,24 @@ class CollectionDisputeService:
         )
         _enqueue_dispute_held(self.ledger, tenant.tenant_reference, result)
         return result
+
+
+def _heal_case_after_recorded_hold(
+    ledger: MemoryUsageLedger,
+    collection_case: StoredCollectionCase,
+) -> StoredCollectionCase:
+    """Flip an unused open or dunning case left open after a recorded hold.
+
+    Already-``disputed`` cases stay as-is.  Replay does not change remaining.
+    """
+    if collection_case.collection_case_status == COLLECTION_CASE_DISPUTED_STATUS:
+        return collection_case
+    if collection_case.collection_case_status not in {
+        COLLECTION_CASE_OPEN_STATUS,
+        COLLECTION_CASE_DUNNING_STATUS,
+    }:
+        return collection_case
+    return ledger.mark_collection_case_disputed(collection_case.collection_case_id)
 
 
 def _enqueue_dispute_held(
