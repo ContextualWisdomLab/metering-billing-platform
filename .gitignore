@@ -1,0 +1,10 @@
+__pycache__/
+.venv/
+.coverage
+coverage.xml
+htmlcov/
+*.pyc
+.DS_Store
+node_modules/
+operator_console/node_modules/
+operator_console/storybook-static/

@@ -1,0 +1,19 @@
+{
+  "issued_credit_note_presentment_contract_version": 1,
+  "issued_credit_note_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd20",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf660",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+  "currency_code": "USD",
+  "tax_exclusive_amount": "0.003705",
+  "tax_amount": "0",
+  "tax_inclusive_amount": "0.003705",
+  "issued_credit_note_status": "issued",
+  "issued_at": "2026-08-17T21:00:00Z",
+  "source_payload_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "credit_adjustment_source_payload_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "credit_adjustment_contract_version": 1,
+  "credit_reason_code": "rating_correction",
+  "issued_credit_note_contract_version": 1,
+  "next_operator_action": "wait"
+}

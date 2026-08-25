@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/payment-receipt/v1",
+  "title": "Payment Receipt",
+  "description": "Commercial payment receipt applied against one tenant payment intent. Replays acknowledge the stored payment_receipt_id. Receipt status is applied only; the receipt is not captured via a provider or posted to AIS. Card PAN is never stored.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "settlement_contract_version",
+    "payment_settlement_outcome_code"
+  ],
+  "properties": {
+    "settlement_contract_version": {"type": "integer", "minimum": 1},
+    "payment_settlement_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "payment_receipt_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "payment_intent_id": {"type": "string", "format": "uuid"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "payment_receipt_status": {
+      "type": "string",
+      "enum": ["applied"]
+    },
+    "payment_intent_status": {
+      "type": "string",
+      "enum": ["projected", "cancelled", "rejected"]
+    },
+    "received_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled"]
+    },
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "received_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "payment_intent_not_found",
+        "payment_intent_not_projected",
+        "payment_amount_invalid",
+        "payment_amount_exceeds_outstanding",
+        "collection_case_disputed"
+      ]
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "usage_event_presentment_contract_version": 1,
+  "usage_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "source_event_key": "workflow_381:step_04:attempt_01",
+  "event_payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "occurred_at": "2026-08-16T10:27:42.482Z",
+  "recorded_at": "2026-08-17T21:00:00Z",
+  "next_operator_action": "rate_window",
+  "measurements": [
+    {
+      "meter_code": "gen_ai_output_token",
+      "quantity": "1810",
+      "unit_code": "token",
+      "quality_code": "provider_reported"
+    }
+  ]
+}

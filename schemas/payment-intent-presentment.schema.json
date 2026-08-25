@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/payment-intent-presentment/v1",
+  "title": "Payment Intent Presentment",
+  "description": "Tenant-scoped commercial payment-intent statement projected from a stored payment_intent. Amount is an exact-decimal string. Status stays projected, cancelled, or rejected. Next operator action is record_receipt or wait. The document is not a capture, posting, or statutory invoice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payment_intent_presentment_contract_version",
+    "payment_intent_id",
+    "tenant_reference",
+    "collection_case_id",
+    "currency_code",
+    "payment_amount",
+    "payment_intent_status",
+    "projected_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "payment_intent_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "payment_intent_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "payment_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "payment_intent_status": {
+      "type": "string",
+      "enum": ["projected", "cancelled", "rejected"]
+    },
+    "projected_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["record_receipt", "wait"]
+    }
+  }
+}

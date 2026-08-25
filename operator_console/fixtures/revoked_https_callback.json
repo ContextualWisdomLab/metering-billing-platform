@@ -1,0 +1,12 @@
+{
+  "webhook_subscription_presentment_contract_version": 1,
+  "webhook_subscription_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfab0",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "callback_url": "https://hooks.example.test/cwl-revoked",
+  "event_type_codes": ["journal_proposal.validated"],
+  "subscription_status": "revoked",
+  "webhook_subscription_contract_version": 1,
+  "issued_at": "2026-08-17T21:00:00Z",
+  "revoked_at": "2026-08-17T22:00:00Z",
+  "next_operator_action": "register"
+}

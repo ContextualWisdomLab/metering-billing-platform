@@ -1,0 +1,12 @@
+{
+  "collection_case_presentment_contract_version": 1,
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf633",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+  "currency_code": "USD",
+  "collection_outstanding": "0.00",
+  "collection_case_status": "settled",
+  "opened_at": "2026-08-17T21:00:00Z",
+  "next_operator_action": "wait",
+  "dunning_events": []
+}

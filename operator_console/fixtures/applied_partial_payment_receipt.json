@@ -1,0 +1,14 @@
+{
+  "payment_receipt_presentment_contract_version": 1,
+  "payment_receipt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf651",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "payment_intent_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf640",
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+  "currency_code": "USD",
+  "received_amount": "0.001",
+  "remaining_outstanding_amount": "0.002705",
+  "payment_receipt_status": "applied",
+  "collection_case_status": "open",
+  "received_at": "2026-08-17T21:00:00Z",
+  "next_operator_action": "record_receipt"
+}

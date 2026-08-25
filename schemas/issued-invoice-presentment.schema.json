@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/issued-invoice-presentment/v1",
+  "title": "Issued Invoice Presentment",
+  "description": "Tenant-scoped commercial issued-invoice statement projected from a stored issued_invoice. Amounts are exact-decimal strings. Optional tax_assessment_id is the stored commercial assessment whose totals still match the frozen issued amounts. Next operator action is collect. The document is not a statutory invoice, tax invoice certificate, VAT register, NTS or hometax document, or AIS posting and does not invent sequential legal numbering.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issued_invoice_presentment_contract_version",
+    "issued_invoice_id",
+    "tenant_reference",
+    "invoice_draft_id",
+    "rating_run_id",
+    "usage_snapshot_hash",
+    "currency_code",
+    "tax_exclusive_amount",
+    "tax_amount",
+    "tax_inclusive_amount",
+    "issued_invoice_status",
+    "issued_at",
+    "source_payload_hash",
+    "issued_invoice_contract_version",
+    "next_operator_action",
+    "issued_invoice_lines"
+  ],
+  "properties": {
+    "issued_invoice_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "issued_invoice_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "rating_run_id": {"type": "string", "format": "uuid"},
+    "usage_snapshot_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "tax_exclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_inclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "issued_invoice_status": {"type": "string", "enum": ["issued"]},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "due_at": {"type": "string", "format": "date-time"},
+    "tax_assessment_id": {"type": "string", "format": "uuid"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "issued_invoice_contract_version": {"type": "integer", "minimum": 1},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["collect"]
+    },
+    "issued_invoice_lines": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/issued_invoice_line"}
+    }
+  },
+  "$defs": {
+    "issued_invoice_line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "line_number",
+        "billing_account_reference",
+        "meter_code",
+        "unit_code",
+        "rated_quantity",
+        "unit_price_amount",
+        "line_total_amount"
+      ],
+      "properties": {
+        "line_number": {"type": "integer", "minimum": 1},
+        "billing_account_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "meter_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,95}$"},
+        "unit_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,31}$"},
+        "rated_quantity": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "unit_price_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "line_total_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        }
+      }
+    }
+  }
+}

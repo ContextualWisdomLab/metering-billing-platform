@@ -1,0 +1,10 @@
+{
+  "dunning_event_presentment_contract_version": 1,
+  "dunning_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfbb0",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf631",
+  "dunning_event_number": 2,
+  "dunning_notice_code": "overdue_notice",
+  "occurred_at": "2026-08-17T22:05:00Z",
+  "next_operator_action": "collect"
+}

@@ -1,0 +1,11 @@
+{
+  "payment_intent_presentment_contract_version": 1,
+  "payment_intent_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf641",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+  "currency_code": "USD",
+  "payment_amount": "0.003705",
+  "payment_intent_status": "cancelled",
+  "projected_at": "2026-08-17T21:00:00Z",
+  "next_operator_action": "wait"
+}

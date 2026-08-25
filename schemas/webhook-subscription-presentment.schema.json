@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/webhook-subscription-presentment/v1",
+  "title": "Webhook Subscription Presentment",
+  "description": "Tenant-scoped webhook-subscription metadata statement projected from a stored webhook_subscription. Next operator action is run_deliveries while active, otherwise register. The document is not a register response, recoverable secret, verifier, signature key, or signed payload.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "webhook_subscription_presentment_contract_version",
+    "webhook_subscription_id",
+    "tenant_reference",
+    "callback_url",
+    "event_type_codes",
+    "subscription_status",
+    "webhook_subscription_contract_version",
+    "issued_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "webhook_subscription_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "webhook_subscription_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "callback_url": {"type": "string", "minLength": 8, "maxLength": 2048},
+    "event_type_codes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "journal_proposal.validated",
+          "payment_receipt.applied",
+          "credit_adjustment.recorded",
+          "invoice.issued",
+          "invoice.voided",
+          "credit_note.issued",
+          "credit_note.voided",
+          "credit_note.applied",
+          "collection.settled",
+          "write_off.recorded",
+          "unapplied_cash.applied",
+          "refund.recorded",
+          "dispute.held",
+          "dispute.released"
+        ]
+      }
+    },
+    "subscription_status": {"type": "string", "enum": ["active", "revoked"]},
+    "webhook_subscription_contract_version": {"type": "integer", "minimum": 1},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "revoked_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["run_deliveries", "register"]
+    }
+  }
+}

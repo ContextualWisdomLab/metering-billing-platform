@@ -1,0 +1,22 @@
+{
+  "invoice_presentment_contract_version": 1,
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "currency_code": "USD",
+  "drafted_at": "2026-08-16T12:00:00Z",
+  "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf631",
+  "tax_exclusive_amount": "0.003705",
+  "tax_amount": "0",
+  "tax_inclusive_amount": "0.003705",
+  "credited_amount": "0",
+  "amount_due": "0.003705",
+  "invoice_lines": [
+    {
+      "line_number": 1,
+      "metric_code": "gen_ai_output_token",
+      "quantity": "1852.5",
+      "unit_amount": "0.000002",
+      "line_amount": "0.003705"
+    }
+  ]
+}

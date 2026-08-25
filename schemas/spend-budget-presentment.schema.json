@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/spend-budget-presentment/v1",
+  "title": "Spend Budget Presentment",
+  "description": "Tenant-scoped commercial spend-budget statement projected from a stored spend_budget. Amounts are exact-decimal strings. Status stays published. Next operator action is wait. The document is not a rated-spend comparison, posting, or statutory identifier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spend_budget_presentment_contract_version",
+    "spend_budget_id",
+    "tenant_reference",
+    "billing_account_id",
+    "currency_code",
+    "budget_amount",
+    "window_started_at",
+    "window_ended_at",
+    "spend_budget_status",
+    "source_payload_hash",
+    "published_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "spend_budget_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "spend_budget_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "billing_account_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "budget_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "window_started_at": {"type": "string", "format": "date-time"},
+    "window_ended_at": {"type": "string", "format": "date-time"},
+    "spend_budget_status": {
+      "type": "string",
+      "enum": ["published"]
+    },
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "published_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}

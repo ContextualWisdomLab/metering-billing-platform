@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-dispute-release-presentment/v1",
+  "title": "Collection Dispute Release Presentment",
+  "description": "Tenant-scoped commercial statement projected from a released collection_dispute and the current collection_case. remaining_outstanding_amount is the current exact-decimal remaining snapshot. Dispute status stays released. Case status is open or dunning. Next operator action is wait. The document is not a payment receipt, credit note, settlement, write-off, void, journal, webhook event, or AIS posting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "collection_dispute_release_presentment_contract_version",
+    "collection_dispute_id",
+    "tenant_reference",
+    "collection_case_id",
+    "invoice_draft_id",
+    "currency_code",
+    "remaining_outstanding_amount",
+    "collection_dispute_status",
+    "collection_case_status",
+    "released_at",
+    "source_payload_hash",
+    "next_operator_action"
+  ],
+  "properties": {
+    "collection_dispute_release_presentment_contract_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "collection_dispute_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "issued_invoice_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "remaining_outstanding_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "collection_dispute_status": {"type": "string", "enum": ["released"]},
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning"]
+    },
+    "released_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}

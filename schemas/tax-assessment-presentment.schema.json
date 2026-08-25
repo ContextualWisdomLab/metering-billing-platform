@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/tax-assessment-presentment/v1",
+  "title": "Tax Assessment Presentment",
+  "description": "Tenant-scoped commercial tax-assessment statement projected from a stored tax_assessment. Amounts are exact-decimal strings. Next operator action is propose_journal. The document is not a journal, statutory tax record, or new tax engine.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tax_assessment_presentment_contract_version",
+    "tax_assessment_id",
+    "tenant_reference",
+    "invoice_draft_id",
+    "tax_rate_version_id",
+    "tax_rate_version",
+    "tax_code",
+    "tax_rate",
+    "currency_code",
+    "tax_exclusive_amount",
+    "tax_amount",
+    "tax_inclusive_amount",
+    "source_payload_hash",
+    "assessed_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "tax_assessment_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "tax_assessment_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "tax_rate_version_id": {"type": "string", "format": "uuid"},
+    "tax_rate_version": {"type": "integer", "minimum": 1},
+    "tax_code": {"type": "string", "enum": ["vat", "gst", "sales_tax"]},
+    "tax_rate": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "tax_exclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_inclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "assessed_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["propose_journal"]
+    }
+  }
+}

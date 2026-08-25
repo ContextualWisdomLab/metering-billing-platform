@@ -1,0 +1,14 @@
+{
+  "webhook_delivery_presentment_contract_version": 1,
+  "delivery_attempt_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8a0",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "webhook_subscription_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8b0",
+  "outbox_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8c0",
+  "event_type_code": "journal_proposal.validated",
+  "source_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf8d0",
+  "attempt_number": 1,
+  "http_status": 200,
+  "attempted_at": "2026-08-17T21:00:00Z",
+  "delivered_at": "2026-08-17T21:00:00Z",
+  "next_operator_action": "wait"
+}

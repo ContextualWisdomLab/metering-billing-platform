@@ -1,0 +1,13 @@
+{
+  "credit_adjustment_presentment_contract_version": 1,
+  "credit_adjustment_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf661",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf621",
+  "currency_code": "USD",
+  "credit_amount": "11.00",
+  "tax_exclusive_amount": "10.00",
+  "tax_amount": "1.00",
+  "credit_adjustment_status": "recorded",
+  "recorded_at": "2026-08-17T21:00:00Z",
+  "next_operator_action": "wait"
+}

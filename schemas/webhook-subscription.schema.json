@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/webhook-subscription/v1",
+  "title": "Webhook Subscription",
+  "description": "Tenant-scoped https callback for commercial outbox events. The plaintext secret appears only on register. Persisted rows store a keyed HMAC, never the secret. Status is active or revoked.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "webhook_subscription_contract_version",
+    "webhook_subscription_outcome_code"
+  ],
+  "properties": {
+    "webhook_subscription_contract_version": {"type": "integer", "minimum": 1},
+    "webhook_subscription_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "webhook_subscription_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "callback_url": {"type": "string", "minLength": 8, "maxLength": 2048},
+    "event_type_codes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "journal_proposal.validated",
+          "payment_receipt.applied",
+          "credit_adjustment.recorded",
+          "invoice.issued",
+          "invoice.voided",
+          "credit_note.issued",
+          "credit_note.voided",
+          "credit_note.applied",
+          "collection.settled",
+          "write_off.recorded",
+          "unapplied_cash.applied",
+          "refund.recorded",
+          "dispute.held",
+          "dispute.released"
+        ]
+      }
+    },
+    "webhook_secret_prefix": {"type": "string", "minLength": 8, "maxLength": 32},
+    "webhook_secret": {"type": "string", "minLength": 16, "maxLength": 256},
+    "subscription_status": {"type": "string", "enum": ["active", "revoked"]},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "webhook_callback_url_insecure",
+        "webhook_event_type_unknown",
+        "webhook_subscription_not_found"
+      ]
+    }
+  }
+}

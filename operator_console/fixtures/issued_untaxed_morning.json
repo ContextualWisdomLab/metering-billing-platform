@@ -1,0 +1,28 @@
+{
+  "issued_invoice_presentment_contract_version": 1,
+  "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
+  "rating_run_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf631",
+  "usage_snapshot_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "currency_code": "USD",
+  "tax_exclusive_amount": "0.003705",
+  "tax_amount": "0",
+  "tax_inclusive_amount": "0.003705",
+  "issued_invoice_status": "issued",
+  "issued_at": "2026-08-17T21:00:00Z",
+  "source_payload_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "issued_invoice_contract_version": 1,
+  "next_operator_action": "collect",
+  "issued_invoice_lines": [
+    {
+      "line_number": 1,
+      "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+      "meter_code": "gen_ai_output_token",
+      "unit_code": "token",
+      "rated_quantity": "1852.5",
+      "unit_price_amount": "0.000002",
+      "line_total_amount": "0.003705"
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/provider-capability/v1",
+  "title": "Commerce Provider Capability Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider_code", "provider_roles", "capabilities", "effective_from"],
+  "properties": {
+    "provider_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "provider_roles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "merchant_of_record",
+          "payment_processor",
+          "payment_gateway",
+          "payment_orchestrator",
+          "tax_service",
+          "invoicing_service",
+          "metering_service",
+          "manual_collection"
+        ]
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "hosted_checkout",
+          "subscription_collection",
+          "metered_usage_push",
+          "custom_invoice_line",
+          "prepaid_credit",
+          "customer_portal",
+          "partial_refund",
+          "dispute_management",
+          "tax_document",
+          "wire_transfer",
+          "multi_currency",
+          "korean_billing_key",
+          "settlement_export"
+        ]
+      }
+    },
+    "effective_from": {"type": "string", "format": "date-time"},
+    "effective_to": {"type": "string", "format": "date-time"}
+  }
+}

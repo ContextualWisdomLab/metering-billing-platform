@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/ais-outbox-drain/v1",
+  "title": "AIS Outbox Drain",
+  "description": "Result of one explicit drain_ais_outbox run. There is no scheduler. Empty unpublished outbox_events is success and performs zero receipt GETs. Matched posting_receipt rows use the stored Billing idempotency_key, never the payload_reference URN.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ais_outbox_drain_contract_version",
+    "ais_outbox_drain_outcome_code"
+  ],
+  "properties": {
+    "ais_outbox_drain_contract_version": {"type": "integer", "minimum": 1},
+    "ais_outbox_drain_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "rejected"]
+    },
+    "outbox_event_count": {"type": "integer", "minimum": 0},
+    "receipt_lookup_count": {"type": "integer", "minimum": 0},
+    "observed_receipt_count": {"type": "integer", "minimum": 0},
+    "published_event_count": {"type": "integer", "minimum": 0},
+    "skipped_event_count": {"type": "integer", "minimum": 0},
+    "next_cursor": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {"const": null}
+      ]
+    },
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "ais_endpoint_unconfigured",
+        "ais_base_url_insecure",
+        "ais_outbox_invalid",
+        "cross_tenant",
+        "transport_failure"
+      ]
+    }
+  }
+}

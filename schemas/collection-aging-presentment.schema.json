@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-aging-presentment/v1",
+  "title": "Collection Aging Presentment",
+  "description": "Tenant-scoped commercial AR aging projected from stored collection_case remaining. Totals are grouped by currency_code and never mixed. Outstanding amounts are exact-decimal strings. Settled cases and exact-zero remaining are omitted. The document is not a capture, posting, write-off, or statutory ledger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "collection_aging_presentment_contract_version",
+    "tenant_reference",
+    "as_of",
+    "currencies"
+  ],
+  "properties": {
+    "collection_aging_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "as_of": {"type": "string", "format": "date-time"},
+    "currencies": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 200,
+      "items": {"$ref": "#/$defs/currency_aging"}
+    }
+  },
+  "$defs": {
+    "aging_bucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_count", "outstanding_amount"],
+      "properties": {
+        "case_count": {"type": "integer", "minimum": 0},
+        "outstanding_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        }
+      }
+    },
+    "currency_aging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency_code",
+        "current",
+        "days_1_30",
+        "days_31_60",
+        "days_61_90",
+        "days_90_plus"
+      ],
+      "properties": {
+        "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "current": {"$ref": "#/$defs/aging_bucket"},
+        "days_1_30": {"$ref": "#/$defs/aging_bucket"},
+        "days_31_60": {"$ref": "#/$defs/aging_bucket"},
+        "days_61_90": {"$ref": "#/$defs/aging_bucket"},
+        "days_90_plus": {"$ref": "#/$defs/aging_bucket"}
+      }
+    }
+  }
+}

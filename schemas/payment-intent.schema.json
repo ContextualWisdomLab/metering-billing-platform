@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/payment-intent/v1",
+  "title": "Payment Intent",
+  "description": "Provider-neutral payment initiation projection for one tenant collection case. Replays acknowledge the stored payment_intent_id. Status is projected, cancelled, or rejected only; the intent is not captured, settled, or posted. Card PAN is never stored.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payment_intent_contract_version",
+    "payment_intent_outcome_code"
+  ],
+  "properties": {
+    "payment_intent_contract_version": {"type": "integer", "minimum": 1},
+    "payment_intent_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "payment_intent_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "payment_intent_status": {
+      "type": "string",
+      "enum": ["projected", "cancelled", "rejected"]
+    },
+    "payment_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "projected_at": {"type": "string", "format": "date-time"},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "collection_case_not_found",
+        "payment_amount_invalid"
+      ]
+    }
+  }
+}

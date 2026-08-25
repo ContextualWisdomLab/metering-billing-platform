@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/invoice-draft-presentment/v1",
+  "title": "Invoice Draft Presentment",
+  "description": "Tenant-scoped commercial statement projected from a stored invoice draft, tax assessment, accepted credits, and optional collection case. Tax amounts are zero when no assessment exists. Amount due is tax-inclusive consideration minus credits and never below zero. The document is not issued, posted, or a statutory invoice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invoice_presentment_contract_version",
+    "invoice_draft_id",
+    "tenant_reference",
+    "currency_code",
+    "drafted_at",
+    "rating_run_id",
+    "tax_exclusive_amount",
+    "tax_amount",
+    "tax_inclusive_amount",
+    "credited_amount",
+    "amount_due",
+    "invoice_lines"
+  ],
+  "properties": {
+    "invoice_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "drafted_at": {"type": "string", "format": "date-time"},
+    "rating_run_id": {"type": "string", "format": "uuid"},
+    "tax_exclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "tax_inclusive_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "credited_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "amount_due": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "collection_outstanding": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "invoice_lines": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/invoice_presentment_line"}
+    }
+  },
+  "$defs": {
+    "invoice_presentment_line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "line_number",
+        "metric_code",
+        "quantity",
+        "unit_amount",
+        "line_amount"
+      ],
+      "properties": {
+        "line_number": {"type": "integer", "minimum": 1},
+        "metric_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,95}$"},
+        "quantity": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "unit_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "line_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        }
+      }
+    }
+  }
+}

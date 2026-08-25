@@ -1,0 +1,19 @@
+{
+  "rate_card_presentment_contract_version": 1,
+  "rate_card_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf670",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "rate_card_name": "cwl_standard",
+  "currency_code": "USD",
+  "rate_card_version": 1,
+  "rate_card_version_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf671",
+  "created_at": "2026-08-17T21:00:00Z",
+  "published_at": "2026-08-17T21:00:00Z",
+  "next_operator_action": "rate_window",
+  "lines": [
+    {
+      "metric_code": "gen_ai_output_token",
+      "unit_amount": "0.000002",
+      "currency_code": "USD"
+    }
+  ]
+}

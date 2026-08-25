@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/dunning-event-presentment/v1",
+  "title": "Dunning Event Presentment",
+  "description": "Tenant-scoped commercial reminder statement projected from a stored collection_dunning_event. Next operator action is wait when the parent case is settled, otherwise collect. The document is not a send command, recipient record, delivery receipt, or notice body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dunning_event_presentment_contract_version",
+    "dunning_event_id",
+    "tenant_reference",
+    "collection_case_id",
+    "dunning_event_number",
+    "dunning_notice_code",
+    "occurred_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "dunning_event_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "dunning_event_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "dunning_event_number": {"type": "integer", "minimum": 1},
+    "dunning_notice_code": {"type": "string", "enum": ["first_notice", "overdue_notice"]},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["collect", "wait"]
+    }
+  }
+}

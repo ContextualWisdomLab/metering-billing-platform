@@ -1,0 +1,74 @@
+name: Foundation CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metering-billing-foundation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-contracts:
+    name: Repository contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      METERING_BILLING_POSTGRES_DSN: dbname=metering_billing_test user=postgres password=postgres host=127.0.0.1 port=5432
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: metering_billing_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metering_billing_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Check out exact head
+        uses: actions/checkout@631c942040754b6e095e929c1677c07e10ed4f87
+        with:
+          persist-credentials: false
+      - name: Install pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements-quality.txt
+            requirements-runtime.txt
+      - name: Install hash-locked quality dependency
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r requirements-quality.txt
+      - name: Install hash-locked runtime dependency
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r requirements-runtime.txt
+      - name: Apply PostgreSQL migrations with advisory lock
+        run: python scripts/migrate_postgres.py --dsn "$METERING_BILLING_POSTGRES_DSN"
+      - name: Run tests with complete branch coverage
+        run: python -m coverage run --branch --source=scripts,metering_billing -m unittest discover -s tests -v
+      - name: Enforce complete statement and branch coverage
+        run: python -m coverage report --fail-under=100 --show-missing
+      - name: Validate repository contracts
+        run: python scripts/validate_repository.py .
+      - name: Compile quality tooling
+        run: python -m compileall -q scripts tests metering_billing

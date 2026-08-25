@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/collection-case-presentment/v1",
+  "title": "Collection Case Presentment",
+  "description": "Tenant-scoped commercial collection statement projected from a stored collection_case and dunning rows. Outstanding is an exact-decimal string. Status stays open, dunning, settled, voided, or disputed. Next operator action is collect, credit, or wait. The document is not a capture, posting, or statutory invoice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "collection_case_presentment_contract_version",
+    "collection_case_id",
+    "tenant_reference",
+    "invoice_draft_id",
+    "currency_code",
+    "collection_outstanding",
+    "collection_case_status",
+    "opened_at",
+    "next_operator_action",
+    "dunning_events"
+  ],
+  "properties": {
+    "collection_case_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "invoice_draft_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "collection_outstanding": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "collection_case_status": {
+      "type": "string",
+      "enum": ["open", "dunning", "settled", "voided", "disputed"]
+    },
+    "opened_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["collect", "credit", "wait"]
+    },
+    "last_dunning_notice_code": {
+      "type": "string",
+      "enum": ["first_notice", "overdue_notice"]
+    },
+    "next_dunning_notice_code": {
+      "type": "string",
+      "enum": ["first_notice", "overdue_notice"]
+    },
+    "dunning_events": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/collection_dunning_event"}
+    }
+  },
+  "$defs": {
+    "collection_dunning_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dunning_event_id",
+        "dunning_event_number",
+        "dunning_notice_code",
+        "occurred_at"
+      ],
+      "properties": {
+        "dunning_event_id": {"type": "string", "format": "uuid"},
+        "dunning_event_number": {"type": "integer", "minimum": 1},
+        "dunning_notice_code": {
+          "type": "string",
+          "enum": ["first_notice", "overdue_notice"]
+        },
+        "occurred_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

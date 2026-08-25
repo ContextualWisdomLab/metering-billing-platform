@@ -1,0 +1,13 @@
+{
+  "webhook_outbox_event_presentment_contract_version": 1,
+  "outbox_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfcc0",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "event_type_code": "payment_receipt.applied",
+  "source_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfcd0",
+  "payload_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "occurred_at": "2026-08-17T22:00:00Z",
+  "enqueued_at": "2026-08-17T22:00:00Z",
+  "delivery_status": "delivered",
+  "attempted_delivery_count": 1,
+  "next_operator_action": "wait"
+}

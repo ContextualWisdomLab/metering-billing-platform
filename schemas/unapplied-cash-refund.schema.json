@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/unapplied-cash-refund/v1",
+  "title": "Unapplied Cash Refund",
+  "description": "Append-only commercial refund of one parked unapplied_cash leftover. One leftover refunds at most once. Replays acknowledge the stored unapplied_cash_refund_id and never write a second row. The document is not a journal, webhook, write-off, settlement, credit note, PSP capture, or AIS posting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "unapplied_cash_refund_contract_version",
+    "unapplied_cash_refund_outcome_code"
+  ],
+  "properties": {
+    "unapplied_cash_refund_contract_version": {"type": "integer", "minimum": 1},
+    "unapplied_cash_refund_outcome_code": {
+      "type": "string",
+      "enum": ["accepted", "duplicate_replay", "rejected"]
+    },
+    "unapplied_cash_refund_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "unapplied_cash_id": {"type": "string", "format": "uuid"},
+    "payment_receipt_id": {"type": "string", "format": "uuid"},
+    "payment_intent_id": {"type": "string", "format": "uuid"},
+    "collection_case_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "refund_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "unapplied_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "unapplied_cash_refund_status": {"type": "string", "enum": ["recorded"]},
+    "unapplied_cash_status": {"type": "string", "enum": ["parked"]},
+    "refunded_at": {"type": "string", "format": "date-time"},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "next_operator_action": {"type": "string", "minLength": 1},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found",
+        "unapplied_cash_not_found",
+        "unapplied_cash_already_applied",
+        "unapplied_cash_not_parked",
+        "currency_mismatch",
+        "refund_amount_zero",
+        "refund_amount_negative",
+        "refund_amount_mismatch",
+        "request_invalid"
+      ]
+    }
+  }
+}

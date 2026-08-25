@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/posting-receipt-observation-presentment/v1",
+  "title": "Posting Receipt Observation Presentment",
+  "description": "Tenant-scoped commercial observation statement projected from a stored posting_receipt_observation. posting_status_code is AIS-owned. Next operator action is wait. The document is not a journal, posted book, or new AIS receipt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "posting_receipt_observation_presentment_contract_version",
+    "posting_receipt_observation_id",
+    "tenant_reference",
+    "source_proposal_id",
+    "idempotency_key",
+    "receipt_id",
+    "receipt_contract_version",
+    "source_payload_hash",
+    "posting_status_code",
+    "recorded_at",
+    "observed_at",
+    "next_operator_action"
+  ],
+  "properties": {
+    "posting_receipt_observation_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "posting_receipt_observation_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "source_proposal_id": {"type": "string", "format": "uuid"},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "receipt_id": {"type": "string", "format": "uuid"},
+    "receipt_contract_version": {"type": "integer", "minimum": 1},
+    "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "posting_status_code": {
+      "type": "string",
+      "enum": ["posted", "held", "rejected", "reversed"]
+    },
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "posted_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}
