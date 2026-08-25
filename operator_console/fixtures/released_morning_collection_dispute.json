@@ -1,0 +1,14 @@
+{
+  "collection_dispute_release_presentment_contract_version": 1,
+  "collection_dispute_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd70",
+  "tenant_reference": "urn:cwl:tenant_001",
+  "collection_case_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd21",
+  "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf620",
+  "currency_code": "USD",
+  "remaining_outstanding_amount": "0.003705",
+  "collection_dispute_status": "released",
+  "collection_case_status": "open",
+  "released_at": "2026-08-18T14:00:00Z",
+  "source_payload_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "next_operator_action": "wait"
+}

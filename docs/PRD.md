@@ -260,7 +260,7 @@ contextual-orchestrator usage
 - `GET /v1/collection-disputes/{collection_dispute_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/collection-disputes` lists summaries as `{collection_disputes, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{held_at}|{collection_dispute_id}`.
 - Write-off, void, settle, receipt, credit-apply, leftover-apply, journal, and AIS contracts stay unchanged except additive fail-closed `collection_case_disputed` reasons.
-- Operators hold the disputed case, then wait. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
+- Operators hold the disputed case, then wait. `operator_console` Storybook adds one `CollectionDispute` story for the held presentment. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Collection-dispute-held webhook acceptance
 
@@ -284,7 +284,7 @@ contextual-orchestrator usage
 - Envelope `data` is a thin reference plus hash: ids, contract version, hash, currency, exact remaining outstanding at release, `released_at`, `collection_dispute_status`, and optional `issued_invoice_id`. Collection-case status, operator action, outcome codes, `held_at`, PII, PAN, secrets, statutory identifiers, and dispute-reason blobs are omitted.
 - Existing subscriptions opt in by including `dispute.released`.
 - Hold, write-off, void, settle, receipt, credit-apply, leftover-apply, journal, and AIS contracts stay unchanged except additive fail-closed `collection_dispute_released` on a later hold.
-- Operators release the hold, then collect or dunn. There is no Storybook story in this slice. There is no login wall, Stripe, AIS call, or production SPA.
+- Operators release the hold, then collect or dunn. `operator_console` Storybook presents the released/fail-close remaining snapshot on the same `CollectionDispute` story. There is no login wall, Stripe, AIS call, or production SPA.
 
 ## Collection-write-off acceptance
 

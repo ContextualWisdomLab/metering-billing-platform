@@ -126,3 +126,9 @@ export {
   SPEND_BUDGET_APPROACHING_CUSTOMER_COPY,
   SPEND_BUDGET_APPROACHING_TENANT_REFERENCE,
 } from "./spend_budget_approaching.js";
+export {
+  renderCollectionDispute,
+  COLLECTION_DISPUTE_CUSTOMER_COPY,
+  COLLECTION_DISPUTE_RELEASE_CUSTOMER_COPY,
+  nextOperatorActionCopy as nextCollectionDisputeActionCopy,
+} from "./collection_dispute.js";
