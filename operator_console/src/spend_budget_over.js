@@ -18,6 +18,10 @@ const AMOUNT_LABELS = {
   over_amount: "Over",
 };
 
+// Over-signal omits remaining_amount. under/at remaining is complementary
+// zero, so the existing StatusChip stays settled. Only over uses over_amount.
+const OMITTED_REMAINING_AMOUNT = "0";
+
 /**
  * Render one spend_budget.over observation for the operator console.
  *
@@ -65,7 +69,9 @@ export function renderSpendBudgetOver(observation, overSignalRows = []) {
     `<p class="oc-invoice-statement__id">${escapeHtml(String(observation.window_started_at ?? ""))}` +
     ` – ${escapeHtml(String(observation.window_ended_at ?? ""))}</p>` +
     `</div>` +
-    `${renderStatusChip(utilizationChipStatement(utilizationStatus, "0", overAmount))}` +
+    `${renderStatusChip(
+      utilizationChipStatement(utilizationStatus, OMITTED_REMAINING_AMOUNT, overAmount),
+    )}` +
     `</header>` +
     `${renderTenantPin({ tenant_reference: SPEND_BUDGET_OVER_TENANT_REFERENCE })}` +
     `${renderAmountDue({

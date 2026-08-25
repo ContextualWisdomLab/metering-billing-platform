@@ -954,6 +954,27 @@ test("under observation waits with zero over-signal rows", () => {
   assert.ok(!("card_pan" in observation));
 });
 
+test("at observation stays settled with complementary-zero remaining and no over rows", () => {
+  const observation = {
+    ...loadFixture("accepted_under_signal.json"),
+    utilization_status: "at",
+    budget_amount: "0.003705",
+    over_amount: "0",
+  };
+  const html = renderSpendBudgetOver(observation, []);
+  assert.match(html, /0\.003705 USD/);
+  assert.match(html, /0 USD/);
+  assert.match(html, /oc-status-chip--settled/);
+  assert.match(html, /at/);
+  assert.match(html, />Wait</);
+  assert.match(html, /Over-signal rows<\/span><p class="oc-invoice-statement__id">0<\/p>/);
+  assert.doesNotMatch(html, /spend_budget\.over/);
+  assert.match(renderStatusChip({
+    amount_due: "0",
+    status_label: "at",
+  }), /oc-status-chip--settled/);
+});
+
 test("duplicate replay keeps first-over-wins outbox and current over evaluation", () => {
   const observation = loadFixture("duplicate_replay_over_signal.json");
   const outbox = loadFixture("pending_spend_budget_over.json");
