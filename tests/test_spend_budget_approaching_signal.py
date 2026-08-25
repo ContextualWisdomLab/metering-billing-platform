@@ -498,8 +498,9 @@ class SpendBudgetApproachingSignalTests(unittest.TestCase):
             path,
             headers={"X-CWL-Tenant-Reference": TENANT_ONE},
         )
-        self.assertEqual(get_status, 422)
-        self.assertEqual(get_body["rejection_reason_code"], "request_invalid")
+        self.assertEqual(get_status, 200)
+        self.assertEqual(get_body["approaching_signal"]["utilization_status"], UTILIZATION_AT)
+        self.assertEqual(len(get_body["webhook_outbox_events"]), 1)
         self.assertEqual(len(_approaching_events(ledger)), 1)
         pan_status, pan_body = invoke_http(
             app,

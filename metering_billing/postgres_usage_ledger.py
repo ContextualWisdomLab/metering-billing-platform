@@ -1,11 +1,11 @@
 """PostgreSQL repository for the durable usage-to-invoice vertical slice.
 
 The repository owns catalog rows, immutable usage facts, rating runs, invoice
-drafts, issued invoices, collection cases, payment and credit facts, journal
-proposals, published spend budgets, and the atomic webhook outbox used by
-the first commercial path. Every public operation uses the supplied
-PostgreSQL connection; the implementation never falls back to an in-memory
-copy. Provider capture and remaining exception repositories remain
+drafts, issued invoices, issued credit notes, collection cases, payment and
+credit facts, journal proposals, published spend budgets, and the atomic
+webhook outbox used by the first commercial path. Every public operation uses
+the supplied PostgreSQL connection; the implementation never falls back to an
+in-memory copy. Provider capture and remaining exception repositories remain
 subsequent slices of the persistence port.
 """
 
@@ -42,6 +42,7 @@ from metering_billing.usage_ledger import (
     StoredInvoiceDraft,
     StoredInvoiceDraftLine,
     StoredIngestionReceipt,
+    StoredIssuedCreditNote,
     StoredIssuedInvoice,
     StoredIssuedInvoiceLine,
     StoredJournalProposal,
@@ -3005,6 +3006,145 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
 
+    def find_issued_credit_note(
+        self, tenant_account_id: UUID, credit_adjustment_id: UUID
+    ) -> StoredIssuedCreditNote | None:
+        """Return the issued credit note for one tenant credit, if any."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_credit_note_id
+                FROM billing_core.issued_credit_note
+                WHERE tenant_account_id = %s AND credit_adjustment_id = %s
+                """,
+                (tenant_account_id, credit_adjustment_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_issued_credit_note(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_issued_credit_note(
+        self, issued_credit_note_id: UUID
+    ) -> StoredIssuedCreditNote | None:
+        """Return one issued credit note by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_credit_note_id
+                FROM billing_core.issued_credit_note
+                WHERE issued_credit_note_id = %s
+                """,
+                (issued_credit_note_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_issued_credit_note(
+                cursor, UUID(str(row[0]))
+            )
+
+    def list_issued_credit_notes_for_tenant(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredIssuedCreditNote, ...]:
+        """Return issued credit notes limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT issued_credit_note_id
+                FROM billing_core.issued_credit_note
+                WHERE tenant_account_id = %s
+                ORDER BY issued_at, issued_credit_note_id
+                """,
+                (tenant_account_id,),
+            )
+            return tuple(
+                self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+
+    def insert_issued_credit_note(
+        self, issued_credit_note: StoredIssuedCreditNote
+    ) -> StoredIssuedCreditNote:
+        """Persist one commercial credit-note snapshot or return its identity replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(issued_credit_note.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(issued_credit_note.source_payload_hash) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                issued_credit_note.credit_adjustment_source_payload_hash
+            )
+            is None
+        ):
+            raise ValueError("credit_adjustment_source_payload_hash must be a sha256 digest")
+        if issued_credit_note.issued_credit_note_status != "issued":
+            raise ValueError("issued_credit_note_status must be issued")
+        if issued_credit_note.credit_reason_code not in {
+            "rating_correction",
+            "goodwill",
+            "billing_error",
+        }:
+            raise ValueError("credit_reason_code is not in the closed set")
+        exclusive = parse_exact_decimal(
+            format_exact_decimal(issued_credit_note.tax_exclusive_amount)
+        )
+        tax_amount = parse_exact_decimal(format_exact_decimal(issued_credit_note.tax_amount))
+        inclusive = parse_exact_decimal(
+            format_exact_decimal(issued_credit_note.tax_inclusive_amount)
+        )
+        if exclusive + tax_amount != inclusive:
+            raise ValueError("issued credit note totals must sum")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.issued_credit_note
+                    (issued_credit_note_id, tenant_account_id, credit_adjustment_id,
+                     invoice_draft_id, issued_invoice_id,
+                     issued_credit_note_contract_version,
+                     credit_adjustment_contract_version, credit_reason_code,
+                     credit_adjustment_source_payload_hash, source_payload_hash,
+                     currency_code, tax_exclusive_amount, tax_amount,
+                     tax_inclusive_amount, issued_credit_note_status, issued_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING issued_credit_note_id
+                """,
+                (
+                    issued_credit_note.issued_credit_note_id,
+                    issued_credit_note.tenant_account_id,
+                    issued_credit_note.credit_adjustment_id,
+                    issued_credit_note.invoice_draft_id,
+                    issued_credit_note.issued_invoice_id,
+                    issued_credit_note.issued_credit_note_contract_version,
+                    issued_credit_note.credit_adjustment_contract_version,
+                    issued_credit_note.credit_reason_code,
+                    issued_credit_note.credit_adjustment_source_payload_hash,
+                    issued_credit_note.source_payload_hash,
+                    issued_credit_note.currency_code,
+                    exclusive,
+                    tax_amount,
+                    inclusive,
+                    issued_credit_note.issued_credit_note_status,
+                    issued_credit_note.issued_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT issued_credit_note_id
+                    FROM billing_core.issued_credit_note
+                    WHERE tenant_account_id = %s AND credit_adjustment_id = %s
+                    """,
+                    (
+                        issued_credit_note.tenant_account_id,
+                        issued_credit_note.credit_adjustment_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError("issued credit note identity conflicts with an existing row")
+            return self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
+
     def find_spend_budget(
         self,
         tenant_account_id: UUID,
@@ -4480,6 +4620,51 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - caller selected an existing row
             raise KeyError(credit_adjustment_id)
         return self._credit_adjustment_from_row(row)
+
+    @staticmethod
+    def _issued_credit_note_from_row(row: tuple[Any, ...]) -> StoredIssuedCreditNote:
+        """Decode one normalized issued-credit-note row."""
+        return StoredIssuedCreditNote(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            None if row[4] is None else UUID(str(row[4])),
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+            row[10],
+            parse_exact_decimal(format_exact_decimal(row[11])),
+            parse_exact_decimal(format_exact_decimal(row[12])),
+            parse_exact_decimal(format_exact_decimal(row[13])),
+            row[14],
+            row[15],
+        )
+
+    def _fetch_issued_credit_note(
+        self, cursor: Any, issued_credit_note_id: UUID
+    ) -> StoredIssuedCreditNote:
+        """Hydrate one issued credit-note snapshot."""
+        cursor.execute(
+            """
+            SELECT issued_credit_note_id, tenant_account_id, credit_adjustment_id,
+                   invoice_draft_id, issued_invoice_id,
+                   issued_credit_note_contract_version,
+                   credit_adjustment_contract_version, credit_reason_code,
+                   credit_adjustment_source_payload_hash, source_payload_hash,
+                   currency_code, tax_exclusive_amount, tax_amount,
+                   tax_inclusive_amount, issued_credit_note_status, issued_at
+            FROM billing_core.issued_credit_note
+            WHERE issued_credit_note_id = %s
+            """,
+            (issued_credit_note_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(issued_credit_note_id)
+        return self._issued_credit_note_from_row(row)
 
     @staticmethod
     def _spend_budget_from_row(row: tuple[Any, ...]) -> StoredSpendBudget:

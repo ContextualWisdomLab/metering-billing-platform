@@ -48,6 +48,9 @@ from metering_billing.spend_budget_over_signal_presentment import (
 from metering_billing.spend_budget_approaching_signal import (
     SpendBudgetApproachingSignalService,
 )
+from metering_billing.spend_budget_approaching_signal_presentment import (
+    SpendBudgetApproachingSignalPresentmentService,
+)
 from metering_billing.collection_aging_presentment import CollectionAgingPresentmentService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
@@ -65,6 +68,7 @@ from metering_billing.contracts import (
     SPEND_BUDGET_SCHEMA_NAME,
     SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME,
     SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME,
+    SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME,
     SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME,
     BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME,
     COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME,
@@ -122,6 +126,7 @@ from metering_billing.contracts import (
     validate_spend_budget_over_signal,
     validate_spend_budget_over_signal_presentment,
     validate_spend_budget_approaching_signal,
+    validate_spend_budget_approaching_signal_presentment,
     validate_spend_budget_presentment,
     validate_spend_budget_evaluation_presentment,
     validate_billing_account_budget_status_presentment,
@@ -188,6 +193,7 @@ from metering_billing.errors import (
     SpendBudgetApproachingSignalOutcomeCode,
     SpendBudgetEvaluationPresentmentQueryError,
     SpendBudgetOverSignalPresentmentQueryError,
+    SpendBudgetApproachingSignalPresentmentQueryError,
     SpendBudgetPresentmentQueryError,
     SpendBudgetQueryError,
     SpendBudgetRejectionReasonCode,
@@ -366,6 +372,7 @@ __all__ = (
     "SPEND_BUDGET_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME",
+    "SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
     "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
@@ -422,6 +429,8 @@ __all__ = (
     "SpendBudgetOutcomeCode",
     "SpendBudgetOverSignalOutcomeCode",
     "SpendBudgetApproachingSignalOutcomeCode",
+    "SpendBudgetApproachingSignalPresentmentQueryError",
+    "SpendBudgetApproachingSignalPresentmentService",
     "SpendBudgetApproachingSignalService",
     "SpendBudgetEvaluationPresentmentQueryError",
     "SpendBudgetEvaluationPresentmentService",
@@ -601,6 +610,7 @@ __all__ = (
     "validate_spend_budget_over_signal",
     "validate_spend_budget_over_signal_presentment",
     "validate_spend_budget_approaching_signal",
+    "validate_spend_budget_approaching_signal_presentment",
     "validate_spend_budget_presentment",
     "validate_spend_budget_evaluation_presentment",
     "validate_billing_account_budget_status_presentment",
