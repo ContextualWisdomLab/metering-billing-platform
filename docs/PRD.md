@@ -223,8 +223,8 @@ contextual-orchestrator usage
 
 ## Credit-note-application acceptance
 
-- A known stored issued credit note applies once onto one open same-tenant collection case and reduces `collection_outstanding` by the exact issued tax-inclusive amount.
-- A second apply of the same tenant and `issued_credit_note_id` returns the same `credit_note_application_id` as `duplicate_replay` and never double-reduces.
+- A known stored issued credit note applies once onto one open same-tenant collection case and reduces `collection_outstanding` by the exact issued tax-inclusive amount. `PostgresUsageLedger` persists that application so GET presentment survives process restart.
+- A second apply of the same tenant and `issued_credit_note_id` returns the same `credit_note_application_id` as `duplicate_replay`, never double-reduces, and does not insert a second row.
 - `credit_note_application_id` is an opaque generated identifier. The path does not invent statutory numbering, a journal, tax unwind, payment capture, AIS call, write-off, or settlement.
 - Currency mismatch, settled case, remaining that would go negative, invoice mismatch (draft, or issued invoice when stored), and a voided unused note fail closed.
 - `POST /v1/collection-cases/{collection_case_id}/credit-note-applications` is the nested apply command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422.
