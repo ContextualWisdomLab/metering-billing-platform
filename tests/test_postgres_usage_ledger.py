@@ -74,6 +74,7 @@ from metering_billing.errors import (
     IssuedCreditNotePresentmentQueryError,
     IssuedCreditNoteVoidPresentmentQueryError,
     IssuedInvoiceVoidPresentmentQueryError,
+    JournalProposalQueryError,
     RejectionReasonCode,
     SpendBudgetPresentmentQueryError,
     IssuedInvoiceVoidRejectionReasonCode,
@@ -1552,6 +1553,381 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.commit()
         with self.assertRaises(ValueError):
             self.ledger.mark_collection_case_settled(case.collection_case_id)
+
+    def test_write_off_journal_is_durable(self) -> None:
+        """Persist one write-off journal and keep GET presentment after restart."""
+        leftover = Decimal("0.001")
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(opened.collection_case_outcome_code.value, "accepted")
+        assert opened.collection_case_id is not None
+        remaining = self.ledger.get_collection_case(opened.collection_case_id).outstanding_amount
+        self.assertGreater(remaining, leftover)
+        self.assertNotEqual(remaining, KNOWN_MORNING_TOTAL)
+        write_off = CollectionWriteOffService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).write_off_collection_case(TENANT_ONE, opened.collection_case_id)
+        self.assertEqual(write_off.collection_write_off_outcome_code.value, "accepted")
+        assert write_off.collection_write_off_id is not None
+        stored_write_off = self.ledger.get_collection_write_off(write_off.collection_write_off_id)
+        assert stored_write_off is not None
+        self.assertEqual(stored_write_off.write_off_amount, remaining)
+        self.assertNotEqual(stored_write_off.write_off_amount, KNOWN_MORNING_TOTAL)
+        self.assertEqual(stored_write_off.remaining_outstanding_amount, Decimal("0"))
+        zero_case = self.ledger.get_collection_case(opened.collection_case_id)
+        assert zero_case is not None
+        self.assertEqual(zero_case.outstanding_amount, Decimal("0.000000000000"))
+        self.assertEqual(zero_case.collection_case_status, "open")
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        proposed_at = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+        accepted = AccountingExportService(
+            self.ledger, clock=lambda: proposed_at
+        ).propose_write_off_journal(TENANT_ONE, write_off.collection_write_off_id)
+        self.assertEqual(accepted.journal_proposal_outcome_code.value, "accepted")
+        assert accepted.proposal_id is not None
+        stored = self.ledger.get_journal_proposal(accepted.proposal_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
+        self.assertEqual(stored.collection_write_off_id, write_off.collection_write_off_id)
+        self.assertEqual(stored.invoice_draft_id, draft.invoice_draft_id)
+        self.assertEqual(stored.proposal_status, "validated")
+        self.assertNotEqual(stored.proposal_status, "posted")
+        self.assertEqual(stored.transaction_currency, "USD")
+        self.assertEqual(len(stored.proposal_lines), 2)
+        self.assertEqual(stored.proposal_lines[0].account_role_code, "write_off_expense")
+        self.assertEqual(stored.proposal_lines[0].debit_amount, remaining)
+        self.assertEqual(stored.proposal_lines[0].credit_amount, Decimal("0"))
+        self.assertEqual(stored.proposal_lines[1].account_role_code, "accounts_receivable")
+        self.assertEqual(stored.proposal_lines[1].debit_amount, Decimal("0"))
+        self.assertEqual(stored.proposal_lines[1].credit_amount, remaining)
+        self.assertIsInstance(stored.proposal_lines[0].debit_amount, Decimal)
+        self.assertNotIsInstance(stored.proposal_lines[0].debit_amount, float)
+        self.assertEqual(
+            self.ledger.find_journal_proposal_for_write_off(
+                stored.tenant_account_id, write_off.collection_write_off_id
+            ),
+            stored,
+        )
+        self.assertIsNone(
+            self.ledger.find_journal_proposal_for_write_off(stored.tenant_account_id, uuid4())
+        )
+        write_off_rows = tuple(
+            proposal
+            for proposal in self.ledger.list_journal_proposals(stored.tenant_account_id)
+            if proposal.collection_write_off_id is not None
+        )
+        self.assertEqual(write_off_rows, (stored,))
+        self.assertEqual(
+            self.ledger.list_journal_proposals(
+                self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+            ),
+            (),
+        )
+        self.assertIsNone(self.ledger.get_journal_proposal(uuid4()))
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.journal_proposal "
+                "WHERE collection_write_off_id IS NOT NULL"
+            ).fetchone()[0],
+            1,
+        )
+        outbox_rows = [
+            event
+            for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                stored.tenant_account_id
+            )
+            if event.event_type_code == EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED
+            and event.source_id == stored.journal_proposal_id
+        ]
+        self.assertEqual(len(outbox_rows), 1)
+        remaining_after = self.ledger.get_collection_case(opened.collection_case_id)
+        assert remaining_after is not None
+        self.assertEqual(remaining_after.outstanding_amount, Decimal("0.000000000000"))
+
+        replay = AccountingExportService(
+            self.ledger, clock=lambda: proposed_at
+        ).propose_write_off_journal(TENANT_ONE, write_off.collection_write_off_id)
+        self.assertEqual(replay.journal_proposal_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replay.proposal_id, stored.journal_proposal_id)
+        self.assertEqual(replay.proposal_lines[0].debit_amount, remaining)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.journal_proposal "
+                "WHERE collection_write_off_id IS NOT NULL"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED
+                    and event.source_id == stored.journal_proposal_id
+                ]
+            ),
+            1,
+        )
+        still_zero = self.ledger.get_collection_case(opened.collection_case_id)
+        assert still_zero is not None
+        self.assertEqual(still_zero.outstanding_amount, Decimal("0.000000000000"))
+
+        rejected = AccountingExportService(self.ledger).propose_write_off_journal(
+            TENANT_ONE, uuid4()
+        )
+        self.assertEqual(rejected.journal_proposal_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.journal_proposal "
+                "WHERE collection_write_off_id IS NOT NULL"
+            ).fetchone()[0],
+            1,
+        )
+        mismatch = AccountingExportService(self.ledger).propose_write_off_journal(
+            TENANT_TWO, write_off.collection_write_off_id
+        )
+        self.assertEqual(mismatch.journal_proposal_outcome_code.value, "rejected")
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.journal_proposal "
+                "WHERE collection_write_off_id IS NOT NULL"
+            ).fetchone()[0],
+            1,
+        )
+
+        leftover_usage = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf71c",
+            source_event_key="workflow_381:step_14:attempt_01",
+            occurred_at="2026-08-16T14:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "500",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(leftover_usage)
+        leftover_window = TimeWindow.from_iso8601(
+            "2026-08-16T14:00:00Z", "2026-08-16T15:00:00Z"
+        )
+        leftover_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, leftover_window, 1, rate_card_code="cwl_standard"
+        )
+        leftover_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, leftover_rating.rating_run_id
+        )
+        leftover_opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, leftover_draft.invoice_draft_id)
+        assert leftover_opened.collection_case_id is not None
+        leftover_remaining = self.ledger.get_collection_case(
+            leftover_opened.collection_case_id
+        ).outstanding_amount
+        self.assertEqual(leftover_remaining, leftover)
+        leftover_write_off = CollectionWriteOffService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).write_off_collection_case(TENANT_ONE, leftover_opened.collection_case_id)
+        self.assertEqual(leftover_write_off.collection_write_off_outcome_code.value, "accepted")
+        assert leftover_write_off.collection_write_off_id is not None
+        leftover_stored_write_off = self.ledger.get_collection_write_off(
+            leftover_write_off.collection_write_off_id
+        )
+        assert leftover_stored_write_off is not None
+        self.assertEqual(leftover_stored_write_off.write_off_amount, leftover)
+        self.assertEqual(leftover_stored_write_off.remaining_outstanding_amount, Decimal("0"))
+        self.assertIsNone(
+            self.ledger.find_journal_proposal_for_write_off(
+                leftover_stored_write_off.tenant_account_id,
+                leftover_write_off.collection_write_off_id,
+            )
+        )
+
+        crash_usage = make_event(
+            event_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf81c",
+            source_event_key="workflow_381:step_15:attempt_01",
+            occurred_at="2026-08-16T15:27:42.482Z",
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": "500",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        UsageIngestionService(self.ledger).ingest_usage_event(crash_usage)
+        crash_window = TimeWindow.from_iso8601(
+            "2026-08-16T15:00:00Z", "2026-08-16T16:00:00Z"
+        )
+        crash_rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, crash_window, 1, rate_card_code="cwl_standard"
+        )
+        crash_draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, crash_rating.rating_run_id
+        )
+        crash_opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, crash_draft.invoice_draft_id)
+        assert crash_opened.collection_case_id is not None
+        crash_write_off = CollectionWriteOffService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).write_off_collection_case(TENANT_ONE, crash_opened.collection_case_id)
+        assert crash_write_off.collection_write_off_id is not None
+        crash_composed = AccountingExportService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
+        ).propose_write_off_journal(TENANT_ONE, crash_write_off.collection_write_off_id)
+        self.assertEqual(crash_composed.journal_proposal_outcome_code.value, "accepted")
+        assert crash_composed.proposal_id is not None
+        crash_stored = self.ledger.get_journal_proposal(crash_composed.proposal_id)
+        assert crash_stored is not None
+        self.connection.execute(
+            "DELETE FROM billing_core.webhook_outbox_event "
+            "WHERE event_type_code = %s AND source_id = %s",
+            (EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED, crash_stored.journal_proposal_id),
+        )
+        self.connection.commit()
+        prior_outbox = len(
+            [
+                event
+                for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                    stored.tenant_account_id
+                )
+                if event.event_type_code == EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED
+            ]
+        )
+        healed = AccountingExportService(
+            self.ledger, clock=lambda: proposed_at
+        ).propose_write_off_journal(TENANT_ONE, crash_write_off.collection_write_off_id)
+        self.assertEqual(healed.journal_proposal_outcome_code.value, "duplicate_replay")
+        self.assertEqual(healed.proposal_id, crash_stored.journal_proposal_id)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in self.ledger.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
+                    if event.event_type_code == EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED
+                ]
+            ),
+            prior_outbox + 1,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.journal_proposal "
+                "WHERE collection_write_off_id IS NOT NULL"
+            ).fetchone()[0],
+            2,
+        )
+
+        self.assertEqual(self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                replace(stored, payment_receipt_id=None, credit_adjustment_id=None, collection_write_off_id=None),
+                stored.proposal_lines,
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                replace(
+                    stored,
+                    collection_write_off_id=leftover_write_off.collection_write_off_id,
+                ),
+                stored.proposal_lines,
+            )
+        later = AccountingExportService(
+            self.ledger, clock=lambda: datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+        ).propose_write_off_journal(TENANT_ONE, leftover_write_off.collection_write_off_id)
+        self.assertEqual(later.journal_proposal_outcome_code.value, "accepted")
+        assert later.proposal_id is not None
+        later_stored = self.ledger.get_journal_proposal(later.proposal_id)
+        assert later_stored is not None
+        self.assertEqual(later_stored.collection_write_off_id, leftover_write_off.collection_write_off_id)
+        self.assertEqual(later_stored.proposal_lines[0].debit_amount, leftover)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.journal_proposal "
+                "WHERE collection_write_off_id IS NOT NULL"
+            ).fetchone()[0],
+            3,
+        )
+
+        fresh = PostgresUsageLedger(self.connection)
+        reloaded = fresh.get_journal_proposal(stored.journal_proposal_id)
+        self.assertEqual(reloaded, stored)
+        presentment = AccountingExportService(fresh).get_journal_proposal(
+            TENANT_ONE, stored.journal_proposal_id
+        )
+        self.assertEqual(presentment.proposal_id, stored.journal_proposal_id)
+        self.assertEqual(presentment.proposal_status, "validated")
+        self.assertEqual(presentment.proposal_lines[0].debit_amount, remaining)
+        self.assertEqual(presentment.collection_write_off_id, write_off.collection_write_off_id)
+        page = AccountingExportService(fresh).list_journal_proposals(TENANT_ONE)
+        self.assertEqual(
+            {
+                row.proposal_id
+                for row in page.journal_proposals
+                if row.collection_write_off_id is not None
+            },
+            {
+                stored.journal_proposal_id,
+                later.proposal_id,
+                crash_stored.journal_proposal_id,
+            },
+        )
+        leftover_presentment = AccountingExportService(fresh).get_journal_proposal(
+            TENANT_ONE, later.proposal_id
+        )
+        self.assertEqual(leftover_presentment.proposal_lines[0].debit_amount, leftover)
+        reloaded_presentment = AccountingExportService(
+            PostgresUsageLedger(self.connection)
+        ).get_journal_proposal(TENANT_ONE, stored.journal_proposal_id)
+        self.assertEqual(reloaded_presentment.proposal_id, presentment.proposal_id)
+        with self.assertRaises(JournalProposalQueryError) as missing_pin:
+            AccountingExportService(fresh).get_journal_proposal("", stored.journal_proposal_id)
+        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(JournalProposalQueryError) as other_pin:
+            AccountingExportService(fresh).get_journal_proposal(
+                TENANT_TWO, stored.journal_proposal_id
+            )
+        self.assertEqual(other_pin.exception.rejection_reason_code, "proposal_not_found")
+
+        class BlindFindLedger(PostgresUsageLedger):
+            """Force the repository insert path used after a concurrent identity race."""
+
+            def find_journal_proposal_for_write_off(self, *args, **kwargs):
+                return None
+
+        raced = AccountingExportService(
+            BlindFindLedger(self.connection), clock=lambda: proposed_at
+        ).propose_write_off_journal(TENANT_ONE, write_off.collection_write_off_id)
+        self.assertEqual(raced.journal_proposal_outcome_code.value, "accepted")
+        self.assertEqual(raced.proposal_id, stored.journal_proposal_id)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.journal_proposal "
+                "WHERE collection_write_off_id IS NOT NULL"
+            ).fetchone()[0],
+            3,
+        )
 
     def test_webhook_subscription_outbox_and_delivery_are_durable(self) -> None:
         """Persist subscription metadata, attempts, and delivery status in PostgreSQL."""

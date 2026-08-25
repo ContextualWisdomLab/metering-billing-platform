@@ -440,9 +440,18 @@ class AccountingExportService:
             tenant.tenant_account_id, collection_write_off_id
         )
         if existing is not None:
-            return _from_stored(
+            result = _from_stored(
                 existing, tenant.tenant_reference, JournalProposalOutcomeCode.DUPLICATE_REPLAY
             )
+            enqueue_accepted_fact(
+                self.ledger,
+                tenant.tenant_reference,
+                EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+                existing.journal_proposal_id,
+                result.as_contract_dict(),
+                existing.proposed_at,
+            )
+            return result
 
         write_off = self.ledger.get_collection_write_off(collection_write_off_id)
         if write_off is None or write_off.tenant_account_id != tenant.tenant_account_id:
