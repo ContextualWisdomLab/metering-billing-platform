@@ -3,11 +3,12 @@
 The buyer-facing path is:
 
 1. Register an https callback for a closed event-type set.
-2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued-invoice void, issued credit note, issued-credit-note void, credit-note application, collection-case settlement, collection write-off, leftover apply, leftover refund, collection-dispute hold, collection-dispute release, published spend budget, or first-over spend budget).
+2. Accept a commercial fact (journal proposal, payment receipt, credit, issued invoice, issued-invoice void, issued credit note, issued-credit-note void, credit-note application, collection-case settlement, collection write-off, leftover apply, leftover refund, collection-dispute hold, collection-dispute release, published spend budget, first-over spend budget, or first-at spend budget).
 3. Run ``deliver_due_events`` so active subscriptions receive a signed POST.
 
 Accepted facts include published spend budgets (``spend_budget.published``)
-and first-over observations (``spend_budget.over``).
+and first-over observations (``spend_budget.over``) and first-at
+observations (``spend_budget.approaching``).
 AIS may keep polling ``GET /v1/journal-proposals``.  This slice does not
 require AIS to subscribe, does not flip ``proposal_status``, and does not
 call AIS posting-receipt (Fielding et al., 2022; Krawczyk et al., 1997).
@@ -75,6 +76,7 @@ EVENT_TYPE_DISPUTE_HELD = "dispute.held"
 EVENT_TYPE_DISPUTE_RELEASED = "dispute.released"
 EVENT_TYPE_SPEND_BUDGET_PUBLISHED = "spend_budget.published"
 EVENT_TYPE_SPEND_BUDGET_OVER = "spend_budget.over"
+EVENT_TYPE_SPEND_BUDGET_APPROACHING = "spend_budget.approaching"
 KNOWN_EVENT_TYPE_CODES = frozenset(
     {
         EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
@@ -93,6 +95,7 @@ KNOWN_EVENT_TYPE_CODES = frozenset(
         EVENT_TYPE_DISPUTE_RELEASED,
         EVENT_TYPE_SPEND_BUDGET_PUBLISHED,
         EVENT_TYPE_SPEND_BUDGET_OVER,
+        EVENT_TYPE_SPEND_BUDGET_APPROACHING,
     }
 )
 LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})

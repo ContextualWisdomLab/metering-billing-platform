@@ -131,6 +131,15 @@ The application is a thin WSGI adapter:
     whose billing account belongs to another commercial ``tenant_account``
     is HTTP 403.  The read does not enqueue, persist, hard-stop, or
     compose a journal.
+    ``POST /v1/spend-budgets/{spend_budget_id}/approaching-signal`` observes
+    that published budget with the same remaining/over math and enqueues
+    one existing ``spend_budget.approaching`` outbox event when
+    utilization is ``at`` the documented ``budget_amount`` threshold.
+    Same tenant is HTTP 200.  Unknown or cross-tenant is HTTP 404.
+    Missing tenant pin is HTTP 422.  A budget whose billing account
+    belongs to another commercial ``tenant_account`` is HTTP 403.  under
+    and over write zero approaching-signal rows.  The write does not
+    persist an evaluation snapshot, hard-stop, or compose a journal.
     ``GET /v1/billing-accounts/{billing_account_id}/budget-status`` evaluates
     every published commercial ``spend_budget`` on that same-tenant account.
     The envelope is ``{budget_statuses, next_cursor}``.  Same tenant is
@@ -382,6 +391,9 @@ from metering_billing.spend_budget_over_signal import SpendBudgetOverSignalServi
 from metering_billing.spend_budget_over_signal_presentment import (
     SpendBudgetOverSignalPresentmentService,
 )
+from metering_billing.spend_budget_approaching_signal import (
+    SpendBudgetApproachingSignalService,
+)
 from metering_billing.collection_aging_presentment import (
     Clock,
     CollectionAgingPresentmentService,
@@ -442,6 +454,9 @@ SPEND_BUDGET_EVALUATION_PATH = re.compile(
 )
 SPEND_BUDGET_OVER_SIGNAL_PATH = re.compile(
     r"^/v1/spend-budgets/([0-9a-fA-F-]{36})/over-signal$"
+)
+SPEND_BUDGET_APPROACHING_SIGNAL_PATH = re.compile(
+    r"^/v1/spend-budgets/([0-9a-fA-F-]{36})/approaching-signal$"
 )
 COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36})$")
 COLLECTION_DUNNING_PATH = re.compile(
@@ -713,6 +728,9 @@ def create_http_app(
     spend_budget_over_signals = SpendBudgetOverSignalService(shared_ledger, clock=clock)
     spend_budget_over_signal_presentments = SpendBudgetOverSignalPresentmentService(
         shared_ledger
+    )
+    spend_budget_approaching_signals = SpendBudgetApproachingSignalService(
+        shared_ledger, clock=clock
     )
     dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
@@ -2576,6 +2594,42 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "spend_budget_approaching_signals":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                result = spend_budget_approaching_signals.observe_spend_budget_approaching(
+                    tenant_reference,
+                    _parse_uuid(path_values["spend_budget_id"], "spend_budget_id"),
+                )
+                if result.spend_budget_approaching_signal_outcome_code.value == "rejected":
+                    reason = result.rejection_reason_text()
+                    if reason == "spend_budget_not_found":
+                        status_code = 404
+                    elif reason == "billing_account_not_found":
+                        status_code = 404
+                    elif reason == "billing_account_forbidden":
+                        status_code = 403
+                    else:
+                        status_code = 422
+                    return _send_json(
+                        start_response,
+                        status_code,
+                        result.as_contract_dict(),
+                    )
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "issued_invoices":
             try:
                 payload = _read_json_object(environ)
@@ -2900,6 +2954,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "POST":
             return "spend_budget_over_signals", {
                 "spend_budget_id": budget_over_signal_match.group(1)
+            }
+        return "method_not_allowed", {}
+    budget_approaching_signal_match = SPEND_BUDGET_APPROACHING_SIGNAL_PATH.fullmatch(path)
+    if budget_approaching_signal_match is not None:
+        if method == "POST":
+            return "spend_budget_approaching_signals", {
+                "spend_budget_id": budget_approaching_signal_match.group(1)
             }
         return "method_not_allowed", {}
     budget_match = SPEND_BUDGET_ITEM_PATH.fullmatch(path)
