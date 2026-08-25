@@ -40,10 +40,15 @@ mutate it. IEEE 754 forbids smuggling binary floating-point values into money
   Application identifiers stay UUIDv7; PostgreSQL 18 `uuidv7()` remains the
   table default.
 - Replay of the same tenant and issued invoice is `duplicate_replay` and
-  does not insert a second row or re-close the case. A concurrent insert
-  identity race classifies as `duplicate_replay` when insert returns the
-  stored id. A crash after insert and before outbox enqueue is healed by
-  the next replay. Rejected void writes zero rows.
+  does not insert a second row. Already-`voided` cases stay as-is. Do not
+  reuse `settled`. A concurrent insert identity race classifies as
+  `duplicate_replay` when insert returns the stored id. A crash after
+  insert and before outbox enqueue is healed by the next replay. A crash
+  after insert and before `mark_collection_case_voided` is healed by the
+  next replay when the stored void's case is still `open` or `dunning`
+  and remaining still equals the issued amount: replay calls
+  `mark_collection_case_voided` at exact-zero remaining. Rejected void
+  writes zero rows.
 - First accept closes an unused open or dunning case as `voided` at
   exact-zero remaining. Do not reuse `settled`. Fail closed when the case
   has a payment receipt, credit-note application, write-off, leftover

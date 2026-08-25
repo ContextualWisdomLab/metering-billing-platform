@@ -285,24 +285,37 @@ class UnappliedCashApplicationService:
         source_payload_hash = compute_unapplied_cash_application_payload_hash(
             _canonical_application_snapshot(parked, collection_case, leftover)
         )
-        stored = self.ledger.insert_unapplied_cash_application(
-            StoredUnappliedCashApplication(
-                unapplied_cash_application_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                unapplied_cash_id=parked.unapplied_cash_id,
-                collection_case_id=collection_case.collection_case_id,
-                payment_receipt_id=parked.payment_receipt_id,
-                invoice_draft_id=collection_case.invoice_draft_id,
-                unapplied_cash_application_contract_version=(
-                    UNAPPLIED_CASH_APPLICATION_CONTRACT_VERSION
-                ),
-                source_payload_hash=source_payload_hash,
-                currency_code=parked.currency_code,
-                applied_amount=leftover,
-                unapplied_cash_application_status=UNAPPLIED_CASH_APPLICATION_STATUS,
-                applied_at=self._clock(),
-            )
+        candidate = StoredUnappliedCashApplication(
+            unapplied_cash_application_id=generate_record_id(),
+            tenant_account_id=tenant.tenant_account_id,
+            unapplied_cash_id=parked.unapplied_cash_id,
+            collection_case_id=collection_case.collection_case_id,
+            payment_receipt_id=parked.payment_receipt_id,
+            invoice_draft_id=collection_case.invoice_draft_id,
+            unapplied_cash_application_contract_version=(
+                UNAPPLIED_CASH_APPLICATION_CONTRACT_VERSION
+            ),
+            source_payload_hash=source_payload_hash,
+            currency_code=parked.currency_code,
+            applied_amount=leftover,
+            unapplied_cash_application_status=UNAPPLIED_CASH_APPLICATION_STATUS,
+            applied_at=self._clock(),
         )
+        stored = self.ledger.insert_unapplied_cash_application(candidate)
+        if stored.unapplied_cash_application_id != candidate.unapplied_cash_application_id:
+            current_case = self.ledger.get_collection_case(stored.collection_case_id)
+            if current_case is None:
+                return _rejected(
+                    UnappliedCashApplicationRejectionReasonCode.COLLECTION_CASE_NOT_FOUND
+                )
+            result = _from_stored(
+                stored,
+                current_case,
+                tenant.tenant_reference,
+                UnappliedCashApplicationOutcomeCode.DUPLICATE_REPLAY,
+            )
+            _enqueue_unapplied_cash_applied(self.ledger, tenant.tenant_reference, result)
+            return result
         updated_case = self.ledger.apply_unapplied_cash_to_collection_case(
             collection_case.collection_case_id, leftover
         )

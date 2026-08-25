@@ -393,7 +393,7 @@ contextual-orchestrator usage
 
 ## Unapplied-cash-application acceptance
 
-- `POST /v1/collection-cases/{collection_case_id}/unapplied-cash-applications` applies one parked leftover onto one same-tenant open collection case. Replay of the same tenant and leftover returns the same `unapplied_cash_application_id`. PAN, CVC, and provider secrets are refused.
+- `POST /v1/collection-cases/{collection_case_id}/unapplied-cash-applications` applies one parked leftover onto one same-tenant open collection case. Replay of the same tenant and leftover returns the same `unapplied_cash_application_id`. `PostgresUsageLedger` persists that leftover-apply so GET presentment survives process restart. PAN, CVC, and provider secrets are refused.
 - The apply uses the full parked amount. Omitting `applied_amount` uses the parked leftover. A supplied amount must equal the parked leftover.
 - Outstanding is reduced by the exact applied inclusive amount. Remaining zero does not settle the case. Next operator action is `collect`, `settle`, or `wait`.
 - A known stored application presents one tenant-scoped statement with `applied_amount`, current remaining, `unapplied_cash_application_status` (`applied`), and `next_operator_action`.

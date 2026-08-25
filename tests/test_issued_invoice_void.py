@@ -41,8 +41,9 @@ from metering_billing.issued_invoice_void import (
     _enqueue_invoice_voided,
     _format_voided_at,
     _rejected,
+    compute_issued_invoice_void_payload_hash,
 )
-from metering_billing.usage_ledger import generate_record_id
+from metering_billing.usage_ledger import StoredIssuedInvoiceVoid, generate_record_id
 from metering_billing.webhook_outbox import EVENT_TYPE_INVOICE_VOIDED
 from test_collection_case import draft_known_morning
 from test_credit_note_application import issue_morning_credit_then_open_case
@@ -67,6 +68,36 @@ def issue_known_morning_invoice(open_case: bool = True):
             TENANT_ONE, invoice_draft_id
         )
     return ledger, issued, collection
+
+
+def insert_void_without_closing_case(ledger, issued, collection):
+    """Record a void row and leave the unused collection case open."""
+    stored_invoice = ledger.get_issued_invoice(issued.issued_invoice_id)
+    payload_hash = compute_issued_invoice_void_payload_hash(
+        {
+            "issued_invoice_id": str(stored_invoice.issued_invoice_id),
+            "invoice_draft_id": str(stored_invoice.invoice_draft_id),
+            "currency_code": stored_invoice.currency_code,
+            "voided_amount": format_exact_decimal(stored_invoice.tax_inclusive_amount),
+            "issued_invoice_void_contract_version": 1,
+        }
+    )
+    return ledger.insert_issued_invoice_void(
+        StoredIssuedInvoiceVoid(
+            issued_invoice_void_id=uuid4(),
+            tenant_account_id=stored_invoice.tenant_account_id,
+            issued_invoice_id=stored_invoice.issued_invoice_id,
+            invoice_draft_id=stored_invoice.invoice_draft_id,
+            collection_case_id=collection.collection_case_id,
+            issued_invoice_void_contract_version=1,
+            source_payload_hash=payload_hash,
+            currency_code=stored_invoice.currency_code,
+            voided_amount=stored_invoice.tax_inclusive_amount,
+            remaining_outstanding_amount=Decimal("0"),
+            issued_invoice_void_status="recorded",
+            voided_at=VOIDED_MORNING,
+        )
+    )
 
 
 class IssuedInvoiceVoidTests(unittest.TestCase):
@@ -1112,3 +1143,70 @@ class IssuedInvoiceVoidTests(unittest.TestCase):
         self.assertNotIn(
             "remaining_outstanding_amount", no_case_presentment.as_summary_dict()
         )
+        crash_ledger, crash_issued, crash_collection = issue_known_morning_invoice()
+        crash_void = insert_void_without_closing_case(
+            crash_ledger, crash_issued, crash_collection
+        )
+        self.assertEqual(
+            crash_ledger.get_collection_case(
+                crash_collection.collection_case_id
+            ).collection_case_status,
+            "open",
+        )
+        healed_memory = IssuedInvoiceVoidService(crash_ledger).void_issued_invoice(
+            TENANT_ONE, crash_issued.issued_invoice_id
+        )
+        self.assertEqual(
+            healed_memory.issued_invoice_void_outcome_code,
+            IssuedInvoiceVoidOutcomeCode.DUPLICATE_REPLAY,
+        )
+        self.assertEqual(healed_memory.issued_invoice_void_id, crash_void.issued_invoice_void_id)
+        self.assertEqual(healed_memory.collection_case_status, "voided")
+        self.assertEqual(healed_memory.remaining_outstanding_amount, Decimal("0"))
+        dunning_ledger, dunning_crash_issued, dunning_crash_case = (
+            issue_known_morning_invoice()
+        )
+        insert_void_without_closing_case(
+            dunning_ledger, dunning_crash_issued, dunning_crash_case
+        )
+        dunning_ledger.collection_cases[dunning_crash_case.collection_case_id] = replace(
+            dunning_ledger.get_collection_case(dunning_crash_case.collection_case_id),
+            collection_case_status="dunning",
+        )
+        dunning_healed = IssuedInvoiceVoidService(dunning_ledger).void_issued_invoice(
+            TENANT_ONE, dunning_crash_issued.issued_invoice_id
+        )
+        self.assertEqual(dunning_healed.collection_case_status, "voided")
+        self.assertEqual(dunning_healed.remaining_outstanding_amount, Decimal("0"))
+        mismatch_ledger, mismatch_issued, mismatch_case = issue_known_morning_invoice()
+        insert_void_without_closing_case(mismatch_ledger, mismatch_issued, mismatch_case)
+        mismatch_ledger.collection_cases[mismatch_case.collection_case_id] = replace(
+            mismatch_ledger.get_collection_case(mismatch_case.collection_case_id),
+            outstanding_amount=Decimal("1.00"),
+        )
+        mismatch_replay = IssuedInvoiceVoidService(mismatch_ledger).void_issued_invoice(
+            TENANT_ONE, mismatch_issued.issued_invoice_id
+        )
+        self.assertEqual(mismatch_replay.collection_case_status, "open")
+        self.assertEqual(mismatch_replay.remaining_outstanding_amount, Decimal("1.00"))
+        zero_ledger, zero_issued, zero_case = issue_known_morning_invoice()
+        insert_void_without_closing_case(zero_ledger, zero_issued, zero_case)
+        zero_ledger.collection_cases[zero_case.collection_case_id] = replace(
+            zero_ledger.get_collection_case(zero_case.collection_case_id),
+            outstanding_amount=Decimal("0"),
+        )
+        zero_replay = IssuedInvoiceVoidService(zero_ledger).void_issued_invoice(
+            TENANT_ONE, zero_issued.issued_invoice_id
+        )
+        self.assertEqual(zero_replay.collection_case_status, "open")
+        self.assertEqual(zero_replay.remaining_outstanding_amount, Decimal("0"))
+        settled_ledger, settled_issued, settled_case = issue_known_morning_invoice()
+        insert_void_without_closing_case(settled_ledger, settled_issued, settled_case)
+        settled_ledger.collection_cases[settled_case.collection_case_id] = replace(
+            settled_ledger.get_collection_case(settled_case.collection_case_id),
+            collection_case_status="settled",
+        )
+        settled_replay = IssuedInvoiceVoidService(settled_ledger).void_issued_invoice(
+            TENANT_ONE, settled_issued.issued_invoice_id
+        )
+        self.assertEqual(settled_replay.collection_case_status, "settled")
