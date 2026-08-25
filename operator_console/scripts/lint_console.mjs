@@ -21,6 +21,8 @@ const moneyFields = [
   "unapplied_amount",
   "applied_amount",
   "refund_amount",
+  "voided_amount",
+  "write_off_amount",
   "credit_amount",
   "rated_total_amount",
   "tax_rate",
