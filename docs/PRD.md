@@ -494,6 +494,12 @@ contextual-orchestrator usage
 - `GET /v1/spend-budgets` lists summaries as `{spend_budgets, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{published_at}|{spend_budget_id}`.
 - Operators publish the commercial budget, then wait. The write does not compare rated spend, stop rating, ingest, or invoice draft, emit a webhook or journal, call AIS, or invent a dimension-scoped budget.
 
+## Spend-budget-evaluation acceptance
+
+- A known stored `spend_budget` presents one evaluation against already-rated spend for the same tenant, billing account, half-open window, and currency. The read reuses `RatedSpendPresentmentService` with `group_by=product` and sums only same-currency product rows. `budget_amount`, `rated_amount`, `remaining_amount`, and `over_amount` are exact decimals. `remaining_amount` and `over_amount` are complementary non-negative amounts. `utilization_status` is `under`, `at`, or `over`. Next operator action is `wait`.
+- `GET /v1/spend-budgets/{spend_budget_id}/evaluation` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak. Missing tenant is HTTP 422. A stored budget whose billing account belongs to another commercial `tenant_account` is HTTP 403. Float money fails closed.
+- Operators inspect remaining, then wait. The read does not persist, mutate the budget, hard-stop rating, ingest, or invoice draft, emit a webhook or journal, call AIS, invent a statutory identifier, or add a VAT/NTS adapter. Atomic authorization and quotas remain a later slice.
+
 ## Dunning-event-presentment acceptance
 
 - A known stored `collection_dunning_event` presents one tenant-scoped statement with `dunning_event_id`, `collection_case_id`, `dunning_event_number`, `dunning_notice_code`, `occurred_at`, and `next_operator_action` (`wait` when the parent case is settled, otherwise `collect`).

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/spend-budget-evaluation-presentment/v1",
+  "title": "Spend Budget Evaluation Presentment",
+  "description": "Tenant-scoped commercial comparison of one published spend_budget to already-rated spend for the same billing account, half-open window, and currency. Amounts are exact-decimal strings. Remaining and over are complementary non-negative amounts. Utilization is under, at, or over. Next operator action is wait. The document is not a hard-stop, reservation, posting, or statutory identifier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spend_budget_evaluation_presentment_contract_version",
+    "spend_budget_id",
+    "tenant_reference",
+    "billing_account_id",
+    "currency_code",
+    "budget_amount",
+    "rated_amount",
+    "remaining_amount",
+    "over_amount",
+    "utilization_status",
+    "window_started_at",
+    "window_ended_at",
+    "spend_budget_status",
+    "next_operator_action"
+  ],
+  "properties": {
+    "spend_budget_evaluation_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "spend_budget_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "billing_account_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "budget_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "rated_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "over_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "utilization_status": {
+      "type": "string",
+      "enum": ["under", "at", "over"]
+    },
+    "window_started_at": {"type": "string", "format": "date-time"},
+    "window_ended_at": {"type": "string", "format": "date-time"},
+    "spend_budget_status": {
+      "type": "string",
+      "enum": ["published"]
+    },
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}
