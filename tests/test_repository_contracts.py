@@ -24,6 +24,7 @@ from metering_billing.contracts import (
     validate_credit_adjustment_presentment,
     validate_spend_budget,
     validate_spend_budget_over_signal,
+    validate_spend_budget_over_signal_presentment,
     validate_spend_budget_presentment,
     validate_spend_budget_evaluation_presentment,
     validate_billing_account_budget_status_presentment,
@@ -1590,6 +1591,130 @@ class RepositoryContractTests(unittest.TestCase):
             "spend_budget_over_signal_outcome_code": "posted",
         }
         self.assertNotEqual(validate_spend_budget_over_signal(posted_outcome), ())
+
+    def test_spend_budget_over_signal_presentment_reuses_existing_envelopes(self) -> None:
+        """GET presentment nests the existing over-signal and outbox envelopes."""
+        schema = self._schema("spend-budget-over-signal-presentment.schema.json")
+        over_signal = {
+            "spend_budget_over_signal_contract_version": 1,
+            "spend_budget_over_signal_outcome_code": "accepted",
+            "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf681",
+            "currency_code": "USD",
+            "budget_amount": "0.001",
+            "over_amount": "12.345",
+            "utilization_status": "over",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "spend_budget_status": "published",
+            "source_payload_hash": "sha256:" + "6" * 64,
+            "spend_budget_contract_version": 1,
+            "next_operator_action": "wait",
+        }
+        outbox = {
+            "webhook_outbox_event_presentment_contract_version": 1,
+            "outbox_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf682",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "event_type_code": "spend_budget.over",
+            "source_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "payload_hash": "sha256:" + "b" * 64,
+            "occurred_at": "2026-08-18T15:00:00Z",
+            "enqueued_at": "2026-08-18T15:00:00Z",
+            "delivery_status": "pending",
+            "attempted_delivery_count": 0,
+            "next_operator_action": "run_deliveries",
+        }
+        instance = {
+            "spend_budget_over_signal_presentment_contract_version": 1,
+            "over_signal": over_signal,
+            "webhook_outbox_events": [outbox],
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_spend_budget_over_signal_presentment(instance), ())
+        under = {
+            "spend_budget_over_signal_presentment_contract_version": 1,
+            "over_signal": dict(over_signal, utilization_status="under", over_amount="0"),
+            "webhook_outbox_events": [],
+        }
+        self.assertEqual(validate_spend_budget_over_signal_presentment(under), ())
+        self.assertNotEqual(validate_spend_budget_over_signal_presentment([]), ())
+        remaining = dict(instance, remaining_amount="0")
+        self.assertIn(
+            "$: over-signal presentment must not include remaining_amount",
+            validate_spend_budget_over_signal_presentment(remaining),
+        )
+        pan = dict(instance, card_pan="4111111111111111")
+        self.assertIn(
+            "$: over-signal presentment must not include card_pan",
+            validate_spend_budget_over_signal_presentment(pan),
+        )
+        earnings = dict(instance, retained_earnings="0")
+        self.assertIn(
+            "$: over-signal presentment must not include retained_earnings",
+            validate_spend_budget_over_signal_presentment(earnings),
+        )
+        leaked = dict(instance, payload_json="{}")
+        self.assertIn(
+            "$: over-signal presentment must not include payload_json",
+            validate_spend_budget_over_signal_presentment(leaked),
+        )
+        zeroed = dict(instance, over_signal=dict(over_signal, budget_amount="0"))
+        self.assertIn(
+            "$: budget_amount must be greater than zero",
+            validate_spend_budget_over_signal_presentment(zeroed),
+        )
+        two_rows = dict(instance, webhook_outbox_events=[outbox, outbox])
+        self.assertIn(
+            "$: over-signal presentment has at most one spend_budget.over row",
+            validate_spend_budget_over_signal_presentment(two_rows),
+        )
+        hollow_row = dict(instance, webhook_outbox_events=["pending"])
+        self.assertNotEqual(validate_spend_budget_over_signal_presentment(hollow_row), ())
+        published = dict(outbox, event_type_code="spend_budget.published")
+        wrong_type = dict(instance, webhook_outbox_events=[published])
+        self.assertTrue(
+            any(
+                "event_type_code must be spend_budget.over" in error
+                for error in validate_spend_budget_over_signal_presentment(wrong_type)
+            )
+        )
+        mismatched = dict(outbox, source_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf699")
+        crossed = dict(instance, webhook_outbox_events=[mismatched])
+        self.assertTrue(
+            any(
+                "source_id must match over_signal.spend_budget_id" in error
+                for error in validate_spend_budget_over_signal_presentment(crossed)
+            )
+        )
+        self.assertNotEqual(
+            validate_spend_budget_over_signal_presentment(dict(instance, over_signal="x")),
+            (),
+        )
+        rejected_presentment = {
+            "spend_budget_over_signal_presentment_contract_version": 1,
+            "over_signal": {
+                "spend_budget_over_signal_contract_version": 1,
+                "spend_budget_over_signal_outcome_code": "rejected",
+                "rejection_reason_code": "tenant_not_found",
+            },
+            "webhook_outbox_events": [outbox],
+        }
+        self.assertEqual(validate_spend_budget_over_signal_presentment(rejected_presentment), ())
+        missing_type = dict(outbox)
+        missing_type.pop("event_type_code")
+        self.assertNotEqual(
+            validate_spend_budget_over_signal_presentment(
+                dict(instance, webhook_outbox_events=[missing_type])
+            ),
+            (),
+        )
+        self.assertNotEqual(
+            validate_spend_budget_over_signal_presentment(
+                dict(instance, webhook_outbox_events=None)
+            ),
+            (),
+        )
 
     def test_spend_budget_presentment_accepts_published_row_and_rejects_posted(self) -> None:
         """A spend-budget statement records exact amounts and cannot claim posting."""

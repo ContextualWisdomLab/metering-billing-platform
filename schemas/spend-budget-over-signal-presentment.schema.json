@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/spend-budget-over-signal-presentment/v1",
+  "title": "Spend Budget Over Signal Presentment",
+  "description": "Safe GET of one published commercial spend budget that reuses the existing over-signal envelope plus zero or one existing webhook-outbox presentment. over_signal is the live observation. webhook_outbox_events is the stored spend_budget.over row when first-over already enqueued, otherwise empty. Amounts stay exact-decimal strings. Remaining and rated lines stay omitted. The document is not a write, hard-stop, journal, AIS posting, or statutory identifier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spend_budget_over_signal_presentment_contract_version",
+    "over_signal",
+    "webhook_outbox_events"
+  ],
+  "properties": {
+    "spend_budget_over_signal_presentment_contract_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "over_signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spend_budget_over_signal_contract_version",
+        "spend_budget_over_signal_outcome_code"
+      ],
+      "properties": {
+        "spend_budget_over_signal_contract_version": {"type": "integer", "minimum": 1},
+        "spend_budget_over_signal_outcome_code": {
+          "type": "string",
+          "enum": ["accepted", "duplicate_replay", "rejected"]
+        },
+        "spend_budget_id": {"type": "string", "format": "uuid"},
+        "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "billing_account_id": {"type": "string", "format": "uuid"},
+        "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "budget_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "over_amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 39
+        },
+        "utilization_status": {"type": "string", "enum": ["under", "at", "over"]},
+        "window_started_at": {"type": "string", "format": "date-time"},
+        "window_ended_at": {"type": "string", "format": "date-time"},
+        "spend_budget_status": {"type": "string", "enum": ["published"]},
+        "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "spend_budget_contract_version": {"type": "integer", "minimum": 1},
+        "next_operator_action": {"type": "string", "minLength": 1},
+        "rejection_reason_code": {
+          "type": "string",
+          "enum": [
+            "tenant_not_found",
+            "billing_account_not_found",
+            "billing_account_forbidden",
+            "budget_amount_invalid",
+            "currency_invalid",
+            "request_invalid",
+            "spend_budget_not_found"
+          ]
+        }
+      }
+    },
+    "webhook_outbox_events": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "webhook_outbox_event_presentment_contract_version",
+          "outbox_event_id",
+          "tenant_reference",
+          "event_type_code",
+          "source_id",
+          "payload_hash",
+          "occurred_at",
+          "enqueued_at",
+          "delivery_status",
+          "attempted_delivery_count",
+          "next_operator_action"
+        ],
+        "properties": {
+          "webhook_outbox_event_presentment_contract_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "outbox_event_id": {"type": "string", "format": "uuid"},
+          "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+          "event_type_code": {"type": "string", "const": "spend_budget.over"},
+          "source_id": {"type": "string", "format": "uuid"},
+          "payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "occurred_at": {"type": "string", "format": "date-time"},
+          "enqueued_at": {"type": "string", "format": "date-time"},
+          "delivery_status": {"type": "string", "enum": ["pending", "delivered"]},
+          "attempted_delivery_count": {"type": "integer", "minimum": 0},
+          "next_operator_action": {
+            "type": "string",
+            "enum": ["wait", "run_deliveries"]
+          }
+        }
+      }
+    }
+  }
+}

@@ -24,6 +24,7 @@ from metering_billing import (
     PaymentIntentService,
     PostgresUsageLedger,
     SpendBudgetEvaluationPresentmentService,
+    SpendBudgetOverSignalPresentmentService,
     SpendBudgetOverSignalService,
     SpendBudgetPresentmentService,
     SpendBudgetService,
@@ -1923,6 +1924,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             0,
         )
+        under_observation = SpendBudgetOverSignalPresentmentService(
+            fresh
+        ).present_spend_budget_over_signal(TENANT_ONE, stored.spend_budget_id)
+        self.assertEqual(under_observation.over_signal.utilization_status, "under")
+        self.assertEqual(under_observation.webhook_outbox_events, ())
         over_budget = SpendBudgetService(fresh, clock=lambda: published_at).publish_spend_budget(
             TENANT_ONE,
             account.billing_account_id,
@@ -1957,6 +1963,27 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 ]
             ),
             1,
+        )
+        over_observation = SpendBudgetOverSignalPresentmentService(
+            fresh
+        ).present_spend_budget_over_signal(TENANT_ONE, over_budget.spend_budget_id)
+        self.assertEqual(over_observation.over_signal.utilization_status, "over")
+        self.assertEqual(len(over_observation.webhook_outbox_events), 1)
+        self.assertEqual(
+            over_observation.webhook_outbox_events[0].event_type_code,
+            EVENT_TYPE_SPEND_BUDGET_OVER,
+        )
+        self.assertEqual(
+            over_observation.webhook_outbox_events[0].source_id,
+            over_budget.spend_budget_id,
+        )
+        reloaded_observation = SpendBudgetOverSignalPresentmentService(
+            PostgresUsageLedger(self.connection)
+        ).present_spend_budget_over_signal(TENANT_ONE, over_budget.spend_budget_id)
+        self.assertEqual(len(reloaded_observation.webhook_outbox_events), 1)
+        self.assertEqual(
+            reloaded_observation.webhook_outbox_events[0].outbox_event_id,
+            over_observation.webhook_outbox_events[0].outbox_event_id,
         )
         # HTTP create_http_app still requires #22 credential methods on the ledger.
         with self.assertRaises(SpendBudgetPresentmentQueryError) as missing_pin:

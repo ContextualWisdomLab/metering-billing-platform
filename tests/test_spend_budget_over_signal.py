@@ -450,8 +450,9 @@ class SpendBudgetOverSignalTests(unittest.TestCase):
         self.assertEqual(unknown_body["rejection_reason_code"], "spend_budget_not_found")
         method_status, method_body = invoke_http(
             app,
-            "GET",
+            "PUT",
             path,
+            {"tenant_reference": TENANT_ONE},
             headers={"X-CWL-Tenant-Reference": TENANT_ONE},
         )
         self.assertEqual(method_status, 422)
