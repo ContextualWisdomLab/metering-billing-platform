@@ -4461,12 +4461,33 @@ class PostgresUsageLedger:
                 cursor, UUID(str(row[0]))
             )
 
+    def find_journal_proposal_for_unapplied_cash(
+        self,
+        tenant_account_id: UUID,
+        unapplied_cash_id: UUID,
+    ) -> StoredJournalProposal | None:
+        """Return one tenant-scoped leftover proposal identity."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT journal_proposal_id
+                FROM billing_core.journal_proposal
+                WHERE tenant_account_id = %s
+                  AND unapplied_cash_id = %s
+                """,
+                (tenant_account_id, unapplied_cash_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_journal_proposal(
+                cursor, UUID(str(row[0]))
+            )
+
     def insert_journal_proposal(
         self,
         journal_proposal: StoredJournalProposal,
         proposal_lines: tuple[StoredJournalProposalLine, ...],
     ) -> StoredJournalProposal:
-        """Persist one balanced cash, credit, or write-off proposal or its replay."""
+        """Persist one balanced cash, credit, write-off, or leftover proposal or its replay."""
         if journal_proposal.proposal_status not in {
             "draft",
             "validated",
@@ -4507,8 +4528,8 @@ class PostgresUsageLedger:
                      intended_book_role_code, transaction_currency, transaction_date,
                      accounting_date, source_payload_hash, proposed_at, proposal_status,
                      source_event_reference, payment_receipt_id, credit_adjustment_id,
-                     collection_write_off_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     collection_write_off_id, unapplied_cash_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 RETURNING journal_proposal_id
                 """,
@@ -4530,6 +4551,7 @@ class PostgresUsageLedger:
                     journal_proposal.payment_receipt_id,
                     journal_proposal.credit_adjustment_id,
                     journal_proposal.collection_write_off_id,
+                    journal_proposal.unapplied_cash_id,
                 ),
             )
             row = cursor.fetchone()
@@ -4581,6 +4603,19 @@ class PostgresUsageLedger:
                         (
                             journal_proposal.tenant_account_id,
                             journal_proposal.collection_write_off_id,
+                        ),
+                    )
+                elif journal_proposal.unapplied_cash_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT journal_proposal_id
+                        FROM billing_core.journal_proposal
+                        WHERE tenant_account_id = %s
+                          AND unapplied_cash_id = %s
+                        """,
+                        (
+                            journal_proposal.tenant_account_id,
+                            journal_proposal.unapplied_cash_id,
                         ),
                     )
                 else:
