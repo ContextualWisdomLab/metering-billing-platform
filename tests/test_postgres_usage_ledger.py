@@ -4626,28 +4626,41 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         raced = UnappliedCashApplicationService(
             BlindFindLedger(self.connection), clock=lambda: applied_at
         ).apply_unapplied_cash(
-            TENANT_ONE, parked.unapplied_cash_id, afternoon_collection.collection_case_id
+            TENANT_ONE, later_parked.unapplied_cash_id, night_collection.collection_case_id
         )
         self.assertEqual(raced.unapplied_cash_application_outcome_code.value, "duplicate_replay")
-        self.assertEqual(raced.unapplied_cash_application_id, stored.unapplied_cash_application_id)
+        self.assertEqual(raced.unapplied_cash_application_id, later.unapplied_cash_application_id)
         self.assertEqual(
-            self.ledger.get_collection_case(afternoon_collection.collection_case_id).outstanding_amount,
-            Decimal("0"),
+            self.ledger.get_collection_case(night_collection.collection_case_id).outstanding_amount,
+            night_remaining_before - leftover,
         )
 
         class BlindFindMissingCaseLedger(PostgresUsageLedger):
             """Force the insert race when the stored case cannot be loaded."""
 
+            def __init__(self, connection: object) -> None:
+                super().__init__(connection)
+                self._hide_collection_case = False
+
             def find_unapplied_cash_application(self, *args, **kwargs):
                 return None
 
-            def get_collection_case(self, *args, **kwargs):
-                return None
+            def insert_unapplied_cash_application(self, application):
+                stored_application = PostgresUsageLedger.insert_unapplied_cash_application(
+                    self, application
+                )
+                self._hide_collection_case = True
+                return stored_application
+
+            def get_collection_case(self, collection_case_id):
+                if self._hide_collection_case:
+                    return None
+                return PostgresUsageLedger.get_collection_case(self, collection_case_id)
 
         missing_case = UnappliedCashApplicationService(
             BlindFindMissingCaseLedger(self.connection), clock=lambda: applied_at
         ).apply_unapplied_cash(
-            TENANT_ONE, parked.unapplied_cash_id, afternoon_collection.collection_case_id
+            TENANT_ONE, later_parked.unapplied_cash_id, night_collection.collection_case_id
         )
         self.assertEqual(missing_case.unapplied_cash_application_outcome_code.value, "rejected")
         self.assertEqual(
