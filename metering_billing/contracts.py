@@ -29,6 +29,7 @@ __all__ = (
     "SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME",
     "SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME",
+    "SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
     "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
@@ -142,6 +143,7 @@ __all__ = (
     "validate_spend_budget_over_signal",
     "validate_spend_budget_over_signal_presentment",
     "validate_spend_budget_approaching_signal",
+    "validate_spend_budget_approaching_signal_presentment",
     "validate_rate_card",
     "validate_tax_rate",
     "validate_tax_assessment",
@@ -173,6 +175,9 @@ SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME = (
     "spend-budget-over-signal-presentment.schema.json"
 )
 SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME = "spend-budget-approaching-signal.schema.json"
+SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME = (
+    "spend-budget-approaching-signal-presentment.schema.json"
+)
 SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME = "spend-budget-presentment.schema.json"
 SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME = (
     "spend-budget-evaluation-presentment.schema.json"
@@ -1773,6 +1778,60 @@ def _missing_success_spend_budget_approaching_signal_fields(
         if field_name not in approaching_signal:
             missing.append(f"$: {outcome} approaching signals must include {field_name}")
     return tuple(missing)
+
+
+def validate_spend_budget_approaching_signal_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate live approaching-signal presentment plus nested existing envelopes."""
+    schema = load_json_schema(
+        SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    if "over_amount" in statement:
+        errors.append("$: approaching-signal presentment must not include over_amount")
+    if "card_pan" in statement:
+        errors.append("$: approaching-signal presentment must not include card_pan")
+    if "retained_earnings" in statement:
+        errors.append("$: approaching-signal presentment must not include retained_earnings")
+    if "payload_json" in statement:
+        errors.append("$: approaching-signal presentment must not include payload_json")
+    approaching_signal = statement.get("approaching_signal")
+    spend_budget_id = None
+    if isinstance(approaching_signal, Mapping):
+        errors.extend(
+            validate_spend_budget_approaching_signal(approaching_signal, schemas_directory)
+        )
+        raw_budget_id = approaching_signal.get("spend_budget_id")
+        if isinstance(raw_budget_id, str):
+            spend_budget_id = raw_budget_id
+    rows = statement.get("webhook_outbox_events")
+    if isinstance(rows, list):
+        if len(rows) > 1:
+            errors.append(
+                "$: approaching-signal presentment has at most one spend_budget.approaching row"
+            )
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                continue
+            errors.extend(validate_webhook_outbox_event_presentment(row, schemas_directory))
+            event_type = row.get("event_type_code")
+            if event_type is not None and event_type != "spend_budget.approaching":
+                errors.append(
+                    f"$.webhook_outbox_events[{index}]: event_type_code must be spend_budget.approaching"
+                )
+            source_id = row.get("source_id")
+            if (
+                spend_budget_id is not None
+                and source_id is not None
+                and source_id != spend_budget_id
+            ):
+                errors.append(
+                    f"$.webhook_outbox_events[{index}]: source_id must match approaching_signal.spend_budget_id"
+                )
+    return tuple(errors)
 
 
 def _missing_success_spend_budget_fields(
