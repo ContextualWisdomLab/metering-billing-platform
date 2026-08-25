@@ -173,6 +173,7 @@ JOURNAL_PROPOSAL_FIXTURE_NAMES = (
     "validated_morning_invoice_draft_journal.json",
     "validated_taxed_invoice_draft_journal.json",
     "validated_morning_leftover_journal.json",
+    "validated_morning_leftover_apply_journal.json",
 )
 COLLECTION_WRITE_OFF_MONEY_FIELDS = (
     "write_off_amount",
@@ -1064,6 +1065,63 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("card_pan", leftover_journal)
         self.assertNotIn("retained_earnings", leftover_journal)
         self.assertNotIn("310100", json.dumps(leftover_journal))
+        leftover_apply_journal = self._fixture("validated_morning_leftover_apply_journal.json")
+        self.assertEqual(validate_journal_proposal(leftover_apply_journal), ())
+        self.assertEqual(leftover_apply_journal["tenant_reference"], "urn:cwl:tenant_001")
+        self.assertEqual(leftover_apply_journal["proposal_status"], "validated")
+        self.assertEqual(leftover_apply_journal["transaction_currency"], "USD")
+        self.assertEqual(
+            leftover_apply_journal["source_event_references"],
+            [
+                "urn:cwl:tenant_001:unapplied_cash_application:"
+                f"{leftover_apply['unapplied_cash_application_id']}"
+            ],
+        )
+        self.assertEqual(
+            leftover_apply_journal["lines"][0]["account_role_code"],
+            "unapplied_cash",
+        )
+        self.assertEqual(leftover_apply_journal["lines"][0]["debit_amount"], "0.001")
+        self.assertEqual(leftover_apply_journal["lines"][0]["credit_amount"], "0")
+        self.assertEqual(
+            leftover_apply_journal["lines"][1]["account_role_code"],
+            "accounts_receivable",
+        )
+        self.assertEqual(leftover_apply_journal["lines"][1]["debit_amount"], "0")
+        self.assertEqual(leftover_apply_journal["lines"][1]["credit_amount"], "0.001")
+        self.assertEqual(len(leftover_apply_journal["lines"]), 2)
+        self.assertEqual(
+            leftover_apply_journal["lines"][0]["debit_amount"],
+            leftover_apply["applied_amount"],
+        )
+        self.assertEqual(leftover_apply["remaining_outstanding_amount"], "19.999")
+        self.assertEqual(leftover_apply["unapplied_cash_application_status"], "applied")
+        self.assertNotEqual(
+            leftover_apply_journal["proposal_id"],
+            cash_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            leftover_apply_journal["proposal_id"],
+            morning_draft_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            leftover_apply_journal["proposal_id"],
+            taxed_draft_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            leftover_apply_journal["proposal_id"],
+            leftover_journal["proposal_id"],
+        )
+        self.assertNotIn("next_operator_action", leftover_apply_journal)
+        for line in leftover_apply_journal["lines"]:
+            for field_name in JOURNAL_PROPOSAL_MONEY_FIELDS:
+                self.assertIsInstance(line[field_name], str)
+                self.assertNotIsInstance(line[field_name], float)
+                parse_exact_decimal(line[field_name])
+        self.assertNotIn("journal_entry_id", leftover_apply_journal)
+        self.assertNotIn("card_pan", leftover_apply_journal)
+        self.assertNotIn("retained_earnings", leftover_apply_journal)
+        self.assertNotIn("310100", json.dumps(leftover_apply_journal))
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
