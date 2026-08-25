@@ -26,7 +26,6 @@ from metering_billing.errors import (
     SpendBudgetEvaluationPresentmentQueryError,
     SpendBudgetOverSignalOutcomeCode,
     SpendBudgetRejectionReasonCode,
-    require_resolved,
 )
 from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.spend_budget import (
@@ -200,12 +199,8 @@ class SpendBudgetOverSignalService:
         budget = self.ledger.get_spend_budget(evaluation.spend_budget_id)
         if budget is None:
             raise ValueError("accepted over signals require a stored budget")
-        tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
-        if tenant_error is not None:
-            return _rejected(SpendBudgetRejectionReasonCode.TENANT_NOT_FOUND)
-        tenant = require_resolved(tenant, "tenant")
         existing = _existing_over_event(
-            self.ledger, tenant.tenant_account_id, evaluation.spend_budget_id
+            self.ledger, budget.tenant_account_id, evaluation.spend_budget_id
         )
         outcome = (
             SpendBudgetOverSignalOutcomeCode.DUPLICATE_REPLAY
@@ -214,7 +209,7 @@ class SpendBudgetOverSignalService:
         )
         result = _from_evaluation(evaluation, outcome, budget.source_payload_hash)
         if existing is None:
-            _enqueue_spend_budget_over(self.ledger, tenant.tenant_reference, result, self._clock())
+            _enqueue_spend_budget_over(self.ledger, tenant_reference, result, self._clock())
         return result
 
 

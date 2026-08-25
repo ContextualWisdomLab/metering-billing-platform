@@ -1550,6 +1550,16 @@ class RepositoryContractTests(unittest.TestCase):
             "$: accepted over signals must include spend_budget_id",
             validate_spend_budget_over_signal(missing_id),
         )
+        missing_budget = dict(instance)
+        del missing_budget["budget_amount"]
+        self.assertIn(
+            "$: accepted over signals must include budget_amount",
+            validate_spend_budget_over_signal(missing_budget),
+        )
+        unpublished = dict(instance, spend_budget_status="draft")
+        unpublished_errors = validate_spend_budget_over_signal(unpublished)
+        self.assertTrue(unpublished_errors)
+        self.assertNotIn("$: published spend budgets must wait", unpublished_errors)
         pan = dict(instance, card_pan="4111111111111111")
         self.assertIn(
             "$: spend budget over signal must not include card_pan",
