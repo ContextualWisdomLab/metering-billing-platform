@@ -6,7 +6,7 @@ export default {
   title: "PaymentReceipt",
 };
 
-export const AppliedFullDrainOrWait = {
+export const AppliedFullWaitForAis = {
   render: () => renderPaymentReceipt(appliedFullPaymentReceipt),
 };
 

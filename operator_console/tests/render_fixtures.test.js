@@ -258,17 +258,17 @@ test("cancelled payment intent waits", () => {
   assert.equal(statement.next_operator_action, "wait");
 });
 
-test("full payment receipt shows received amount and drain or wait", () => {
+test("full payment receipt shows received amount and wait for AIS", () => {
   const statement = loadFixture("applied_full_payment_receipt.json");
   const html = renderPaymentReceipt(statement);
   assert.match(html, /0\.003705 USD/);
-  assert.match(html, /Drain or wait for AIS/);
+  assert.match(html, /Wait for AIS/);
   assert.match(html, /Record the receipt; the cash journal is already validated for AIS to pull/);
   assert.equal(
     PAYMENT_RECEIPT_CUSTOMER_COPY,
     "Record the receipt; the cash journal is already validated for AIS to pull.",
   );
-  assert.equal(nextPaymentReceiptActionCopy("drain_or_wait"), "Drain or wait for AIS");
+  assert.equal(nextPaymentReceiptActionCopy("drain_or_wait"), "Wait for AIS");
   assert.equal(nextPaymentReceiptActionCopy("record_receipt"), "Record the receipt");
   assert.equal(typeof statement.received_amount, "string");
 });
@@ -405,11 +405,11 @@ test("observed posted morning shows posted and wait", () => {
   assert.match(html, />Wait</);
   assert.match(
     html,
-    /Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty/,
+    /Store each posted receipt observation, then wait; AIS keeps sending updates automatically until every receipt is stored/,
   );
   assert.equal(
     POSTING_RECEIPT_OBSERVATION_CUSTOMER_COPY,
-    "Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.",
+    "Store each posted receipt observation, then wait; AIS keeps sending updates automatically until every receipt is stored.",
   );
   assert.equal(nextPostingReceiptObservationActionCopy("wait"), "Wait");
   assert.equal(nextPostingReceiptObservationActionCopy("pull"), "Store the observation");
@@ -423,11 +423,11 @@ test("delivered morning webhook shows wait and never leaks a secret", () => {
   assert.match(html, />Wait</);
   assert.match(
     html,
-    /Register an https callback, then run deliveries; AIS may keep polling/,
+    /Register an https callback, then run deliveries; AIS picks up new events automatically/,
   );
   assert.equal(
     WEBHOOK_DELIVERY_CUSTOMER_COPY,
-    "Register an https callback, then run deliveries; AIS may keep polling.",
+    "Register an https callback, then run deliveries; AIS picks up new events automatically.",
   );
   assert.equal(nextWebhookDeliveryActionCopy("wait"), "Wait");
   assert.equal(nextWebhookDeliveryActionCopy("run_deliveries"), "Run deliveries");
@@ -472,11 +472,11 @@ test("active https callback shows run deliveries and never leaks a secret", () =
   assert.match(html, /Run deliveries/);
   assert.match(
     html,
-    /Register an https callback, then run deliveries; AIS may keep polling/,
+    /Register an https callback, then run deliveries; AIS picks up new events automatically/,
   );
   assert.equal(
     WEBHOOK_SUBSCRIPTION_CUSTOMER_COPY,
-    "Register an https callback, then run deliveries; AIS may keep polling.",
+    "Register an https callback, then run deliveries; AIS picks up new events automatically.",
   );
   assert.equal(nextWebhookSubscriptionActionCopy("run_deliveries"), "Run deliveries");
   assert.equal(nextWebhookSubscriptionActionCopy("register"), "Register a callback");
@@ -531,11 +531,11 @@ test("pending journal outbox event shows run deliveries and never leaks a body",
   assert.match(html, /Run deliveries/);
   assert.match(
     html,
-    /Register an https callback, then run deliveries; AIS may keep polling/,
+    /Register an https callback, then run deliveries; AIS picks up new events automatically/,
   );
   assert.equal(
     WEBHOOK_OUTBOX_EVENT_CUSTOMER_COPY,
-    "Register an https callback, then run deliveries; AIS may keep polling.",
+    "Register an https callback, then run deliveries; AIS picks up new events automatically.",
   );
   assert.equal(nextWebhookOutboxEventActionCopy("run_deliveries"), "Run deliveries");
   assert.equal(nextWebhookOutboxEventActionCopy("wait"), "Wait");

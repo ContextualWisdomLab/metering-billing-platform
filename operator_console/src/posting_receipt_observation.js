@@ -3,7 +3,7 @@ import { renderStatusChip } from "./status_chip.js";
 import { renderTenantPin } from "./tenant_pin.js";
 
 export const POSTING_RECEIPT_OBSERVATION_CUSTOMER_COPY =
-  "Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.";
+  "Store each posted receipt observation, then wait; AIS keeps sending updates automatically until every receipt is stored.";
 
 /**
  * Return the operator-facing next-action copy for one observation.

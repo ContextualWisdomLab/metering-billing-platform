@@ -1361,11 +1361,11 @@ class OperatorConsoleTests(unittest.TestCase):
             inventory,
         )
         self.assertIn(
-            "Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty",
+            "Store each posted receipt observation, then wait; AIS keeps sending updates automatically until every receipt is stored",
             inventory,
         )
         self.assertIn(
-            "Register an https callback, then run deliveries; AIS may keep polling",
+            "Register an https callback, then run deliveries; AIS picks up new events automatically",
             inventory,
         )
         self.assertIn("Issue a key, then send it on every /v1 call; revoke when leaked", inventory)
