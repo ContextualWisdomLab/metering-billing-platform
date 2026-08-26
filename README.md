@@ -204,6 +204,16 @@ python3 -m metering_billing.http_app
 
 `create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, usage event, rating run, invoice draft, collection case, payment intent, payment receipt, or API credential. The adapter does not post journals or call a named payment provider.
 
+The bound ledger defaults to the deterministic in-memory reference adapter. To serve the durable PostgreSQL production system of record, set both variables before startup — the selection fails closed when the DSN is missing:
+
+```bash
+export METERING_BILLING_LEDGER_BACKEND=postgres
+export METERING_BILLING_POSTGRES_DSN="postgresql:///metering_billing?host=/tmp&port=5433"
+python3 -c "from metering_billing.http_app import create_default_ledger, create_http_app; app = create_http_app(create_default_ledger())"
+```
+
+Unauthenticated `GET /healthz` stays a static liveness reply, and `GET /readyz` reports the serving backend: healthy processes answer `200 {"status": "ready", "backend": "memory" | "postgres"}` while a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` with stable reason codes only (see ADR 0123).
+
 Until a tenant has an active API credential, the existing tenant pin is enough (bootstrap window). AIS can keep pulling with `X-CWL-Tenant-Reference` until a key is issued for that tenant. After a key exists, send it on every `/v1` call.
 
 ## Issue a tenant API credential
