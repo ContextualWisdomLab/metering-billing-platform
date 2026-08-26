@@ -1,6 +1,6 @@
 [project]
 name = "metering-billing-platform"
-version = "0.1.0"
+version = "0.2.0"
 description = "Provider-neutral commercial metering and billing control plane"
 requires-python = ">=3.13"
 dependencies = [

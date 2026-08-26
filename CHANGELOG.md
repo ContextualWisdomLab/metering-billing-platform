@@ -12,7 +12,7 @@
   a secure secret provider is added. The broader commercial persistence and GA
   recovery backlog remains open under issue #84.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-25
 
 ### Added
 
