@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
+from threading import RLock
 from typing import Any, Iterator
 from uuid import UUID
 
@@ -66,6 +67,7 @@ from metering_billing.usage_ledger import (
     StoredRatingRun,
     StoredTaxRateSchedule,
     StoredTaxRateVersion,
+    StoredTenantApiCredential,
     StoredTaxAssessment,
     StoredPaymentIntent,
     StoredPaymentReceipt,
@@ -101,6 +103,10 @@ class PostgresUsageLedger:
         self._owns_connection = owns_connection
         self._transaction_active = False
         self.webhook_subscription_secrets: dict[UUID, str] = {}
+        # One psycopg connection serializes its transactions; the threaded web
+        # tier must funnel every session touch through this reentrant lock so
+        # concurrent requests never interleave transaction nesting.
+        self._connection_lock = RLock()
 
     @classmethod
     def connect(cls, dsn: str) -> "PostgresUsageLedger":
@@ -120,35 +126,47 @@ class PostgresUsageLedger:
             with self.connection.cursor() as cursor:
                 yield cursor
             return
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                yield cursor
+        self._connection_lock.acquire()
+        try:
+            with self.connection.transaction():
+                with self.connection.cursor() as cursor:
+                    yield cursor
+        finally:
+            self._connection_lock.release()
 
     @contextmanager
     def ingestion_transaction(self) -> Iterator[None]:
         """Commit one ingest decision and its audit receipt atomically."""
-        if self._transaction_active:
-            yield
-            return
-        self._transaction_active = True
+        self._connection_lock.acquire()
         try:
-            with self.connection.transaction():
+            if self._transaction_active:
                 yield
+                return
+            self._transaction_active = True
+            try:
+                with self.connection.transaction():
+                    yield
+            finally:
+                self._transaction_active = False
         finally:
-            self._transaction_active = False
+            self._connection_lock.release()
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
         """Commit one multi-record commercial command atomically."""
-        if self._transaction_active:
-            yield
-            return
-        self._transaction_active = True
+        self._connection_lock.acquire()
         try:
-            with self.connection.transaction():
+            if self._transaction_active:
                 yield
+                return
+            self._transaction_active = True
+            try:
+                with self.connection.transaction():
+                    yield
+            finally:
+                self._transaction_active = False
         finally:
-            self._transaction_active = False
+            self._connection_lock.release()
 
     def close(self) -> None:
         """Close the connection when this repository owns it."""
@@ -4961,6 +4979,185 @@ class PostgresUsageLedger:
                 self._fetch_journal_proposal(cursor, UUID(str(row[0])))
                 for row in cursor.fetchall()
             )
+
+    def insert_tenant_api_credential(
+        self, credential: StoredTenantApiCredential
+    ) -> StoredTenantApiCredential:
+        """Persist one API credential.  Secrets are never replayed or stored."""
+        if credential.credential_status not in {"active", "revoked"}:
+            raise ValueError("credential_status must be active or revoked")
+        if not credential.credential_secret_hash.startswith("hmac-sha256:"):
+            raise ValueError("credential_secret_hash must be a keyed HMAC")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM billing_core.tenant_api_credential
+                WHERE credential_secret_hash = %s
+                """,
+                (credential.credential_secret_hash,),
+            )
+            if cursor.fetchone() is not None:
+                raise ValueError("credential_secret_hash already stored")
+            cursor.execute(
+                """
+                INSERT INTO billing_core.tenant_api_credential
+                    (tenant_api_credential_id, tenant_account_id,
+                     tenant_api_credential_contract_version, credential_label,
+                     credential_prefix, credential_secret_hash, credential_status,
+                     issued_at, revoked_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tenant_api_credential_id) DO NOTHING
+                RETURNING tenant_api_credential_id
+                """,
+                (
+                    credential.tenant_api_credential_id,
+                    credential.tenant_account_id,
+                    credential.tenant_api_credential_contract_version,
+                    credential.credential_label,
+                    credential.credential_prefix,
+                    credential.credential_secret_hash,
+                    credential.credential_status,
+                    credential.issued_at,
+                    credential.revoked_at,
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise ValueError("tenant_api_credential_id already stored")
+        return credential
+
+    def get_tenant_api_credential(
+        self, tenant_api_credential_id: UUID
+    ) -> StoredTenantApiCredential | None:
+        """Return one API credential by internal identifier, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tenant_api_credential_id, tenant_account_id,
+                       tenant_api_credential_contract_version, credential_label,
+                       credential_prefix, credential_secret_hash, credential_status,
+                       issued_at, revoked_at
+                FROM billing_core.tenant_api_credential
+                WHERE tenant_api_credential_id = %s
+                """,
+                (tenant_api_credential_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return self._tenant_api_credential_from_row(row)
+
+    def find_tenant_api_credential_by_hash(
+        self, credential_secret_hash: str
+    ) -> StoredTenantApiCredential | None:
+        """Return the credential for one keyed hash, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tenant_api_credential_id, tenant_account_id,
+                       tenant_api_credential_contract_version, credential_label,
+                       credential_prefix, credential_secret_hash, credential_status,
+                       issued_at, revoked_at
+                FROM billing_core.tenant_api_credential
+                WHERE credential_secret_hash = %s
+                """,
+                (credential_secret_hash,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return self._tenant_api_credential_from_row(row)
+
+    def list_tenant_api_credentials(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredTenantApiCredential, ...]:
+        """Return API credentials limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tenant_api_credential_id, tenant_account_id,
+                       tenant_api_credential_contract_version, credential_label,
+                       credential_prefix, credential_secret_hash, credential_status,
+                       issued_at, revoked_at
+                FROM billing_core.tenant_api_credential
+                WHERE tenant_account_id = %s
+                ORDER BY issued_at, tenant_api_credential_id
+                """,
+                (tenant_account_id,),
+            )
+            rows = cursor.fetchall()
+        return tuple(self._tenant_api_credential_from_row(row) for row in rows)
+
+    def list_active_tenant_api_credentials(
+        self, tenant_account_id: UUID
+    ) -> tuple[StoredTenantApiCredential, ...]:
+        """Return active API credentials limited to one tenant."""
+        return tuple(
+            credential
+            for credential in self.list_tenant_api_credentials(tenant_account_id)
+            if credential.credential_status == "active"
+        )
+
+    def revoke_tenant_api_credential(
+        self, tenant_api_credential_id: UUID, revoked_at: datetime
+    ) -> StoredTenantApiCredential:
+        """Mark one stored credential revoked.  A second revoke is idempotent."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE billing_core.tenant_api_credential
+                SET credential_status = 'revoked', revoked_at = %s
+                WHERE tenant_api_credential_id = %s
+                  AND credential_status = 'active'
+                RETURNING tenant_api_credential_id
+                """,
+                (revoked_at, tenant_api_credential_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM billing_core.tenant_api_credential
+                    WHERE tenant_api_credential_id = %s
+                    """,
+                    (tenant_api_credential_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError(
+                        "api credential revocation requires a stored credential"
+                    )
+            cursor.execute(
+                """
+                SELECT tenant_api_credential_id, tenant_account_id,
+                       tenant_api_credential_contract_version, credential_label,
+                       credential_prefix, credential_secret_hash, credential_status,
+                       issued_at, revoked_at
+                FROM billing_core.tenant_api_credential
+                WHERE tenant_api_credential_id = %s
+                """,
+                (tenant_api_credential_id,),
+            )
+            stored_row = cursor.fetchone()
+        assert stored_row is not None
+        return self._tenant_api_credential_from_row(stored_row)
+
+    @staticmethod
+    def _tenant_api_credential_from_row(
+        row: tuple[Any, ...]
+    ) -> StoredTenantApiCredential:
+        """Decode one normalized API credential row."""
+        return StoredTenantApiCredential(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            int(row[2]),
+            str(row[3]),
+            str(row[4]),
+            str(row[5]),
+            str(row[6]),
+            row[7],
+            row[8],
+        )
 
     def insert_webhook_subscription(
         self, subscription: StoredWebhookSubscription

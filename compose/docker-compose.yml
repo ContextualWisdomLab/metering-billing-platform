@@ -1,0 +1,74 @@
+name: metering-billing-platform
+
+# Compose is the deployment surface for this platform.  Copy
+# compose/.env.example to compose/.env and adjust values before running:
+#   docker compose -f compose/docker-compose.yml up -d --wait
+#
+# Startup order: postgres_database becomes healthy, then schema_migration
+# applies the checked-in SQL migrations once (idempotent on every boot), then
+# billing_api starts serving and only reports healthy when GET /readyz
+# answers 200 for the PostgreSQL backend.
+
+services:
+  postgres_database:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-metering_billing}
+      POSTGRES_USER: ${POSTGRES_USER:-metering_billing}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-metering_billing_dev_only_change_me}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      # postgres:18+ keeps PGDATA in a subdirectory of /var/lib/postgresql so
+      # pg_upgrade can cross mount boundaries; mount the parent directory.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-metering_billing} -d ${POSTGRES_DB:-metering_billing}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  schema_migration:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: "no"
+    depends_on:
+      postgres_database:
+        condition: service_healthy
+    environment:
+      METERING_BILLING_POSTGRES_DSN: ${METERING_BILLING_POSTGRES_DSN:-postgresql://metering_billing:metering_billing_dev_only_change_me@postgres_database:5432/metering_billing}
+    command:
+      - python
+      - scripts/migrate_postgres.py
+      - --dsn
+      - ${METERING_BILLING_POSTGRES_DSN:-postgresql://metering_billing:metering_billing_dev_only_change_me@postgres_database:5432/metering_billing}
+      - --migrations
+      - database/migrations
+
+  billing_api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres_database:
+        condition: service_healthy
+      schema_migration:
+        condition: service_completed_successfully
+    ports:
+      - "${BILLING_API_HOST_PORT:-8000}:8000"
+    environment:
+      PORT: ${BILLING_API_PORT:-8000}
+      METERING_BILLING_LEDGER_BACKEND: postgres
+      METERING_BILLING_POSTGRES_DSN: ${METERING_BILLING_POSTGRES_DSN:-postgresql://metering_billing:metering_billing_dev_only_change_me@postgres_database:5432/metering_billing}
+      AIS_BASE_URL: ${AIS_BASE_URL:-}
+    healthcheck:
+      # Stdlib-only probe: no curl needed inside the image.
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  postgres_data:

@@ -95,6 +95,11 @@ from metering_billing.issued_invoice_void import (
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.rate_card import RateCardService
 from metering_billing.spend_budget import compute_spend_budget_payload_hash
+from metering_billing.tenant_api_credential import (
+    TenantApiCredentialQueryError,
+    TenantApiCredentialService,
+    hash_api_credential_secret,
+)
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_rating import UsageRatingService
 from metering_billing.usage_ledger import (
@@ -103,6 +108,7 @@ from metering_billing.usage_ledger import (
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
+    StoredTenantApiCredential,
     StoredUnappliedCash,
     StoredUnappliedCashApplication,
     StoredUnappliedCashRefund,
@@ -482,6 +488,125 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "gen_ai_output_token", 1, "token", "sum", CATALOG_START
         )
         self.assertEqual(meter, self.meter)
+
+    def test_tenant_api_credentials_are_durable_tenant_scoped_and_revocable(self) -> None:
+        """Issue-once secrets survive reload and authorized reads stay tenant-scoped."""
+        service = TenantApiCredentialService(self.ledger)
+        first = service.issue_credential(TENANT_ONE, "operator_key")
+        self.assertEqual(first.tenant_api_credential_outcome_code.value, "accepted")
+        secret = first.api_credential_secret
+        assert secret is not None
+        TenantApiCredentialService(self.ledger).authorize_request(TENANT_ONE, secret)
+        with self.assertRaises(TenantApiCredentialQueryError):
+            TenantApiCredentialService(self.ledger).authorize_request(
+                TENANT_ONE, "cwlak_not_a_stored_secret"
+            )
+
+        stored_first = self.ledger.get_tenant_api_credential(first.tenant_api_credential_id)
+        assert stored_first is not None
+        self.assertEqual(stored_first.credential_status, "active")
+        self.assertIsNone(stored_first.revoked_at)
+        self.assertIsNone(self.ledger.get_tenant_api_credential(uuid4()))
+        self.assertIsNone(self.ledger.find_tenant_api_credential_by_hash("hmac-sha256:" + "0" * 64))
+        self.assertEqual(
+            self.ledger.find_tenant_api_credential_by_hash(stored_first.credential_secret_hash),
+            stored_first,
+        )
+
+        tenant_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+        other_tenant_id = self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+        self.assertEqual(self.ledger.list_tenant_api_credentials(other_tenant_id), ())
+        self.assertEqual(self.ledger.list_tenant_api_credentials(tenant_id), (stored_first,))
+        self.assertEqual(
+            self.ledger.list_active_tenant_api_credentials(tenant_id), (stored_first,)
+        )
+
+        def make_stored(**overrides: object) -> StoredTenantApiCredential:
+            base: dict[str, object] = {
+                "tenant_api_credential_id": uuid4(),
+                "tenant_account_id": tenant_id,
+                "tenant_api_credential_contract_version": 1,
+                "credential_label": "operator_key",
+                "credential_prefix": "cwlak_prefix1",
+                "credential_secret_hash": hash_api_credential_secret(
+                    f"cwlak_{uuid4().hex}", "test_pepper_two"
+                ),
+                "credential_status": "active",
+                "issued_at": datetime(2026, 8, 20, tzinfo=UTC),
+                "revoked_at": None,
+            }
+            base.update(overrides)
+            return StoredTenantApiCredential(**base)  # type: ignore[arg-type]
+
+        with self.assertRaises(ValueError):
+            self.ledger.insert_tenant_api_credential(make_stored(credential_status="expired"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_tenant_api_credential(make_stored(credential_secret_hash="plaintext"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_tenant_api_credential(
+                make_stored(credential_secret_hash=stored_first.credential_secret_hash)
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_tenant_api_credential(
+                make_stored(tenant_api_credential_id=first.tenant_api_credential_id)
+            )
+        direct = make_stored()
+        self.assertEqual(self.ledger.insert_tenant_api_credential(direct), direct)
+
+        revoke_one_at = datetime.now(UTC)
+        revoke_two_at = datetime.now(UTC)
+        with self.assertRaises(ValueError):
+            self.ledger.revoke_tenant_api_credential(uuid4(), revoke_two_at)
+        revoked = self.ledger.revoke_tenant_api_credential(
+            first.tenant_api_credential_id, revoke_one_at
+        )
+        self.assertEqual(revoked.credential_status, "revoked")
+        assert revoked.revoked_at is not None
+        again = self.ledger.revoke_tenant_api_credential(
+            first.tenant_api_credential_id, revoke_two_at
+        )
+        self.assertEqual(again, revoked)
+        self.assertEqual(
+            self.ledger.list_tenant_api_credentials(tenant_id), (direct, revoked)
+        )
+        self.assertEqual(self.ledger.list_active_tenant_api_credentials(tenant_id), (direct,))
+
+    def test_threaded_requests_serialize_on_one_connection_safely(self) -> None:
+        """Concurrent web-tier workers never interleave one connection's transactions."""
+        from metering_billing.http_app import create_http_app
+        from tests.test_http_app_backend_selection import invoke_http
+
+        app = create_http_app(ledger=self.ledger)
+        service = TenantApiCredentialService(self.ledger)
+        first = service.issue_credential(TENANT_ONE, "operator_key")
+        secret = first.api_credential_secret
+        assert secret is not None
+
+        failures: list[BaseException] = []
+        barrier = Barrier(8)
+
+        def hammer(worker_number: int) -> None:
+            try:
+                barrier.wait()
+                for _ in range(20):
+                    status, body = invoke_http(
+                        app,
+                        "GET",
+                        "/v1/tenant-api-credentials",
+                        headers={
+                            "X-CWL-Tenant-Reference": TENANT_ONE,
+                            "X-CWL-Api-Key": secret,
+                        },
+                    )
+                    if status != 200:
+                        raise AssertionError(f"unexpected status {status}: {body}")
+                    self.ledger.migration_history_row_count()
+            except BaseException as error:  # noqa: BLE001 - collected below
+                failures.append(error)
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            tuple(executor.map(hammer, range(8)))
+        self.assertEqual(failures, [])
 
     def test_rate_card_and_rating_are_durable_and_tenant_scoped(self) -> None:
         """The first usage-to-rating path survives reload and exact replay."""
