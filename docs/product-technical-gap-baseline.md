@@ -44,13 +44,27 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
+> **Status update (2026-08-25):** the verified release train has merged. The
+> cumulative candidate stack (`#82` plus descendants `#93`–`#132`, recreated
+> as `#133`–`#136`) and the contributor/validation docs (`#137`) are on
+> `develop`. Superseded snapshots (`#1`, `#3`, `#4`, `#92`–`#94`) are closed
+> as absorbed. Issue `#83` (collapse superseded snapshot PRs into a verified
+> release train) is complete: zero open pull requests remain, and the exact
+> head was validated offline — 39 PostgreSQL migrations applied, full unit
+> suite OK, 100% statement/branch coverage (16,971 statements, 5,870
+> branches), repository contracts valid, compile clean. The gap backlog
+> `#84`–`#91` is unchanged and now applies directly to the default branch.
+
 ### Default branch
 
-`develop` contains only the repository bootstrap README. A fresh clone of the default branch does not contain the candidate product.
+As of the status update above, `develop` contains the complete candidate
+product including durable PostgreSQL persistence for the commercial ledger,
+spend-budget publication/evaluation/observation, journal-proposal
+persistence, and operator-console Storybook presentment.
 
 ### Pull-request topology
 
-At assessment time:
+At assessment time (2026-08-20):
 
 - ordinary open issues before this assessment: **9** (`#83`–`#91`), all completion-gap issues;
 - open pull requests: **5** (`#1`, `#3`, `#4`, `#82`, and draft `#92`);
