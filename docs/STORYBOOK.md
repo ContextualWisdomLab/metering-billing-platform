@@ -20,17 +20,17 @@ Customer copy on every rating run: rated total and the next operator action. Rat
 
 Customer copy on every tax assessment: tax-inclusive amount and the next operator action. Publish a tax rate, assess the draft, then propose the journal and let AIS pull.
 
-Customer copy on every posting-receipt observation: AIS posting status and the next operator action. Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.
+Customer copy on every posting-receipt observation: AIS posting status and the next operator action. Store each posted receipt observation, then wait; AIS keeps sending updates automatically until every receipt is stored.
 
-Customer copy on every webhook delivery: stored attempt outcome and the next operator action. Register an https callback, then run deliveries; AIS may keep polling.
+Customer copy on every webhook delivery: stored attempt outcome and the next operator action. Register an https callback, then run deliveries; AIS picks up new events automatically.
 
 Customer copy on every tenant API credential: prefix, status, and the next operator action. Issue a key, then send it on every /v1 call; revoke when leaked.
 
-Customer copy on every webhook subscription: callback URL, status, and the next operator action. Register an https callback, then run deliveries; AIS may keep polling.
+Customer copy on every webhook subscription: callback URL, status, and the next operator action. Register an https callback, then run deliveries; AIS picks up new events automatically.
 
 Customer copy on every dunning notice: notice code, sequence, and the next operator action. Record the commercial reminder, then collect or credit.
 
-Customer copy on every webhook outbox event: event type, delivery status, and the next operator action. Register an https callback, then run deliveries; AIS may keep polling.
+Customer copy on every webhook outbox event: event type, delivery status, and the next operator action. Register an https callback, then run deliveries; AIS picks up new events automatically.
 
 Customer copy on every issued invoice: frozen inclusive total and the next operator action. Issue invoice, then collect or credit.
 

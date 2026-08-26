@@ -3,7 +3,7 @@ import { renderStatusChip } from "./status_chip.js";
 import { renderTenantPin } from "./tenant_pin.js";
 
 export const WEBHOOK_OUTBOX_EVENT_CUSTOMER_COPY =
-  "Register an https callback, then run deliveries; AIS may keep polling.";
+  "Register an https callback, then run deliveries; AIS picks up new events automatically.";
 
 /**
  * Return the operator-facing next-action copy for one outbox event.
@@ -34,7 +34,7 @@ export function renderWebhookOutboxEvent(statement) {
     `<article class="oc-webhook-outbox-event">` +
     `<header class="oc-invoice-statement__header">` +
     `<div>` +
-    `<h1 class="oc-invoice-statement__title">Webhook outbox event</h1>` +
+    `<h1 class="oc-invoice-statement__title">Webhook event</h1>` +
     `<p class="oc-invoice-statement__id">${escapeHtml(statement.outbox_event_id)}</p>` +
     `<p class="oc-invoice-statement__action-copy">${escapeHtml(statement.event_type_code)}</p>` +
     `</div>` +

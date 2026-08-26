@@ -3,7 +3,7 @@ import { renderStatusChip } from "./status_chip.js";
 import { renderTenantPin } from "./tenant_pin.js";
 
 export const WEBHOOK_SUBSCRIPTION_CUSTOMER_COPY =
-  "Register an https callback, then run deliveries; AIS may keep polling.";
+  "Register an https callback, then run deliveries; AIS picks up new events automatically.";
 
 /**
  * Return the operator-facing next-action copy for one subscription.

@@ -16,7 +16,7 @@ export function nextOperatorActionCopy(action) {
   if (action === "record_receipt") {
     return "Record the receipt";
   }
-  return "Drain or wait for AIS";
+  return "Wait for AIS";
 }
 
 /**
