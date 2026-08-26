@@ -436,6 +436,7 @@ from metering_billing.tenant_api_credential_presentment import (
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
+from metering_billing.postgres_usage_ledger import PostgresUsageLedger, UsageLedger
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_ingestion import UsageIngestionService
@@ -647,6 +648,55 @@ KNOWN_POST_PATHS = frozenset(
 )
 SUCCESS_OUTCOMES = frozenset({"accepted", "duplicate_replay"})
 TENANT_HEADER_ENVIRON = "HTTP_X_CWL_TENANT_REFERENCE"
+LEDGER_BACKEND_ENVIRONMENT_VARIABLE = "METERING_BILLING_LEDGER_BACKEND"
+POSTGRES_DSN_ENVIRONMENT_VARIABLE = "METERING_BILLING_POSTGRES_DSN"
+MEMORY_BACKEND_LABEL = "memory"
+POSTGRES_BACKEND_LABEL = "postgres"
+READYZ_REASON_MIGRATION_HISTORY_UNAVAILABLE = "migration_history_unavailable"
+
+
+def create_default_ledger(
+    environ: Mapping[str, str] | None = None,
+) -> UsageLedger:
+    """Build the environment-selected ledger backend for ``create_http_app``.
+
+    ``METERING_BILLING_LEDGER_BACKEND=postgres`` selects the durable
+    :class:`PostgresUsageLedger` production system of record, built from
+    ``METERING_BILLING_POSTGRES_DSN`` through the existing
+    :meth:`PostgresUsageLedger.connect` connection convention.  A missing or
+    empty DSN fails closed at startup with a :class:`ValueError` naming the
+    missing variable.  Every other value, including an unset variable,
+    returns the deterministic :class:`MemoryUsageLedger` reference adapter so
+    tests and local runs keep working unchanged.
+    """
+    settings = os.environ if environ is None else environ
+    if settings.get(LEDGER_BACKEND_ENVIRONMENT_VARIABLE) != POSTGRES_BACKEND_LABEL:
+        return MemoryUsageLedger()
+    dsn = settings.get(POSTGRES_DSN_ENVIRONMENT_VARIABLE)
+    if not dsn:
+        raise ValueError(
+            f"{POSTGRES_DSN_ENVIRONMENT_VARIABLE} must be set to a non-empty "
+            f"PostgreSQL DSN when {LEDGER_BACKEND_ENVIRONMENT_VARIABLE}="
+            f"{POSTGRES_BACKEND_LABEL}"
+        )
+    return PostgresUsageLedger.connect(dsn)
+
+
+def _probe_ledger_readiness(ledger: UsageLedger) -> tuple[str, str | None]:
+    """Probe the bound ledger once and return ``(backend_label, reason_code)``.
+
+    The memory reference adapter is always ready.  The PostgreSQL ledger runs
+    one cheap migration-history row count through its own session; any probe
+    failure maps onto the stable ``migration_history_unavailable`` reason code
+    so raw exception text never leaks into the response.
+    """
+    if not isinstance(ledger, PostgresUsageLedger):
+        return MEMORY_BACKEND_LABEL, None
+    try:
+        ledger.migration_history_row_count()
+    except Exception:  # any probe failure means not ready; never leak internals
+        return POSTGRES_BACKEND_LABEL, READYZ_REASON_MIGRATION_HISTORY_UNAVAILABLE
+    return POSTGRES_BACKEND_LABEL, None
 
 
 class HttpRequestError(ValueError):
@@ -658,13 +708,20 @@ class HttpRequestError(ValueError):
 
 
 def create_http_app(
-    ledger: MemoryUsageLedger | None = None,
+    ledger: UsageLedger | None = None,
     *,
     ais_base_url: str | None = None,
     ais_client: AisPostingReceiptClient | None = None,
     clock: Clock | None = None,
 ) -> WSGIApp:
-    """Return a stdlib WSGI app bound to one shared commercial ledger."""
+    """Return a stdlib WSGI app bound to one shared commercial ledger.
+
+    *ledger* accepts either the deterministic :class:`MemoryUsageLedger`
+    reference adapter or the durable :class:`PostgresUsageLedger` production
+    system of record; ``None`` keeps the memory default.  ``GET /healthz``
+    stays a static liveness reply, while ``GET /readyz`` probes the bound
+    backend and reports which one is serving.
+    """
     shared_ledger = MemoryUsageLedger() if ledger is None else ledger
     ingestion = UsageIngestionService(shared_ledger)
     rating = UsageRatingService(shared_ledger)
@@ -795,6 +852,23 @@ def create_http_app(
             )
         if route_name == "healthz":
             return _send_json(start_response, 200, {"status": "ok"})
+        if route_name == "readyz":
+            backend_label, reason_code = _probe_ledger_readiness(shared_ledger)
+            if reason_code is None:
+                return _send_json(
+                    start_response,
+                    200,
+                    {"status": "ready", "backend": backend_label},
+                )
+            return _send_json(
+                start_response,
+                503,
+                {
+                    "status": "not_ready",
+                    "backend": backend_label,
+                    "reason": reason_code,
+                },
+            )
         if route_name in {"list_tenant_api_credentials", "get_tenant_api_credential"}:
             try:
                 query = _read_query(environ)
@@ -2751,6 +2825,10 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "healthz", {}
         return "method_not_allowed", {}
+    if path == "/readyz":
+        if method == "GET":
+            return "readyz", {}
+        return "method_not_allowed", {}
     if path == TENANT_API_CREDENTIAL_COLLECTION_PATH:
         if method == "POST":
             return "tenant_api_credentials", {}
@@ -3723,6 +3801,7 @@ def _send_json(
         404: "Not Found",
         405: "Method Not Allowed",
         422: "Unprocessable Entity",
+        503: "Service Unavailable",
     }.get(status_code, "OK")
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     start_response(

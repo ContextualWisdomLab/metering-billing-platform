@@ -36,6 +36,7 @@ from metering_billing.usage_ledger import (
     BillingPrincipal,
     CredentialAssignment,
     CredentialRecord,
+    MemoryUsageLedger,
     MeterDefinition,
     MeterQualityRule,
     StoredCollectionCase,
@@ -80,6 +81,10 @@ from metering_billing.usage_ledger import (
     _single_urn_segment,
     generate_record_id,
 )
+
+
+MIGRATION_HISTORY_TABLE = "public.metering_billing_schema_migration"
+"""Migration-history table mirrored from ``scripts/migrate_postgres.py``."""
 
 
 class PostgresUsageLedger:
@@ -149,6 +154,20 @@ class PostgresUsageLedger:
         """Close the connection when this repository owns it."""
         if self._owns_connection:
             self.connection.close()
+
+    def migration_history_row_count(self) -> int:
+        """Return one cheap liveness-probe row count from the migration history.
+
+        The probe runs through the same connection and transaction conventions
+        as every other repository operation, so ``/readyz`` never opens an
+        ad-hoc PostgreSQL connection beside the ledger's own session.
+        """
+        with self._cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE}")
+            row = cursor.fetchone()
+        if row is None:  # pragma: no cover - COUNT(*) always returns one row
+            raise RuntimeError("migration history count did not return a row")
+        return int(row[0])
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Insert or return one tenant authority row."""
@@ -6807,3 +6826,11 @@ class PostgresUsageLedger:
             row[7],
             row[8],
         )
+
+
+UsageLedger = MemoryUsageLedger | PostgresUsageLedger
+"""Ledger implementations accepted by the HTTP adapter and service wiring.
+
+``MemoryUsageLedger`` stays the deterministic reference and test adapter;
+:class:`PostgresUsageLedger` is the durable production system of record.
+"""

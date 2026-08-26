@@ -12,6 +12,13 @@
   a secure secret provider is added. The broader commercial persistence and GA
   recovery backlog remains open under issue #84.
 
+## [Unreleased]
+
+### Added
+
+- The HTTP accept surface selects its ledger backend from the environment: `create_http_app(ledger=...)` now accepts either the deterministic `MemoryUsageLedger` reference adapter or the durable `PostgresUsageLedger` production system of record through the new `UsageLedger` union, and `metering_billing.http_app.create_default_ledger(environ=None)` builds the selected backend — `METERING_BILLING_LEDGER_BACKEND=postgres` constructs `PostgresUsageLedger` via the existing `PostgresUsageLedger.connect` convention from `METERING_BILLING_POSTGRES_DSN`, a missing or empty DSN raises a startup `ValueError` naming `METERING_BILLING_POSTGRES_DSN`, and every other value including unset keeps returning `MemoryUsageLedger()` so tests stay unchanged. Unauthenticated `GET /readyz` joins `GET /healthz` in the same dispatch style: healthy backends answer `200 {"status": "ready", "backend": "memory" | "postgres"}`, and a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` using one cheap migration-history row count (`public.metering_billing_schema_migration`) executed through the ledger's own connection and transaction conventions with no ad-hoc psycopg connections and no raw exception text. Memory stays the deterministic reference/test adapter; postgres becomes the selectable production system of record as partial progress on issue #84. Service constructor signatures, existing routes, exact-decimal money, journal boundaries, AIS pull behavior, and the #24 outbox stay unchanged. ADR 0123 documents the decision. There is no new third-party dependency, schema change, secret, or provider call on this path.
+- ADR 0123 for environment-driven PostgreSQL ledger backend selection and the `/readyz` backend probe.
+
 ## [0.2.0] - 2026-08-25
 
 ### Added
