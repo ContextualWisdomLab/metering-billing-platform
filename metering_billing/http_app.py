@@ -284,10 +284,11 @@ from __future__ import annotations
 import json
 import os
 import re
+from socketserver import ThreadingMixIn
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qs, unquote
 from uuid import UUID
-from wsgiref.simple_server import make_server
+from wsgiref.simple_server import WSGIServer, make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
 from metering_billing.ais_outbox_drain import AisOutboxDrainService
@@ -445,6 +446,14 @@ from metering_billing.usage_rating import UsageRatingService
 
 
 WSGIApp = Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]
+
+
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Serve one daemon thread per connection so tenant reads never serialize."""
+
+    daemon_threads = True
+
+
 COLLECTION_CASE_COLLECTION_PATH = "/v1/collection-cases"
 COLLECTION_AGING_PATH = "/v1/collection-aging"
 BILLING_ACCOUNT_STATEMENT_PATH = re.compile(
@@ -2809,12 +2818,24 @@ def main(arguments: tuple[str, ...] | None = None) -> int:
 
     *arguments* is accepted so tests can invoke the entrypoint without
     touching ``sys.argv``.  The standalone process binds every interface so a
-    container or Render web service can reach it.
+    container or Render web service can reach it.  ``PORT`` selects the
+    listening port and defaults to ``8000`` so container deployments can remap
+    the tier without code changes.  The bound ledger comes from
+    :func:`create_default_ledger`, so ``METERING_BILLING_LEDGER_BACKEND``
+    plus ``METERING_BILLING_POSTGRES_DSN`` select the durable system of
+    record exactly as documented for ``create_http_app``.  Serving uses
+    :class:`ThreadingWSGIServer` so concurrent tenant requests are handled on
+    separate daemon threads instead of serializing behind one request loop.
     """
     del arguments
     port = int(os.environ.get("PORT", "8000"))
     ais_base_url = os.environ.get("AIS_BASE_URL") or None
-    httpd = make_server("0.0.0.0", port, create_http_app(ais_base_url=ais_base_url))
+    httpd = make_server(
+        "0.0.0.0",
+        port,
+        create_http_app(create_default_ledger(), ais_base_url=ais_base_url),
+        server_class=ThreadingWSGIServer,
+    )
     httpd.serve_forever()
     return 0
 

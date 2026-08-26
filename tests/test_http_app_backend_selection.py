@@ -38,17 +38,23 @@ def invoke_http(
     app: Any,
     method: str,
     path: str,
+    payload: Any = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Call the WSGI app in-process and return status code plus JSON body."""
+    raw_body = b"" if payload is None else json.dumps(payload).encode("utf-8")
     environ: dict[str, Any] = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
         "QUERY_STRING": urlencode({}),
-        "CONTENT_LENGTH": "0",
-        "wsgi.input": io.BytesIO(b""),
+        "CONTENT_LENGTH": str(len(raw_body)),
+        "wsgi.input": io.BytesIO(raw_body),
         "wsgi.errors": io.StringIO(),
         "wsgi.url_scheme": "http",
     }
+    if headers is not None:
+        for header_name, header_value in headers.items():
+            environ["HTTP_" + header_name.upper().replace("-", "_")] = header_value
     recorded: dict[str, Any] = {}
 
     def start_response(
@@ -147,6 +153,38 @@ class ReadyzBackendProbeTests(unittest.TestCase):
         self.assertEqual(body["status"], "not_ready")
         self.assertEqual(body["backend"], "postgres")
         self.assertEqual(body["reason"], READYZ_REASON_MIGRATION_HISTORY_UNAVAILABLE)
+
+    def test_postgres_backed_app_serves_authenticated_tenant_reads(self) -> None:
+        """The durable backend accepts credential issue plus an authorized read."""
+        ledger = PostgresUsageLedger.connect(LOCAL_POSTGRES_DSN)
+        try:
+            ledger.register_tenant("urn:cwl:k6_http_probe")
+            app = create_http_app(ledger=ledger)
+            issue_status, issue_body = invoke_http(
+                app,
+                "POST",
+                "/v1/tenant-api-credentials",
+                payload={"credential_label": "k6_baseline_runner"},
+                headers={"X-CWL-Tenant-Reference": "urn:cwl:k6_http_probe"},
+            )
+            self.assertEqual(issue_status, 200)
+            secret = issue_body["api_credential_secret"]
+            read_status, read_body = invoke_http(
+                app,
+                "GET",
+                "/v1/tenant-api-credentials",
+                headers={
+                    "X-CWL-Tenant-Reference": "urn:cwl:k6_http_probe",
+                    "X-CWL-Api-Key": secret,
+                },
+            )
+            self.assertEqual(read_status, 200)
+            self.assertEqual(
+                read_body["tenant_api_credentials"][0]["credential_label"],
+                "k6_baseline_runner",
+            )
+        finally:
+            ledger.close()
 
     def test_wrong_method_on_readyz_stays_request_invalid(self) -> None:
         """Non-GET readiness requests match the existing health route behavior."""

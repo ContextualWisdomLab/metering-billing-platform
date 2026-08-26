@@ -29,6 +29,25 @@ The current milestone contains:
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
 
+## Run the platform in three commands
+
+Start your own billing platform with Docker Compose.  The database starts,
+schema migrations apply automatically before the API accepts its first
+request, and the API reports readiness when the durable PostgreSQL backend
+answers:
+
+```bash
+cp compose/.env.example compose/.env   # review the defaults; change them before production
+docker compose -f compose/docker-compose.yml up -d --wait
+open http://localhost:8000/readyz      # expect {"status": "ready", "backend": "postgres"}
+```
+
+When `--wait` returns, the API is serving on port 8000 and you can start
+accepting usage writes over HTTP right away.  The measured performance of
+this deployment is recorded in `docs/operations/load-test-baseline.md`
+(ADR 0124); re-run `compose/k6/e2e_smoke.js` against a healthy stack to add
+your own dated numbers.
+
 ## Run validation
 
 ```bash

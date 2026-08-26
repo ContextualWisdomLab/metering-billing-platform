@@ -34,6 +34,7 @@ from metering_billing.http_app import (
     _status_for_result,
     create_http_app,
     main,
+    ThreadingWSGIServer,
 )
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payment_intent import PaymentIntentService
@@ -599,21 +600,27 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         host, port, app = maker.call_args.args
         self.assertEqual(host, "0.0.0.0")
         self.assertEqual(port, 8000)
+        self.assertIs(maker.call_args.kwargs["server_class"], ThreadingWSGIServer)
         self.assertTrue(callable(app))
         fake_server.serve_forever.assert_called_once()
 
         fake_server_two = mock.Mock()
         with mock.patch("metering_billing.http_app.make_server", return_value=fake_server_two) as maker_two:
-            with mock.patch("metering_billing.http_app.create_http_app") as creator:
-                creator.return_value = lambda environ, start_response: []
-                with mock.patch.dict(
-                    os.environ,
-                    {"PORT": "9000", "AIS_BASE_URL": "http://ais.example"},
-                    clear=False,
-                ):
-                    self.assertEqual(main(None), 0)
+            sentinel_ledger = object()
+            with mock.patch(
+                "metering_billing.http_app.create_default_ledger", return_value=sentinel_ledger
+            ) as ledger_maker:
+                with mock.patch("metering_billing.http_app.create_http_app") as creator:
+                    creator.return_value = lambda environ, start_response: []
+                    with mock.patch.dict(
+                        os.environ,
+                        {"PORT": "9000", "AIS_BASE_URL": "http://ais.example"},
+                        clear=False,
+                    ):
+                        self.assertEqual(main(None), 0)
         self.assertEqual(maker_two.call_args.args[1], 9000)
-        creator.assert_called_once_with(ais_base_url="http://ais.example")
+        creator.assert_called_once_with(sentinel_ledger, ais_base_url="http://ais.example")
+        ledger_maker.assert_called_once_with()
 
         fake_server_three = mock.Mock()
         with mock.patch("wsgiref.simple_server.make_server", return_value=fake_server_three):
