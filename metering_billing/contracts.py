@@ -10,13 +10,20 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping
 
-from scripts.validate_repository import (
-    validate_accounting_journal_proposal,
-    validate_schema_instance,
-)
+try:
+    from metering_billing._repository_validation.validate_repository import (
+        validate_accounting_journal_proposal,
+        validate_schema_instance,
+    )
+except ModuleNotFoundError:
+    from scripts.validate_repository import (
+        validate_accounting_journal_proposal,
+        validate_schema_instance,
+    )
 
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
@@ -264,7 +271,11 @@ ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json
 
 
 def default_schemas_directory() -> Path:
-    """Return the repository ``schemas/`` directory next to this package."""
+    """Return the packaged schema directory or its source-tree equivalent."""
+    try:
+        return Path(str(resources.files("metering_billing._schemas")))
+    except ModuleNotFoundError:
+        pass
     return Path(__file__).resolve().parents[1] / "schemas"
 
 

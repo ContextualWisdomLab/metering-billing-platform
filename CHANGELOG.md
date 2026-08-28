@@ -16,6 +16,9 @@
 
 ### Added
 
+- The platform now builds an installable Python distribution containing the
+  canonical producer SDK and its checked-in schemas, so producer repositories
+  can consume the same builder instead of copying contract logic.
 - Python, Rust, and TypeScript producer SDKs now include a durable local
   outbox with bounded batch delivery, per-event partial receipts, explicit
   dead-letter replay, and hash-checked removal. Python uses SQLite; Rust and
