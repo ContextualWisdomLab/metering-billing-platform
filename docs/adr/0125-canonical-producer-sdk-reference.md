@@ -23,6 +23,12 @@ The hash covers the usage data, not CloudEvents transport metadata. The server
 `UsageIngestionService` remains responsible for tenant resolution,
 deduplication, durable storage, and ingestion receipts.
 
+The canonical timestamp rule is part of this handoff contract: `occurred_at`
+must be offset-aware, is normalized to UTC, and uses the reference
+implementation's `datetime.isoformat()` precision (no fractional component for
+zero microseconds, otherwise six digits) before the UTC offset is rendered as
+`Z`. For example, `.004Z` becomes `.004000Z` in the canonical JSON.
+
 ## Consequences
 
 Rust and TypeScript implementations can target the same vector before they are
