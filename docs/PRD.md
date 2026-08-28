@@ -504,6 +504,13 @@ contextual-orchestrator usage
 - Existing subscriptions opt in by including `spend_budget.published`.
 - Operators publish the commercial budget, then wait. The write does not compare rated spend, stop rating, ingest, or invoice draft, persist evaluation, mutate the budget, emit a journal, call AIS, or invent a dimension-scoped budget.
 
+## Spend-authorization acceptance
+
+- A known tenant can reserve an exact amount against an immutable published budget with actor, purpose, policy-version, idempotency, and bounded-validity metadata. PostgreSQL locks the budget row before summing prior exposure, so concurrent requests cannot reserve more than the hard-limit remainder.
+- `POST /v1/spend-authorizations`, `GET /v1/spend-authorizations/{id}`, `POST /v1/spend-authorizations/{id}/commitments`, and `POST /v1/spend-authorizations/{id}/releases` expose the request, read, actual-use, and unused-exposure lifecycle. Retries replay the prior result and do not create a second monetary receipt.
+- `requested_amount = committed_amount + released_amount + remaining_amount` is exact decimal arithmetic. Partial commits, cancellation releases, timeout expiry, cross-tenant identifiers, invalid metadata, and over-reservation fail closed.
+- `spend_budget` remains immutable and payment-provider state does not grant entitlement. Credential/principal/project/cost-center/contract policies, quotas, credits, and entitlement grants remain later slices.
+
 ## Spend-budget-over-signal acceptance
 
 - A known tenant can observe one same-tenant published `spend_budget` for over utilization. The write reuses `SpendBudgetEvaluationPresentmentService` so remaining/over math matches one-budget evaluation. First observation with `utilization_status=over` enqueues one existing #24 `spend_budget.over` outbox event. `source_id` is `spend_budget_id`. Replay of the same over observation is `duplicate_replay` and does not enqueue a second row. under and at write zero over-signal outbox rows. Rejected observe writes zero rows.

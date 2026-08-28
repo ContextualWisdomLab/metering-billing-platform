@@ -16,6 +16,7 @@ subsequent slices of the persistence port.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from threading import RLock
 from typing import Any, Iterator
@@ -72,6 +73,12 @@ from metering_billing.usage_ledger import (
     StoredPaymentIntent,
     StoredPaymentReceipt,
     StoredSpendBudget,
+    StoredSpendAuthorization,
+    StoredSpendReservation,
+    StoredSpendCommitment,
+    StoredSpendRelease,
+    _authorization_identity,
+    _authorization_status,
     StoredUsageEvent,
     StoredUsageMeasurement,
     StoredWebhookDeliveryAttempt,
@@ -181,7 +188,7 @@ class PostgresUsageLedger:
         ad-hoc PostgreSQL connection beside the ledger's own session.
         """
         with self._cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE}")
+            cursor.execute("SELECT COUNT(*) FROM public.metering_billing_schema_migration")
             row = cursor.fetchone()
         if row is None:  # pragma: no cover - COUNT(*) always returns one row
             raise RuntimeError("migration history count did not return a row")
@@ -4417,6 +4424,315 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
 
+    def find_spend_authorization(
+        self, tenant_account_id: UUID, idempotency_key: str
+    ) -> StoredSpendAuthorization | None:
+        """Return one tenant-scoped authorization by request key."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT spend_authorization_id
+                FROM billing_core.spend_authorization
+                WHERE tenant_account_id = %s AND idempotency_key = %s
+                """,
+                (tenant_account_id, idempotency_key),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_spend_authorization(
+                cursor, UUID(str(row[0]))
+            )
+
+    def get_spend_authorization(
+        self, tenant_account_id: UUID, spend_authorization_id: UUID
+    ) -> StoredSpendAuthorization | None:
+        """Return an authorization only when it belongs to the tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT spend_authorization_id
+                FROM billing_core.spend_authorization
+                WHERE tenant_account_id = %s AND spend_authorization_id = %s
+                """,
+                (tenant_account_id, spend_authorization_id),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._fetch_spend_authorization(
+                cursor, UUID(str(row[0]))
+            )
+
+    def create_spend_authorization(
+        self,
+        authorization: StoredSpendAuthorization,
+        reservation: StoredSpendReservation,
+    ) -> tuple[StoredSpendAuthorization, str]:
+        """Atomically lock a budget and append one authorization reservation."""
+        requested_amount = parse_exact_decimal(
+            format_exact_decimal(authorization.requested_amount)
+        )
+        if requested_amount <= 0:
+            raise ValueError("requested amount must be positive")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT spend_authorization_id
+                FROM billing_core.spend_authorization
+                WHERE tenant_account_id = %s AND idempotency_key = %s
+                FOR UPDATE
+                """,
+                (authorization.tenant_account_id, authorization.idempotency_key),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row is not None:
+                existing = self._fetch_spend_authorization(
+                    cursor, UUID(str(existing_row[0]))
+                )
+                if _authorization_identity(existing) != _authorization_identity(authorization):
+                    raise ValueError("idempotency key already stores a different authorization")
+                return existing, "duplicate_replay"
+            cursor.execute(
+                """
+                SELECT budget_amount
+                FROM billing_core.spend_budget
+                WHERE tenant_account_id = %s AND spend_budget_id = %s
+                FOR UPDATE
+                """,
+                (authorization.tenant_account_id, authorization.spend_budget_id),
+            )
+            budget_row = cursor.fetchone()
+            if budget_row is None:
+                raise KeyError(authorization.spend_budget_id)
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(requested_amount - released_amount), 0)
+                FROM billing_core.spend_authorization
+                WHERE tenant_account_id = %s
+                  AND spend_budget_id = %s
+                  AND authorization_status <> 'denied'
+                """,
+                (authorization.tenant_account_id, authorization.spend_budget_id),
+            )
+            used_amount = parse_exact_decimal(format_exact_decimal(cursor.fetchone()[0]))
+            if used_amount + requested_amount > parse_exact_decimal(
+                format_exact_decimal(budget_row[0])
+            ):
+                denied = replace(
+                    authorization,
+                    authorization_status="denied",
+                    rejection_reason_code="authorization_exposure_exceeded",
+                    updated_at=authorization.created_at,
+                )
+                self._insert_spend_authorization(cursor, denied)
+                self._insert_spend_authorization_transition(
+                    cursor, denied, "requested", "denied", denied.idempotency_key
+                )
+                return denied, "authorization_exposure_exceeded"
+            reserved = replace(authorization, authorization_status="reserved")
+            self._insert_spend_authorization(cursor, reserved)
+            cursor.execute(
+                """
+                INSERT INTO billing_core.spend_reservation
+                    (spend_reservation_id, tenant_account_id,
+                     spend_authorization_id, reserved_amount, idempotency_key,
+                     reserved_at, valid_until)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    reservation.spend_reservation_id,
+                    reservation.tenant_account_id,
+                    reserved.spend_authorization_id,
+                    parse_exact_decimal(format_exact_decimal(reservation.reserved_amount)),
+                    reservation.idempotency_key,
+                    reservation.reserved_at,
+                    reservation.valid_until,
+                ),
+            )
+            self._insert_spend_authorization_transition(
+                cursor, reserved, "requested", "reserved", reserved.idempotency_key
+            )
+            return self._fetch_spend_authorization(
+                cursor, reserved.spend_authorization_id
+            ), "accepted"
+
+    def apply_spend_commitment(
+        self,
+        tenant_account_id: UUID,
+        commitment: StoredSpendCommitment,
+        now: datetime,
+    ) -> tuple[StoredSpendAuthorization, str]:
+        """Lock an authorization and append one exact actual-use commitment."""
+        with self._cursor() as cursor:
+            authorization = self._locked_spend_authorization(
+                cursor, tenant_account_id, commitment.spend_authorization_id
+            )
+            if authorization is None:
+                raise KeyError(commitment.spend_authorization_id)
+            cursor.execute(
+                """
+                SELECT committed_amount
+                FROM billing_core.spend_commitment
+                WHERE tenant_account_id = %s
+                  AND spend_authorization_id = %s
+                  AND idempotency_key = %s
+                """,
+                (
+                    tenant_account_id,
+                    commitment.spend_authorization_id,
+                    commitment.idempotency_key,
+                ),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row is not None:
+                if parse_exact_decimal(format_exact_decimal(existing_row[0])) != commitment.committed_amount:
+                    raise ValueError("idempotency key already stores a different commitment")
+                return authorization, "duplicate_replay"
+            if authorization.authorization_status == "expired":
+                return authorization, "authorization_expired"
+            if authorization.authorization_status == "denied":
+                return authorization, "authorization_status_invalid"
+            committed_amount = parse_exact_decimal(
+                format_exact_decimal(commitment.committed_amount)
+            )
+            remaining = (
+                authorization.requested_amount
+                - authorization.committed_amount
+                - authorization.released_amount
+            )
+            if committed_amount > remaining:
+                return authorization, "commitment_amount_exceeded"
+            new_committed = authorization.committed_amount + committed_amount
+            new_status = _authorization_status(
+                authorization.requested_amount,
+                new_committed,
+                authorization.released_amount,
+            )
+            cursor.execute(
+                """
+                INSERT INTO billing_core.spend_commitment
+                    (spend_commitment_id, tenant_account_id,
+                     spend_authorization_id, idempotency_key,
+                     committed_amount, actual_usage_reference, committed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    commitment.spend_commitment_id,
+                    commitment.tenant_account_id,
+                    commitment.spend_authorization_id,
+                    commitment.idempotency_key,
+                    committed_amount,
+                    commitment.actual_usage_reference,
+                    commitment.committed_at,
+                ),
+            )
+            self._update_spend_authorization(
+                cursor,
+                authorization,
+                new_status,
+                new_committed,
+                authorization.released_amount,
+                now,
+            )
+            if new_status != authorization.authorization_status:
+                self._insert_spend_authorization_transition(
+                    cursor,
+                    authorization,
+                    authorization.authorization_status,
+                    new_status,
+                    commitment.idempotency_key,
+                    now,
+                )
+            return self._fetch_spend_authorization(
+                cursor, commitment.spend_authorization_id
+            ), "accepted"
+
+    def apply_spend_release(
+        self,
+        tenant_account_id: UUID,
+        release: StoredSpendRelease,
+        now: datetime,
+        target_status: str = "released",
+    ) -> tuple[StoredSpendAuthorization, str]:
+        """Lock an authorization and append one exact release receipt."""
+        with self._cursor() as cursor:
+            authorization = self._locked_spend_authorization(
+                cursor, tenant_account_id, release.spend_authorization_id
+            )
+            if authorization is None:
+                raise KeyError(release.spend_authorization_id)
+            cursor.execute(
+                """
+                SELECT released_amount
+                FROM billing_core.spend_release
+                WHERE tenant_account_id = %s
+                  AND spend_authorization_id = %s
+                  AND idempotency_key = %s
+                """,
+                (
+                    tenant_account_id,
+                    release.spend_authorization_id,
+                    release.idempotency_key,
+                ),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row is not None:
+                if parse_exact_decimal(format_exact_decimal(existing_row[0])) != release.released_amount:
+                    raise ValueError("idempotency key already stores a different release")
+                return authorization, "duplicate_replay"
+            released_amount = parse_exact_decimal(
+                format_exact_decimal(release.released_amount)
+            )
+            remaining = (
+                authorization.requested_amount
+                - authorization.committed_amount
+                - authorization.released_amount
+            )
+            if released_amount > remaining:
+                return authorization, "release_amount_exceeded"
+            new_released = authorization.released_amount + released_amount
+            new_status = _authorization_status(
+                authorization.requested_amount,
+                authorization.committed_amount,
+                new_released,
+                target_status,
+            )
+            cursor.execute(
+                """
+                INSERT INTO billing_core.spend_release
+                    (spend_release_id, tenant_account_id,
+                     spend_authorization_id, idempotency_key,
+                     released_amount, release_reason_code, released_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    release.spend_release_id,
+                    release.tenant_account_id,
+                    release.spend_authorization_id,
+                    release.idempotency_key,
+                    released_amount,
+                    release.release_reason_code,
+                    release.released_at,
+                ),
+            )
+            self._update_spend_authorization(
+                cursor,
+                authorization,
+                new_status,
+                authorization.committed_amount,
+                new_released,
+                now,
+            )
+            if new_status != authorization.authorization_status:
+                self._insert_spend_authorization_transition(
+                    cursor,
+                    authorization,
+                    authorization.authorization_status,
+                    new_status,
+                    release.idempotency_key,
+                    now,
+                )
+            return self._fetch_spend_authorization(
+                cursor, release.spend_authorization_id
+            ), "accepted"
+
     def find_journal_proposal(
         self,
         tenant_account_id: UUID,
@@ -6569,6 +6885,177 @@ class PostgresUsageLedger:
             row[8],
             row[9],
             row[10],
+        )
+
+    @staticmethod
+    def _spend_authorization_from_row(
+        row: tuple[Any, ...],
+    ) -> StoredSpendAuthorization:
+        """Decode one normalized authorization projection."""
+        return StoredSpendAuthorization(
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            UUID(str(row[2])),
+            UUID(str(row[3])),
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+            parse_exact_decimal(format_exact_decimal(row[10])),
+            parse_exact_decimal(format_exact_decimal(row[11])),
+            parse_exact_decimal(format_exact_decimal(row[12])),
+            parse_exact_decimal(format_exact_decimal(row[13])),
+            row[14],
+            row[15],
+            row[16],
+            row[17],
+            row[18],
+            row[19],
+        )
+
+    def _fetch_spend_authorization(
+        self, cursor: Any, spend_authorization_id: UUID
+    ) -> StoredSpendAuthorization:
+        """Hydrate one authorization projection."""
+        cursor.execute(
+            """
+            SELECT spend_authorization_id, tenant_account_id, billing_account_id,
+                   spend_budget_id, spend_authorization_contract_version,
+                   idempotency_key, actor_reference, purpose_code, policy_version,
+                   currency_code, requested_amount, reserved_amount, committed_amount,
+                   released_amount, valid_from, valid_until, authorization_status,
+                   rejection_reason_code, created_at, updated_at
+            FROM billing_core.spend_authorization
+            WHERE spend_authorization_id = %s
+            """,
+            (spend_authorization_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - caller selected an existing row
+            raise KeyError(spend_authorization_id)
+        return self._spend_authorization_from_row(row)
+
+    def _locked_spend_authorization(
+        self, cursor: Any, tenant_account_id: UUID, spend_authorization_id: UUID
+    ) -> StoredSpendAuthorization | None:
+        """Hydrate and lock one tenant-scoped authorization."""
+        cursor.execute(
+            """
+            SELECT spend_authorization_id, tenant_account_id, billing_account_id,
+                   spend_budget_id, spend_authorization_contract_version,
+                   idempotency_key, actor_reference, purpose_code, policy_version,
+                   currency_code, requested_amount, reserved_amount, committed_amount,
+                   released_amount, valid_from, valid_until, authorization_status,
+                   rejection_reason_code, created_at, updated_at
+            FROM billing_core.spend_authorization
+            WHERE tenant_account_id = %s AND spend_authorization_id = %s
+            FOR UPDATE
+            """,
+            (tenant_account_id, spend_authorization_id),
+        )
+        row = cursor.fetchone()
+        return None if row is None else self._spend_authorization_from_row(row)
+
+    @staticmethod
+    def _insert_spend_authorization(
+        cursor: Any, authorization: StoredSpendAuthorization
+    ) -> None:
+        """Insert one authorization projection."""
+        cursor.execute(
+            """
+            INSERT INTO billing_core.spend_authorization
+                (spend_authorization_id, tenant_account_id, billing_account_id,
+                 spend_budget_id, spend_authorization_contract_version,
+                 idempotency_key, actor_reference, purpose_code, policy_version,
+                 currency_code, requested_amount, reserved_amount,
+                 committed_amount, released_amount, valid_from, valid_until,
+                 authorization_status, rejection_reason_code, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                authorization.spend_authorization_id,
+                authorization.tenant_account_id,
+                authorization.billing_account_id,
+                authorization.spend_budget_id,
+                authorization.spend_authorization_contract_version,
+                authorization.idempotency_key,
+                authorization.actor_reference,
+                authorization.purpose_code,
+                authorization.policy_version,
+                authorization.currency_code,
+                authorization.requested_amount,
+                authorization.reserved_amount,
+                authorization.committed_amount,
+                authorization.released_amount,
+                authorization.valid_from,
+                authorization.valid_until,
+                authorization.authorization_status,
+                authorization.rejection_reason_code,
+                authorization.created_at,
+                authorization.updated_at,
+            ),
+        )
+
+    @staticmethod
+    def _update_spend_authorization(
+        cursor: Any,
+        authorization: StoredSpendAuthorization,
+        status: str,
+        committed_amount: Any,
+        released_amount: Any,
+        updated_at: datetime,
+    ) -> None:
+        """Update only the current authorization projection after a receipt."""
+        cursor.execute(
+            """
+            UPDATE billing_core.spend_authorization
+            SET authorization_status = %s,
+                committed_amount = %s,
+                released_amount = %s,
+                updated_at = %s
+            WHERE tenant_account_id = %s AND spend_authorization_id = %s
+            """,
+            (
+                status,
+                committed_amount,
+                released_amount,
+                updated_at,
+                authorization.tenant_account_id,
+                authorization.spend_authorization_id,
+            ),
+        )
+
+    @staticmethod
+    def _insert_spend_authorization_transition(
+        cursor: Any,
+        authorization: StoredSpendAuthorization,
+        from_status: str,
+        to_status: str,
+        causation_key: str,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        """Insert one immutable lifecycle transition receipt."""
+        cursor.execute(
+            """
+            INSERT INTO billing_core.spend_authorization_transition
+                (spend_authorization_transition_id, tenant_account_id,
+                 spend_authorization_id, from_status, to_status,
+                 causation_key, actor_reference, occurred_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                generate_record_id(),
+                authorization.tenant_account_id,
+                authorization.spend_authorization_id,
+                from_status,
+                to_status,
+                causation_key,
+                authorization.actor_reference,
+                authorization.updated_at if occurred_at is None else occurred_at,
+            ),
         )
 
     def _fetch_spend_budget(

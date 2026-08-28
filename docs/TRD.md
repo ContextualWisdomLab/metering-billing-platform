@@ -13,6 +13,17 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 - Usage ingestion deduplicates on tenant-scoped `source_event_key` and on `source_payload_hash` plus `event_contract_version`.
 - CloudEvents-compatible envelopes in the event milestone.
 
+## Spend-authorization control plane
+
+`POST /v1/spend-authorizations` reserves exact exposure against one immutable
+published `spend_budget`. `GET /v1/spend-authorizations/{id}` is a tenant-
+scoped read; nested commitment and release POSTs append actual-use or
+unused-exposure receipts. Each write requires an idempotency key, actor and
+purpose metadata, policy version, exact decimal amount, and bounded validity
+window. PostgreSQL locks the budget row for capacity and the authorization
+row for lifecycle mutations. Quota, credit, entitlement, and dimension-
+scoped policy engines remain separate bounded contexts.
+
 ## Usage-ingestion plane
 
 The importable `metering_billing` package is the first runtime module.  Usage

@@ -284,6 +284,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import UTC, datetime
 from socketserver import ThreadingMixIn
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qs, unquote
@@ -302,6 +303,7 @@ from metering_billing.errors import (
     SpendBudgetOverSignalPresentmentQueryError,
     SpendBudgetApproachingSignalPresentmentQueryError,
     SpendBudgetPresentmentQueryError,
+    SpendAuthorizationQueryError,
     CollectionAgingPresentmentQueryError,
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
@@ -392,6 +394,7 @@ from metering_billing.account_statement_presentment import (
 )
 from metering_billing.rated_spend_presentment import RatedSpendPresentmentService
 from metering_billing.spend_budget import SpendBudgetService
+from metering_billing.spend_authorization import SpendAuthorizationService
 from metering_billing.spend_budget_presentment import SpendBudgetPresentmentService
 from metering_billing.spend_budget_evaluation_presentment import (
     SpendBudgetEvaluationPresentmentService,
@@ -478,6 +481,16 @@ SPEND_BUDGET_OVER_SIGNAL_PATH = re.compile(
 )
 SPEND_BUDGET_APPROACHING_SIGNAL_PATH = re.compile(
     r"^/v1/spend-budgets/([0-9a-fA-F-]{36})/approaching-signal$"
+)
+SPEND_AUTHORIZATION_COLLECTION_PATH = "/v1/spend-authorizations"
+SPEND_AUTHORIZATION_ITEM_PATH = re.compile(
+    r"^/v1/spend-authorizations/([0-9a-fA-F-]{36})$"
+)
+SPEND_AUTHORIZATION_COMMITMENT_PATH = re.compile(
+    r"^/v1/spend-authorizations/([0-9a-fA-F-]{36})/commitments$"
+)
+SPEND_AUTHORIZATION_RELEASE_PATH = re.compile(
+    r"^/v1/spend-authorizations/([0-9a-fA-F-]{36})/releases$"
 )
 COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36})$")
 COLLECTION_DUNNING_PATH = re.compile(
@@ -812,6 +825,7 @@ def create_http_app(
     spend_budget_approaching_signal_presentments = (
         SpendBudgetApproachingSignalPresentmentService(shared_ledger)
     )
+    spend_authorizations = SpendAuthorizationService(shared_ledger, clock=clock)
     dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
@@ -2686,6 +2700,99 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "get_spend_authorization":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                body = spend_authorizations.present_authorization(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["spend_authorization_id"], "spend_authorization_id"
+                    ),
+                )
+                return _send_json(start_response, 200, body)
+            except SpendAuthorizationQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "spend_authorization_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {
+            "spend_authorizations",
+            "spend_authorization_commitments",
+            "spend_authorization_releases",
+        }:
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                if route_name == "spend_authorizations":
+                    valid_until = _parse_authorization_datetime(payload.get("valid_until"))
+                    result = spend_authorizations.request_authorization(
+                        tenant_reference,
+                        _parse_uuid(payload.get("spend_budget_id"), "spend_budget_id"),
+                        payload.get("requested_amount"),
+                        payload.get("idempotency_key"),
+                        payload.get("actor_reference"),
+                        payload.get("purpose_code"),
+                        payload.get("policy_version"),
+                        valid_until,
+                    )
+                elif route_name == "spend_authorization_commitments":
+                    result = spend_authorizations.commit_authorization(
+                        tenant_reference,
+                        _parse_uuid(
+                            path_values["spend_authorization_id"], "spend_authorization_id"
+                        ),
+                        payload.get("committed_amount"),
+                        payload.get("idempotency_key"),
+                        payload.get("actual_usage_reference"),
+                    )
+                else:
+                    result = spend_authorizations.release_authorization(
+                        tenant_reference,
+                        _parse_uuid(
+                            path_values["spend_authorization_id"], "spend_authorization_id"
+                        ),
+                        payload.get("released_amount"),
+                        payload.get("idempotency_key"),
+                        payload.get("release_reason_code"),
+                    )
+                body = result.as_contract_dict()
+                if result.outcome_code.value == "rejected":
+                    reason = result.rejection_reason_code or "request_invalid"
+                    status_code = (
+                        404
+                        if reason in {
+                            "spend_budget_not_found",
+                            "spend_authorization_not_found",
+                        }
+                        else 422
+                    )
+                    return _send_json(start_response, status_code, body)
+                return _send_json(start_response, 200, body)
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         if route_name == "spend_budget_over_signals":
             try:
                 payload = _read_json_object(environ)
@@ -3116,6 +3223,31 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "GET":
             return "get_spend_budget", {"spend_budget_id": budget_match.group(1)}
         return "method_not_allowed", {}
+    authorization_commitment_match = SPEND_AUTHORIZATION_COMMITMENT_PATH.fullmatch(path)
+    if authorization_commitment_match is not None:
+        if method == "POST":
+            return "spend_authorization_commitments", {
+                "spend_authorization_id": authorization_commitment_match.group(1)
+            }
+        return "method_not_allowed", {}
+    authorization_release_match = SPEND_AUTHORIZATION_RELEASE_PATH.fullmatch(path)
+    if authorization_release_match is not None:
+        if method == "POST":
+            return "spend_authorization_releases", {
+                "spend_authorization_id": authorization_release_match.group(1)
+            }
+        return "method_not_allowed", {}
+    if path == SPEND_AUTHORIZATION_COLLECTION_PATH:
+        if method == "POST":
+            return "spend_authorizations", {}
+        return "method_not_allowed", {}
+    authorization_match = SPEND_AUTHORIZATION_ITEM_PATH.fullmatch(path)
+    if authorization_match is not None:
+        if method == "GET":
+            return "get_spend_authorization", {
+                "spend_authorization_id": authorization_match.group(1)
+            }
+        return "method_not_allowed", {}
     if path == COLLECTION_AGING_PATH:
         if method == "GET":
             return "collection_aging", {}
@@ -3526,6 +3658,19 @@ def _parse_uuid(value: object, field_name: str) -> UUID:
         return UUID(value)
     except ValueError as error:
         raise HttpRequestError("request_invalid") from error
+
+
+def _parse_authorization_datetime(value: object) -> datetime:
+    """Parse one aware ISO-8601 authorization deadline."""
+    if not isinstance(value, str) or not value:
+        raise HttpRequestError("request_invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise HttpRequestError("request_invalid") from error
+    if parsed.tzinfo is None:
+        raise HttpRequestError("request_invalid")
+    return parsed.astimezone(UTC)
 
 
 def _dispatch_write(

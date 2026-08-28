@@ -26,6 +26,8 @@ __all__ = (
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_SCHEMA_NAME",
+    "SPEND_AUTHORIZATION_SCHEMA_NAME",
+    "SPEND_AUTHORIZATION_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME",
     "SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME",
@@ -140,6 +142,8 @@ __all__ = (
     "validate_payment_receipt",
     "validate_credit_adjustment",
     "validate_spend_budget",
+    "validate_spend_authorization",
+    "validate_spend_authorization_presentment",
     "validate_spend_budget_over_signal",
     "validate_spend_budget_over_signal_presentment",
     "validate_spend_budget_approaching_signal",
@@ -170,6 +174,8 @@ PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
 SPEND_BUDGET_SCHEMA_NAME = "spend-budget.schema.json"
+SPEND_AUTHORIZATION_SCHEMA_NAME = "spend-authorization.schema.json"
+SPEND_AUTHORIZATION_PRESENTMENT_SCHEMA_NAME = "spend-authorization-presentment.schema.json"
 SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME = "spend-budget-over-signal.schema.json"
 SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME = (
     "spend-budget-over-signal-presentment.schema.json"
@@ -1571,6 +1577,63 @@ def validate_spend_budget(
     if "retained_earnings" in spend_budget:
         errors.append("$: spend budget must not include retained_earnings")
     return tuple(errors)
+
+
+def validate_spend_authorization(
+    authorization: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one authorization command envelope and conservation fields."""
+    schema = load_json_schema(SPEND_AUTHORIZATION_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, authorization))
+    if not isinstance(authorization, Mapping):
+        return tuple(errors)
+    outcome = authorization.get("spend_authorization_outcome_code")
+    if outcome in {"accepted", "duplicate_replay"}:
+        for field_name in (
+            "spend_authorization_id",
+            "spend_budget_id",
+            "requested_amount",
+            "reserved_amount",
+            "committed_amount",
+            "released_amount",
+            "remaining_amount",
+            "authorization_status",
+        ):
+            if field_name not in authorization:
+                errors.append(f"$: successful authorizations must include {field_name}")
+    elif outcome == "rejected" and "rejection_reason_code" not in authorization:
+        errors.append("$: rejected authorizations must include rejection_reason_code")
+    _append_authorization_conservation_errors(errors, authorization)
+    return tuple(errors)
+
+
+def validate_spend_authorization_presentment(
+    authorization: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one tenant-scoped authorization presentment."""
+    schema = load_json_schema(
+        SPEND_AUTHORIZATION_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, authorization))
+    _append_authorization_conservation_errors(errors, authorization)
+    return tuple(errors)
+
+
+def _append_authorization_conservation_errors(
+    errors: list[str], authorization: Any
+) -> None:
+    """Check exact authorization arithmetic when all three components exist."""
+    if not isinstance(authorization, Mapping):
+        return
+    try:
+        requested = Decimal(str(authorization["requested_amount"]))
+        committed = Decimal(str(authorization["committed_amount"]))
+        released = Decimal(str(authorization["released_amount"]))
+        remaining = Decimal(str(authorization["remaining_amount"]))
+    except (KeyError, ArithmeticError, ValueError):
+        return
+    if requested != committed + released + remaining:
+        errors.append("$: authorization amounts must conserve requested exposure")
 
 
 def validate_spend_budget_over_signal(

@@ -48,6 +48,7 @@ from metering_billing import (
     SpendBudgetOverSignalService,
     SpendBudgetPresentmentService,
     SpendBudgetService,
+    SpendAuthorizationService,
     TaxAssessmentService,
     TaxRateService,
     UsageIngestionService,
@@ -113,6 +114,9 @@ from metering_billing.usage_ledger import (
     StoredUnappliedCashApplication,
     StoredUnappliedCashRefund,
     StoredSpendBudget,
+    StoredSpendCommitment,
+    StoredSpendRelease,
+    StoredSpendReservation,
     StoredWebhookDeliveryAttempt,
 )
 from metering_billing.webhook_outbox import (
@@ -184,8 +188,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 39:
-            raise AssertionError(f"expected 39 migrations, got {len(applied)}")
+        if len(applied) != 40:
+            raise AssertionError(f"expected 40 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -197,6 +201,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.spend_authorization_transition,
+                billing_core.spend_release,
+                billing_core.spend_commitment,
+                billing_core.spend_reservation,
+                billing_core.spend_authorization,
                 billing_core.spend_budget,
                 billing_core.journal_proposal_line,
                 billing_core.journal_proposal,
@@ -5651,6 +5660,214 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,),
         )
         self.assertEqual(concurrent_replay.webhook_subscription_outcome_code.value, "duplicate_replay")
+
+    def test_spend_authorization_is_atomic_idempotent_and_restart_safe(self) -> None:
+        """Concurrent requests share one hard-limit remainder and survive reload."""
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        account, account_error = self.ledger.resolve_billing_account(tenant, ACCOUNT_ONE)
+        self.assertIsNone(account_error)
+        assert account is not None
+        published_at = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
+        budget = SpendBudgetService(self.ledger, clock=lambda: published_at).publish_spend_budget(
+            TENANT_ONE,
+            account.billing_account_id,
+            "USD",
+            Decimal("100.00"),
+            MORNING_WINDOW,
+        )
+        assert budget.spend_budget_id is not None
+        workers = [
+            PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
+            PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
+        ]
+        barrier = Barrier(2)
+        deadline = datetime(2026, 8, 16, 10, 30, tzinfo=UTC)
+
+        def request(item: tuple[int, PostgresUsageLedger]):
+            index, worker = item
+            barrier.wait()
+            return SpendAuthorizationService(worker, clock=lambda: published_at).request_authorization(
+                TENANT_ONE,
+                budget.spend_budget_id,
+                "60.00",
+                f"concurrent-request-{index}",
+                "worker",
+                "batch",
+                "policy-v1",
+                deadline,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = tuple(pool.map(request, enumerate(workers)))
+        for worker in workers:
+            worker.close()
+        self.assertEqual(
+            sum(result.outcome_code.value == "accepted" for result in results), 1
+        )
+        self.assertEqual(
+            sum(result.rejection_reason_code == "authorization_exposure_exceeded" for result in results),
+            1,
+        )
+        accepted = next(result for result in results if result.outcome_code.value == "accepted")
+        assert accepted.authorization is not None
+        authorization_id = accepted.authorization.spend_authorization_id
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.spend_reservation"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.spend_authorization"
+            ).fetchone()[0],
+            2,
+        )
+        restart = PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True)
+        stored = restart.get_spend_authorization(tenant.tenant_account_id, authorization_id)
+        self.assertIsNotNone(stored)
+        committed = SpendAuthorizationService(restart, clock=lambda: published_at).commit_authorization(
+            TENANT_ONE, authorization_id, "10.00", "commit-restart", "usage-restart"
+        )
+        released = SpendAuthorizationService(restart, clock=lambda: published_at).release_authorization(
+            TENANT_ONE, authorization_id, "50.00", "release-restart", "cancelled"
+        )
+        restart.close()
+        self.assertEqual(committed.authorization.committed_amount, Decimal("10.00"))
+        self.assertEqual(released.authorization.authorization_status, "released")
+        self.assertEqual(
+            released.authorization.requested_amount
+            - released.authorization.committed_amount
+            - released.authorization.released_amount,
+            Decimal("0"),
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.spend_authorization_transition"
+            ).fetchone()[0],
+            4,
+        )
+
+    def test_spend_authorization_postgres_edges_are_idempotent_and_tenant_scoped(self) -> None:
+        """Exercise direct durable authorization branches that the service guards."""
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        account, account_error = self.ledger.resolve_billing_account(tenant, ACCOUNT_ONE)
+        self.assertIsNone(account_error)
+        assert account is not None
+        published_at = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
+        budget = SpendBudgetService(self.ledger, clock=lambda: published_at).publish_spend_budget(
+            TENANT_ONE, account.billing_account_id, "USD", Decimal("40"), MORNING_WINDOW
+        )
+        assert budget.spend_budget_id is not None
+        deadline = datetime(2026, 8, 16, 10, 30, tzinfo=UTC)
+        accepted = SpendAuthorizationService(self.ledger, clock=lambda: published_at).request_authorization(
+            TENANT_ONE, budget.spend_budget_id, "40", "edge-request", "worker", "batch", "v1", deadline
+        )
+        authorization = accepted.authorization
+        assert authorization is not None
+        tenant_id = tenant.tenant_account_id
+        self.assertEqual(
+            self.ledger.find_spend_authorization(tenant_id, "edge-request"), authorization
+        )
+        self.assertIsNone(self.ledger.find_spend_authorization(tenant_id, "missing-request"))
+        self.assertEqual(
+            self.ledger.get_spend_authorization(tenant_id, authorization.spend_authorization_id),
+            authorization,
+        )
+        self.assertIsNone(self.ledger.get_spend_authorization(tenant_id, uuid4()))
+        reservation = StoredSpendReservation(
+            uuid4(), tenant_id, authorization.spend_authorization_id, authorization.requested_amount,
+            authorization.idempotency_key, published_at, deadline
+        )
+        self.assertEqual(
+            self.ledger.create_spend_authorization(authorization, reservation)[1], "duplicate_replay"
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.create_spend_authorization(
+                replace(authorization, actor_reference="other"), reservation
+            )
+        with self.assertRaises(KeyError):
+            self.ledger.create_spend_authorization(
+                replace(authorization, spend_budget_id=uuid4(), idempotency_key="missing-budget"),
+                reservation,
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.create_spend_authorization(
+                replace(authorization, requested_amount=Decimal("0"), idempotency_key="zero-request"),
+                reservation,
+            )
+
+        first_commit = StoredSpendCommitment(
+            uuid4(), tenant_id, authorization.spend_authorization_id, "first-commit", Decimal("1"), "usage", published_at
+        )
+        second_commit = replace(first_commit, spend_commitment_id=uuid4(), idempotency_key="second-commit")
+        self.assertEqual(self.ledger.apply_spend_commitment(tenant_id, first_commit, published_at)[1], "accepted")
+        self.assertEqual(self.ledger.apply_spend_commitment(tenant_id, second_commit, published_at)[1], "accepted")
+        self.assertEqual(self.ledger.apply_spend_commitment(tenant_id, second_commit, published_at)[1], "duplicate_replay")
+        with self.assertRaises(ValueError):
+            self.ledger.apply_spend_commitment(
+                tenant_id, replace(second_commit, committed_amount=Decimal("0.1")), published_at
+            )
+        self.assertEqual(
+            self.ledger.apply_spend_commitment(
+                tenant_id, replace(second_commit, idempotency_key="too-much", committed_amount=Decimal("39")), published_at
+            )[1],
+            "commitment_amount_exceeded",
+        )
+        with self.assertRaises(KeyError):
+            self.ledger.apply_spend_commitment(
+                tenant_id, replace(second_commit, spend_authorization_id=uuid4()), published_at
+            )
+
+        expiring = SpendAuthorizationService(self.ledger, clock=lambda: published_at).request_authorization(
+            TENANT_ONE, budget.spend_budget_id, "1", "expiring-request", "worker", "batch", "v1", deadline
+        )
+        assert expiring.authorization is not None
+        expired = SpendAuthorizationService(
+            self.ledger, clock=lambda: deadline + timedelta(seconds=1)
+        ).expire_authorization(TENANT_ONE, expiring.authorization.spend_authorization_id, "expire-edge")
+        self.assertEqual(
+            self.ledger.apply_spend_commitment(
+                tenant_id,
+                replace(first_commit, spend_authorization_id=expired.authorization.spend_authorization_id, idempotency_key="late-commit"),
+                deadline + timedelta(seconds=1),
+            )[1],
+            "authorization_expired",
+        )
+        denied = SpendAuthorizationService(self.ledger, clock=lambda: published_at).request_authorization(
+            TENANT_ONE, budget.spend_budget_id, "3", "denied-request", "worker", "batch", "v1", deadline
+        )
+        assert denied.authorization is not None
+        self.assertEqual(
+            self.ledger.apply_spend_commitment(
+                tenant_id,
+                replace(first_commit, spend_authorization_id=denied.authorization.spend_authorization_id, idempotency_key="denied-commit"),
+                published_at,
+            )[1],
+            "authorization_status_invalid",
+        )
+
+        first_release = StoredSpendRelease(
+            uuid4(), tenant_id, authorization.spend_authorization_id, "first-release", Decimal("1"), "cancelled", published_at
+        )
+        second_release = replace(first_release, spend_release_id=uuid4(), idempotency_key="second-release")
+        self.assertEqual(self.ledger.apply_spend_release(tenant_id, first_release, published_at)[1], "accepted")
+        self.assertEqual(self.ledger.apply_spend_release(tenant_id, second_release, published_at)[1], "accepted")
+        self.assertEqual(self.ledger.apply_spend_release(tenant_id, second_release, published_at)[1], "duplicate_replay")
+        with self.assertRaises(ValueError):
+            self.ledger.apply_spend_release(
+                tenant_id, replace(second_release, released_amount=Decimal("0.1")), published_at
+            )
+        self.assertEqual(
+            self.ledger.apply_spend_release(
+                tenant_id, replace(second_release, idempotency_key="too-much-release", released_amount=Decimal("37")), published_at
+            )[1],
+            "release_amount_exceeded",
+        )
+        with self.assertRaises(KeyError):
+            self.ledger.apply_spend_release(
+                tenant_id, replace(second_release, spend_authorization_id=uuid4()), published_at
+            )
 
     def test_published_spend_budget_is_durable(self) -> None:
         """Persist one published spend_budget and keep existing reads after restart."""
