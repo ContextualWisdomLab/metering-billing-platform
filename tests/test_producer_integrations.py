@@ -87,6 +87,11 @@ class ProducerIntegrationTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             build_contextual_usage_event(
+                {**record, "workflow_run_id": None},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
                 {**record, "measurement_status": "unavailable"},
                 **IDENTITY,
             )
