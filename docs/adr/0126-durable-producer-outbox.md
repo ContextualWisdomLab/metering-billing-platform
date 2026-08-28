@@ -25,8 +25,11 @@ producer integration:
 - The event ID is the stable local outbox ID. Re-enqueueing the same tenant,
   source key, and byte-stable event is a duplicate enqueue; reusing the key for
   a different fact fails closed.
-- A lease prevents two local workers from delivering the same row at once. An
-  expired lease is eligible for recovery after a process crash.
+- A tenant-scoped lease prevents two local workers from delivering the same row
+  at once. Claiming records the lease but does not consume an attempt; the
+  attempt count advances only when the result is applied. An expired lease is
+  eligible for recovery after a process crash, and a late result can update a
+  row only while its original lease is still current.
 - Each drain is capped at 100 events. `accepted` and `duplicate_replay` are
   terminal delivery outcomes; explicit `rejected` results enter dead-letter
   state; transport errors and incomplete receipts retry with capped exponential
@@ -35,6 +38,9 @@ producer integration:
   credential. Billing remains responsible for tenant-scoped idempotency and
   at-most-once monetary effect; the outbox does not calculate price, tax,
   credit, or invoice amounts.
+- SQLite write transactions use a bounded busy timeout and a per-connection
+  lock; transport I/O runs outside that lock so local enqueue is not held behind
+  a slow network call.
 
 The transport is a protocol rather than an HTTP client. This keeps endpoint
 policy, authentication, and language-specific networking in the producer

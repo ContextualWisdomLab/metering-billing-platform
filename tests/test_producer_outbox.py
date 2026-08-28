@@ -204,6 +204,93 @@ class ProducerOutboxTests(unittest.TestCase):
             denied.close()
             outbox.close()
 
+            stale = ProducerOutbox(Path(directory) / "stale.sqlite3", clock=lambda: NOW)
+            stale_event = event_for(54)
+            stale.enqueue(stale_event, auth=AUTH)
+            with mock.patch.object(stale, "_apply_result", return_value=(False, False)):
+                receipt = stale.drain(
+                    FakeTransport(
+                        [ProducerDeliveryResult(stale_event["source_event_key"], "accepted")]
+                    ),
+                    auth=AUTH,
+                    now=NOW,
+                )
+            self.assertEqual(receipt.accepted_event_count, 0)
+            stale.close()
+
+    def test_crash_after_claim_does_not_consume_attempt(self) -> None:
+        class CrashTransport:
+            def ingest_batch(self, events, *, auth, credential):
+                raise SystemExit("worker crashed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "outbox.sqlite3"
+            outbox = ProducerOutbox(path, clock=lambda: NOW, lease_seconds=1)
+            event = event_for(52)
+            outbox.enqueue(event, auth=AUTH)
+            with self.assertRaises(SystemExit):
+                outbox.drain(CrashTransport(), auth=AUTH, now=NOW)
+            self.assertEqual(
+                outbox.get_status(str(event["event_id"])).attempt_count, 0
+            )
+            recovered = FakeTransport(
+                [ProducerDeliveryResult(event["source_event_key"], "accepted")]
+            )
+            receipt = outbox.drain(
+                recovered,
+                auth=AUTH,
+                now=NOW + timedelta(seconds=1, microseconds=500_000),
+            )
+            self.assertEqual(receipt.accepted_event_count, 1)
+            self.assertEqual(
+                outbox.get_status(str(event["event_id"])).attempt_count, 1
+            )
+            outbox.close()
+
+    def test_late_result_cannot_overwrite_newer_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "outbox.sqlite3"
+            first = ProducerOutbox(path, clock=lambda: NOW, lease_seconds=1)
+            event = event_for(53)
+            first.enqueue(event, auth=AUTH)
+            first_rows = first._claim_pending(
+                _format_instant(NOW), 1, AUTH.tenant_reference
+            )
+            second = ProducerOutbox(path, clock=lambda: NOW, lease_seconds=1)
+            second_rows = second._claim_pending(
+                _format_instant(NOW + timedelta(seconds=2)), 1, AUTH.tenant_reference
+            )
+            self.assertEqual(len(second_rows), 1)
+
+            first._lock.acquire()
+            try:
+                first._begin_write()
+                applied, dead_lettered = first._apply_result(
+                    first_rows[0],
+                    ProducerDeliveryResult(event["source_event_key"], "accepted"),
+                    NOW + timedelta(seconds=2),
+                )
+                first._connection.commit()
+            finally:
+                first._lock.release()
+            self.assertFalse(applied)
+            self.assertFalse(dead_lettered)
+            self.assertEqual(
+                second.get_status(str(event["event_id"])).status, "pending"
+            )
+            second.drain(
+                FakeTransport(
+                    [ProducerDeliveryResult(event["source_event_key"], "accepted")]
+                ),
+                auth=AUTH,
+                now=NOW + timedelta(seconds=3, microseconds=500_000),
+            )
+            self.assertEqual(
+                second.get_status(str(event["event_id"])).status, "delivered"
+            )
+            second.close()
+            first.close()
+
     def test_drain_accepts_duplicate_rejects_and_passes_auth_ephemerally(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             outbox = ProducerOutbox(Path(directory) / "outbox.sqlite3", clock=lambda: NOW)

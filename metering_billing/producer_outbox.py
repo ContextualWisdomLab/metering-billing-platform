@@ -295,7 +295,9 @@ class ProducerOutbox:
             self._begin_write()
             try:
                 for row, result in zip(rows, ordered_results):
-                    dead_lettered = self._apply_result(row, result, current)
+                    applied, dead_lettered = self._apply_result(row, result, current)
+                    if not applied:
+                        continue
                     if result.outcome == "accepted":
                         counts[0] += 1
                     elif result.outcome == "duplicate_replay":
@@ -343,7 +345,7 @@ class ProducerOutbox:
 
     def _claim_pending(
         self, now_text: str, limit: int, tenant_reference: str
-    ) -> tuple[sqlite3.Row, ...]:
+    ) -> tuple[dict[str, Any], ...]:
         """Lease due rows so a crashed worker can be recovered after expiry."""
         lease_until = _format_instant(
             _parse_instant(now_text) + timedelta(seconds=self._lease_seconds)
@@ -369,7 +371,7 @@ class ProducerOutbox:
                 self._connection.execute(
                     """
                     UPDATE producer_outbox_event
-                    SET attempt_count = attempt_count + 1, lease_until = ?
+                    SET lease_until = ?
                     WHERE outbox_event_id = ?
                     """,
                     (lease_until, row["outbox_event_id"]),
@@ -383,66 +385,76 @@ class ProducerOutbox:
                 "outbox_event_id": row["outbox_event_id"],
                 "source_event_key": row["source_event_key"],
                 "event_json": row["event_json"],
-                "attempt_count": row["attempt_count"] + 1,
+                "attempt_count": row["attempt_count"],
+                "lease_until": lease_until,
             }
             for row in rows
         )
 
     def _apply_result(
         self, row: Mapping[str, Any], result: ProducerDeliveryResult, now: datetime
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """Persist one terminal, retryable, or dead-letter outcome."""
         event_id = row["outbox_event_id"]
+        lease_until = row["lease_until"]
         if result.outcome in {"accepted", "duplicate_replay"}:
-            self._connection.execute(
+            updated = self._connection.execute(
                 """
                 UPDATE producer_outbox_event
-                SET delivery_status = 'delivered', lease_until = NULL, last_error_code = NULL
-                WHERE outbox_event_id = ?
+                SET delivery_status = 'delivered', attempt_count = attempt_count + 1,
+                    lease_until = NULL, last_error_code = NULL
+                WHERE outbox_event_id = ? AND delivery_status = 'pending'
+                  AND lease_until = ?
                 """,
-                (event_id,),
-            )
-            return False
+                (event_id, lease_until),
+            ).rowcount
+            return bool(updated), False
+        attempt_count = row["attempt_count"] + 1
         if result.outcome == "rejected":
-            self._connection.execute(
+            updated = self._connection.execute(
                 """
                 UPDATE producer_outbox_event
-                SET delivery_status = 'dead_letter', lease_until = NULL,
+                SET delivery_status = 'dead_letter', attempt_count = ?, lease_until = NULL,
                     last_error_code = ?
-                WHERE outbox_event_id = ?
+                WHERE outbox_event_id = ? AND delivery_status = 'pending'
+                  AND lease_until = ?
                 """,
-                (result.reason_code or "rejected", event_id),
-            )
-            return True
-        if row["attempt_count"] >= self._max_attempts:
-            self._connection.execute(
+                (attempt_count, result.reason_code or "rejected", event_id, lease_until),
+            ).rowcount
+            return bool(updated), bool(updated)
+        if attempt_count >= self._max_attempts:
+            updated = self._connection.execute(
                 """
                 UPDATE producer_outbox_event
-                SET delivery_status = 'dead_letter', lease_until = NULL,
+                SET delivery_status = 'dead_letter', attempt_count = ?, lease_until = NULL,
                     last_error_code = ?
-                WHERE outbox_event_id = ?
+                WHERE outbox_event_id = ? AND delivery_status = 'pending'
+                  AND lease_until = ?
                 """,
-                (result.reason_code or "retry_exhausted", event_id),
-            )
-            return True
+                (attempt_count, result.reason_code or "retry_exhausted", event_id, lease_until),
+            ).rowcount
+            return bool(updated), bool(updated)
         backoff = min(
             self._max_backoff_seconds,
-            self._base_backoff_seconds * (2 ** (row["attempt_count"] - 1)),
+            self._base_backoff_seconds * (2 ** (attempt_count - 1)),
         )
-        self._connection.execute(
+        updated = self._connection.execute(
             """
             UPDATE producer_outbox_event
-            SET delivery_status = 'pending', lease_until = NULL,
+            SET delivery_status = 'pending', attempt_count = ?, lease_until = NULL,
                 next_attempt_at = ?, last_error_code = ?
-            WHERE outbox_event_id = ?
+            WHERE outbox_event_id = ? AND delivery_status = 'pending'
+              AND lease_until = ?
             """,
             (
+                attempt_count,
                 _format_instant(now + timedelta(seconds=backoff)),
                 result.reason_code or "retryable",
                 event_id,
+                lease_until,
             ),
-        )
-        return False
+        ).rowcount
+        return bool(updated), False
 
 
 def _validate_batch_limit(limit: int) -> None:
