@@ -97,6 +97,7 @@ class ProducerIntegrationTests(unittest.TestCase):
             page_count=2,
             ocr_page_count=1,
             extracted_block_count=7,
+            cost_center_reference="urn:cwl:tenant_001:cost_center:document",
         )
         self.assertEqual(validate_usage_event(event), ())
         self.assertEqual(
@@ -106,6 +107,10 @@ class ProducerIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {measurement["quality_code"] for measurement in event["measurements"]},
             {"locally_measured"},
+        )
+        self.assertEqual(
+            event["cost_center_reference"],
+            "urn:cwl:tenant_001:cost_center:document",
         )
         self.assertNotIn("doc-01", str(event["measurements"]))
 

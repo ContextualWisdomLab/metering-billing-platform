@@ -105,6 +105,7 @@ def build_newsdom_usage_event(
     shard_reference: str | None = None,
     credential_reference: str | None = None,
     project_reference: str | None = None,
+    cost_center_reference: str | None = None,
 ) -> dict[str, Any]:
     """Map one NewsDOM parse result using counts, never document text."""
     if not document_id:
@@ -156,6 +157,7 @@ def build_newsdom_usage_event(
         ],
         credential_reference=credential_reference,
         project_reference=project_reference,
+        cost_center_reference=cost_center_reference,
         dimensions=dimensions,
     )
 
