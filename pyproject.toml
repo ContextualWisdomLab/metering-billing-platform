@@ -16,7 +16,7 @@ Repository = "https://github.com/ContextualWisdomLab/metering-billing-platform"
 Documentation = "https://github.com/ContextualWisdomLab/metering-billing-platform/tree/develop/docs"
 
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [dependency-groups]
