@@ -51,9 +51,10 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
 > PRs `#142`–`#145` remain `BLOCKED`/`REVIEW_REQUIRED`; PR `#146` is
-> `BLOCKED` with its ordinary checks passed but provider-side OpenCode/Strix
-> evidence not green, and PR `#147` is `CLEAN` with terminal producer Checks,
-> but both have zero independent approvals. The
+> `BLOCKED` with its ordinary checks rerunning after the package/release
+> follow-up and provider-side OpenCode/Strix evidence not green, and PR `#147`
+> is rerunning its producer Checks after normal source synchronization. Both
+> have zero independent approvals. The
 > external producer onboarding PRs remain separate: contextual-orchestrator
 > `#908`, NewsDOM `#740`, and fast-mlsirm `#1545`. None is merge evidence for
 > `develop`.
@@ -180,8 +181,8 @@ not merge evidence:
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `c4f0478847dfdcbc026241fe3126c6ea4ba3e769`; open, blocked, review required, zero unresolved threads, zero approvals; hosted checks are rerunning after the timeout fix |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `f33234c9f6380d0885247ca386893d3297395b1f`; open, dependent on #146, current source synchronized by a normal merge; hosted checks and independent approval remain required |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `7aa47c7420a09e1ed6f5e34b9a327d885ac2e4f6`; open, blocked, review required, zero unresolved threads, zero approvals; package/release contracts pass locally and hosted checks are rerunning |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `707f23630c5fb36e98ec46e20b31e074865c4a08`; open, dependent on #146, current source synchronized by a normal merge; hosted checks and independent approval remain required |
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
