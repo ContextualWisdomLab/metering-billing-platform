@@ -1476,7 +1476,7 @@ class PostgresUsageLedger:
                      billing_account_id, billing_principal_id, credential_record_id,
                      source_event_key, event_contract_version, event_payload_hash,
                      product_code, operation_code, occurred_at, recorded_at,
-                     cost_center_reference, project_reference, dimensions)
+                     cost_center_reference, project_reference, usage_dimensions)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT DO NOTHING
                 RETURNING usage_event_id
@@ -5720,7 +5720,7 @@ class PostgresUsageLedger:
                    billing_principal_id, credential_record_id, source_event_key,
                    event_contract_version, event_payload_hash, product_code, operation_code,
                    occurred_at, recorded_at, cost_center_reference, project_reference,
-                   dimensions
+                   usage_dimensions
             FROM billing_core.usage_event
             WHERE usage_event_id = %s
             """,

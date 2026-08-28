@@ -349,7 +349,7 @@ SCHEMA_NAME_PATTERN = re.compile(
 )
 COLUMN_NAME_PATTERN = re.compile(
     r"(?:^\s+|ADD\s+COLUMN\s+)([a-zA-Z_][a-zA-Z0-9_]*)\s+"
-    r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean)\b",
+    r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean|jsonb)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 TABLE_NAME_PATTERN = re.compile(
