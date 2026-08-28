@@ -54,15 +54,20 @@ the release artifact set in a fresh environment before installation:
 sha256sum --check evidence/subjects.sha256
 for artifact in python/* rust/* typescript/*; do
   gh attestation verify "$artifact" \
-    --repo ContextualWisdomLab/metering-billing-platform
+    --repo ContextualWisdomLab/metering-billing-platform \
+    --predicate-type https://slsa.dev/provenance/v1
+  gh attestation verify "$artifact" \
+    --repo ContextualWisdomLab/metering-billing-platform \
+    --predicate-type https://spdx.dev/Document/v3
 done
 ```
 
 The downloaded `evidence/producer-sdks.spdx.json` is the SPDX document and
 the two `*.sigstore.json` files are the signed attestation bundles retained
-with the package files. `gh attestation verify` checks the artifact's
-repository-bound signed attestation; it does not treat a copied bundle as a
-standalone trust decision.
+with the package files. The SBOM attestation uses the vetted SPDX 3 predicate
+type `https://spdx.dev/Document/v3`. `gh attestation verify` checks the
+artifact's repository-bound signed attestation; it does not treat a copied
+bundle as a standalone trust decision.
 
 The registry 404 state, absent protected release environment, or absent
 attestation receipt is release-blocking evidence rather than a successful

@@ -205,7 +205,7 @@ jobs:
             --output dist/evidence/producer-sdks.spdx.json \
             --release-sha "$RELEASE_SHA" \
             --created-at "$created_at"
-      - name: Attest SLSA 1.2 build provenance
+      - name: Attest SLSA build provenance
         id: attest-provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
@@ -213,7 +213,7 @@ jobs:
             dist/python/*
             dist/rust/*
             dist/typescript/*
-      - name: Attest SPDX SBOM
+      - name: Attest SPDX 3.0.1 SBOM
         id: attest-sbom
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
@@ -221,7 +221,8 @@ jobs:
             dist/python/*
             dist/rust/*
             dist/typescript/*
-          sbom-path: dist/evidence/producer-sdks.spdx.json
+          predicate-type: https://spdx.dev/Document/v3
+          predicate-path: dist/evidence/producer-sdks.spdx.json
       - name: Record artifact checksums and attestation bundles
         env:
           PROVENANCE_BUNDLE: ${{ steps.attest-provenance.outputs.bundle-path }}
@@ -237,6 +238,19 @@ jobs:
           name: producer-release-evidence
           path: dist
           if-no-files-found: error
+      - name: Verify signed attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for artifact in dist/python/* dist/rust/* dist/typescript/*; do
+            gh attestation verify "$artifact" \
+              --repo ContextualWisdomLab/metering-billing-platform \
+              --predicate-type https://slsa.dev/provenance/v1
+            gh attestation verify "$artifact" \
+              --repo ContextualWisdomLab/metering-billing-platform \
+              --predicate-type https://spdx.dev/Document/v3
+          done
       - name: Publish Python distribution with OIDC provenance
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
