@@ -41,6 +41,13 @@ The server persists the producer contract version, meter version, bounded
 repository and trace references, availability time, and correction lineage as
 append-only event metadata; `recorded_at` remains server-assigned.
 
+Release artifacts are built only from a published GitHub release tag. The
+repository workflow packages the Python distribution, Rust crate, and
+TypeScript tarball first, then publishes them behind the `producer-release`
+environment. PyPI and npm use OIDC provenance; crates.io uses the scoped
+`CARGO_REGISTRY_TOKEN` secret. Package versions must be bumped with the
+changelog before a later release because registry versions are immutable.
+
 ## Consequences
 
 The three SDKs now provide a real local outage buffer and partial-receipt
@@ -60,3 +67,13 @@ https://opentelemetry.io/docs/specs/semconv/
 
 World Wide Web Consortium. (2021). *Trace Context*.
 https://www.w3.org/TR/trace-context/
+
+Python Packaging Authority. (n.d.). *Publishing package distribution releases
+using GitHub Actions CI/CD workflows*.
+https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/
+
+npm. (n.d.). *Generating provenance statements*.
+https://docs.npmjs.com/generating-provenance-statements/
+
+Rust Project. (n.d.). *Cargo publishing*.
+https://doc.rust-lang.org/cargo/commands/cargo-publish.html

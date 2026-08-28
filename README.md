@@ -453,6 +453,25 @@ python3 -c "from metering_billing import DunningEventPresentmentService"
 
 After a `collection_dunning_event` exists, `GET /v1/dunning-events/{dunning_event_id}` returns the tenant-scoped reminder. `GET /v1/dunning-events` lists `{dunning_events, next_cursor}`. Record the commercial reminder, then collect or credit. This path does not send mail or invent recipient PII.
 
+## Install the producer SDKs
+
+The canonical producer artifacts are released from a published GitHub release
+tag by the protected [producer SDK release workflow](docs/operations/release-producer-sdks.md).
+The current distribution identities are:
+
+```bash
+pip install metering-billing-platform
+cargo add cwl-metering-producer
+npm install @contextualwisdomlab/metering-producer
+```
+
+The Python distribution imports as `metering_billing`. Versions must be pinned
+to a published release by each producer; package publication is not complete
+until the release workflow and registry pages provide evidence for that exact
+version. Producer adapters must emit only the bounded dimensions documented by
+the SDKs and must not send prompts, responses, document content, secrets, or
+provider objects.
+
 ## Present a statement in Storybook
 
 ```bash

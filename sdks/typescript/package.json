@@ -2,6 +2,22 @@
   "name": "@contextualwisdomlab/metering-producer",
   "version": "0.1.0",
   "description": "Canonical CWL metering producer event builder",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/ContextualWisdomLab/metering-billing-platform/tree/develop/sdks/typescript",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ContextualWisdomLab/metering-billing-platform.git",
+    "directory": "sdks/typescript"
+  },
+  "files": [
+    "README.md",
+    "src"
+  ],
+  "keywords": [
+    "metering",
+    "billing",
+    "cloudevents"
+  ],
   "type": "module",
   "exports": {
     ".": {

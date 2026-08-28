@@ -49,3 +49,9 @@ PCI Security Standards Council. (2024). *Payment Card Industry Data Security Sta
 TM Forum. (2024). *TMF620 Product Catalog Management API (Version 5.0.0).* https://www.tmforum.org/oda/open-apis/directory/product-catalog-management-api-TMF620
 
 PostgreSQL Global Development Group. (2026). *PostgreSQL versioning policy.* https://www.postgresql.org/support/versioning/
+
+Python Packaging Authority. (n.d.). *Publishing package distribution releases using GitHub Actions CI/CD workflows.* https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/
+
+npm. (n.d.). *Generating provenance statements.* https://docs.npmjs.com/generating-provenance-statements/
+
+Rust Project. (n.d.). *Cargo publishing.* https://doc.rust-lang.org/cargo/commands/cargo-publish.html

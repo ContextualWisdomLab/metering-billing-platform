@@ -2,10 +2,18 @@
 name = "metering-billing-platform"
 version = "0.2.0"
 description = "Provider-neutral commercial metering and billing control plane"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "psycopg[binary]>=3.2,<4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ContextualWisdomLab/metering-billing-platform"
+Repository = "https://github.com/ContextualWisdomLab/metering-billing-platform"
+Documentation = "https://github.com/ContextualWisdomLab/metering-billing-platform/tree/develop/docs"
 
 [build-system]
 requires = ["setuptools>=75"]

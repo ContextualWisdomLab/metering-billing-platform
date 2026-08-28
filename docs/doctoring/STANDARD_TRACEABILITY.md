@@ -27,3 +27,6 @@
 | OECD International VAT/GST Guidelines | A published tenant tax rate is separate from later invoice calculation. This slice applies one flat persisted rate and does not implement nexus, exemptions, or an OSS engine. |
 | IAS 12 | Statutory tax presentation belongs to AIS. Billing emits semantic `tax_payable` on taxed invoice journals and debits the same role on taxed credits; AIS must map that role onto its chart. |
 | PostgreSQL 18 | UUIDv7 and exact numeric persistence support ordered identifiers and monetary precision. |
+| PyPA Trusted Publishing | Python artifacts are built separately and published from a protected release environment with OIDC rather than a long-lived upload token. |
+| npm provenance | The TypeScript tarball is published with `--provenance` from GitHub Actions and public access is explicit. |
+| Cargo publishing | The Rust crate passes `cargo package --locked` before the protected publish step; crate versions remain immutable. |
