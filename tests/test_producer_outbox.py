@@ -228,6 +228,23 @@ class ProducerOutboxTests(unittest.TestCase):
             self.assertEqual(receipt.accepted_event_count, 0)
             stale.close()
 
+    def test_enqueue_rejects_ambiguous_identity_matches(self) -> None:
+        """A candidate matching two identity keys cannot be classified as a replay."""
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = ProducerOutbox(Path(directory) / "outbox.sqlite3", clock=lambda: NOW)
+            first = event_for(60)
+            second = event_for(61)
+            outbox.enqueue(first, auth=AUTH)
+            outbox.enqueue(second, auth=AUTH)
+
+            ambiguous = event_for(62)
+            ambiguous["event_id"] = first["event_id"]
+            ambiguous["source_event_key"] = second["source_event_key"]
+            ambiguous["source_payload_hash"] = compute_source_payload_hash(ambiguous)
+            with self.assertRaisesRegex(ProducerOutboxConflict, "multiple persisted facts"):
+                outbox.enqueue(ambiguous, auth=AUTH)
+            outbox.close()
+
     def test_crash_after_claim_does_not_consume_attempt(self) -> None:
         class CrashTransport:
             def ingest_batch(self, events, *, auth, credential):

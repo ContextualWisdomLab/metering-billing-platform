@@ -187,19 +187,22 @@ class ProducerOutbox:
             now_text = _format_instant(self._clock())
             self._begin_write()
             try:
-                existing = self._connection.execute(
+                existing_rows = self._connection.execute(
                     """
                     SELECT outbox_event_id, source_event_key, tenant_reference, event_json,
                            credential_reference, purpose_code, correlation_id
                     FROM producer_outbox_event
                     WHERE outbox_event_id = ?
                        OR (tenant_reference = ? AND source_event_key = ?)
-                    ORDER BY outbox_event_id
-                    LIMIT 1
                     """,
                     (event_id, auth.tenant_reference, source_event_key),
-                ).fetchone()
-                if existing is not None:
+                ).fetchall()
+                if existing_rows:
+                    if len(existing_rows) != 1:
+                        raise ProducerOutboxConflict(
+                            "producer event identity matches multiple persisted facts"
+                        )
+                    existing = existing_rows[0]
                     if (
                         existing["tenant_reference"] == auth.tenant_reference
                         and existing["source_event_key"] == source_event_key
