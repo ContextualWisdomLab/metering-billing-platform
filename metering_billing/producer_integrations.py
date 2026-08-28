@@ -29,11 +29,12 @@ def build_contextual_usage_event(
     if not isinstance(workflow_run_id, str) or not workflow_run_id:
         raise ValueError("workflow_run_id must be a non-empty string when present")
     source_event_key = f"contextual-orchestrator:{workflow_run_id}:{usage_record_id}"
-    quality = (
-        "provider_reported"
-        if record.get("measurement_status") == "measured"
-        else "estimated"
-    )
+    measurement_status = record.get("measurement_status")
+    if measurement_status not in {"measured", "estimated"}:
+        raise ValueError(
+            "measurement_status must be measured or estimated for canonical export"
+        )
+    quality = "provider_reported" if measurement_status == "measured" else "estimated"
     provider = _code(record.get("provider_name"), "provider_name")
     route_mode = _code(
         record.get("route_mode") or record.get("request_channel") or "sync",

@@ -34,6 +34,10 @@
   document text, and secrets remain rejected. This is contract groundwork for
   the three real producer integrations required by issue #90, not an integration
   claim.
+- The contextual-orchestrator producer adapter now rejects missing,
+  unavailable, or unknown measurement provenance instead of relabeling it as
+  an estimate; only `measured` and `estimated` ledger claims map to canonical
+  usage quality codes.
 - Usage-event contract metadata now includes producer-contract version, meter
   version, repository and trace/correlation/causation references, availability
   time, and correction lineage. The PostgreSQL ledger persists these fields in

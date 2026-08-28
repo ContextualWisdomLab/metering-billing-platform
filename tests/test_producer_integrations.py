@@ -58,6 +58,7 @@ class ProducerIntegrationTests(unittest.TestCase):
             "model_name": "gpt-4o-mini",
             "prompt_tokens": 1,
             "completion_tokens": 2,
+            "measurement_status": "estimated",
             "created_at": 1,
         }
         cloud_event = build_contextual_cloud_event(record, **IDENTITY)
@@ -82,6 +83,20 @@ class ProducerIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_contextual_usage_event(
                 {**record, "workflow_run_id": 0},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
+                {**record, "measurement_status": "unavailable"},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "measurement_status"
+                },
                 **IDENTITY,
             )
         with self.assertRaises(ValueError):
