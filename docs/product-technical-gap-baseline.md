@@ -181,8 +181,8 @@ not merge evidence:
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `59f60f2df377e84e567ecdcd5605da46868c1106`; open, blocked, review required, zero unresolved threads, zero approvals; package/release contracts pass locally and hosted checks are rerunning |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `135bda7584837bee963a36fda577b79d4817a252`; open, dependent on #146, current source synchronized by a normal merge; hosted checks and independent approval remain required |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `ab3175b27737cab665898d3ed840e62e03ffbe8d`; open, blocked, review required, zero independent approvals; package/release contracts pass locally and hosted checks are rerunning |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `7ae0da1cc3daca80305c3a2983ef4e6cbccacb6a`; open, dependent on #146, current source synchronized by a normal merge; hosted checks and independent approval remain required |
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
