@@ -146,6 +146,10 @@ class ProducerSdkTests(unittest.TestCase):
             build_usage_event(**arguments, dimensions={"prompt": "must-not-persist"})
         with self.assertRaises(ProducerContractError):
             build_usage_event(**arguments, dimensions=["must-not-persist"])
+        invalid_lineage = dict(arguments)
+        invalid_lineage["correction_lineage"] = ["must-not-persist"]
+        with self.assertRaises(ProducerContractError):
+            build_usage_event(**invalid_lineage)
 
     def test_outbox_guards_duplicate_bytes_and_empty_flush(self) -> None:
         """Durability guards reject collisions and keep no-op flushes explicit."""

@@ -664,6 +664,19 @@ class UsageIngestionTests(unittest.TestCase):
                 service.ingest_usage_event(make_event()).rejection_reason_code,
                 RejectionReasonCode.SCHEMA_INVALID,
             )
+        with mock.patch(
+            "metering_billing.usage_ingestion.parse_iso8601_datetime",
+            side_effect=[
+                datetime(2026, 8, 16, 10, 27, 42, 482000, tzinfo=UTC),
+                TimeWindowError("bad available_at"),
+            ],
+        ):
+            self.assertEqual(
+                service.ingest_usage_event(
+                    make_event(available_at="2026-08-16T10:27:43.482Z")
+                ).rejection_reason_code,
+                RejectionReasonCode.SCHEMA_INVALID,
+            )
 
     def test_default_service_clock_and_receipt_optional_fields(self) -> None:
         """The zero-argument service constructs a ledger and a timezone-aware clock."""

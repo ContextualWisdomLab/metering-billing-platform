@@ -179,12 +179,6 @@ class DurableUsageOutbox:
                     event_id, "transport_transient", max_attempts
                 )
                 retried += self._was_retried(event_id, max_attempts)
-        except Exception:
-            for event_id, _ in rows:
-                dead_lettered += self._fail(
-                    event_id, "transport_unexpected", max_attempts
-                )
-                retried += self._was_retried(event_id, max_attempts)
         else:
             receipts = (
                 response.get("event_receipts")
