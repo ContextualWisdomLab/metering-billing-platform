@@ -41,7 +41,9 @@
         "document_job_reference": {"type": "string", "pattern": "^urn:cwl:"},
         "shard_reference": {"type": "string", "pattern": "^urn:cwl:"},
         "run_reference": {"type": "string", "pattern": "^urn:cwl:"},
-        "artifact_reference": {"type": "string", "pattern": "^urn:cwl:"}
+        "artifact_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "configuration_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "seed_reference": {"type": "string", "pattern": "^urn:cwl:"}
       }
     },
     "occurred_at": {"type": "string", "format": "date-time"},

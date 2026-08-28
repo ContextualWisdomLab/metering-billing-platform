@@ -16,6 +16,13 @@
 
 ### Added
 
+- Python, Rust, and TypeScript producer SDKs now include a durable local
+  outbox with bounded batch delivery, per-event partial receipts, explicit
+  dead-letter replay, and hash-checked removal. Python uses SQLite; Rust and
+  TypeScript use atomic local files. A transport callback owns credentials and
+  scheduling, and the existing server idempotency remains the monetary-effect
+  authority (ADR 0129). This is outage-buffer groundwork; real producer
+  onboarding and released consumer pins under issue #90 remain open.
 - The canonical usage-event schema and Python, Rust, and TypeScript producer
   SDK references now accept a bounded allowlist of non-sensitive provider,
   model, workflow, role, backend, and job-reference dimensions. The dimensions

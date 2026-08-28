@@ -1,0 +1,51 @@
+# ADR 0129: Durable producer SDK outbox and receipt delivery
+
+## Context
+
+The canonical Python, Rust, and TypeScript builders produce the same
+CloudEvents-compatible usage fact, but a producer process can still lose that
+fact between construction and HTTP delivery. The existing
+`POST /v1/usage-events` endpoint already returns ordered per-event receipts,
+including accepted, duplicate replay, and rejected outcomes.
+
+## Decision
+
+Add a small durable outbox to each SDK:
+
+- Python uses SQLite; Rust and TypeScript use an atomically replaced local
+  file, with no new runtime dependency.
+- enqueue validates the closed event and rejects a reused `event_id` whose
+  bytes differ; it never generates or mutates an event identifier;
+- a bounded flush sends at most the configured batch size;
+- only a receipt whose tenant, source key, contract version, and source hash
+  match the queued event removes it;
+- accepted and duplicate-replay receipts are acknowledged, rejected receipts
+  are retained as dead letters, and missing/malformed receipts or transient
+  transport failures remain pending until the bounded attempt limit;
+- dead letters require explicit replay, and the transport/scheduler and
+  credential handling remain application-owned.
+
+The server remains the monetary-effect authority. A crash after server accept
+and before local deletion causes an at-least-once replay, while the server's
+tenant-scoped idempotency prevents a second usage fact. Telemetry and tracing
+may correlate a delivery attempt, but sampled telemetry is not ledger truth.
+
+## Consequences
+
+The three SDKs now provide a real local outage buffer and partial-receipt
+boundary. The file implementations are process-local and rewrite the small
+queue atomically; a high-throughput multi-process queue, remote broker, and
+full retry scheduler remain deployment concerns. Producer integrations still
+need released SDK pins and real scheduled smoke/replay evidence before issue
+#90 is complete.
+
+## References
+
+Cloud Native Computing Foundation. (2024). *CloudEvents specification*
+(Version 1.0.2). https://github.com/cloudevents/spec
+
+OpenTelemetry Authors. (n.d.). *Semantic conventions*.
+https://opentelemetry.io/docs/specs/semconv/
+
+World Wide Web Consortium. (2021). *Trace Context*.
+https://www.w3.org/TR/trace-context/

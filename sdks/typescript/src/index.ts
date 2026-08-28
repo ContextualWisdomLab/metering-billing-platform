@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 export const CLOUD_EVENTS_SPECVERSION = "1.0";
 export const USAGE_CLOUD_EVENT_TYPE = "org.contextualwisdomlab.metering.usage.v1";
@@ -47,6 +49,184 @@ export interface UsageCloudEvent {
   time: string;
   datacontenttype: string;
   data: UsageEvent;
+}
+
+export interface OutboxFlushResult {
+  attemptedCount: number;
+  acceptedCount: number;
+  duplicateReplayCount: number;
+  rejectedCount: number;
+  retriedCount: number;
+  deadLetteredCount: number;
+  pendingCount: number;
+}
+
+export type UsageDeliveryResponse = { event_receipts: Array<Record<string, unknown>> };
+export type UsageDeliverySender = (
+  events: readonly UsageEvent[],
+) => UsageDeliveryResponse | Promise<UsageDeliveryResponse>;
+
+export class TransientDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransientDeliveryError";
+  }
+}
+
+export class PermanentDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PermanentDeliveryError";
+  }
+}
+
+type OutboxRecord = {
+  event: UsageEvent;
+  attempts: number;
+  state: "pending" | "dead_letter";
+  lastErrorCode?: string;
+};
+
+/** A process-local durable queue; the file is atomically replaced per change. */
+export class FileUsageOutbox {
+  private readonly filePath: string;
+
+  constructor(filePath: string) {
+    this.filePath = filePath;
+    mkdirSync(dirname(filePath), { recursive: true });
+    if (!existsSync(filePath)) this.write([]);
+  }
+
+  enqueue(event: UsageEvent): void {
+    buildUsageCloudEvent(event, "urn:cwl:producer:outbox-validation");
+    const records = this.read();
+    const existing = records.find((record) => record.event.event_id === event.event_id);
+    if (existing !== undefined) {
+      if (JSON.stringify(existing.event) !== JSON.stringify(event)) {
+        throw new ProducerContractError("event_id already has different event bytes");
+      }
+      return;
+    }
+    records.push({ event: structuredClone(event), attempts: 0, state: "pending" });
+    this.write(records);
+  }
+
+  replayDeadLetter(eventId: string): void {
+    const records = this.read();
+    const record = records.find((candidate) => candidate.event.event_id === eventId);
+    if (record === undefined || record.state !== "dead_letter") throw new Error(`unknown dead letter: ${eventId}`);
+    record.attempts = 0;
+    record.state = "pending";
+    delete record.lastErrorCode;
+    this.write(records);
+  }
+
+  pendingCount(): number {
+    return this.read().filter((record) => record.state === "pending").length;
+  }
+
+  deadLetterCount(): number {
+    return this.read().filter((record) => record.state === "dead_letter").length;
+  }
+
+  async flush(sender: UsageDeliverySender, batchSize = 100, maxAttempts = 5): Promise<OutboxFlushResult> {
+    if (!Number.isInteger(batchSize) || batchSize < 1 || !Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      throw new RangeError("batchSize and maxAttempts must be positive integers");
+    }
+    const records = this.read();
+    const batch = records.filter((record) => record.state === "pending").slice(0, batchSize);
+    if (batch.length === 0) return this.result(0, 0, 0, 0, 0, 0);
+    let accepted = 0;
+    let duplicateReplay = 0;
+    let rejected = 0;
+    let retried = 0;
+    let deadLettered = 0;
+    const fail = (record: OutboxRecord, code: string, forceDead = false): void => {
+      record.attempts += 1;
+      if (forceDead || record.attempts >= maxAttempts) {
+        record.state = "dead_letter";
+        deadLettered += 1;
+      } else {
+        retried += 1;
+      }
+      record.lastErrorCode = code;
+    };
+    try {
+      const response = await sender(batch.map((record) => record.event));
+      if (!response || !Array.isArray(response.event_receipts)) {
+        for (const record of batch) fail(record, "invalid_delivery_response");
+      } else {
+        for (const record of batch) {
+          const receipt = findReceipt(response.event_receipts, record.event);
+          if (receipt?.ingestion_outcome_code === "accepted" && receiptMatches(receipt, record.event)) {
+            records.splice(records.indexOf(record), 1);
+            accepted += 1;
+          } else if (receipt?.ingestion_outcome_code === "duplicate_replay" && receiptMatches(receipt, record.event)) {
+            records.splice(records.indexOf(record), 1);
+            duplicateReplay += 1;
+          } else if (receipt?.ingestion_outcome_code === "rejected") {
+            fail(record, typeof receipt.rejection_reason_code === "string" ? receipt.rejection_reason_code : "rejected", true);
+            rejected += 1;
+          } else {
+            fail(record, "invalid_delivery_receipt");
+          }
+        }
+      }
+    } catch (error) {
+      const permanent = error instanceof PermanentDeliveryError;
+      for (const record of batch) fail(record, permanent ? "transport_permanent" : "transport_transient", permanent);
+    }
+    this.write(records);
+    return this.result(batch.length, accepted, duplicateReplay, rejected, retried, deadLettered);
+  }
+
+  private result(attemptedCount: number, acceptedCount: number, duplicateReplayCount: number, rejectedCount: number, retriedCount: number, deadLetteredCount: number): OutboxFlushResult {
+    return { attemptedCount, acceptedCount, duplicateReplayCount, rejectedCount, retriedCount, deadLetteredCount, pendingCount: this.pendingCount() };
+  }
+
+  private read(): OutboxRecord[] {
+    return JSON.parse(readFileSync(this.filePath, "utf8")) as OutboxRecord[];
+  }
+
+  private write(records: OutboxRecord[]): void {
+    const temporaryPath = `${this.filePath}.tmp`;
+    writeFileSync(temporaryPath, JSON.stringify(records), { encoding: "utf8", mode: 0o600 });
+    const descriptor = openSync(temporaryPath, "r");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    renameSync(temporaryPath, this.filePath);
+    const directory = openSync(dirname(this.filePath), "r");
+    fsyncSync(directory);
+    closeSync(directory);
+  }
+}
+
+/** Fetch-based sender for the platform's existing POST /v1/usage-events route. */
+export function httpUsageIngestionTransport(endpoint: string, headers: Record<string, string> = {}): UsageDeliverySender {
+  return async (events) => {
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ events }),
+      });
+    } catch (error) {
+      throw new TransientDeliveryError("network");
+    }
+    if (response.status >= 500) throw new TransientDeliveryError("http_5xx");
+    if (!response.ok && response.status !== 422) throw new PermanentDeliveryError(`http_${response.status}`);
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw new TransientDeliveryError("invalid_json");
+    }
+    if (!body || typeof body !== "object" || !Array.isArray((body as { event_receipts?: unknown }).event_receipts)) {
+      throw new TransientDeliveryError("invalid_delivery_response");
+    }
+    return body as UsageDeliveryResponse;
+  };
 }
 
 export function buildUsageEvent(input: UsageEventInput): UsageEvent {
@@ -248,6 +428,15 @@ function validateEvent(event: UsageEvent): void {
   }
 }
 
+function findReceipt(receipts: Array<Record<string, unknown>>, event: UsageEvent): Record<string, unknown> | undefined {
+  const matches = receipts.filter((receipt) => receipt.source_event_key === event.source_event_key && (receipt.tenant_reference === undefined || receipt.tenant_reference === event.tenant_reference));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function receiptMatches(receipt: Record<string, unknown>, event: UsageEvent): boolean {
+  return receipt.source_payload_hash === event.source_payload_hash && receipt.event_contract_version === event.event_contract_version;
+}
+
 function validateDimensions(dimensions: Record<string, string> | undefined): void {
   if (dimensions === undefined) {
     return;
@@ -266,6 +455,8 @@ function validateDimensions(dimensions: Record<string, string> | undefined): voi
     "shard_reference",
     "run_reference",
     "artifact_reference",
+    "configuration_reference",
+    "seed_reference",
   ]);
   const names = Object.keys(dimensions);
   if (names.length > 10 || names.some((name) => !allowed.has(name))) {

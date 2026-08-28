@@ -355,6 +355,21 @@ from metering_billing.producer_sdk import (
     build_usage_cloud_event,
     build_usage_event,
 )
+from metering_billing.producer_outbox import (
+    DurableUsageOutbox,
+    HttpUsageIngestionTransport,
+    OutboxFlushResult,
+    PermanentDeliveryError,
+    TransientDeliveryError,
+)
+from metering_billing.producer_integrations import (
+    build_contextual_cloud_event,
+    build_contextual_usage_event,
+    build_fast_mlsirm_cloud_event,
+    build_fast_mlsirm_usage_event,
+    build_newsdom_cloud_event,
+    build_newsdom_usage_event,
+)
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
 from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
@@ -604,6 +619,17 @@ __all__ = (
     "USAGE_CLOUD_EVENT_TYPE",
     "build_usage_cloud_event",
     "build_usage_event",
+    "DurableUsageOutbox",
+    "HttpUsageIngestionTransport",
+    "OutboxFlushResult",
+    "PermanentDeliveryError",
+    "TransientDeliveryError",
+    "build_contextual_cloud_event",
+    "build_contextual_usage_event",
+    "build_fast_mlsirm_cloud_event",
+    "build_fast_mlsirm_usage_event",
+    "build_newsdom_cloud_event",
+    "build_newsdom_usage_event",
     "canonical_source_payload_json",
     "compute_source_payload_hash",
     "create_http_app",

@@ -10,6 +10,10 @@ use std::fmt::{Display, Formatter};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub const CLOUD_EVENTS_SPECVERSION: &str = "1.0";
@@ -87,6 +91,303 @@ pub struct UsageCloudEvent {
     pub time: String,
     pub datacontenttype: String,
     pub data: UsageEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryError {
+    Transient(String),
+    Permanent(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageDeliveryReceipt {
+    pub source_event_key: String,
+    #[serde(default)]
+    pub event_contract_version: Option<u32>,
+    #[serde(default)]
+    pub source_payload_hash: Option<String>,
+    #[serde(default)]
+    pub tenant_reference: Option<String>,
+    pub ingestion_outcome_code: String,
+    #[serde(default)]
+    pub rejection_reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageDeliveryResponse {
+    pub event_receipts: Vec<UsageDeliveryReceipt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboxFlushResult {
+    pub attempted_count: usize,
+    pub accepted_count: usize,
+    pub duplicate_replay_count: usize,
+    pub rejected_count: usize,
+    pub retried_count: usize,
+    pub dead_lettered_count: usize,
+    pub pending_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OutboxState {
+    Pending,
+    DeadLetter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct OutboxRecord {
+    event: UsageEvent,
+    attempts: u32,
+    state: OutboxState,
+    #[serde(default)]
+    last_error_code: Option<String>,
+}
+
+/// A durable, process-local file queue for at-least-once producer delivery.
+pub struct FileUsageOutbox {
+    path: PathBuf,
+    records: Vec<OutboxRecord>,
+}
+
+impl FileUsageOutbox {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ProducerContractError> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        let records = if path.exists() {
+            let bytes = fs::read(&path).map_err(io_error)?;
+            serde_json::from_slice(&bytes).map_err(json_error)?
+        } else {
+            Vec::new()
+        };
+        let outbox = Self { path, records };
+        if !outbox.path.exists() {
+            outbox.persist()?;
+        }
+        Ok(outbox)
+    }
+
+    pub fn enqueue(&mut self, event: UsageEvent) -> Result<(), ProducerContractError> {
+        build_usage_cloud_event(&event, "urn:cwl:producer:outbox-validation")?;
+        if let Some(existing) = self
+            .records
+            .iter()
+            .find(|record| record.event.event_id == event.event_id)
+        {
+            let existing_bytes = serde_json::to_vec(&existing.event).map_err(json_error)?;
+            let event_bytes = serde_json::to_vec(&event).map_err(json_error)?;
+            if existing_bytes != event_bytes {
+                return Err(ProducerContractError(
+                    "event_id already has different event bytes".into(),
+                ));
+            }
+            return Ok(());
+        }
+        self.records.push(OutboxRecord {
+            event,
+            attempts: 0,
+            state: OutboxState::Pending,
+            last_error_code: None,
+        });
+        self.persist()
+    }
+
+    pub fn replay_dead_letter(&mut self, event_id: &str) -> Result<(), ProducerContractError> {
+        let record = self
+            .records
+            .iter_mut()
+            .find(|record| {
+                record.event.event_id == event_id && record.state == OutboxState::DeadLetter
+            })
+            .ok_or_else(|| ProducerContractError(format!("unknown dead letter: {event_id}")))?;
+        record.attempts = 0;
+        record.state = OutboxState::Pending;
+        record.last_error_code = None;
+        self.persist()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|record| record.state == OutboxState::Pending)
+            .count()
+    }
+
+    pub fn dead_letter_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|record| record.state == OutboxState::DeadLetter)
+            .count()
+    }
+
+    pub fn flush<F>(
+        &mut self,
+        batch_size: usize,
+        max_attempts: u32,
+        sender: F,
+    ) -> Result<OutboxFlushResult, ProducerContractError>
+    where
+        F: FnOnce(&[UsageEvent]) -> Result<UsageDeliveryResponse, DeliveryError>,
+    {
+        if batch_size == 0 || max_attempts == 0 {
+            return Err(ProducerContractError(
+                "batch_size and max_attempts must be positive".into(),
+            ));
+        }
+        let batch: Vec<UsageEvent> = self
+            .records
+            .iter()
+            .filter(|record| record.state == OutboxState::Pending)
+            .take(batch_size)
+            .map(|record| record.event.clone())
+            .collect();
+        if batch.is_empty() {
+            return Ok(self.result(0, 0, 0, 0, 0, 0));
+        }
+
+        let mut accepted_count = 0;
+        let mut duplicate_replay_count = 0;
+        let mut rejected_count = 0;
+        let mut retried_count = 0;
+        let mut dead_lettered_count = 0;
+        let mut remove_ids = HashSet::new();
+        let mut fail = |event_id: &str, code: &str, force_dead: bool| {
+            if let Some(record) = self
+                .records
+                .iter_mut()
+                .find(|record| record.event.event_id == event_id)
+            {
+                record.attempts += 1;
+                record.last_error_code = Some(code.into());
+                if force_dead || record.attempts >= max_attempts {
+                    record.state = OutboxState::DeadLetter;
+                    dead_lettered_count += 1;
+                } else {
+                    retried_count += 1;
+                }
+            }
+        };
+
+        match sender(&batch) {
+            Err(DeliveryError::Permanent(_)) => {
+                for event in &batch {
+                    fail(&event.event_id, "transport_permanent", true);
+                }
+            }
+            Err(DeliveryError::Transient(_)) => {
+                for event in &batch {
+                    fail(&event.event_id, "transport_transient", false);
+                }
+            }
+            Ok(response) => {
+                for event in &batch {
+                    let receipt = find_receipt(&response.event_receipts, event);
+                    match receipt {
+                        Some(receipt)
+                            if receipt.ingestion_outcome_code == "accepted"
+                                && receipt_matches(receipt, event) =>
+                        {
+                            remove_ids.insert(event.event_id.clone());
+                            accepted_count += 1;
+                        }
+                        Some(receipt)
+                            if receipt.ingestion_outcome_code == "duplicate_replay"
+                                && receipt_matches(receipt, event) =>
+                        {
+                            remove_ids.insert(event.event_id.clone());
+                            duplicate_replay_count += 1;
+                        }
+                        Some(receipt) if receipt.ingestion_outcome_code == "rejected" => {
+                            fail(
+                                &event.event_id,
+                                receipt
+                                    .rejection_reason_code
+                                    .as_deref()
+                                    .unwrap_or("rejected"),
+                                true,
+                            );
+                            rejected_count += 1;
+                        }
+                        _ => fail(&event.event_id, "invalid_delivery_receipt", false),
+                    }
+                }
+            }
+        }
+        self.records
+            .retain(|record| !remove_ids.contains(&record.event.event_id));
+        self.persist()?;
+        Ok(self.result(
+            batch.len(),
+            accepted_count,
+            duplicate_replay_count,
+            rejected_count,
+            retried_count,
+            dead_lettered_count,
+        ))
+    }
+
+    fn result(
+        &self,
+        attempted_count: usize,
+        accepted_count: usize,
+        duplicate_replay_count: usize,
+        rejected_count: usize,
+        retried_count: usize,
+        dead_lettered_count: usize,
+    ) -> OutboxFlushResult {
+        OutboxFlushResult {
+            attempted_count,
+            accepted_count,
+            duplicate_replay_count,
+            rejected_count,
+            retried_count,
+            dead_lettered_count,
+            pending_count: self.pending_count(),
+        }
+    }
+
+    fn persist(&self) -> Result<(), ProducerContractError> {
+        let temporary_path = self.path.with_extension("tmp");
+        let bytes = serde_json::to_vec(&self.records).map_err(json_error)?;
+        let mut file = File::create(&temporary_path).map_err(io_error)?;
+        file.write_all(&bytes).map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
+        fs::rename(temporary_path, &self.path).map_err(io_error)
+    }
+}
+
+fn find_receipt<'a>(
+    receipts: &'a [UsageDeliveryReceipt],
+    event: &UsageEvent,
+) -> Option<&'a UsageDeliveryReceipt> {
+    let mut matches = receipts.iter().filter(|receipt| {
+        receipt.source_event_key == event.source_event_key
+            && receipt
+                .tenant_reference
+                .as_ref()
+                .is_none_or(|tenant| tenant == &event.tenant_reference)
+    });
+    let receipt = matches.next()?;
+    matches.next().is_none().then_some(receipt)
+}
+
+fn receipt_matches(receipt: &UsageDeliveryReceipt, event: &UsageEvent) -> bool {
+    receipt.source_payload_hash.as_deref() == Some(event.source_payload_hash.as_str())
+        && receipt.event_contract_version == Some(event.event_contract_version)
+}
+
+fn io_error(error: io::Error) -> ProducerContractError {
+    ProducerContractError(format!("outbox I/O failed: {error}"))
+}
+
+fn json_error(error: serde_json::Error) -> ProducerContractError {
+    ProducerContractError(format!("outbox JSON failed: {error}"))
 }
 
 /// Builds one closed, validated event and computes its canonical source hash.
@@ -382,7 +683,9 @@ fn validate_dimensions(
             "document_job_reference"
             | "shard_reference"
             | "run_reference"
-            | "artifact_reference" => validate_reference(name, value)?,
+            | "artifact_reference"
+            | "configuration_reference"
+            | "seed_reference" => validate_reference(name, value)?,
             _ => {
                 return Err(ProducerContractError(format!(
                     "dimension {name} is not in the published allowlist"
@@ -559,5 +862,96 @@ mod tests {
         assert!(build_usage_event(input.clone()).is_ok());
         input.measurements[0].quantity = "1e3".into();
         assert!(build_usage_event(input).is_err());
+    }
+
+    #[test]
+    fn durable_outbox_retries_and_acknowledges_duplicate_replay() {
+        let vector = fixture();
+        let event = build_usage_event(input_from_fixture(&vector)).unwrap();
+        let path = std::env::temp_dir().join(format!("cwl-outbox-{}.json", event.event_id));
+        let _ = fs::remove_file(&path);
+        let mut outbox = FileUsageOutbox::open(&path).unwrap();
+        outbox.enqueue(event.clone()).unwrap();
+        let first = outbox
+            .flush(1, 3, |_| Err(DeliveryError::Transient("offline".into())))
+            .unwrap();
+        assert_eq!(first.retried_count, 1);
+        assert_eq!(outbox.pending_count(), 1);
+        let response = UsageDeliveryResponse {
+            event_receipts: vec![UsageDeliveryReceipt {
+                source_event_key: event.source_event_key.clone(),
+                event_contract_version: Some(event.event_contract_version),
+                source_payload_hash: Some(event.source_payload_hash.clone()),
+                tenant_reference: Some(event.tenant_reference.clone()),
+                ingestion_outcome_code: "duplicate_replay".into(),
+                rejection_reason_code: None,
+            }],
+        };
+        let second = outbox.flush(1, 3, |_| Ok(response)).unwrap();
+        assert_eq!(second.duplicate_replay_count, 1);
+        assert_eq!(outbox.pending_count(), 0);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn durable_outbox_dead_letters_and_explicitly_replays_rejections() {
+        let vector = fixture();
+        let event = build_usage_event(input_from_fixture(&vector)).unwrap();
+        let path = std::env::temp_dir().join(format!("cwl-reject-outbox-{}.json", event.event_id));
+        let _ = fs::remove_file(&path);
+        let mut outbox = FileUsageOutbox::open(&path).unwrap();
+        outbox.enqueue(event.clone()).unwrap();
+        let result = outbox
+            .flush(1, 3, |_| {
+                Ok(UsageDeliveryResponse {
+                    event_receipts: vec![UsageDeliveryReceipt {
+                        source_event_key: event.source_event_key.clone(),
+                        event_contract_version: None,
+                        source_payload_hash: None,
+                        tenant_reference: Some(event.tenant_reference.clone()),
+                        ingestion_outcome_code: "rejected".into(),
+                        rejection_reason_code: Some("meter_not_found".into()),
+                    }],
+                })
+            })
+            .unwrap();
+        assert_eq!(result.rejected_count, 1);
+        assert_eq!(outbox.dead_letter_count(), 1);
+        outbox.replay_dead_letter(&event.event_id).unwrap();
+        assert_eq!(outbox.pending_count(), 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn durable_outbox_applies_partial_receipts_per_event() {
+        let vector = fixture();
+        let first = build_usage_event(input_from_fixture(&vector)).unwrap();
+        let mut second_input = input_from_fixture(&vector);
+        second_input.event_id = "019d7b92-1aa0-7a7f-b61c-962c0f4bf6ad".into();
+        second_input.source_event_key = "producer-reference:workflow-381:step-05".into();
+        let second = build_usage_event(second_input).unwrap();
+        let path = std::env::temp_dir().join(format!("cwl-partial-outbox-{}.json", first.event_id));
+        let _ = fs::remove_file(&path);
+        let mut outbox = FileUsageOutbox::open(&path).unwrap();
+        outbox.enqueue(first.clone()).unwrap();
+        outbox.enqueue(second).unwrap();
+        let result = outbox
+            .flush(2, 3, |events| {
+                Ok(UsageDeliveryResponse {
+                    event_receipts: vec![UsageDeliveryReceipt {
+                        source_event_key: events[0].source_event_key.clone(),
+                        event_contract_version: Some(events[0].event_contract_version),
+                        source_payload_hash: Some(events[0].source_payload_hash.clone()),
+                        tenant_reference: Some(events[0].tenant_reference.clone()),
+                        ingestion_outcome_code: "accepted".into(),
+                        rejection_reason_code: None,
+                    }],
+                })
+            })
+            .unwrap();
+        assert_eq!(result.accepted_count, 1);
+        assert_eq!(result.retried_count, 1);
+        assert_eq!(outbox.pending_count(), 1);
+        let _ = fs::remove_file(path);
     }
 }

@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
   buildUsageCloudEvent,
   buildUsageEvent,
   canonicalSourcePayloadJson,
+  FileUsageOutbox,
 } from "../src/index.ts";
 
 const fixture = JSON.parse(
@@ -72,4 +75,69 @@ test("matches Python for allowlisted provider dimensions", () => {
     () => buildUsageEvent({ ...input, dimensions: { prompt: "must-not-persist" } }),
     { name: "ProducerContractError" },
   );
+});
+
+test("durable outbox keeps failed events and accepts a matched replay receipt", async () => {
+  const { source_payload_hash: _sourcePayloadHash, ...input } = fixture.event;
+  const event = buildUsageEvent(input);
+  const directory = mkdtempSync(join(tmpdir(), "cwl-outbox-"));
+  try {
+    const outbox = new FileUsageOutbox(join(directory, "outbox.json"));
+    outbox.enqueue(event);
+    let calls = 0;
+    const result = await outbox.flush(async (events) => {
+      calls += 1;
+      if (calls === 1) throw new Error("offline");
+      return {
+        event_receipts: [{
+          source_event_key: events[0].source_event_key,
+          tenant_reference: events[0].tenant_reference,
+          event_contract_version: events[0].event_contract_version,
+          source_payload_hash: events[0].source_payload_hash,
+          ingestion_outcome_code: "duplicate_replay",
+        }],
+      };
+    }, 1, 3);
+    assert.equal(result.retriedCount, 1);
+    assert.equal(outbox.pendingCount(), 1);
+    const replay = await outbox.flush(async (events) => ({ event_receipts: [{
+      source_event_key: events[0].source_event_key,
+      tenant_reference: events[0].tenant_reference,
+      event_contract_version: events[0].event_contract_version,
+      source_payload_hash: events[0].source_payload_hash,
+      ingestion_outcome_code: "duplicate_replay",
+    }] }));
+    assert.equal(replay.duplicateReplayCount, 1);
+    assert.equal(outbox.pendingCount(), 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("durable outbox applies partial receipts per event", async () => {
+  const { source_payload_hash: _sourcePayloadHash, ...input } = fixture.event;
+  const first = buildUsageEvent(input);
+  const second = buildUsageEvent({
+    ...input,
+    event_id: "019d7b92-1aa0-7a7f-b61c-962c0f4bf6ad",
+    source_event_key: "producer-reference:workflow-381:step-05",
+  });
+  const directory = mkdtempSync(join(tmpdir(), "cwl-outbox-"));
+  try {
+    const outbox = new FileUsageOutbox(join(directory, "outbox.json"));
+    outbox.enqueue(first);
+    outbox.enqueue(second);
+    const result = await outbox.flush(async (events) => ({ event_receipts: [{
+      source_event_key: events[0].source_event_key,
+      tenant_reference: events[0].tenant_reference,
+      event_contract_version: events[0].event_contract_version,
+      source_payload_hash: events[0].source_payload_hash,
+      ingestion_outcome_code: "accepted",
+    }] }), 2, 3);
+    assert.equal(result.acceptedCount, 1);
+    assert.equal(result.retriedCount, 1);
+    assert.equal(outbox.pendingCount(), 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
