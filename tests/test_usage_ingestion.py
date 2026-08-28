@@ -268,6 +268,13 @@ class UsageIngestionTests(unittest.TestCase):
         self.assertEqual(dict(stored.correction_lineage), event["correction_lineage"])
         self.assertEqual(stored.measurements[0].meter_version, 1)
 
+    def test_unpublished_event_contract_version_is_rejected_before_storage(self) -> None:
+        """The server rejects a version without a published schema contract."""
+        event = make_event(event_contract_version=2)
+        receipt = UsageIngestionService(seed_ledger()).ingest_usage_event(event)
+        self.assertEqual(receipt.ingestion_outcome_code, IngestionOutcomeCode.REJECTED)
+        self.assertEqual(receipt.rejection_reason_code, RejectionReasonCode.SCHEMA_INVALID)
+
     def test_known_batch_reproduces_stored_usage_and_rejects_replays(self) -> None:
         """The same batch must store one usage set and then only acknowledge replays."""
         service = UsageIngestionService(seed_ledger())
