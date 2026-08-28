@@ -5,6 +5,6 @@ ALTER TABLE billing_core.usage_event
 
 ALTER TABLE billing_core.usage_event
     ADD CONSTRAINT usage_event_dimensions_object
-    CHECK (jsonb_typeof(dimensions) = 'object');
+    CHECK (jsonb_typeof(dimensions) = 'object') NOT VALID;
 
 COMMIT;

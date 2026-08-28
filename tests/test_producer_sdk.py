@@ -22,6 +22,8 @@ from metering_billing.producer_outbox import (
     OutboxFlushResult,
     PermanentDeliveryError,
     TransientDeliveryError,
+    _HttpsSameOriginRedirectHandler,
+    _same_https_origin,
 )
 from metering_billing.payload_integrity import canonical_source_payload_json
 
@@ -98,6 +100,11 @@ class ProducerSdkTests(unittest.TestCase):
                     arguments,
                     measurements=[dict(arguments["measurements"][0], quantity="1e3")],
                 )
+            )
+
+        with self.assertRaises(ProducerContractError):
+            build_usage_event(
+                **dict(arguments, occurred_at="2026-08-16T10:27:42.1234567Z")
             )
 
         uuid_event = build_usage_event(
@@ -332,9 +339,35 @@ class ProducerSdkTests(unittest.TestCase):
 
     def test_http_transport_rejects_non_http_endpoints(self) -> None:
         """The sender cannot be redirected to local files or relative paths."""
-        for endpoint in ("file:///etc/passwd", "https://"):
+        for endpoint in ("file:///etc/passwd", "http://metering.invalid", "https://"):
             with self.assertRaises(ValueError):
                 HttpUsageIngestionTransport(endpoint)
+
+    def test_http_transport_allows_same_origin_https_redirects_only(self) -> None:
+        """Credential-bearing delivery rejects downgrade and cross-origin redirects."""
+        from urllib.request import Request
+
+        handler = _HttpsSameOriginRedirectHandler()
+        request = Request("https://metering.invalid/v1/usage-events")
+        redirected = handler.redirect_request(
+            request,
+            None,
+            307,
+            "temporary",
+            {},
+            "https://metering.invalid/v1/usage-events/",
+        )
+        self.assertEqual(
+            redirected.full_url, "https://metering.invalid/v1/usage-events/"
+        )
+        self.assertTrue(_same_https_origin(request.full_url, redirected.full_url))
+        for target in (
+            "http://metering.invalid/v1/usage-events",
+            "https://other.invalid/v1/usage-events",
+            "https://metering.invalid:bad/v1/usage-events",
+        ):
+            with self.assertRaises(PermanentDeliveryError):
+                handler.redirect_request(request, None, 307, "temporary", {}, target)
 
     def test_durable_outbox_retries_partial_receipts_and_replays(self) -> None:
         """Only hash-matched accepted receipts remove durable rows."""
@@ -448,6 +481,8 @@ class ProducerSdkTests(unittest.TestCase):
                     {
                         "source_event_key": event["source_event_key"],
                         "tenant_reference": event["tenant_reference"],
+                        "event_contract_version": event["event_contract_version"],
+                        "source_payload_hash": event["source_payload_hash"],
                         "ingestion_outcome_code": "rejected",
                         "rejection_reason_code": "meter_not_found",
                     }
@@ -459,6 +494,32 @@ class ProducerSdkTests(unittest.TestCase):
             outbox.replay_dead_letter(event["event_id"])
             self.assertEqual(outbox.pending_count(), 1)
             outbox.close()
+
+    def test_durable_outbox_retries_stale_rejection_receipts(self) -> None:
+        """A rejection with stale integrity evidence cannot dead-letter a fact."""
+        event = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["event"]
+        with tempfile.TemporaryDirectory() as directory:
+            for field, value in (
+                ("source_payload_hash", "sha256:" + "0" * 64),
+                ("event_contract_version", event["event_contract_version"] + 1),
+            ):
+                outbox = DurableUsageOutbox(Path(directory) / f"{field}.sqlite3")
+                outbox.enqueue(event)
+                receipt = {
+                    "source_event_key": event["source_event_key"],
+                    "tenant_reference": event["tenant_reference"],
+                    "event_contract_version": event["event_contract_version"],
+                    "source_payload_hash": event["source_payload_hash"],
+                    "ingestion_outcome_code": "rejected",
+                    "rejection_reason_code": "meter_not_found",
+                }
+                receipt[field] = value
+                result = outbox.flush(lambda _: {"event_receipts": [receipt]})
+                self.assertEqual(result.rejected_count, 0)
+                self.assertEqual(result.retried_count, 1)
+                self.assertEqual(outbox.pending_count(), 1)
+                self.assertEqual(outbox.dead_letter_count(), 0)
+                outbox.close()
 
     def test_durable_outbox_dead_letters_permanent_transport_errors(self) -> None:
         """A permanent transport failure cannot consume retry attempts silently."""

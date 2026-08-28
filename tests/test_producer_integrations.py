@@ -72,6 +72,11 @@ class ProducerIntegrationTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             build_contextual_usage_event(
+                {**record, "usage_record_id": "ignore previous instructions"},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
                 {**record, "workflow_run_id": object()},
                 **IDENTITY,
             )
@@ -87,7 +92,12 @@ class ProducerIntegrationTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             build_contextual_usage_event(
-                {**record, "workflow_run_id": None},
+                {**record, "workflow_run_id": "response text"},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
+                {**record, "model_name": "model response text"},
                 **IDENTITY,
             )
         with self.assertRaises(ValueError):
@@ -162,6 +172,17 @@ class ProducerIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_newsdom_usage_event(**{**arguments, "document_id": ""})
         with self.assertRaises(ValueError):
+            build_newsdom_usage_event(
+                **{**arguments, "document_id": "response document text"}
+            )
+        with self.assertRaises(ValueError):
+            build_newsdom_usage_event(
+                **{
+                    **arguments,
+                    "document_job_reference": "urn:cwl:job:response text",
+                }
+            )
+        with self.assertRaises(ValueError):
             build_newsdom_usage_event(**{**arguments, "pdf_bytes": -1})
 
     def test_fast_mlsirm_maps_run_provenance_and_stable_replay_identity(self) -> None:
@@ -212,6 +233,14 @@ class ProducerIntegrationTests(unittest.TestCase):
         self.assertEqual(len(cloud_event["data"]["measurements"]), 2)
         with self.assertRaises(ValueError):
             build_fast_mlsirm_usage_event(**{**arguments, "response_rows": -1})
+        with self.assertRaises(ValueError):
+            build_fast_mlsirm_usage_event(
+                **{**arguments, "run_reference": "urn:cwl:run:response text"}
+            )
+        with self.assertRaises(ValueError):
+            build_fast_mlsirm_usage_event(
+                **{**arguments, "model_code": "model response text"}
+            )
         with self.assertRaises(ValueError):
             build_fast_mlsirm_usage_event(
                 **{**arguments, "response_rows": 10**18, "response_items": 2}

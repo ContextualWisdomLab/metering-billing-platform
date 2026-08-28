@@ -57,6 +57,9 @@ The default branch carries the repository-local workflow
 - runs the unit suite under branch coverage, fails under 100% statement and
   branch coverage, runs `scripts/validate_repository.py .`, and compiles
   `scripts`, `tests`, and `metering_billing`.
+- runs the Rust producer SDK tests plus pinned `cargo-llvm-cov` coverage, and
+  runs the TypeScript producer SDK conformance suite with 100% line, branch,
+  and function thresholds.
 
 Mutable GitHub Action tags (`@v4`, `@main`) are rejected by the repository
 validator. Review and merge evidence must match the current head commit; an

@@ -10,4 +10,5 @@ content. `FileUsageOutbox` provides durable local buffering: enqueue validated
 events, call `flush(batch_size, max_attempts, sender)`, and remove only
 hash-matched accepted or duplicate-replay receipts. Rejected events remain
 dead-lettered until `replay_dead_letter` is called. The sender owns HTTP,
-credentials, and scheduling.
+credentials, and scheduling. The file queue fsyncs both the replacement file
+and its parent directory before acknowledging persistence.

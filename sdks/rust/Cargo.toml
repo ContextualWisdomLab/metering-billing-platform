@@ -5,6 +5,9 @@ edition = "2021"
 description = "Canonical CWL metering producer event builder"
 license = "Apache-2.0"
 
+[features]
+coverage = []
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std"] }
 serde = { version = "1", features = ["derive"] }

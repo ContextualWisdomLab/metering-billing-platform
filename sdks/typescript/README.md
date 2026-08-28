@@ -11,4 +11,4 @@ events, call `flush(sender, batchSize, maxAttempts)`, and remove only
 hash-matched accepted or duplicate-replay receipts. Rejected events remain
 dead-lettered until `replayDeadLetter` is called. The sender owns HTTP,
 credentials, and scheduling; `httpUsageIngestionTransport` targets the
-platform's existing batch route.
+platform's existing batch route over HTTPS with a bounded timeout.

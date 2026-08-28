@@ -22,8 +22,16 @@ Add a small durable outbox to each SDK:
 - accepted and duplicate-replay receipts are acknowledged, rejected receipts
   are retained as dead letters, and missing/malformed receipts or transient
   transport failures remain pending until the bounded attempt limit;
-- dead letters require explicit replay, and the transport/scheduler and
-  credential handling remain application-owned.
+- dead letters require explicit replay; the SDKs provide optional HTTPS
+  senders, while endpoint selection, credential values, and scheduling remain
+  application-owned.
+
+The reference tests cover both accepted and duplicate acknowledgements,
+matched dead-letter rejection, stale or tenant-mismatched receipts, bounded
+retry exhaustion, and durable rename behavior. Rust's CI coverage report also
+keeps the producer implementation on a pinned coverage toolchain; platform
+specific write and directory-sync faults remain reported as fault-injection
+work rather than being treated as ordinary contract-path coverage.
 
 The server remains the monetary-effect authority. A crash after server accept
 and before local deletion causes an at-least-once replay, while the server's

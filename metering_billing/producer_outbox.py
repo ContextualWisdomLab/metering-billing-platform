@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from metering_billing.contracts import validate_usage_event
 from metering_billing.payload_integrity import source_payload_hash_errors
@@ -573,6 +573,33 @@ class PermanentDeliveryError(DeliveryError):
     """The batch cannot succeed without operator action."""
 
 
+def _same_https_origin(source_url: str, target_url: str) -> bool:
+    """Return whether two URLs share the HTTPS origin used for delivery."""
+    source = urlparse(source_url)
+    target = urlparse(target_url)
+    try:
+        return (
+            source.scheme == "https"
+            and target.scheme == "https"
+            and source.hostname == target.hostname
+            and (source.port or 443) == (target.port or 443)
+        )
+    except ValueError:
+        return False
+
+
+class _HttpsSameOriginRedirectHandler(HTTPRedirectHandler):
+    """Allow only same-origin HTTPS redirects for credential-bearing sends."""
+
+    def redirect_request(self, request, file, code, message, headers, new_url):
+        if not _same_https_origin(request.full_url, new_url):
+            raise PermanentDeliveryError("unsafe_redirect")
+        return super().redirect_request(request, file, code, message, headers, new_url)
+
+
+urlopen = build_opener(_HttpsSameOriginRedirectHandler).open
+
+
 @dataclass(frozen=True)
 class OutboxFlushResult:
     """One bounded flush outcome, including events still pending.
@@ -748,7 +775,7 @@ class DurableUsageOutbox:
                             accepted += 1
                         else:
                             replayed += 1
-                    elif outcome == "rejected" and receipt is not None:
+                    elif outcome == "rejected" and _receipt_matches(receipt, event):
                         reason = receipt.get("rejection_reason_code")
                         error_code = reason if isinstance(reason, str) else "rejected"
                         dead_lettered += self._fail(
@@ -815,8 +842,8 @@ class HttpUsageIngestionTransport:
         timeout: float = 10.0,
     ) -> None:
         parsed_endpoint = urlparse(endpoint)
-        if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.netloc:
-            raise ValueError("endpoint must be an absolute HTTP(S) URL")
+        if parsed_endpoint.scheme != "https" or not parsed_endpoint.netloc:
+            raise ValueError("endpoint must be an absolute HTTPS URL")
         self.endpoint = endpoint
         self.headers = {"Content-Type": "application/json", **(headers or {})}
         self.timeout = timeout

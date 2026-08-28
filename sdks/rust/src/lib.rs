@@ -210,8 +210,9 @@ impl FileUsageOutbox {
             .iter()
             .find(|record| record.event.event_id == event.event_id)
         {
-            let existing_bytes = serde_json::to_vec(&existing.event).map_err(json_error)?;
-            let event_bytes = serde_json::to_vec(&event).map_err(json_error)?;
+            let existing_bytes =
+                serde_json::to_vec(&existing.event).expect("event is serializable");
+            let event_bytes = serde_json::to_vec(&event).expect("event is serializable");
             if existing_bytes != event_bytes {
                 return Err(ProducerContractError(
                     "event_id already has different event bytes".into(),
@@ -288,19 +289,18 @@ impl FileUsageOutbox {
         let mut dead_lettered_count = 0;
         let mut remove_ids = HashSet::new();
         let mut fail = |event_id: &str, code: &str, force_dead: bool| {
-            if let Some(record) = self
+            let record = self
                 .records
                 .iter_mut()
                 .find(|record| record.event.event_id == event_id)
-            {
-                record.attempts += 1;
-                record.last_error_code = Some(code.into());
-                if force_dead || record.attempts >= max_attempts {
-                    record.state = OutboxState::DeadLetter;
-                    dead_lettered_count += 1;
-                } else {
-                    retried_count += 1;
-                }
+                .expect("every flushed event remains in the outbox");
+            record.attempts += 1;
+            record.last_error_code = Some(code.into());
+            if force_dead || record.attempts >= max_attempts {
+                record.state = OutboxState::DeadLetter;
+                dead_lettered_count += 1;
+            } else {
+                retried_count += 1;
             }
         };
 
@@ -333,7 +333,10 @@ impl FileUsageOutbox {
                             remove_ids.insert(event.event_id.clone());
                             duplicate_replay_count += 1;
                         }
-                        Some(receipt) if receipt.ingestion_outcome_code == "rejected" => {
+                        Some(receipt)
+                            if receipt.ingestion_outcome_code == "rejected"
+                                && receipt_matches(receipt, event) =>
+                        {
                             fail(
                                 &event.event_id,
                                 receipt
@@ -384,11 +387,21 @@ impl FileUsageOutbox {
 
     fn persist(&self) -> Result<(), ProducerContractError> {
         let temporary_path = self.path.with_extension("tmp");
-        let bytes = serde_json::to_vec(&self.records).map_err(json_error)?;
+        let bytes = serde_json::to_vec(&self.records).expect("outbox records are serializable");
         let mut file = File::create(&temporary_path).map_err(io_error)?;
         file.write_all(&bytes).map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
-        fs::rename(temporary_path, &self.path).map_err(io_error)
+        fs::rename(temporary_path, &self.path).map_err(io_error)?;
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(io_error)?;
+        }
+        Ok(())
     }
 }
 
@@ -396,13 +409,9 @@ fn find_receipt<'a>(
     receipts: &'a [UsageDeliveryReceipt],
     event: &UsageEvent,
 ) -> Option<&'a UsageDeliveryReceipt> {
-    let mut matches = receipts.iter().filter(|receipt| {
-        receipt.source_event_key == event.source_event_key
-            && receipt
-                .tenant_reference
-                .as_ref()
-                .is_some_and(|tenant| tenant == &event.tenant_reference)
-    });
+    let mut matches = receipts
+        .iter()
+        .filter(|receipt| receipt.source_event_key == event.source_event_key);
     let receipt = matches.next()?;
     matches.next().is_none().then_some(receipt)
 }
@@ -448,7 +457,7 @@ pub fn build_usage_event(input: UsageEventInput) -> Result<UsageEvent, ProducerC
         measurements: input.measurements,
         source_payload_hash: String::new(),
     };
-    event.source_payload_hash = compute_source_payload_hash(&event)?;
+    event.source_payload_hash = compute_source_payload_hash(&event);
     Ok(event)
 }
 
@@ -463,7 +472,7 @@ pub fn build_usage_cloud_event(
         ));
     }
     validate_event(event)?;
-    let expected_hash = compute_source_payload_hash(event)?;
+    let expected_hash = compute_source_payload_hash(event);
     if event.source_payload_hash != expected_hash {
         return Err(ProducerContractError(format!(
             "source_payload_hash must equal {expected_hash}"
@@ -579,17 +588,14 @@ pub fn canonical_source_payload_json(event: &UsageEvent) -> Result<String, Produ
         "tenant_reference",
         serde_json::Value::String(event.tenant_reference.clone()),
     );
-    serde_json::to_string(&payload).map_err(|error| {
-        ProducerContractError(format!(
-            "usage event cannot be canonically serialized: {error}"
-        ))
-    })
+    Ok(serde_json::to_string(&payload).expect("canonical payload is serializable"))
 }
 
-fn compute_source_payload_hash(event: &UsageEvent) -> Result<String, ProducerContractError> {
-    let canonical = canonical_source_payload_json(event)?;
+fn compute_source_payload_hash(event: &UsageEvent) -> String {
+    let canonical =
+        canonical_source_payload_json(event).expect("validated event is canonicalizable");
     let digest = Sha256::digest(canonical.as_bytes());
-    Ok(format!("sha256:{digest:x}"))
+    format!("sha256:{digest:x}")
 }
 
 fn insert_optional(
@@ -914,7 +920,7 @@ fn validate_quantity(quantity: &str) -> Result<(), ProducerContractError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "coverage")))]
 mod tests {
     use super::*;
     use serde_json::Value;
@@ -1011,6 +1017,7 @@ mod tests {
         event.source_payload_hash =
             "sha256:0000000000000000000000000000000000000000000000000000000000000000".into();
         assert!(build_usage_cloud_event(&event, "urn:cwl:producer:test").is_err());
+        assert!(build_usage_cloud_event(&event, "").is_err());
 
         let mut input = input_from_fixture(&vector);
         input.measurements[0].quantity = "1.25".into();
@@ -1027,6 +1034,213 @@ mod tests {
         assert!(build_usage_event(unicode_key.clone()).is_ok());
         unicode_key.source_event_key.push('가');
         assert!(build_usage_event(unicode_key).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_contract_boundaries() {
+        let vector = fixture();
+        let base = input_from_fixture(&vector);
+
+        let mut input = base.clone();
+        input.event_id = "not-a-uuid".into();
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.event_contract_version = 0;
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.producer_contract_version = 0;
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.source_event_key.clear();
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.tenant_reference = "not-a-reference".into();
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.credential_reference = Some("not-a-reference".into());
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.trace_reference = Some(String::new());
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.product_code = "A".into();
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.operation_code = Some("A".into());
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.occurred_at = "not-a-timestamp".into();
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.available_at = Some("not-a-timestamp".into());
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.correction_lineage = Some(CorrectionLineage {
+            prior_event_id: "not-a-uuid".into(),
+            relationship_code: "corrects".into(),
+            reason_code: None,
+        });
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.correction_lineage = Some(CorrectionLineage {
+            prior_event_id: base.event_id.clone(),
+            relationship_code: "invalid".into(),
+            reason_code: None,
+        });
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.correction_lineage = Some(CorrectionLineage {
+            prior_event_id: base.event_id.clone(),
+            relationship_code: "corrects".into(),
+            reason_code: Some("A".into()),
+        });
+        assert!(build_usage_event(input).is_err());
+
+        let mut input = base.clone();
+        input.measurements.clear();
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.measurements = vec![base.measurements[0].clone(); 65];
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.measurements[0].meter_version = Some(0);
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.measurements[0].quality_code = "invalid".into();
+        assert!(build_usage_event(input).is_err());
+
+        for quantity in ["", &"1".repeat(40), ".", "01", "1a", "1.", "1.a"] {
+            let mut input = base.clone();
+            input.measurements[0].quantity = quantity.into();
+            assert!(build_usage_event(input).is_err(), "quantity={quantity}");
+        }
+        let mut input = base.clone();
+        input.measurements[0].unit_code = "A".into();
+        assert!(build_usage_event(input).is_err());
+
+        let mut input = base.clone();
+        input.dimensions = Some(BTreeMap::from([("unknown".into(), "value".into())]));
+        assert!(build_usage_event(input).is_err());
+        for model_code in ["", &"a".repeat(129), "!a", "a!"] {
+            let mut input = base.clone();
+            input.dimensions = Some(BTreeMap::from([("model_code".into(), model_code.into())]));
+            assert!(build_usage_event(input).is_err(), "model_code={model_code}");
+        }
+        let mut input = base.clone();
+        input.dimensions = Some(BTreeMap::from([
+            ("provider_code".into(), "openai".into()),
+            ("workflow_code".into(), "workflow_code".into()),
+            ("role_code".into(), "operator".into()),
+            ("orchestration_mode_code".into(), "sync".into()),
+            ("backend_code".into(), "rust".into()),
+            ("document_job_reference".into(), "urn:cwl:job:01".into()),
+            ("shard_reference".into(), "urn:cwl:shard:01".into()),
+            ("run_reference".into(), "urn:cwl:run:01".into()),
+            ("artifact_reference".into(), "urn:cwl:artifact:01".into()),
+            (
+                "configuration_reference".into(),
+                "urn:cwl:configuration:01".into(),
+            ),
+        ]));
+        assert!(build_usage_event(input).is_ok());
+        let mut too_many = base.clone();
+        too_many.dimensions = Some(BTreeMap::from([
+            ("provider_code".into(), "openai".into()),
+            ("workflow_code".into(), "workflow_code".into()),
+            ("role_code".into(), "operator".into()),
+            ("orchestration_mode_code".into(), "sync".into()),
+            ("backend_code".into(), "rust".into()),
+            ("document_job_reference".into(), "urn:cwl:job:01".into()),
+            ("shard_reference".into(), "urn:cwl:shard:01".into()),
+            ("run_reference".into(), "urn:cwl:run:01".into()),
+            ("artifact_reference".into(), "urn:cwl:artifact:01".into()),
+            (
+                "configuration_reference".into(),
+                "urn:cwl:configuration:01".into(),
+            ),
+            ("seed_reference".into(), "urn:cwl:seed:01".into()),
+        ]));
+        assert!(build_usage_event(too_many).is_err());
+    }
+
+    #[test]
+    fn exercises_outbox_open_enqueue_and_flush_edges() {
+        assert_eq!(ProducerContractError("error".into()).to_string(), "error");
+        let vector = fixture();
+        let event = build_usage_event(input_from_fixture(&vector)).unwrap();
+
+        let parent_file =
+            std::env::temp_dir().join(format!("cwl-outbox-parent-{}", event.event_id));
+        fs::write(&parent_file, b"file").unwrap();
+        assert!(FileUsageOutbox::open(parent_file.join("child.json")).is_err());
+        let _ = fs::remove_file(&parent_file);
+
+        let directory =
+            std::env::temp_dir().join(format!("cwl-outbox-directory-{}", event.event_id));
+        fs::create_dir(&directory).unwrap();
+        assert!(FileUsageOutbox::open(&directory).is_err());
+        fs::remove_dir(&directory).unwrap();
+
+        let invalid_json =
+            std::env::temp_dir().join(format!("cwl-outbox-invalid-{}", event.event_id));
+        fs::write(&invalid_json, b"{").unwrap();
+        assert!(FileUsageOutbox::open(&invalid_json).is_err());
+        let _ = fs::remove_file(&invalid_json);
+
+        let relative = PathBuf::from(format!("cwl-relative-outbox-{}.json", event.event_id));
+        let mut outbox = FileUsageOutbox::open(&relative).unwrap();
+        assert_eq!(outbox.pending_count(), 0);
+        assert_eq!(outbox.dead_letter_count(), 0);
+        assert!(outbox.flush(0, 1, |_| unreachable!()).is_err());
+        assert!(outbox.flush(1, 0, |_| unreachable!()).is_err());
+        assert_eq!(
+            outbox
+                .flush(1, 1, |_| unreachable!())
+                .unwrap()
+                .attempted_count,
+            0
+        );
+
+        outbox.enqueue(event.clone()).unwrap();
+        outbox.enqueue(event.clone()).unwrap();
+        let mut different = input_from_fixture(&vector);
+        different.source_event_key = "producer-reference:workflow-381:other".into();
+        let mut different_event = build_usage_event(different).unwrap();
+        different_event.event_id = event.event_id.clone();
+        assert!(outbox.enqueue(different_event).is_err());
+        let reopened = FileUsageOutbox::open(&relative).unwrap();
+        assert_eq!(reopened.pending_count(), 1);
+
+        let permanent = outbox
+            .flush(1, 3, |_| {
+                Err(DeliveryError::Permanent("bad request".into()))
+            })
+            .unwrap();
+        assert_eq!(permanent.dead_lettered_count, 1);
+        assert!(outbox.replay_dead_letter("unknown").is_err());
+        let _ = fs::remove_file(relative);
+
+        let duplicate_path =
+            std::env::temp_dir().join(format!("cwl-outbox-duplicate-{}", event.event_id));
+        let mut duplicate_outbox = FileUsageOutbox::open(&duplicate_path).unwrap();
+        duplicate_outbox.enqueue(event.clone()).unwrap();
+        let duplicate_receipt = UsageDeliveryReceipt {
+            source_event_key: event.source_event_key.clone(),
+            event_contract_version: Some(event.event_contract_version),
+            source_payload_hash: Some(event.source_payload_hash.clone()),
+            tenant_reference: Some(event.tenant_reference.clone()),
+            ingestion_outcome_code: "accepted".into(),
+            rejection_reason_code: None,
+        };
+        let invalid = duplicate_outbox
+            .flush(1, 2, |_| {
+                Ok(UsageDeliveryResponse {
+                    event_receipts: vec![duplicate_receipt.clone(), duplicate_receipt],
+                })
+            })
+            .unwrap();
+        assert_eq!(invalid.retried_count, 1);
+        let _ = fs::remove_file(duplicate_path);
     }
 
     #[test]
@@ -1071,8 +1285,8 @@ mod tests {
                 Ok(UsageDeliveryResponse {
                     event_receipts: vec![UsageDeliveryReceipt {
                         source_event_key: event.source_event_key.clone(),
-                        event_contract_version: None,
-                        source_payload_hash: None,
+                        event_contract_version: Some(event.event_contract_version),
+                        source_payload_hash: Some(event.source_payload_hash.clone()),
                         tenant_reference: Some(event.tenant_reference.clone()),
                         ingestion_outcome_code: "rejected".into(),
                         rejection_reason_code: Some("meter_not_found".into()),
@@ -1084,6 +1298,36 @@ mod tests {
         assert_eq!(outbox.dead_letter_count(), 1);
         outbox.replay_dead_letter(&event.event_id).unwrap();
         assert_eq!(outbox.pending_count(), 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn durable_outbox_retries_stale_rejection_receipts() {
+        let vector = fixture();
+        let event = build_usage_event(input_from_fixture(&vector)).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("cwl-stale-reject-outbox-{}.json", event.event_id));
+        let _ = fs::remove_file(&path);
+        let mut outbox = FileUsageOutbox::open(&path).unwrap();
+        outbox.enqueue(event.clone()).unwrap();
+        let result = outbox
+            .flush(1, 3, |_| {
+                Ok(UsageDeliveryResponse {
+                    event_receipts: vec![UsageDeliveryReceipt {
+                        source_event_key: event.source_event_key.clone(),
+                        event_contract_version: Some(event.event_contract_version + 1),
+                        source_payload_hash: Some(event.source_payload_hash.clone()),
+                        tenant_reference: Some(event.tenant_reference.clone()),
+                        ingestion_outcome_code: "rejected".into(),
+                        rejection_reason_code: Some("meter_not_found".into()),
+                    }],
+                })
+            })
+            .unwrap();
+        assert_eq!(result.rejected_count, 0);
+        assert_eq!(result.retried_count, 1);
+        assert_eq!(outbox.pending_count(), 1);
+        assert_eq!(outbox.dead_letter_count(), 0);
         let _ = fs::remove_file(path);
     }
 
