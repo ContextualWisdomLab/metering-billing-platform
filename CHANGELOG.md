@@ -16,6 +16,9 @@
 
 ### Added
 
+- The platform now builds an installable Python distribution containing the
+  canonical producer SDK and its checked-in schemas, so producer repositories
+  can consume the same builder instead of copying contract logic.
 - The canonical usage-event schema and Python, Rust, and TypeScript producer
   SDK references now accept a bounded allowlist of non-sensitive provider,
   model, workflow, role, backend, and job-reference dimensions. The dimensions
