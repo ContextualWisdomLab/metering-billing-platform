@@ -41,6 +41,13 @@ The server persists the producer contract version, meter version, bounded
 repository and trace references, availability time, and correction lineage as
 append-only event metadata; `recorded_at` remains server-assigned.
 
+Contract evolution is fail-closed: the current closed schema publishes only
+`event_contract_version=1`. Additive changes must publish a new schema `$id`
+and contract version while keeping the v1 payload valid; breaking changes must
+use a new event contract version and never reinterpret or remove a v1 field.
+Until that schema is published and added to the supported-version registry,
+the SDK and ingestion validator reject the version before enqueue or storage.
+
 Release artifacts are built only from a published GitHub release tag. The
 repository workflow resolves that tag to one commit before any checkout,
 packages the Python distribution, Rust crate, and TypeScript tarball from that
