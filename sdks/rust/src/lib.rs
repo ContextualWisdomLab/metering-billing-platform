@@ -243,9 +243,13 @@ fn canonical_quantity(quantity: &str) -> Result<String, ProducerContractError> {
 fn canonical_timestamp(timestamp: &str) -> Result<String, ProducerContractError> {
     let parsed = DateTime::parse_from_rfc3339(timestamp)
         .map_err(|_| ProducerContractError("occurred_at must be an RFC3339 date-time".into()))?;
-    Ok(parsed
-        .with_timezone(&Utc)
-        .to_rfc3339_opts(SecondsFormat::Micros, true))
+    let normalized = parsed.with_timezone(&Utc);
+    let format = if normalized.timestamp_subsec_micros() == 0 {
+        SecondsFormat::Secs
+    } else {
+        SecondsFormat::Micros
+    };
+    Ok(normalized.to_rfc3339_opts(format, true))
 }
 
 fn validate_input(input: &UsageEventInput) -> Result<(), ProducerContractError> {
@@ -463,5 +467,21 @@ mod tests {
         assert!(build_usage_event(input.clone()).is_ok());
         input.measurements[0].quantity = "1e3".into();
         assert!(build_usage_event(input).is_err());
+    }
+
+    #[test]
+    fn matches_python_whole_second_timestamp_conformance() {
+        let vector = fixture();
+        let mut input = input_from_fixture(&vector);
+        input.occurred_at = "2026-08-28T01:02:03Z".into();
+
+        let event = build_usage_event(input).unwrap();
+        assert!(canonical_source_payload_json(&event)
+            .unwrap()
+            .contains("\"occurred_at\":\"2026-08-28T01:02:03Z\""));
+        assert_eq!(
+            event.source_payload_hash,
+            "sha256:37cd41c8b30b0d334539bce29f69a642468540cf7b5f96fc80ef5bbd5f85e6ad"
+        );
     }
 }
