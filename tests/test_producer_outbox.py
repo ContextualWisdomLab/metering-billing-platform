@@ -320,6 +320,28 @@ class ProducerOutboxTests(unittest.TestCase):
             self.assertEqual(outbox.get_status(str(duplicate["event_id"])).status, "delivered")
             self.assertEqual(outbox.get_status(str(rejected["event_id"])).status, "dead_letter")
 
+            with self.assertRaises(KeyError):
+                outbox.replay_dead_letter(
+                    str(rejected["event_id"]),
+                    auth=ProducerAuthContext("urn:cwl:other", "usage_delivery"),
+                    now=NOW,
+                )
+            outbox.replay_dead_letter(str(rejected["event_id"]), auth=AUTH)
+            replayed = outbox.get_status(str(rejected["event_id"]))
+            self.assertEqual(replayed.status, "pending")
+            self.assertEqual(replayed.attempt_count, 0)
+            self.assertEqual(replayed.next_attempt_at, NOW)
+            replay_receipt = outbox.drain(
+                FakeTransport([ProducerDeliveryResult(rejected["source_event_key"], "accepted")]),
+                auth=AUTH,
+                now=NOW + timedelta(seconds=2),
+            )
+            self.assertEqual(replay_receipt.accepted_event_count, 1)
+            with self.assertRaises(KeyError):
+                outbox.replay_dead_letter(str(rejected["event_id"]), auth=AUTH, now=NOW)
+            with self.assertRaises(KeyError):
+                outbox.replay_dead_letter("missing", auth=AUTH, now=NOW)
+
             empty = outbox.drain(transport, auth=AUTH, now=NOW)
             self.assertEqual(empty.attempted_event_count, 0)
             outbox.close()

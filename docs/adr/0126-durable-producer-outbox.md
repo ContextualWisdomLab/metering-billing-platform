@@ -40,7 +40,10 @@ producer integration:
 - Each drain is capped at 100 events. `accepted` and `duplicate_replay` are
   terminal delivery outcomes; explicit `rejected` results enter dead-letter
   state; transport errors and incomplete receipts retry with capped exponential
-  backoff until the configured attempt limit.
+  backoff until the configured attempt limit. `replay_dead_letter` is the
+  explicit operator recovery path: it requires the matching delivery context,
+  resets the attempt budget, and makes the same fact due again; re-enqueueing a
+  dead-letter event does not silently resurrect it.
 - The transport receives tenant and purpose context plus an ephemeral current
   credential. Billing remains responsible for tenant-scoped idempotency and
   at-most-once monetary effect; the outbox does not calculate price, tax,

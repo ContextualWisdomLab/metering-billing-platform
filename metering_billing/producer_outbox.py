@@ -258,6 +258,46 @@ class ProducerOutbox:
                 last_error_code=row["last_error_code"],
             )
 
+    def replay_dead_letter(
+        self,
+        outbox_event_id: str,
+        *,
+        auth: ProducerAuthContext,
+        now: datetime | None = None,
+    ) -> None:
+        """Return one matching dead-letter event to pending for explicit replay."""
+        next_attempt_at = _format_instant(self._clock() if now is None else now)
+        with self._lock:
+            self._begin_write()
+            try:
+                updated = self._connection.execute(
+                    """
+                    UPDATE producer_outbox_event
+                    SET delivery_status = 'pending', attempt_count = 0,
+                        next_attempt_at = ?, lease_until = NULL, last_error_code = NULL
+                    WHERE outbox_event_id = ?
+                      AND tenant_reference = ?
+                      AND purpose_code = ?
+                      AND credential_reference IS ?
+                      AND correlation_id IS ?
+                      AND delivery_status = 'dead_letter'
+                    """,
+                    (
+                        next_attempt_at,
+                        outbox_event_id,
+                        auth.tenant_reference,
+                        auth.purpose_code,
+                        auth.credential_reference,
+                        auth.correlation_id,
+                    ),
+                ).rowcount
+                if updated != 1:
+                    raise KeyError(outbox_event_id)
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
     def drain(
         self,
         transport: ProducerOutboxTransport,
