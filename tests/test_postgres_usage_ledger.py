@@ -5756,7 +5756,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert account is not None
         published_at = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
         budget = SpendBudgetService(self.ledger, clock=lambda: published_at).publish_spend_budget(
-            TENANT_ONE, account.billing_account_id, "USD", Decimal("40"), MORNING_WINDOW
+            TENANT_ONE, account.billing_account_id, "USD", Decimal("100"), MORNING_WINDOW
         )
         assert budget.spend_budget_id is not None
         deadline = datetime(2026, 8, 16, 10, 30, tzinfo=UTC)
@@ -5823,6 +5823,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             TENANT_ONE, budget.spend_budget_id, "1", "expiring-request", "worker", "batch", "v1", deadline
         )
         assert expiring.authorization is not None
+        self.assertEqual(
+            self.ledger.apply_spend_commitment(
+                tenant_id,
+                replace(first_commit, spend_authorization_id=expiring.authorization.spend_authorization_id, idempotency_key="late-before-expire"),
+                deadline + timedelta(seconds=1),
+            )[1],
+            "authorization_expired",
+        )
         expired = SpendAuthorizationService(
             self.ledger, clock=lambda: deadline + timedelta(seconds=1)
         ).expire_authorization(TENANT_ONE, expiring.authorization.spend_authorization_id, "expire-edge")
@@ -5835,7 +5843,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "authorization_expired",
         )
         denied = SpendAuthorizationService(self.ledger, clock=lambda: published_at).request_authorization(
-            TENANT_ONE, budget.spend_budget_id, "3", "denied-request", "worker", "batch", "v1", deadline
+            TENANT_ONE, budget.spend_budget_id, "100", "denied-request", "worker", "batch", "v1", deadline
         )
         assert denied.authorization is not None
         self.assertEqual(

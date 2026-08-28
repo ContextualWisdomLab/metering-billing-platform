@@ -4589,6 +4589,8 @@ class PostgresUsageLedger:
                 return authorization, "authorization_expired"
             if authorization.authorization_status == "denied":
                 return authorization, "authorization_status_invalid"
+            if now >= authorization.valid_until:
+                return authorization, "authorization_expired"
             committed_amount = parse_exact_decimal(
                 format_exact_decimal(commitment.committed_amount)
             )

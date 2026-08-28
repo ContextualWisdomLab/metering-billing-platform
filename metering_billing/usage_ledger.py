@@ -34,7 +34,7 @@ SOURCE_PAYLOAD_HASH_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _authorization_identity(authorization: "StoredSpendAuthorization") -> tuple[object, ...]:
-    """Return immutable request fields used to validate idempotent replays."""
+    """Return client-supplied immutable fields used to validate replays."""
     return (
         authorization.spend_budget_id,
         authorization.requested_amount,
@@ -43,7 +43,6 @@ def _authorization_identity(authorization: "StoredSpendAuthorization") -> tuple[
         authorization.purpose_code,
         authorization.policy_version,
         authorization.currency_code,
-        authorization.valid_from,
         authorization.valid_until,
     )
 
@@ -3281,6 +3280,8 @@ class MemoryUsageLedger:
             return authorization, "authorization_expired"
         if authorization.authorization_status == "denied":
             return authorization, "authorization_status_invalid"
+        if now >= authorization.valid_until:
+            return authorization, "authorization_expired"
         remaining = (
             authorization.requested_amount
             - authorization.committed_amount

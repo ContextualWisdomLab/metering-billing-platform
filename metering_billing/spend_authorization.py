@@ -18,7 +18,6 @@ from uuid import UUID
 from metering_billing.errors import (
     SpendAuthorizationOutcomeCode,
     SpendAuthorizationQueryError,
-    SpendAuthorizationRejectionReasonCode,
 )
 from metering_billing.exact_decimal import (
     format_exact_decimal,
@@ -283,7 +282,16 @@ class SpendAuthorizationService:
             if now < authorization.valid_until:
                 return _rejected("expire", tenant_reference, "validity_window_invalid")
             remaining = _remaining_amount(authorization)
-            if remaining <= 0 and authorization.authorization_status != "expired":
+            if remaining <= 0:
+                if authorization.authorization_status == "expired":
+                    return _result(
+                        "expire",
+                        SpendAuthorizationOutcomeCode.DUPLICATE_REPLAY,
+                        tenant_reference,
+                        authorization,
+                        authorization.spend_authorization_id,
+                        None,
+                    )
                 return _rejected("expire", tenant_reference, "authorization_status_invalid")
             release = StoredSpendRelease(
                 generate_record_id(),

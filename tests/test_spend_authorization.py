@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock as mock
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest import mock
 from uuid import uuid4
 
 from metering_billing import (
@@ -48,7 +48,7 @@ class SpendAuthorizationTests(unittest.TestCase):
             "policy-v1",
             DEADLINE,
         )
-        replay = service.request_authorization(
+        replay = SpendAuthorizationService(ledger, clock=lambda: NOW + timedelta(seconds=1)).request_authorization(
             TENANT_ONE,
             budget.spend_budget_id,
             "70.00",
@@ -149,11 +149,26 @@ class SpendAuthorizationTests(unittest.TestCase):
         )
         clock[0] = DEADLINE + timedelta(seconds=1)
         expired = expiring.authorization
+        self.assertEqual(
+            ledger.apply_spend_commitment(
+                expired.tenant_account_id,
+                StoredSpendCommitment(
+                    uuid4(), expired.tenant_account_id, expired.spend_authorization_id,
+                    "late-direct", Decimal("1"), "usage-late", clock[0]
+                ),
+                clock[0],
+            )[1],
+            "authorization_expired",
+        )
         expired_result = SpendAuthorizationService(ledger, clock=lambda: clock[0]).expire_authorization(
             TENANT_ONE, expired.spend_authorization_id, "expire-1"
         )
         self.assertEqual(expired_result.authorization.authorization_status, "expired")
         self.assertEqual(expired_result.authorization.released_amount, Decimal("10.00"))
+        expired_replay = SpendAuthorizationService(ledger, clock=lambda: clock[0]).expire_authorization(
+            TENANT_ONE, expired.spend_authorization_id, "expire-1"
+        )
+        self.assertEqual(expired_replay.outcome_code, SpendAuthorizationOutcomeCode.DUPLICATE_REPLAY)
         self.assertEqual(
             SpendAuthorizationService(ledger, clock=lambda: clock[0]).commit_authorization(
                 TENANT_ONE, expired.spend_authorization_id, "1", "late-1", "usage-late"
