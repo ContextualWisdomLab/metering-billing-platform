@@ -184,8 +184,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 42:
-            raise AssertionError(f"expected 42 migrations, got {len(applied)}")
+        if len(applied) != 43:
+            raise AssertionError(f"expected 43 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -863,7 +863,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             causation_reference="urn:cwl:causation:step_03",
             available_at="2026-08-16T10:27:43.482Z",
             correction_lineage={
-                "prior_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61b",
+                "prior_event_id": "019d7b92-1aa0-7a7f-061c-962c0f4bf61b",
                 "relationship_code": "corrects",
                 "reason_code": "late_provider_reconciliation",
             },

@@ -437,6 +437,19 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_correction_uuid_follow_up_migration_matches_schema_uuid_validation(self) -> None:
+        """The follow-up keeps schema-valid non-RFC4122 UUID variants insertable."""
+        sql = (
+            ROOT
+            / "database/migrations/0043_align_correction_uuid_validation.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DROP CONSTRAINT usage_event_correction_lineage_object", sql)
+        self.assertIn("ADD CONSTRAINT usage_event_correction_lineage_object", sql)
+        self.assertIn(
+            "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            sql,
+        )
+
     def test_rating_run_accepts_exact_invoice_intent_totals(self) -> None:
         """A rating-run contract records exact decimal invoice-intent lines."""
         schema = self._schema("rating-run.schema.json")

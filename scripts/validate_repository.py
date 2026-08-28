@@ -265,6 +265,7 @@ REQUIRED_FILES = (
     "database/migrations/0040_usage_event_dimensions.sql",
     "database/migrations/0041_rename_usage_event_dimensions.sql",
     "database/migrations/0042_usage_event_contract_metadata.sql",
+    "database/migrations/0043_align_correction_uuid_validation.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
