@@ -168,7 +168,7 @@ not merge evidence:
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
 | #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `4e39beef7d25b7612e8b02e09925b42bdce6be39`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `023b1ddf59ac4c2a4a91c0a3baa10284c23eed01`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
