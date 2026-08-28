@@ -13,13 +13,15 @@ durable system of record for catalog rows, immutable usage facts, rating runs,
 invoice drafts, issued snapshots, collection facts, journal proposals, and the
 atomic webhook outbox, but the HTTP adapter had no way to select it.
 
-The memory ledger remains the deterministic reference and test adapter: the
-whole unit suite depends on it staying the default. Production selection must
-fail closed at startup, not on the first request, when a PostgreSQL DSN is
-missing. Operators also need one readiness endpoint that reports which backend
-is serving without leaking exception internals, and the probe must reuse the
-ledger's own connection conventions instead of opening ad-hoc psycopg
-connections beside it.
+The memory ledger remains the deterministic reference and test adapter. A
+configured PostgreSQL DSN must select the durable path by default so a
+production process cannot silently fall back to memory-backed writes; setting
+the backend to `memory` is the explicit reference/test override. PostgreSQL
+selection must fail closed at startup, not on the first request, when its DSN
+is missing. Operators also need one readiness endpoint that reports which
+backend is serving without leaking exception internals, and the probe must
+reuse the ledger's own connection conventions instead of opening ad-hoc
+psycopg connections beside it.
 
 ## Decision
 
@@ -29,12 +31,13 @@ connections beside it.
   constructor signatures stay unchanged; both ledgers already satisfy the same
   duck-typed repository surface.
 - Add `create_default_ledger(environ=None)` to `metering_billing/http_app.py`.
-  `METERING_BILLING_LEDGER_BACKEND=postgres` builds `PostgresUsageLedger`
-  from `METERING_BILLING_POSTGRES_DSN` through the existing
-  `PostgresUsageLedger.connect` convention; no new pooling is introduced.
-  A missing or empty DSN raises a `ValueError` naming the variable at startup.
-  Every other value, including an unset variable, returns
-  `MemoryUsageLedger()`, so tests keep working unchanged.
+  `METERING_BILLING_LEDGER_BACKEND=postgres` or an unset backend with a
+  non-empty `METERING_BILLING_POSTGRES_DSN` builds `PostgresUsageLedger`
+  through the existing `PostgresUsageLedger.connect` convention; no new
+  pooling is introduced. A missing or empty DSN raises a `ValueError` naming
+  the variable at startup when PostgreSQL is selected. Explicit `memory`, or
+  an unset backend with no DSN, returns `MemoryUsageLedger()`. Unsupported
+  backend values fail closed rather than silently selecting memory.
 - Add unauthenticated `GET /readyz` beside the existing `/healthz` route in
   the same dispatch style. The response is `200 {"status": "ready",
   "backend": "<memory|postgres>"}` or `503 {"status": "not_ready",
@@ -50,9 +53,10 @@ connections beside it.
 
 ## Consequences
 
-- Operators select the durable backend with two environment variables and get
-  a truthful readiness signal per process. A misconfigured deployment refuses
-  to start instead of silently serving memory-backed writes as production.
+- Operators select the durable backend with a PostgreSQL DSN (and may set the
+  backend label explicitly) and get a truthful readiness signal per process.
+  A misconfigured PostgreSQL deployment refuses to start instead of silently
+  serving memory-backed writes as production.
 - The full existing suite keeps passing untouched because the default path is
   byte-for-byte the previous behavior. New backend-selection tests cover both
   factories' branches and all three readiness outcomes at 100% coverage.
