@@ -232,15 +232,19 @@ export function httpUsageIngestionTransport(
   }
   return async (events) => {
     let response: Response;
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), timeoutMilliseconds);
     try {
       response = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify({ events }),
-        signal: AbortSignal.timeout(timeoutMilliseconds),
+        signal: controller.signal,
       });
     } catch (error) {
       throw new TransientDeliveryError("network");
+    } finally {
+      clearTimeout(timeoutHandle);
     }
     if (response.status >= 500 || response.status === 408 || response.status === 429) {
       throw new TransientDeliveryError(response.status >= 500 ? "http_5xx" : `http_${response.status}`);
