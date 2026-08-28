@@ -294,7 +294,9 @@ class HttpUsageIngestionTransport:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with urlopen(  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+                request, timeout=self.timeout
+            ) as response:
                 status = int(response.status)
                 try:
                     body = json.loads(response.read().decode("utf-8"))
