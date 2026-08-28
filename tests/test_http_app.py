@@ -620,9 +620,17 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         shutdown_server.serve_forever.side_effect = serve_until_shutdown
         with mock.patch("metering_billing.http_app.signal.signal", side_effect=register_handler):
             with mock.patch("metering_billing.http_app.make_server", return_value=shutdown_server):
-                self.assertEqual(main(()), 0)
+                with mock.patch(
+                    "metering_billing.http_app.threading.Thread"
+                ) as shutdown_thread:
+                    shutdown_thread.return_value.start.side_effect = (
+                        lambda: shutdown_server.shutdown()
+                    )
+                    self.assertEqual(main(()), 0)
         shutdown_server.shutdown.assert_called_once()
         shutdown_server.server_close.assert_called_once()
+        shutdown_thread.assert_called_once()
+        shutdown_thread.return_value.start.assert_called_once()
 
         fake_server_two = mock.Mock()
         with mock.patch("metering_billing.http_app.make_server", return_value=fake_server_two) as maker_two:

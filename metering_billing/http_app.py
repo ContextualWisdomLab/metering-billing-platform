@@ -2828,7 +2828,9 @@ def main(arguments: tuple[str, ...] | None = None) -> int:
     plus ``METERING_BILLING_POSTGRES_DSN`` select the durable system of
     record exactly as documented for ``create_http_app``.  Serving uses
     :class:`ThreadingWSGIServer` so concurrent tenant requests are handled on
-    separate daemon threads instead of serializing behind one request loop.
+    separate non-daemon threads that drain on server close instead of
+    serializing behind one request loop.  ``SIGTERM`` and ``SIGINT`` stop the
+    accept loop through a separate shutdown thread and restore prior handlers.
     """
     del arguments
     port = int(os.environ.get("PORT", "8000"))
