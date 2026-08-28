@@ -676,8 +676,8 @@ def create_default_ledger(
     backend variable selects PostgreSQL when a non-empty DSN is present;
     ``METERING_BILLING_LEDGER_BACKEND=memory`` explicitly selects the
     deterministic reference adapter.  A missing or empty DSN fails closed at
-    startup when PostgreSQL is selected, while an unset backend with no DSN
-    keeps the memory default for tests and local runs.
+    startup when PostgreSQL is selected, while an unset backend with no
+    non-empty DSN keeps the memory default for tests and local runs.
     """
     settings = os.environ if environ is None else environ
     backend = settings.get(LEDGER_BACKEND_ENVIRONMENT_VARIABLE)
