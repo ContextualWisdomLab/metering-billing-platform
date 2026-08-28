@@ -26,6 +26,7 @@ from metering_billing.producer_outbox import (
     _same_https_origin,
 )
 from metering_billing.payload_integrity import canonical_source_payload_json
+from metering_billing.contracts import validate_usage_event
 
 
 FIXTURE_PATH = (
@@ -140,6 +141,7 @@ class ProducerSdkTests(unittest.TestCase):
             ProducerContractError, "unsupported usage-event contract version"
         ):
             build_usage_event(**arguments)
+        self.assertTrue(validate_usage_event([]))
 
     def test_allowlisted_dimensions_are_hashed_and_unknown_fields_fail_closed(
         self,
