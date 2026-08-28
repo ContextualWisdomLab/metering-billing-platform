@@ -4655,13 +4655,22 @@ class RepositoryContractTests(unittest.TestCase):
 
         object_schema = {
             "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1,
             "required": ["known_value"],
             "properties": {"known_value": {"type": "string"}},
             "additionalProperties": False,
         }
         self.assertEqual(
             validate_schema_instance(object_schema, {}),
-            ("$: required property is missing: known_value",),
+            (
+                "$: required property is missing: known_value",
+                "$: object has fewer than minProperties",
+            ),
+        )
+        self.assertIn(
+            "$: object has more than maxProperties",
+            validate_schema_instance(object_schema, {"known_value": "ok", "extra": "x"}),
         )
 
     def test_offline_schema_validator_covers_formats_types_and_references(self) -> None:
