@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use cwl_metering_producer::{
     build_usage_cloud_event, build_usage_event, CorrectionLineage, DeliveryError, FileUsageOutbox,
@@ -45,6 +46,23 @@ fn path(suffix: &str, event: &UsageEvent) -> PathBuf {
     std::env::temp_dir().join(format!("cwl-coverage-{suffix}-{}.json", event.event_id))
 }
 
+static CURRENT_DIRECTORY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CurrentDirectoryGuard {
+    previous: PathBuf,
+    isolated: PathBuf,
+    relative_file: PathBuf,
+}
+
+impl Drop for CurrentDirectoryGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.isolated.join(&self.relative_file));
+        let _ = fs::remove_file(self.isolated.join(self.relative_file.with_extension("tmp")));
+        let _ = std::env::set_current_dir(&self.previous);
+        let _ = fs::remove_dir(&self.isolated);
+    }
+}
+
 fn receipt(event: &UsageEvent, outcome: &str) -> UsageDeliveryReceipt {
     UsageDeliveryReceipt {
         source_event_key: event.source_event_key.clone(),
@@ -72,6 +90,9 @@ fn covers_conformance_and_cloud_event() {
     assert_eq!(cloud_event.subject, event.source_event_key);
     assert_eq!(cloud_event.data, event);
     assert!(build_usage_cloud_event(&event, "").is_err());
+    let mut invalid_cloud_event = event.clone();
+    invalid_cloud_event.occurred_at = "not-a-timestamp".into();
+    assert!(build_usage_cloud_event(&invalid_cloud_event, "urn:cwl:producer:coverage").is_err());
 
     let mut invalid_payload = event.clone();
     invalid_payload.available_at = Some("not-a-timestamp".into());
@@ -89,6 +110,9 @@ fn covers_conformance_and_cloud_event() {
     let mut whole_second = input_from_fixture(&vector);
     whole_second.occurred_at = "2026-08-16T10:27:42.000Z".into();
     assert!(build_usage_event(whole_second).is_ok());
+    let mut digit_code = input_from_fixture(&vector);
+    digit_code.product_code = "product_2".into();
+    assert!(build_usage_event(digit_code).is_ok());
     let mut dimensions = input_from_fixture(&vector);
     dimensions.dimensions = Some(BTreeMap::from([
         ("provider_code".into(), "openai".into()),
@@ -221,6 +245,9 @@ fn covers_invalid_contract_boundaries() {
     let mut invalid = base.clone();
     invalid.measurements[0].quality_code = "invalid".into();
     assert!(build_usage_event(invalid).is_err());
+    let mut invalid = base.clone();
+    invalid.measurements[0].meter_code = "A".into();
+    assert!(build_usage_event(invalid).is_err());
     for quantity in ["", "1", ".", "01", "1a", "1.", "1.a"] {
         let mut invalid = base.clone();
         invalid.measurements[0].quantity = if quantity == "1" {
@@ -244,6 +271,15 @@ fn covers_invalid_contract_boundaries() {
     }
     let mut invalid = base.clone();
     invalid.dimensions = Some(BTreeMap::from([("model_code".into(), "a".repeat(129))]));
+    assert!(build_usage_event(invalid).is_err());
+    let mut invalid = base.clone();
+    invalid.dimensions = Some(BTreeMap::from([("provider_code".into(), "A".into())]));
+    assert!(build_usage_event(invalid).is_err());
+    let mut invalid = base.clone();
+    invalid.dimensions = Some(BTreeMap::from([(
+        "document_job_reference".into(),
+        "not-a-reference".into(),
+    )]));
     assert!(build_usage_event(invalid).is_err());
 
     let mut tampered: UsageEvent = serde_json::from_value(vector["event"].clone()).unwrap();
@@ -281,7 +317,20 @@ fn covers_outbox_edges_and_receipt_binding() {
     assert!(FileUsageOutbox::open(&blocked_path).is_err());
     fs::remove_dir(blocked_path.with_extension("tmp")).unwrap();
 
+    let _current_directory_lock = CURRENT_DIRECTORY_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    let previous_directory = std::env::current_dir().unwrap();
+    let isolated_directory = std::env::temp_dir().join(format!("cwl-relative-{}", event.event_id));
+    fs::create_dir(&isolated_directory).unwrap();
+    std::env::set_current_dir(&isolated_directory).unwrap();
     let relative = PathBuf::from(format!("cwl-relative-{}.json", event.event_id));
+    let _relative_guard = CurrentDirectoryGuard {
+        previous: previous_directory,
+        isolated: isolated_directory,
+        relative_file: relative.clone(),
+    };
     let _ = fs::remove_file(&relative);
 
     let flush_parent = std::env::temp_dir().join(format!("cwl-flush-parent-{}", event.event_id));
@@ -309,6 +358,9 @@ fn covers_outbox_edges_and_receipt_binding() {
     fs::remove_dir(&rename_path).unwrap();
     fs::remove_dir(rename_parent).unwrap();
     let mut outbox = FileUsageOutbox::open(&relative).unwrap();
+    let mut invalid_event = event.clone();
+    invalid_event.occurred_at = "not-a-timestamp".into();
+    assert!(outbox.enqueue(invalid_event).is_err());
     assert_eq!(outbox.pending_count(), 0);
     assert_eq!(outbox.dead_letter_count(), 0);
     assert!(outbox.flush(0, 1, |_| unreachable!()).is_err());

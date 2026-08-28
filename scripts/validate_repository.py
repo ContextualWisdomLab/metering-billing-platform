@@ -150,6 +150,11 @@ REQUIRED_FILES = (
     "docs/adr/0116-postgres-issued-credit-note-void-journal.md",
     "docs/adr/0117-postgres-invoice-draft-journal.md",
     "docs/adr/0118-operator-invoice-draft-journal-storybook.md",
+    "docs/adr/0125-canonical-producer-sdk-reference.md",
+    "docs/adr/0127-canonical-rust-producer-sdk.md",
+    "docs/adr/0128-canonical-typescript-producer-sdk.md",
+    "docs/adr/0129-durable-producer-sdk-outbox.md",
+    "docs/operations/release-producer-sdks.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
@@ -266,6 +271,7 @@ REQUIRED_FILES = (
     "database/migrations/0041_rename_usage_event_dimensions.sql",
     "database/migrations/0042_usage_event_contract_metadata.sql",
     "database/migrations/0043_align_correction_uuid_validation.sql",
+    "database/migrations/0044_validate_usage_event_contract_constraints.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
@@ -338,6 +344,7 @@ REQUIRED_FILES = (
     "pyproject.toml",
     "uv.lock",
     ".github/workflows/ci.yml",
+    ".github/workflows/publish-producer-sdks.yml",
 )
 ACTION_REFERENCE_PATTERN = re.compile(
     r"\buses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)@([^\s#]+)"
