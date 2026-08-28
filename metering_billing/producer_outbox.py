@@ -218,6 +218,10 @@ class ProducerOutbox:
                             )
                         self._connection.commit()
                         return ProducerEnqueueReceipt(event_id, source_event_key, True)
+                    if existing["outbox_event_id"] == event_id:
+                        raise ProducerOutboxConflict(
+                            "outbox_event_id already identifies a different producer fact"
+                        )
                     raise ProducerOutboxConflict(
                         "source_event_key already identifies a different producer fact"
                     )

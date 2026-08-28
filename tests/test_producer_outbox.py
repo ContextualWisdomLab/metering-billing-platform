@@ -245,6 +245,22 @@ class ProducerOutboxTests(unittest.TestCase):
                 outbox.enqueue(ambiguous, auth=AUTH)
             outbox.close()
 
+    def test_enqueue_names_event_id_reuse_conflict(self) -> None:
+        """An event id conflict reports the identity key that was reused."""
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = ProducerOutbox(Path(directory) / "outbox.sqlite3", clock=lambda: NOW)
+            first = event_for(60)
+            outbox.enqueue(first, auth=AUTH)
+
+            reused = event_for(61)
+            reused["event_id"] = first["event_id"]
+            reused["source_payload_hash"] = compute_source_payload_hash(reused)
+            with self.assertRaisesRegex(
+                ProducerOutboxConflict, "outbox_event_id already identifies"
+            ):
+                outbox.enqueue(reused, auth=AUTH)
+            outbox.close()
+
     def test_crash_after_claim_does_not_consume_attempt(self) -> None:
         class CrashTransport:
             def ingest_batch(self, events, *, auth, credential):
