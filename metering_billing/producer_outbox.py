@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -147,6 +148,9 @@ class ProducerOutbox:
             str(database_path), check_same_thread=False, isolation_level=None
         )
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._lock = threading.RLock()
+        # ponytail: one lock per shared SQLite connection; use a connection pool for higher throughput.
         self._clock = clock or (lambda: datetime.now(UTC))
         self._max_attempts = max_attempts
         self._base_backoff_seconds = base_backoff_seconds
@@ -156,100 +160,103 @@ class ProducerOutbox:
 
     def close(self) -> None:
         """Close the local outbox connection."""
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def enqueue(
         self, event: Mapping[str, Any], *, auth: ProducerAuthContext
     ) -> ProducerEnqueueReceipt:
         """Validate and durably enqueue one event without storing a secret."""
-        if not isinstance(event, Mapping):
-            raise ProducerContractError("producer outbox requires one usage-event object")
-        errors = validate_usage_event(event)
-        if errors:
-            raise ProducerContractError("invalid usage event: " + "; ".join(errors))
-        hash_errors = source_payload_hash_errors(event)
-        if hash_errors:
-            raise ProducerContractError("invalid usage event: " + "; ".join(hash_errors))
-        if event["tenant_reference"] != auth.tenant_reference:
-            raise ProducerContractError("usage event tenant does not match delivery context")
+        with self._lock:
+            if not isinstance(event, Mapping):
+                raise ProducerContractError("producer outbox requires one usage-event object")
+            errors = validate_usage_event(event)
+            if errors:
+                raise ProducerContractError("invalid usage event: " + "; ".join(errors))
+            hash_errors = source_payload_hash_errors(event)
+            if hash_errors:
+                raise ProducerContractError("invalid usage event: " + "; ".join(hash_errors))
+            if event["tenant_reference"] != auth.tenant_reference:
+                raise ProducerContractError("usage event tenant does not match delivery context")
 
-        event_id = str(event["event_id"])
-        source_event_key = str(event["source_event_key"])
-        event_json = json.dumps(
-            dict(event), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
-        now_text = _format_instant(self._clock())
-        self._begin_write()
-        try:
-            existing = self._connection.execute(
-                """
-                SELECT outbox_event_id, source_event_key, tenant_reference, event_json
-                FROM producer_outbox_event
-                WHERE outbox_event_id = ?
-                   OR (tenant_reference = ? AND source_event_key = ?)
-                ORDER BY outbox_event_id
-                LIMIT 1
-                """,
-                (event_id, auth.tenant_reference, source_event_key),
-            ).fetchone()
-            if existing is not None:
-                if (
-                    existing["tenant_reference"] == auth.tenant_reference
-                    and existing["source_event_key"] == source_event_key
-                    and existing["event_json"] == event_json
-                ):
-                    self._connection.commit()
-                    return ProducerEnqueueReceipt(event_id, source_event_key, True)
-                raise ProducerOutboxConflict(
-                    "source_event_key already identifies a different producer fact"
-                )
-            self._connection.execute(
-                """
-                INSERT INTO producer_outbox_event
-                    (outbox_event_id, tenant_reference, source_event_key, event_json,
-                     credential_reference, purpose_code, correlation_id, status,
-                     attempt_count, next_attempt_at, lease_until, last_error_code, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?)
-                """,
-                (
-                    event_id,
-                    auth.tenant_reference,
-                    source_event_key,
-                    event_json,
-                    auth.credential_reference,
-                    auth.purpose_code,
-                    auth.correlation_id,
-                    now_text,
-                    now_text,
-                ),
+            event_id = str(event["event_id"])
+            source_event_key = str(event["source_event_key"])
+            event_json = json.dumps(
+                dict(event), ensure_ascii=False, sort_keys=True, separators=(",", ":")
             )
-            self._connection.commit()
-        except Exception:
-            self._connection.rollback()
-            raise
-        return ProducerEnqueueReceipt(event_id, source_event_key, False)
+            now_text = _format_instant(self._clock())
+            self._begin_write()
+            try:
+                existing = self._connection.execute(
+                    """
+                    SELECT outbox_event_id, source_event_key, tenant_reference, event_json
+                    FROM producer_outbox_event
+                    WHERE outbox_event_id = ?
+                       OR (tenant_reference = ? AND source_event_key = ?)
+                    ORDER BY outbox_event_id
+                    LIMIT 1
+                    """,
+                    (event_id, auth.tenant_reference, source_event_key),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["tenant_reference"] == auth.tenant_reference
+                        and existing["source_event_key"] == source_event_key
+                        and existing["event_json"] == event_json
+                    ):
+                        self._connection.commit()
+                        return ProducerEnqueueReceipt(event_id, source_event_key, True)
+                    raise ProducerOutboxConflict(
+                        "source_event_key already identifies a different producer fact"
+                    )
+                self._connection.execute(
+                    """
+                    INSERT INTO producer_outbox_event
+                        (outbox_event_id, tenant_reference, source_event_key, event_json,
+                         credential_reference, purpose_code, correlation_id, delivery_status,
+                         attempt_count, next_attempt_at, lease_until, last_error_code, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?)
+                    """,
+                    (
+                        event_id,
+                        auth.tenant_reference,
+                        source_event_key,
+                        event_json,
+                        auth.credential_reference,
+                        auth.purpose_code,
+                        auth.correlation_id,
+                        now_text,
+                        now_text,
+                    ),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+            return ProducerEnqueueReceipt(event_id, source_event_key, False)
 
     def get_status(self, outbox_event_id: str) -> ProducerOutboxStatus | None:
         """Return one event status without exposing its payload or credentials."""
-        row = self._connection.execute(
-            """
-            SELECT outbox_event_id, source_event_key, status, attempt_count,
-                   next_attempt_at, last_error_code
-            FROM producer_outbox_event
-            WHERE outbox_event_id = ?
-            """,
-            (outbox_event_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return ProducerOutboxStatus(
-            outbox_event_id=row["outbox_event_id"],
-            source_event_key=row["source_event_key"],
-            status=row["status"],
-            attempt_count=row["attempt_count"],
-            next_attempt_at=_parse_instant(row["next_attempt_at"]),
-            last_error_code=row["last_error_code"],
-        )
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT outbox_event_id, source_event_key, delivery_status, attempt_count,
+                       next_attempt_at, last_error_code
+                FROM producer_outbox_event
+                WHERE outbox_event_id = ?
+                """,
+                (outbox_event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return ProducerOutboxStatus(
+                outbox_event_id=row["outbox_event_id"],
+                source_event_key=row["source_event_key"],
+                status=row["delivery_status"],
+                attempt_count=row["attempt_count"],
+                next_attempt_at=_parse_instant(row["next_attempt_at"]),
+                last_error_code=row["last_error_code"],
+            )
 
     def drain(
         self,
@@ -261,48 +268,49 @@ class ProducerOutbox:
         limit: int = 50,
     ) -> ProducerDrainReceipt:
         """Deliver one bounded leased batch and apply partial results atomically."""
-        _validate_batch_limit(limit)
-        current = self._clock() if now is None else now
-        now_text = _format_instant(current)
-        rows = self._claim_pending(now_text, limit, auth.tenant_reference)
-        if not rows:
-            return ProducerDrainReceipt(0, 0, 0, 0, 0, 0, ())
-        events = tuple(json.loads(row["event_json"]) for row in rows)
-        try:
-            raw_results = transport.ingest_batch(events, auth=auth, credential=credential)
-            result_by_key = _index_results(raw_results, tuple(row["source_event_key"] for row in rows))
-        except Exception as error:
-            error_code = type(error).__name__
-            result_by_key = {
-                row["source_event_key"]: ProducerDeliveryResult(
-                    row["source_event_key"], "retryable", error_code
-                )
-                for row in rows
-            }
+        with self._lock:
+            _validate_batch_limit(limit)
+            current = self._clock() if now is None else now
+            now_text = _format_instant(current)
+            rows = self._claim_pending(now_text, limit, auth.tenant_reference)
+            if not rows:
+                return ProducerDrainReceipt(0, 0, 0, 0, 0, 0, ())
+            events = tuple(json.loads(row["event_json"]) for row in rows)
+            try:
+                raw_results = transport.ingest_batch(events, auth=auth, credential=credential)
+                result_by_key = _index_results(raw_results, tuple(row["source_event_key"] for row in rows))
+            except Exception as error:
+                error_code = type(error).__name__
+                result_by_key = {
+                    row["source_event_key"]: ProducerDeliveryResult(
+                        row["source_event_key"], "retryable", error_code
+                    )
+                    for row in rows
+                }
 
-        counts = [0, 0, 0, 0, 0]
-        ordered_results = tuple(
-            result_by_key[row["source_event_key"]] for row in rows
-        )
-        self._begin_write()
-        try:
-            for row, result in zip(rows, ordered_results):
-                dead_lettered = self._apply_result(row, result, current)
-                if result.outcome == "accepted":
-                    counts[0] += 1
-                elif result.outcome == "duplicate_replay":
-                    counts[1] += 1
-                elif result.outcome == "rejected":
-                    counts[2] += 1
-                if dead_lettered:
-                    counts[4] += 1
-                elif result.outcome == "retryable":
-                    counts[3] += 1
-            self._connection.commit()
-        except Exception:
-            self._connection.rollback()
-            raise
-        return ProducerDrainReceipt(len(rows), *counts, ordered_results)
+            counts = [0, 0, 0, 0, 0]
+            ordered_results = tuple(
+                result_by_key[row["source_event_key"]] for row in rows
+            )
+            self._begin_write()
+            try:
+                for row, result in zip(rows, ordered_results):
+                    dead_lettered = self._apply_result(row, result, current)
+                    if result.outcome == "accepted":
+                        counts[0] += 1
+                    elif result.outcome == "duplicate_replay":
+                        counts[1] += 1
+                    elif result.outcome == "rejected":
+                        counts[2] += 1
+                    if dead_lettered:
+                        counts[4] += 1
+                    elif result.outcome == "retryable":
+                        counts[3] += 1
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+            return ProducerDrainReceipt(len(rows), *counts, ordered_results)
 
     def _initialize_schema(self) -> None:
         """Create the small durable queue and its due-event index."""
@@ -316,7 +324,7 @@ class ProducerOutbox:
                 credential_reference TEXT,
                 purpose_code TEXT NOT NULL,
                 correlation_id TEXT,
-                status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'dead_letter')),
+                delivery_status TEXT NOT NULL CHECK (delivery_status IN ('pending', 'delivered', 'dead_letter')),
                 attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
                 next_attempt_at TEXT NOT NULL,
                 lease_until TEXT,
@@ -325,7 +333,7 @@ class ProducerOutbox:
                 UNIQUE (tenant_reference, source_event_key)
             );
             CREATE INDEX IF NOT EXISTS producer_outbox_due_event
-                ON producer_outbox_event (status, next_attempt_at, lease_until);
+                ON producer_outbox_event (delivery_status, next_attempt_at, lease_until);
             """
         )
 
@@ -348,7 +356,7 @@ class ProducerOutbox:
                     SELECT outbox_event_id, source_event_key, event_json, attempt_count
                     FROM producer_outbox_event
                     WHERE tenant_reference = ?
-                      AND status = 'pending'
+                      AND delivery_status = 'pending'
                       AND next_attempt_at <= ?
                       AND (lease_until IS NULL OR lease_until <= ?)
                     ORDER BY next_attempt_at, outbox_event_id
@@ -389,7 +397,7 @@ class ProducerOutbox:
             self._connection.execute(
                 """
                 UPDATE producer_outbox_event
-                SET status = 'delivered', lease_until = NULL, last_error_code = NULL
+                SET delivery_status = 'delivered', lease_until = NULL, last_error_code = NULL
                 WHERE outbox_event_id = ?
                 """,
                 (event_id,),
@@ -399,7 +407,7 @@ class ProducerOutbox:
             self._connection.execute(
                 """
                 UPDATE producer_outbox_event
-                SET status = 'dead_letter', lease_until = NULL,
+                SET delivery_status = 'dead_letter', lease_until = NULL,
                     last_error_code = ?
                 WHERE outbox_event_id = ?
                 """,
@@ -410,7 +418,7 @@ class ProducerOutbox:
             self._connection.execute(
                 """
                 UPDATE producer_outbox_event
-                SET status = 'dead_letter', lease_until = NULL,
+                SET delivery_status = 'dead_letter', lease_until = NULL,
                     last_error_code = ?
                 WHERE outbox_event_id = ?
                 """,
@@ -424,7 +432,7 @@ class ProducerOutbox:
         self._connection.execute(
             """
             UPDATE producer_outbox_event
-            SET status = 'pending', lease_until = NULL,
+            SET delivery_status = 'pending', lease_until = NULL,
                 next_attempt_at = ?, last_error_code = ?
             WHERE outbox_event_id = ?
             """,

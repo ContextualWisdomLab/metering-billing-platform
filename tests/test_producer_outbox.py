@@ -118,6 +118,14 @@ class ProducerOutboxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "outbox.sqlite3"
             outbox = ProducerOutbox(path, clock=lambda: NOW)
+            columns = {
+                row[1]
+                for row in outbox._connection.execute(
+                    "PRAGMA table_info(producer_outbox_event)"
+                )
+            }
+            self.assertIn("delivery_status", columns)
+            self.assertNotIn("status", columns)
             first = outbox.enqueue(event, auth=AUTH)
             replay = outbox.enqueue(event, auth=AUTH)
             self.assertFalse(first.duplicate_enqueue)
