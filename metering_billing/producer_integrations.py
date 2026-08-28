@@ -183,6 +183,8 @@ def build_fast_mlsirm_usage_event(
     response_items: int,
     artifact_bytes: int | None = None,
     project_reference: str | None = None,
+    credential_reference: str | None = None,
+    cost_center_reference: str | None = None,
 ) -> dict[str, Any]:
     """Map one fast-mlsirm run using dimensions and result sizes only."""
     source_event_key = f"fast-mlsirm:{run_reference}:fit"
@@ -224,6 +226,8 @@ def build_fast_mlsirm_usage_event(
         operation_code="fit_model",
         occurred_at=occurred_at,
         measurements=measurements,
+        credential_reference=credential_reference,
+        cost_center_reference=cost_center_reference,
         project_reference=project_reference,
         dimensions={
             "run_reference": run_reference,

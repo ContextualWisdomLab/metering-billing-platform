@@ -143,12 +143,20 @@ class ProducerIntegrationTests(unittest.TestCase):
             "response_rows": 8,
             "response_items": 4,
             "artifact_bytes": 512,
+            "credential_reference": "urn:cwl:tenant_001:credential:01",
+            "cost_center_reference": "urn:cwl:tenant_001:cost_center:01",
         }
         first = build_fast_mlsirm_usage_event(**arguments)
         second = build_fast_mlsirm_usage_event(**arguments)
         self.assertEqual(validate_usage_event(first), ())
         self.assertEqual(first, second)
         self.assertEqual(first["measurements"][1]["quantity"], "32")
+        self.assertEqual(
+            first["credential_reference"], "urn:cwl:tenant_001:credential:01"
+        )
+        self.assertEqual(
+            first["cost_center_reference"], "urn:cwl:tenant_001:cost_center:01"
+        )
 
     def test_fast_mlsirm_cloud_event_and_dimension_guards(self) -> None:
         """Optional artifacts and invalid response shapes remain explicit."""
