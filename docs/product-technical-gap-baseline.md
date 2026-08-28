@@ -44,16 +44,14 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
-> **Status update (2026-08-25):** the verified release train has merged. The
-> cumulative candidate stack (`#82` plus descendants `#93`–`#132`, recreated
-> as `#133`–`#136`) and the contributor/validation docs (`#137`) are on
-> `develop`. Superseded snapshots (`#1`, `#3`, `#4`, `#92`–`#94`) are closed
-> as absorbed. Issue `#83` (collapse superseded snapshot PRs into a verified
-> release train) is complete: zero open pull requests remain, and the exact
-> head was validated offline — 39 PostgreSQL migrations applied, full unit
-> suite OK, 100% statement/branch coverage (16,971 statements, 5,870
-> branches), repository contracts valid, compile clean. The gap backlog
-> `#84`–`#91` is unchanged and now applies directly to the default branch.
+> **Status update (2026-08-28):** GitHub reports four open pull requests
+> (`#142`–`#145`), all targeting `develop`. The current default branch is
+> `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`, merged from PR #141
+> on 2026-08-26. The merged release train and the Compose, threaded API,
+> durable credential, and k6 baseline work are on `develop`. Issue #83 is
+> closed; the remaining open gap backlog is #84–#91. At this assessment,
+> every open PR is `BLOCKED`/`REVIEW_REQUIRED`, has zero unresolved threads,
+> and has no qualifying approval, so none is merge evidence for `develop`.
 
 ### Default branch
 
@@ -66,11 +64,10 @@ persistence, and operator-console Storybook presentment.
 
 At assessment time (2026-08-20):
 
-- ordinary open issues before this assessment: **9** (`#83`–`#91`), all completion-gap issues;
-- open pull requests: **5** (`#1`, `#3`, `#4`, `#82`, and draft `#92`);
-- current cumulative tip: PR #82;
-- PR #82 at the assessed head: **133 commits**, **437 changed files**, about **91.9k additions**;
-- PR #82 targets `develop` directly.
+- open issues: **8** (`#84`–`#91`);
+- open pull requests: **4** (`#142`–`#145`), all targeting `develop`;
+- latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`;
+- the merged PR #141 rollup included a failed `Semgrep (multi-language SAST)` job alongside successful repository, analysis, dependency, coverage, and other checks; therefore the merge is not a blanket claim that every release/security gate is complete.
 
 The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `1356b3e148715a568f035608462f55e509374aa0`:
 
@@ -165,15 +162,17 @@ Work can be stacked when public contracts are stable, but each PR must remain in
 
 ## Open pull-request inventory
 
-The current repository inventory on 2026-08-20 contains five open candidates:
+GitHub reports **four open pull requests** on 2026-08-28. The latest merged
+change is PR #141; the following open PR heads are current snapshots and are
+not merge evidence:
 
-| PR | Scope | Base | Current evidence |
+| PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
-| #1 | Provider-neutral billing foundation | `develop` | Checks pending; no formal approval |
-| #3 | Operator README, ADR, APA references, and validation documentation | PR #1 | Draft; repository contracts pending |
-| #4 | Buyer/operator README and contributor documentation | `develop` | Historical Checks passed; no formal approval |
-| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `59051d4`; review required; required Checks pending |
-| #92 | This product and technical gap baseline | PR #82 | Draft; repository contracts pending |
+| #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `0eba48f0c9792e60069dc22243e7d0af9eb47493`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
 
 PRs #5–#81 are closed as superseded snapshots. Their closure is not merge or
 production evidence. PR #92 is the current detailed baseline candidate and
