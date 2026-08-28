@@ -178,7 +178,7 @@ not merge evidence:
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python producer SDK reference and CloudEvents conformance vector for #90 | `develop` | `3b4d915cae4a3eee1dcb694db9df83f0126f5490`; open, blocked, review required, zero unresolved threads, zero approvals; OpenCode/Strix current-head evidence is unavailable because their providers failed |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `3b4d915cae4a3eee1dcb694db9df83f0126f5490`; open, blocked, review required, zero unresolved threads, zero approvals; OpenCode/Strix current-head evidence is unavailable because their providers failed |
 | #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `73bff622bce23afab4f66ac73bce74dd2a712710`; open, unstable, dependent on #146; Repository contracts passed and Devin remains pending; zero unresolved threads and zero approvals |
 
 PRs #148 (Rust SDK) and #149 (TypeScript SDK) merged on 2026-08-28. Their
