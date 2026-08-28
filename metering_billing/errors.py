@@ -36,6 +36,7 @@ class RejectionReasonCode(StrEnum):
     CREDENTIAL_NOT_ASSIGNED = "credential_not_assigned"
     METER_NOT_FOUND = "meter_not_found"
     METER_UNIT_MISMATCH = "meter_unit_mismatch"
+    METER_VERSION_MISMATCH = "meter_version_mismatch"
     METER_QUALITY_NOT_ALLOWED = "meter_quality_not_allowed"
     MEASUREMENT_QUANTITY_INVALID = "measurement_quantity_invalid"
     MEASUREMENT_METER_DUPLICATE = "measurement_meter_duplicate"

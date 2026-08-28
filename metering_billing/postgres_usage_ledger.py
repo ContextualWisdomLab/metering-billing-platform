@@ -15,6 +15,7 @@ subsequent slices of the persistence port.
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from datetime import datetime
 from threading import RLock
@@ -1473,10 +1474,13 @@ class PostgresUsageLedger:
                 INSERT INTO billing_core.usage_event
                     (usage_event_id, producer_event_id, tenant_account_id,
                      billing_account_id, billing_principal_id, credential_record_id,
-                     source_event_key, event_contract_version, event_payload_hash,
-                     product_code, operation_code, occurred_at, recorded_at,
-                     cost_center_reference, project_reference)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     source_event_key, event_contract_version, producer_contract_version,
+                     event_payload_hash, product_code, operation_code, occurred_at, recorded_at,
+                     cost_center_reference, project_reference, usage_dimensions,
+                     repository_reference, trace_reference, correlation_reference,
+                     causation_reference, available_at, correction_lineage)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT DO NOTHING
                 RETURNING usage_event_id
                 """,
@@ -1489,6 +1493,7 @@ class PostgresUsageLedger:
                     event.credential_record_id,
                     event.source_event_key,
                     event.event_contract_version,
+                    event.producer_contract_version,
                     event.event_payload_hash,
                     event.product_code,
                     event.operation_code,
@@ -1496,6 +1501,15 @@ class PostgresUsageLedger:
                     event.recorded_at,
                     event.cost_center_reference,
                     event.project_reference,
+                    json.dumps(dict(event.dimensions), sort_keys=True),
+                    event.repository_reference,
+                    event.trace_reference,
+                    event.correlation_reference,
+                    event.causation_reference,
+                    event.available_at,
+                    json.dumps(dict(event.correction_lineage), sort_keys=True)
+                    if event.correction_lineage
+                    else None,
                 ),
             )
             inserted = cursor.fetchone()
@@ -5716,8 +5730,11 @@ class PostgresUsageLedger:
             """
             SELECT usage_event_id, producer_event_id, tenant_account_id, billing_account_id,
                    billing_principal_id, credential_record_id, source_event_key,
-                   event_contract_version, event_payload_hash, product_code, operation_code,
-                   occurred_at, recorded_at, cost_center_reference, project_reference
+                   event_contract_version, producer_contract_version, event_payload_hash,
+                   product_code, operation_code, occurred_at, recorded_at,
+                   cost_center_reference, project_reference, usage_dimensions,
+                   repository_reference, trace_reference, correlation_reference,
+                   causation_reference, available_at, correction_lineage
             FROM billing_core.usage_event
             WHERE usage_event_id = %s
             """,
@@ -5729,7 +5746,7 @@ class PostgresUsageLedger:
         cursor.execute(
             """
             SELECT usage_measurement_id, usage_event_id, meter_definition_id,
-                   meter_code, unit_code, measured_quantity, quality_code
+                   meter_code, meter_version, unit_code, measured_quantity, quality_code
             FROM billing_core.usage_measurement
             JOIN billing_core.meter_definition USING (meter_definition_id)
             WHERE usage_event_id = %s
@@ -5747,14 +5764,22 @@ class PostgresUsageLedger:
             credential_record_id=None if row[5] is None else UUID(str(row[5])),
             source_event_key=row[6],
             event_contract_version=row[7],
-            event_payload_hash=row[8],
-            product_code=row[9],
-            operation_code=row[10],
-            occurred_at=row[11],
-            recorded_at=row[12],
-            cost_center_reference=row[13],
-            project_reference=row[14],
+            producer_contract_version=row[8],
+            event_payload_hash=row[9],
+            product_code=row[10],
+            operation_code=row[11],
+            occurred_at=row[12],
+            recorded_at=row[13],
+            cost_center_reference=row[14],
+            project_reference=row[15],
             measurements=measurements,
+            dimensions=tuple(sorted((row[16] or {}).items())),
+            repository_reference=row[17],
+            trace_reference=row[18],
+            correlation_reference=row[19],
+            causation_reference=row[20],
+            available_at=row[21],
+            correction_lineage=tuple(sorted((row[22] or {}).items())),
         )
 
     @staticmethod
@@ -7004,9 +7029,10 @@ class PostgresUsageLedger:
             UUID(str(row[1])),
             UUID(str(row[2])),
             row[3],
-            row[4],
             row[5],
             row[6],
+            row[7],
+            row[4],
         )
 
     @staticmethod

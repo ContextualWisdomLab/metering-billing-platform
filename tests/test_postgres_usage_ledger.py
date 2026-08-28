@@ -184,8 +184,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 39:
-            raise AssertionError(f"expected 39 migrations, got {len(applied)}")
+        if len(applied) != 43:
+            raise AssertionError(f"expected 43 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -855,7 +855,24 @@ class PostgresUsageLedgerTests(unittest.TestCase):
     def test_ingestion_is_atomic_replay_safe_and_tenant_scoped(self) -> None:
         """A restart-safe repository keeps one event, normalized measurements, and receipts."""
         service = UsageIngestionService(self.ledger)
-        event = make_event()
+        event = make_event(
+            producer_contract_version=2,
+            repository_reference="urn:cwl:repository:producer",
+            trace_reference="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            correlation_reference="urn:cwl:correlation:workflow_381",
+            causation_reference="urn:cwl:causation:step_03",
+            available_at="2026-08-16T10:27:43.482Z",
+            correction_lineage={
+                "prior_event_id": "019d7b92-1aa0-7a7f-061c-962c0f4bf61b",
+                "relationship_code": "corrects",
+                "reason_code": "late_provider_reconciliation",
+            },
+            dimensions={
+                "model_code": "gpt-4o-mini",
+                "provider_code": "openai",
+                "workflow_code": "verified_workflow",
+            },
+        )
         accepted = service.ingest_usage_event(event)
         replay = service.ingest_usage_event(event)
         self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
@@ -870,6 +887,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         stored = self.ledger.get_usage_event(accepted.usage_event_id)
         self.assertIsNotNone(stored)
         self.assertEqual(len(stored.measurements), 1)
+        self.assertEqual(
+            stored.dimensions,
+            (
+                ("model_code", "gpt-4o-mini"),
+                ("provider_code", "openai"),
+                ("workflow_code", "verified_workflow"),
+            ),
+        )
+        self.assertEqual(stored.producer_contract_version, 2)
+        self.assertEqual(stored.repository_reference, event["repository_reference"])
+        self.assertEqual(stored.trace_reference, event["trace_reference"])
+        self.assertEqual(stored.available_at, datetime(2026, 8, 16, 10, 27, 43, 482000, tzinfo=UTC))
+        self.assertEqual(dict(stored.correction_lineage), event["correction_lineage"])
+        self.assertEqual(stored.measurements[0].meter_version, 1)
         self.assertEqual(len(self.ledger.stored_usage_set(self.ledger.require_tenant(TENANT_ONE).tenant_account_id)), 1)
         self.assertEqual(
             len(self.ledger.list_usage_events(self.ledger.require_tenant(TENANT_TWO).tenant_account_id)),
