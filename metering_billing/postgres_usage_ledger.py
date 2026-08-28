@@ -85,10 +85,6 @@ from metering_billing.usage_ledger import (
 )
 
 
-MIGRATION_HISTORY_TABLE = "public.metering_billing_schema_migration"
-"""Migration-history table mirrored from ``scripts/migrate_postgres.py``."""
-
-
 class PostgresUsageLedger:
     """Persist usage attribution and immutable facts in PostgreSQL.
 
