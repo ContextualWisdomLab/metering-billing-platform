@@ -1,0 +1,31 @@
+# ADR 0125: Canonical producer SDK reference
+
+## Context
+
+Issue #90 needs heterogeneous CWL products to emit the same billable usage
+fact. The repository already owns the closed `usage-event` schema, exact
+decimal quantities, tenant-scoped idempotency, and the source-payload hash.
+Duplicating that logic in each producer would allow the same fact to hash or
+validate differently.
+
+## Decision
+
+Add a dependency-free Python reference builder that:
+
+- exposes only the fields in the published usage contract;
+- computes `source_payload_hash` from the shared canonical representation;
+- rejects schema-invalid quantities, arbitrary dimensions, and sensitive text;
+- wraps the validated data in a CloudEvents 1.0 JSON envelope; and
+- publishes one checked-in conformance vector containing the canonical JSON
+  bytes and expected SHA-256 digest.
+
+The hash covers the usage data, not CloudEvents transport metadata. The server
+`UsageIngestionService` remains responsible for tenant resolution,
+deduplication, durable storage, and ingestion receipts.
+
+## Consequences
+
+Rust and TypeScript implementations can target the same vector before they are
+published. Outbox buffering, retry/dead-letter delivery, tracing extensions,
+and the three real producer integrations remain follow-up work under issue
+#90; this slice does not claim those capabilities.

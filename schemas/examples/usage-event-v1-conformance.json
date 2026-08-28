@@ -1,0 +1,32 @@
+{
+  "event": {
+    "event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf6aa",
+    "event_contract_version": 1,
+    "source_event_key": "producer-reference:workflow-381:step-04",
+    "tenant_reference": "urn:cwl:tenant_001",
+    "billing_account_reference": "urn:cwl:tenant_001:billing_account:019d7001",
+    "billing_principal_reference": "urn:cwl:tenant_001:billing_principal:019d7002",
+    "credential_reference": "urn:cwl:tenant_001:credential_record:019d7003",
+    "project_reference": "urn:cwl:tenant_001:project:metering",
+    "product_code": "contextual_orchestrator",
+    "operation_code": "complete_step",
+    "occurred_at": "2026-08-28T01:02:03.004Z",
+    "measurements": [
+      {
+        "meter_code": "gen_ai_output_token",
+        "quantity": "1810.500",
+        "unit_code": "token",
+        "quality_code": "provider_reported"
+      },
+      {
+        "meter_code": "gen_ai_input_token",
+        "quantity": "42",
+        "unit_code": "token",
+        "quality_code": "provider_reported"
+      }
+    ],
+    "source_payload_hash": "sha256:f49abdc88079a791b06c469823a69539bf6cc0aca69c92a6deb1712487bc34f5"
+  },
+  "canonical_source_payload_json": "{\"billing_account_reference\":\"urn:cwl:tenant_001:billing_account:019d7001\",\"billing_principal_reference\":\"urn:cwl:tenant_001:billing_principal:019d7002\",\"credential_reference\":\"urn:cwl:tenant_001:credential_record:019d7003\",\"event_contract_version\":1,\"measurements\":[{\"meter_code\":\"gen_ai_output_token\",\"quality_code\":\"provider_reported\",\"quantity\":\"1810.5\",\"unit_code\":\"token\"},{\"meter_code\":\"gen_ai_input_token\",\"quality_code\":\"provider_reported\",\"quantity\":\"42\",\"unit_code\":\"token\"}],\"occurred_at\":\"2026-08-28T01:02:03.004000Z\",\"operation_code\":\"complete_step\",\"product_code\":\"contextual_orchestrator\",\"project_reference\":\"urn:cwl:tenant_001:project:metering\",\"tenant_reference\":\"urn:cwl:tenant_001\"}",
+  "source_payload_hash": "sha256:f49abdc88079a791b06c469823a69539bf6cc0aca69c92a6deb1712487bc34f5"
+}

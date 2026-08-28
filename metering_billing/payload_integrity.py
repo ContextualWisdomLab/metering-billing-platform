@@ -59,6 +59,16 @@ def canonical_source_payload(event: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def canonical_source_payload_json(event: Mapping[str, Any]) -> str:
+    """Return the byte-stable JSON used for a source-payload digest."""
+    return json.dumps(
+        canonical_source_payload(event),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _canonical_quantity_text(quantity_text: Any) -> str:
     """Render a quantity so ``1`` and ``1.0`` produce the same digest."""
     formatted = format_exact_decimal(parse_exact_decimal(str(quantity_text)))
@@ -69,12 +79,7 @@ def _canonical_quantity_text(quantity_text: Any) -> str:
 
 def compute_source_payload_hash(event: Mapping[str, Any]) -> str:
     """Return the ``sha256:<hex>`` digest of the canonical source payload."""
-    canonical_text = json.dumps(
-        canonical_source_payload(event),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    canonical_text = canonical_source_payload_json(event)
     digest = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
