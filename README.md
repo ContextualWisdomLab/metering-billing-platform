@@ -223,7 +223,11 @@ python3 -m metering_billing.http_app
 
 `create_http_app(ledger=...)` is a thin stdlib WSGI adapter over the services above. Standalone serving binds `0.0.0.0:$PORT` (default 8000). Every write requires `tenant_reference`. Money stays exact-decimal strings. HTTP 200 means `accepted` or `duplicate_replay` on writes, or a successful read. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant proposal, credit, observation, rate-card version, usage event, rating run, invoice draft, collection case, payment intent, payment receipt, or API credential. The adapter does not post journals or call a named payment provider.
 
-The bound ledger uses PostgreSQL whenever `METERING_BILLING_POSTGRES_DSN` is set, even if the backend selector is unset. Set the selector explicitly to `postgres` for clarity, or set it to `memory` only when the deterministic reference adapter is intentional. PostgreSQL selection fails closed when the DSN is missing:
+The bound ledger uses PostgreSQL whenever `METERING_BILLING_POSTGRES_DSN` is
+set to a non-empty value and the backend selector is unset or `postgres`. Set
+the selector explicitly to `postgres` for clarity, or set it to `memory` only
+when the deterministic reference adapter is intentional. PostgreSQL selection
+fails closed when the DSN is missing or empty:
 
 ```bash
 export METERING_BILLING_LEDGER_BACKEND=postgres
@@ -231,10 +235,11 @@ export METERING_BILLING_POSTGRES_DSN="postgresql:///metering_billing?host=/tmp&p
 python3 -c "from metering_billing.http_app import create_default_ledger, create_http_app; app = create_http_app(create_default_ledger())"
 ```
 
-In a deployed process, the `METERING_BILLING_POSTGRES_DSN` variable alone is
-enough to select PostgreSQL; `METERING_BILLING_LEDGER_BACKEND=memory` is the
-explicit test/reference override. An unsupported backend value fails closed
-at startup rather than falling back to memory.
+In a deployed process, a non-empty `METERING_BILLING_POSTGRES_DSN` value alone
+is enough to select PostgreSQL; `METERING_BILLING_LEDGER_BACKEND=memory` is
+the explicit test/reference override. With the backend unset and the DSN absent
+or empty, the memory adapter is selected. An unsupported backend value fails
+closed at startup rather than falling back to memory.
 
 Unauthenticated `GET /healthz` stays a static liveness reply, and `GET /readyz` reports the serving backend: healthy processes answer `200 {"status": "ready", "backend": "memory" | "postgres"}` while a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` with stable reason codes only (see ADR 0123).
 

@@ -78,6 +78,10 @@ class CreateDefaultLedgerTests(unittest.TestCase):
         """An empty selection and explicit memory both return the reference adapter."""
         self.assertIsInstance(create_default_ledger({}), MemoryUsageLedger)
         self.assertIsInstance(
+            create_default_ledger({POSTGRES_DSN_ENVIRONMENT_VARIABLE: ""}),
+            MemoryUsageLedger,
+        )
+        self.assertIsInstance(
             create_default_ledger({LEDGER_BACKEND_ENVIRONMENT_VARIABLE: "memory"}),
             MemoryUsageLedger,
         )
@@ -115,6 +119,8 @@ class CreateDefaultLedgerTests(unittest.TestCase):
                 }
             )
         self.assertIn(LEDGER_BACKEND_ENVIRONMENT_VARIABLE, str(error.exception))
+        with self.assertRaises(ValueError):
+            create_default_ledger({LEDGER_BACKEND_ENVIRONMENT_VARIABLE: ""})
 
     def test_missing_environ_mapping_reads_the_process_environment(self) -> None:
         """``environ=None`` falls back to ``os.environ`` without selecting postgres."""

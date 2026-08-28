@@ -14,7 +14,7 @@ invoice drafts, issued snapshots, collection facts, journal proposals, and the
 atomic webhook outbox, but the HTTP adapter had no way to select it.
 
 The memory ledger remains the deterministic reference and test adapter. A
-configured PostgreSQL DSN must select the durable path by default so a
+non-empty PostgreSQL DSN must select the durable path by default so a
 production process cannot silently fall back to memory-backed writes; setting
 the backend to `memory` is the explicit reference/test override. PostgreSQL
 selection must fail closed at startup, not on the first request, when its DSN
@@ -36,8 +36,9 @@ psycopg connections beside it.
   through the existing `PostgresUsageLedger.connect` convention; no new
   pooling is introduced. A missing or empty DSN raises a `ValueError` naming
   the variable at startup when PostgreSQL is selected. Explicit `memory`, or
-  an unset backend with no DSN, returns `MemoryUsageLedger()`. Unsupported
-  backend values fail closed rather than silently selecting memory.
+  an unset backend with no non-empty DSN, returns `MemoryUsageLedger()`.
+  Unsupported backend values fail closed rather than silently selecting
+  memory.
 - Add unauthenticated `GET /readyz` beside the existing `/healthz` route in
   the same dispatch style. The response is `200 {"status": "ready",
   "backend": "<memory|postgres>"}` or `503 {"status": "not_ready",
