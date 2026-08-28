@@ -42,9 +42,11 @@ repository and trace references, availability time, and correction lineage as
 append-only event metadata; `recorded_at` remains server-assigned.
 
 Release artifacts are built only from a published GitHub release tag. The
-repository workflow packages the Python distribution, Rust crate, and
-TypeScript tarball first, then publishes them behind the `producer-release`
-environment. PyPI and npm use OIDC provenance; crates.io uses the scoped
+repository workflow resolves that tag to one commit before any checkout,
+packages the Python distribution, Rust crate, and TypeScript tarball from that
+commit, and compares the uploaded Rust crate with a fresh package from the
+same commit before publishing behind the `producer-release` environment. PyPI
+and npm use OIDC provenance; crates.io uses the scoped
 `CARGO_REGISTRY_TOKEN` secret. Package versions must be bumped with the
 changelog before a later release because registry versions are immutable.
 

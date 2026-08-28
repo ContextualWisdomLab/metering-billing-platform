@@ -268,6 +268,36 @@ test("HTTP transport fails closed on redirects", async () => {
   }
 });
 
+test("HTTP transport timeout covers response body consumption", async () => {
+  const originalFetch = globalThis.fetch;
+  let aborted = false;
+  let fallbackTimer;
+  try {
+    globalThis.fetch = async (_input, init) => {
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"event_receipts":['));
+          init.signal.addEventListener("abort", () => {
+            aborted = true;
+            clearTimeout(fallbackTimer);
+            controller.error(new Error("body timeout"));
+          }, { once: true });
+          fallbackTimer = setTimeout(() => controller.error(new Error("test timeout")), 100);
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+    };
+    await assert.rejects(
+      () => httpUsageIngestionTransport("https://metering.invalid", {}, 10)([]),
+      { name: "TransientDeliveryError" },
+    );
+    assert.equal(aborted, true);
+  } finally {
+    clearTimeout(fallbackTimer);
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("HTTP transport turns an abort into a transient delivery error", async () => {
   const originalFetch = globalThis.fetch;
   try {

@@ -231,36 +231,38 @@ export function httpUsageIngestionTransport(
     throw new ProducerContractError("endpoint must be an absolute HTTPS URL");
   }
   return async (events) => {
-    let response: Response;
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), timeoutMilliseconds);
     try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...headers },
-        body: JSON.stringify({ events }),
-        redirect: "error",
-        signal: controller.signal,
-      });
-    } catch (error) {
-      throw new TransientDeliveryError("network");
+      let response: Response;
+      try {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...headers },
+          body: JSON.stringify({ events }),
+          redirect: "error",
+          signal: controller.signal,
+        });
+      } catch (error) {
+        throw new TransientDeliveryError("network");
+      }
+      if (response.status >= 500 || response.status === 408 || response.status === 429) {
+        throw new TransientDeliveryError(response.status >= 500 ? "http_5xx" : `http_${response.status}`);
+      }
+      if (!response.ok && response.status !== 422) throw new PermanentDeliveryError(`http_${response.status}`);
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch (error) {
+        throw new TransientDeliveryError("invalid_json");
+      }
+      if (!body || typeof body !== "object" || !Array.isArray((body as { event_receipts?: unknown }).event_receipts)) {
+        throw new TransientDeliveryError("invalid_delivery_response");
+      }
+      return body as UsageDeliveryResponse;
     } finally {
       clearTimeout(timeoutHandle);
     }
-    if (response.status >= 500 || response.status === 408 || response.status === 429) {
-      throw new TransientDeliveryError(response.status >= 500 ? "http_5xx" : `http_${response.status}`);
-    }
-    if (!response.ok && response.status !== 422) throw new PermanentDeliveryError(`http_${response.status}`);
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch (error) {
-      throw new TransientDeliveryError("invalid_json");
-    }
-    if (!body || typeof body !== "object" || !Array.isArray((body as { event_receipts?: unknown }).event_receipts)) {
-      throw new TransientDeliveryError("invalid_delivery_response");
-    }
-    return body as UsageDeliveryResponse;
   };
 }
 
