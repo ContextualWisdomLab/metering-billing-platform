@@ -33,6 +33,6 @@ zero microseconds, otherwise six digits) before the UTC offset is rendered as
 ## Consequences
 
 Rust and TypeScript implementations can target the same vector before they are
-published. Outbox buffering, retry/dead-letter delivery, tracing extensions,
-and the three real producer integrations remain follow-up work under issue
-#90; this slice does not claim those capabilities.
+published. Durable outbox, retry, and dead-letter behavior is documented in
+ADR 0129; tracing extensions, released SDK pins, and the three real producer
+integrations remain follow-up work under issue #90.
