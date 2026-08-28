@@ -1477,7 +1477,7 @@ class PostgresUsageLedger:
                      source_event_key, event_contract_version, event_payload_hash,
                      product_code, operation_code, occurred_at, recorded_at,
                      cost_center_reference, project_reference, dimensions)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT DO NOTHING
                 RETURNING usage_event_id
                 """,
