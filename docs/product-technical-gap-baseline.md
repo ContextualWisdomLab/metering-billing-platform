@@ -20,7 +20,7 @@ Completion is blocked by eight product-level gaps. Release integration #83 is co
 4. billing-period close, three-way reconciliation, FX, and standardized finance export are incomplete;
 5. production identity, authorization, secrets, egress, compliance evidence, and release provenance are incomplete;
 6. Storybook presentment is not an authenticated operator/customer application;
-7. canonical SDKs and heterogeneous CWL producer integrations are not complete;
+7. the canonical Python producer reference and a durable outbox slice are open in stacked PRs, but canonical SDK coverage and heterogeneous CWL producer integrations are not complete;
 8. GA operability, performance, disaster recovery, release, and support evidence is not complete.
 
 Until those conditions are satisfied, the accurate product statement is:
@@ -43,14 +43,15 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
-> **Status update (2026-08-28):** GitHub reports five open pull requests
-> (`#142`–`#146`), all targeting `develop`. The current default branch is
+> **Status update (2026-08-28):** GitHub reports six open pull requests
+> (`#142`–`#147`). PRs `#142`–`#146` target `develop`; PR `#147` is stacked on
+> the canonical producer SDK branch from PR `#146`. The current default branch is
 > `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`, merged from PR #141
 > on 2026-08-26. The merged release train and the Compose, threaded API,
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
-> every open PR is `BLOCKED`/`REVIEW_REQUIRED`, has zero unresolved threads,
-> and has no qualifying approval, so none is merge evidence for `develop`.
+> PRs `#142`–`#146` are `BLOCKED`/`REVIEW_REQUIRED`; PR `#147` is
+> `UNSTABLE` on its stacked base. None is merge evidence for `develop`.
 
 ### Default branch
 
@@ -68,7 +69,8 @@ operational contract.
 As queried from GitHub on 2026-08-28:
 
 - open issues: **8** (`#84`–`#91`);
-- open pull requests: **5** (`#142`–`#146`), all targeting `develop`;
+- open pull requests: **6** (`#142`–`#147`); `#142`–`#146` target `develop`, while `#147` targets the branch of `#146`;
+- stacked producer work: `#146` provides the canonical Python producer reference and `#147` adds the durable producer outbox slice;
 - latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`;
 - the merged PR #141 rollup included a failed `Semgrep (multi-language SAST)` job alongside successful repository, analysis, dependency, coverage, and other checks; therefore the merge is not a blanket claim that every release/security gate is complete.
 
@@ -82,7 +84,7 @@ The cumulative candidate provides meaningful foundations:
 
 | Capability | Candidate evidence | Current limitation |
 |---|---|---|
-| Usage attribution | Tenant, billing account, principal, credential, project, cost center, product, meter, quality, immutable source hash | Real producer SDK/adoption and durable production ingestion remain incomplete |
+| Usage attribution | Tenant, billing account, principal, credential, project, cost center, product, meter, quality, immutable source hash; canonical Python builder and durable producer outbox slices are present in open PRs | Real producer SDK adoption, heterogeneous integrations, and durable production ingestion remain incomplete |
 | Metering and rating | Exact-decimal quantity/money, billability quality policy, versioned flat rate cards, half-open windows, replay-safe rating | Tiered/package/commitment pricing and full contract engine are incomplete |
 | Invoice and collections | Draft/issue/void commercial invoices, credit notes, collections, dunning, disputes, write-offs, payments, unapplied cash, refunds, settlement facts | No live provider collection or legal invoice authority |
 | Tax | Versioned static rate and deterministic draft assessment | Not a jurisdictional tax engine; exemptions, nexus, legal tax documents, MoR authority, and global compliance are incomplete |
@@ -161,18 +163,19 @@ Work can be stacked when public contracts are stable, but each PR must remain in
 
 ## Current pull-request inventory
 
-GitHub reports **five open pull requests** on 2026-08-28. The latest merged
+GitHub reports **six open pull requests** on 2026-08-28. The latest merged
 change is PR #141; the following open PR heads are current snapshots and are
 not merge evidence:
 
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
 | #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `023b1ddf59ac4c2a4a91c0a3baa10284c23eed01`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `f7ab9103259b4cd0bd7ce673f0fc36c477ad3b2d`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python producer SDK reference and CloudEvents conformance vector for #90 | `develop` | `5a7ca3d56bcf0a38fda7a3d66c7a8f112eb5eca0`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #146 | Canonical Python producer SDK reference and CloudEvents conformance vector for #90 | `develop` | `29b37d73f4a7ae25784d3102aa24d9dd50c7b660`; open, blocked, review required, zero unresolved threads, zero approvals; OpenCode/Strix current-head evidence is unavailable because their providers failed |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | open, unstable, dependent on #146; local exact suite and repository contracts pass; current GitHub HEAD and Checks remain authoritative |
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
