@@ -151,6 +151,7 @@ class StoredUsageMeasurement:
     unit_code: str
     measured_quantity: Decimal
     quality_code: str
+    meter_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,13 @@ class StoredUsageEvent:
     project_reference: str | None
     measurements: tuple[StoredUsageMeasurement, ...]
     dimensions: tuple[tuple[str, str], ...] = ()
+    producer_contract_version: int = 1
+    repository_reference: str | None = None
+    trace_reference: str | None = None
+    correlation_reference: str | None = None
+    causation_reference: str | None = None
+    available_at: datetime | None = None
+    correction_lineage: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

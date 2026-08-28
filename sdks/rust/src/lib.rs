@@ -33,15 +33,26 @@ impl std::error::Error for ProducerContractError {}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Measurement {
     pub meter_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meter_version: Option<u32>,
     pub quantity: String,
     pub unit_code: String,
     pub quality_code: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrectionLineage {
+    pub prior_event_id: String,
+    pub relationship_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageEvent {
     pub event_id: String,
     pub event_contract_version: u32,
+    pub producer_contract_version: u32,
     pub source_event_key: String,
     pub tenant_reference: String,
     pub billing_account_reference: String,
@@ -52,6 +63,18 @@ pub struct UsageEvent {
     pub cost_center_reference: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub causation_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correction_lineage: Option<CorrectionLineage>,
     pub product_code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_code: Option<String>,
@@ -66,6 +89,7 @@ pub struct UsageEvent {
 pub struct UsageEventInput {
     pub event_id: String,
     pub event_contract_version: u32,
+    pub producer_contract_version: u32,
     pub source_event_key: String,
     pub tenant_reference: String,
     pub billing_account_reference: String,
@@ -73,6 +97,12 @@ pub struct UsageEventInput {
     pub credential_reference: Option<String>,
     pub cost_center_reference: Option<String>,
     pub project_reference: Option<String>,
+    pub repository_reference: Option<String>,
+    pub trace_reference: Option<String>,
+    pub correlation_reference: Option<String>,
+    pub causation_reference: Option<String>,
+    pub available_at: Option<String>,
+    pub correction_lineage: Option<CorrectionLineage>,
     pub product_code: String,
     pub operation_code: Option<String>,
     pub dimensions: Option<BTreeMap<String, String>>,
@@ -396,6 +426,7 @@ pub fn build_usage_event(input: UsageEventInput) -> Result<UsageEvent, ProducerC
     let mut event = UsageEvent {
         event_id: input.event_id,
         event_contract_version: input.event_contract_version,
+        producer_contract_version: input.producer_contract_version,
         source_event_key: input.source_event_key,
         tenant_reference: input.tenant_reference,
         billing_account_reference: input.billing_account_reference,
@@ -403,6 +434,12 @@ pub fn build_usage_event(input: UsageEventInput) -> Result<UsageEvent, ProducerC
         credential_reference: input.credential_reference,
         cost_center_reference: input.cost_center_reference,
         project_reference: input.project_reference,
+        repository_reference: input.repository_reference,
+        trace_reference: input.trace_reference,
+        correlation_reference: input.correlation_reference,
+        causation_reference: input.causation_reference,
+        available_at: input.available_at,
+        correction_lineage: input.correction_lineage,
         product_code: input.product_code,
         operation_code: input.operation_code,
         dimensions: input.dimensions,
@@ -474,6 +511,10 @@ pub fn canonical_source_payload_json(event: &UsageEvent) -> Result<String, Produ
         "event_contract_version",
         serde_json::Value::from(event.event_contract_version),
     );
+    payload.insert(
+        "producer_contract_version",
+        serde_json::Value::from(event.producer_contract_version),
+    );
     let measurements = event
         .measurements
         .iter()
@@ -486,6 +527,49 @@ pub fn canonical_source_payload_json(event: &UsageEvent) -> Result<String, Produ
         serde_json::Value::String(event.product_code.clone()),
     );
     insert_optional(&mut payload, "project_reference", &event.project_reference);
+    insert_optional(
+        &mut payload,
+        "repository_reference",
+        &event.repository_reference,
+    );
+    insert_optional(&mut payload, "trace_reference", &event.trace_reference);
+    insert_optional(
+        &mut payload,
+        "correlation_reference",
+        &event.correlation_reference,
+    );
+    insert_optional(
+        &mut payload,
+        "causation_reference",
+        &event.causation_reference,
+    );
+    if let Some(available_at) = &event.available_at {
+        payload.insert(
+            "available_at",
+            serde_json::Value::String(canonical_timestamp(available_at)?),
+        );
+    }
+    if let Some(correction_lineage) = &event.correction_lineage {
+        let mut lineage = BTreeMap::new();
+        lineage.insert(
+            "prior_event_id",
+            serde_json::Value::String(correction_lineage.prior_event_id.clone()),
+        );
+        if let Some(reason_code) = &correction_lineage.reason_code {
+            lineage.insert(
+                "reason_code",
+                serde_json::Value::String(reason_code.clone()),
+            );
+        }
+        lineage.insert(
+            "relationship_code",
+            serde_json::Value::String(correction_lineage.relationship_code.clone()),
+        );
+        payload.insert(
+            "correction_lineage",
+            serde_json::to_value(lineage).expect("lineage is serializable"),
+        );
+    }
     payload.insert(
         "occurred_at",
         serde_json::Value::String(canonical_timestamp(&event.occurred_at)?),
@@ -525,6 +609,9 @@ fn canonical_measurement(
         "meter_code",
         serde_json::Value::String(measurement.meter_code.clone()),
     );
+    if let Some(meter_version) = measurement.meter_version {
+        value.insert("meter_version", serde_json::Value::from(meter_version));
+    }
     value.insert(
         "quality_code",
         serde_json::Value::String(measurement.quality_code.clone()),
@@ -570,6 +657,11 @@ fn validate_input(input: &UsageEventInput) -> Result<(), ProducerContractError> 
             "event_contract_version must be at least 1".into(),
         ));
     }
+    if input.producer_contract_version == 0 {
+        return Err(ProducerContractError(
+            "producer_contract_version must be at least 1".into(),
+        ));
+    }
     validate_bounded_text("source_event_key", &input.source_event_key, 256)?;
     for (name, value) in [
         ("tenant_reference", &input.tenant_reference),
@@ -588,10 +680,16 @@ fn validate_input(input: &UsageEventInput) -> Result<(), ProducerContractError> 
         ("credential_reference", &input.credential_reference),
         ("cost_center_reference", &input.cost_center_reference),
         ("project_reference", &input.project_reference),
+        ("repository_reference", &input.repository_reference),
+        ("correlation_reference", &input.correlation_reference),
+        ("causation_reference", &input.causation_reference),
     ] {
         if let Some(value) = value {
             validate_reference(name, value)?;
         }
+    }
+    if let Some(trace_reference) = &input.trace_reference {
+        validate_bounded_text("trace_reference", trace_reference, 256)?;
     }
     validate_code("product_code", &input.product_code, 64)?;
     if let Some(operation_code) = &input.operation_code {
@@ -599,6 +697,12 @@ fn validate_input(input: &UsageEventInput) -> Result<(), ProducerContractError> 
     }
     validate_dimensions(input.dimensions.as_ref())?;
     canonical_timestamp(&input.occurred_at)?;
+    if let Some(available_at) = &input.available_at {
+        canonical_timestamp(available_at)?;
+    }
+    if let Some(lineage) = &input.correction_lineage {
+        validate_correction_lineage(lineage)?;
+    }
     if input.measurements.is_empty() || input.measurements.len() > 64 {
         return Err(ProducerContractError(
             "measurements must contain between 1 and 64 objects".into(),
@@ -606,6 +710,11 @@ fn validate_input(input: &UsageEventInput) -> Result<(), ProducerContractError> 
     }
     for measurement in &input.measurements {
         validate_code("meter_code", &measurement.meter_code, 96)?;
+        if matches!(measurement.meter_version, Some(0)) {
+            return Err(ProducerContractError(
+                "meter_version must be at least 1".into(),
+            ));
+        }
         validate_quantity(&measurement.quantity)?;
         validate_code("unit_code", &measurement.unit_code, 32)?;
         if !matches!(
@@ -629,6 +738,7 @@ fn validate_event(event: &UsageEvent) -> Result<(), ProducerContractError> {
     let input = UsageEventInput {
         event_id: event.event_id.clone(),
         event_contract_version: event.event_contract_version,
+        producer_contract_version: event.producer_contract_version,
         source_event_key: event.source_event_key.clone(),
         tenant_reference: event.tenant_reference.clone(),
         billing_account_reference: event.billing_account_reference.clone(),
@@ -636,6 +746,12 @@ fn validate_event(event: &UsageEvent) -> Result<(), ProducerContractError> {
         credential_reference: event.credential_reference.clone(),
         cost_center_reference: event.cost_center_reference.clone(),
         project_reference: event.project_reference.clone(),
+        repository_reference: event.repository_reference.clone(),
+        trace_reference: event.trace_reference.clone(),
+        correlation_reference: event.correlation_reference.clone(),
+        causation_reference: event.causation_reference.clone(),
+        available_at: event.available_at.clone(),
+        correction_lineage: event.correction_lineage.clone(),
         product_code: event.product_code.clone(),
         operation_code: event.operation_code.clone(),
         dimensions: event.dimensions.clone(),
@@ -692,6 +808,22 @@ fn validate_dimensions(
                 )))
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_correction_lineage(lineage: &CorrectionLineage) -> Result<(), ProducerContractError> {
+    validate_uuid(&lineage.prior_event_id)?;
+    if !matches!(
+        lineage.relationship_code.as_str(),
+        "corrects" | "reverses" | "supersedes"
+    ) {
+        return Err(ProducerContractError(
+            "correction_lineage relationship_code is not in the published enum".into(),
+        ));
+    }
+    if let Some(reason_code) = &lineage.reason_code {
+        validate_code("correction_lineage reason_code", reason_code, 64)?;
     }
     Ok(())
 }
@@ -785,6 +917,7 @@ mod tests {
         UsageEventInput {
             event_id: event.event_id,
             event_contract_version: event.event_contract_version,
+            producer_contract_version: event.producer_contract_version,
             source_event_key: event.source_event_key,
             tenant_reference: event.tenant_reference,
             billing_account_reference: event.billing_account_reference,
@@ -792,6 +925,12 @@ mod tests {
             credential_reference: event.credential_reference,
             cost_center_reference: event.cost_center_reference,
             project_reference: event.project_reference,
+            repository_reference: event.repository_reference,
+            trace_reference: event.trace_reference,
+            correlation_reference: event.correlation_reference,
+            causation_reference: event.causation_reference,
+            available_at: event.available_at,
+            correction_lineage: event.correction_lineage,
             product_code: event.product_code,
             operation_code: event.operation_code,
             dimensions: event.dimensions,
@@ -832,7 +971,7 @@ mod tests {
         let event = build_usage_event(input).unwrap();
         assert_eq!(
             event.source_payload_hash,
-            "sha256:48e92ee2293e0c0eda5aaad6de7b4c6657134c6a0200249498c447c8e3aadac9"
+            "sha256:601172eebd1e5f5d840706bcf1b5833203d4b802898459c00176fd4600ebed35"
         );
     }
 
@@ -845,7 +984,7 @@ mod tests {
         let event = build_usage_event(input).unwrap();
         assert_eq!(
             event.source_payload_hash,
-            "sha256:23f8cd504adbc694ea715d7840e8c199019cfb6d36b066e82eafb538bcf4eb87"
+            "sha256:d5d3aeda8f19e49e2db7cd70e9d1219bf131941e0142a750a8fe51d84515fa3c"
         );
     }
 

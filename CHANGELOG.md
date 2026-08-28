@@ -34,6 +34,12 @@
   document text, and secrets remain rejected. This is contract groundwork for
   the three real producer integrations required by issue #90, not an integration
   claim.
+- Usage-event contract metadata now includes producer-contract version, meter
+  version, repository and trace/correlation/causation references, availability
+  time, and correction lineage. The PostgreSQL ledger persists these fields in
+  the append-only event row through migration 0042 and rejects a supplied meter
+  version that differs from the effective catalog version; old v1 events remain
+  valid through the additive optional-field path.
 - A Rust producer SDK reference under sdks/rust builds the closed typed usage
   event, verifies exact-decimal and CloudEvents boundaries, and produces the
   same canonical source-payload JSON and SHA-256 hash as the Python conformance

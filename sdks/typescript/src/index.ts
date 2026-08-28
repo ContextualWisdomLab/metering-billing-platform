@@ -14,14 +14,22 @@ export class ProducerContractError extends Error {
 
 export interface Measurement {
   meter_code: string;
+  meter_version?: number;
   quantity: string;
   unit_code: string;
   quality_code: string;
 }
 
+export interface CorrectionLineage {
+  prior_event_id: string;
+  relationship_code: "corrects" | "reverses" | "supersedes";
+  reason_code?: string;
+}
+
 export interface UsageEventInput {
   event_id: string;
   event_contract_version: number;
+  producer_contract_version: number;
   source_event_key: string;
   tenant_reference: string;
   billing_account_reference: string;
@@ -29,6 +37,12 @@ export interface UsageEventInput {
   credential_reference?: string;
   cost_center_reference?: string;
   project_reference?: string;
+  repository_reference?: string;
+  trace_reference?: string;
+  correlation_reference?: string;
+  causation_reference?: string;
+  available_at?: string;
+  correction_lineage?: CorrectionLineage;
   product_code: string;
   operation_code?: string;
   dimensions?: Record<string, string>;
@@ -234,6 +248,7 @@ export function buildUsageEvent(input: UsageEventInput): UsageEvent {
   const event: UsageEvent = {
     event_id: input.event_id,
     event_contract_version: input.event_contract_version,
+    producer_contract_version: input.producer_contract_version,
     source_event_key: input.source_event_key,
     tenant_reference: input.tenant_reference,
     billing_account_reference: input.billing_account_reference,
@@ -245,6 +260,12 @@ export function buildUsageEvent(input: UsageEventInput): UsageEvent {
       ? {}
       : { cost_center_reference: input.cost_center_reference }),
     ...(input.project_reference === undefined ? {} : { project_reference: input.project_reference }),
+    ...(input.repository_reference === undefined ? {} : { repository_reference: input.repository_reference }),
+    ...(input.trace_reference === undefined ? {} : { trace_reference: input.trace_reference }),
+    ...(input.correlation_reference === undefined ? {} : { correlation_reference: input.correlation_reference }),
+    ...(input.causation_reference === undefined ? {} : { causation_reference: input.causation_reference }),
+    ...(input.available_at === undefined ? {} : { available_at: input.available_at }),
+    ...(input.correction_lineage === undefined ? {} : { correction_lineage: { ...input.correction_lineage } }),
     product_code: input.product_code,
     ...(input.operation_code === undefined ? {} : { operation_code: input.operation_code }),
     ...(input.dimensions === undefined ? {} : { dimensions: { ...input.dimensions } }),
@@ -278,10 +299,27 @@ export function buildUsageCloudEvent(event: UsageEvent, source: string): UsageCl
 }
 
 export function canonicalSourcePayloadJson(event: UsageEvent): string {
-  const payload: Record<string, unknown> = {
-    billing_account_reference: event.billing_account_reference,
-    billing_principal_reference: event.billing_principal_reference,
-  };
+  const payload: Record<string, unknown> = {};
+  if (event.available_at !== undefined) {
+    payload.available_at = canonicalTimestamp(event.available_at);
+  }
+  payload.billing_account_reference = event.billing_account_reference;
+  payload.billing_principal_reference = event.billing_principal_reference;
+  if (event.causation_reference !== undefined) {
+    payload.causation_reference = event.causation_reference;
+  }
+  if (event.correction_lineage !== undefined) {
+    payload.correction_lineage = {
+      prior_event_id: event.correction_lineage.prior_event_id,
+      ...(event.correction_lineage.reason_code === undefined
+        ? {}
+        : { reason_code: event.correction_lineage.reason_code }),
+      relationship_code: event.correction_lineage.relationship_code,
+    };
+  }
+  if (event.correlation_reference !== undefined) {
+    payload.correlation_reference = event.correlation_reference;
+  }
   if (event.cost_center_reference !== undefined) {
     payload.cost_center_reference = event.cost_center_reference;
   }
@@ -296,6 +334,7 @@ export function canonicalSourcePayloadJson(event: UsageEvent): string {
   payload.event_contract_version = event.event_contract_version;
   payload.measurements = event.measurements.map((measurement) => ({
     meter_code: measurement.meter_code,
+    ...(measurement.meter_version === undefined ? {} : { meter_version: measurement.meter_version }),
     quality_code: measurement.quality_code,
     quantity: canonicalQuantity(measurement.quantity),
     unit_code: measurement.unit_code,
@@ -304,11 +343,18 @@ export function canonicalSourcePayloadJson(event: UsageEvent): string {
   if (event.operation_code !== undefined) {
     payload.operation_code = event.operation_code;
   }
+  payload.producer_contract_version = event.producer_contract_version;
   payload.product_code = event.product_code;
   if (event.project_reference !== undefined) {
     payload.project_reference = event.project_reference;
   }
+  if (event.repository_reference !== undefined) {
+    payload.repository_reference = event.repository_reference;
+  }
   payload.tenant_reference = event.tenant_reference;
+  if (event.trace_reference !== undefined) {
+    payload.trace_reference = event.trace_reference;
+  }
   return JSON.stringify(payload);
 }
 
@@ -349,6 +395,9 @@ function validateInput(input: UsageEventInput): void {
   if (!Number.isInteger(input.event_contract_version) || input.event_contract_version < 1) {
     throw new ProducerContractError("event_contract_version must be at least 1");
   }
+  if (!Number.isInteger(input.producer_contract_version) || input.producer_contract_version < 1) {
+    throw new ProducerContractError("producer_contract_version must be at least 1");
+  }
   validateBoundedText("source_event_key", input.source_event_key, 256);
   for (const [name, value] of [
     ["tenant_reference", input.tenant_reference],
@@ -361,10 +410,16 @@ function validateInput(input: UsageEventInput): void {
     ["credential_reference", input.credential_reference],
     ["cost_center_reference", input.cost_center_reference],
     ["project_reference", input.project_reference],
+    ["repository_reference", input.repository_reference],
+    ["correlation_reference", input.correlation_reference],
+    ["causation_reference", input.causation_reference],
   ] as const) {
     if (value !== undefined) {
       validateReference(name, value);
     }
+  }
+  if (input.trace_reference !== undefined) {
+    validateBoundedText("trace_reference", input.trace_reference, 256);
   }
   validateCode("product_code", input.product_code, 64);
   if (input.operation_code !== undefined) {
@@ -372,6 +427,20 @@ function validateInput(input: UsageEventInput): void {
   }
   validateDimensions(input.dimensions);
   canonicalTimestamp(input.occurred_at);
+  if (input.available_at !== undefined) {
+    canonicalTimestamp(input.available_at);
+  }
+  if (input.correction_lineage !== undefined) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.correction_lineage.prior_event_id)) {
+      throw new ProducerContractError("correction_lineage.prior_event_id must be a UUID");
+    }
+    if (!(["corrects", "reverses", "supersedes"] as const).includes(input.correction_lineage.relationship_code)) {
+      throw new ProducerContractError("correction_lineage relationship_code is not in the published enum");
+    }
+    if (input.correction_lineage.reason_code !== undefined) {
+      validateCode("correction_lineage reason_code", input.correction_lineage.reason_code, 64);
+    }
+  }
   if (!Array.isArray(input.measurements) || input.measurements.length < 1 || input.measurements.length > 64) {
     throw new ProducerContractError("measurements must contain between 1 and 64 objects");
   }
@@ -380,10 +449,13 @@ function validateInput(input: UsageEventInput): void {
       throw new ProducerContractError("measurements must contain objects");
     }
     const keys = Object.keys(measurement);
-    if (keys.some((key) => !["meter_code", "quantity", "unit_code", "quality_code"].includes(key))) {
+    if (keys.some((key) => !["meter_code", "meter_version", "quantity", "unit_code", "quality_code"].includes(key))) {
       throw new ProducerContractError("measurements cannot contain arbitrary fields");
     }
     validateCode("meter_code", measurement.meter_code, 96);
+    if (measurement.meter_version !== undefined && (!Number.isInteger(measurement.meter_version) || measurement.meter_version < 1)) {
+      throw new ProducerContractError("meter_version must be at least 1");
+    }
     validateQuantity(measurement.quantity);
     validateCode("unit_code", measurement.unit_code, 32);
     if (
@@ -406,6 +478,7 @@ function validateEvent(event: UsageEvent): void {
   const allowedKeys = new Set([
     "event_id",
     "event_contract_version",
+    "producer_contract_version",
     "source_event_key",
     "tenant_reference",
     "billing_account_reference",
@@ -413,6 +486,12 @@ function validateEvent(event: UsageEvent): void {
     "credential_reference",
     "cost_center_reference",
     "project_reference",
+    "repository_reference",
+    "trace_reference",
+    "correlation_reference",
+    "causation_reference",
+    "available_at",
+    "correction_lineage",
     "product_code",
     "operation_code",
     "dimensions",

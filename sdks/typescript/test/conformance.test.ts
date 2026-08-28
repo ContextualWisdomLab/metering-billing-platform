@@ -69,7 +69,7 @@ test("matches Python for allowlisted provider dimensions", () => {
   });
   assert.equal(
     event.source_payload_hash,
-    "sha256:48e92ee2293e0c0eda5aaad6de7b4c6657134c6a0200249498c447c8e3aadac9",
+    "sha256:601172eebd1e5f5d840706bcf1b5833203d4b802898459c00176fd4600ebed35",
   );
   assert.throws(
     () => buildUsageEvent({ ...input, dimensions: { prompt: "must-not-persist" } }),

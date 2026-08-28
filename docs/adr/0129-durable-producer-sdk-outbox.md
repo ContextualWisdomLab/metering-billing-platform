@@ -29,6 +29,9 @@ The server remains the monetary-effect authority. A crash after server accept
 and before local deletion causes an at-least-once replay, while the server's
 tenant-scoped idempotency prevents a second usage fact. Telemetry and tracing
 may correlate a delivery attempt, but sampled telemetry is not ledger truth.
+The server persists the producer contract version, meter version, bounded
+repository and trace references, availability time, and correction lineage as
+append-only event metadata; `recorded_at` remains server-assigned.
 
 ## Consequences
 

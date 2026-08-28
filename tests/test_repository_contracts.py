@@ -419,6 +419,24 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_usage_event_contract_metadata_migration_is_append_only(self) -> None:
+        """The event table persists producer, trace, availability, and correction metadata."""
+        sql = (ROOT / "database/migrations/0042_usage_event_contract_metadata.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ADD COLUMN producer_contract_version integer NOT NULL DEFAULT 1",
+            "ADD COLUMN repository_reference text",
+            "ADD COLUMN trace_reference text",
+            "ADD COLUMN correlation_reference text",
+            "ADD COLUMN causation_reference text",
+            "ADD COLUMN available_at timestamptz",
+            "ADD COLUMN correction_lineage jsonb",
+            "usage_event_producer_contract_version_positive",
+            "usage_event_correction_lineage_object",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_rating_run_accepts_exact_invoice_intent_totals(self) -> None:
         """A rating-run contract records exact decimal invoice-intent lines."""
         schema = self._schema("rating-run.schema.json")

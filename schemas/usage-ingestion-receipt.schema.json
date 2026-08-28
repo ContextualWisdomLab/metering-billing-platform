@@ -85,6 +85,7 @@
             "credential_not_assigned",
             "meter_not_found",
             "meter_unit_mismatch",
+            "meter_version_mismatch",
             "meter_quality_not_allowed",
             "measurement_quantity_invalid",
             "measurement_meter_duplicate",

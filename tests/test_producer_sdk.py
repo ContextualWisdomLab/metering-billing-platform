@@ -58,6 +58,9 @@ class ProducerSdkTests(unittest.TestCase):
         self.assertEqual(cloud_event["id"], event["event_id"])
         self.assertEqual(cloud_event["subject"], event["source_event_key"])
         self.assertEqual(cloud_event["data"], event)
+        self.assertEqual(event["producer_contract_version"], 1)
+        self.assertEqual(event["measurements"][0]["meter_version"], 1)
+        self.assertEqual(event["correction_lineage"]["relationship_code"], "corrects")
 
     def test_builder_rejects_float_quantities_and_sensitive_fields(self) -> None:
         """Invalid or sensitive producer input cannot cross the SDK boundary."""
@@ -137,7 +140,7 @@ class ProducerSdkTests(unittest.TestCase):
         )
         self.assertEqual(
             event["source_payload_hash"],
-            "sha256:48e92ee2293e0c0eda5aaad6de7b4c6657134c6a0200249498c447c8e3aadac9",
+            "sha256:601172eebd1e5f5d840706bcf1b5833203d4b802898459c00176fd4600ebed35",
         )
         with self.assertRaises(ProducerContractError):
             build_usage_event(**arguments, dimensions={"prompt": "must-not-persist"})

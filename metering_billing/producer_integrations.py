@@ -57,12 +57,14 @@ def build_contextual_usage_event(
         measurements=[
             {
                 "meter_code": "gen_ai_input_token",
+                "meter_version": 1,
                 "quantity": _quantity(record.get("prompt_tokens"), "prompt_tokens"),
                 "unit_code": "token",
                 "quality_code": quality,
             },
             {
                 "meter_code": "gen_ai_output_token",
+                "meter_version": 1,
                 "quantity": _quantity(
                     record.get("completion_tokens"), "completion_tokens"
                 ),
@@ -125,24 +127,28 @@ def build_newsdom_usage_event(
         measurements=[
             {
                 "meter_code": "document_byte",
+                "meter_version": 1,
                 "quantity": _quantity(pdf_bytes, "pdf_bytes"),
                 "unit_code": "byte",
                 "quality_code": "locally_measured",
             },
             {
                 "meter_code": "document_page",
+                "meter_version": 1,
                 "quantity": _quantity(page_count, "page_count"),
                 "unit_code": "page",
                 "quality_code": "locally_measured",
             },
             {
                 "meter_code": "document_ocr_page",
+                "meter_version": 1,
                 "quantity": _quantity(ocr_page_count, "ocr_page_count"),
                 "unit_code": "page",
                 "quality_code": "locally_measured",
             },
             {
                 "meter_code": "document_extracted_block",
+                "meter_version": 1,
                 "quantity": _quantity(extracted_block_count, "extracted_block_count"),
                 "unit_code": "block",
                 "quality_code": "locally_measured",
@@ -183,12 +189,14 @@ def build_fast_mlsirm_usage_event(
     measurements = [
         {
             "meter_code": "analysis_run",
+            "meter_version": 1,
             "quantity": "1",
             "unit_code": "run",
             "quality_code": "deterministically_derived",
         },
         {
             "meter_code": "analysis_response_cell",
+            "meter_version": 1,
             "quantity": _quantity(
                 _product(response_rows, response_items), "response_cells"
             ),
@@ -200,6 +208,7 @@ def build_fast_mlsirm_usage_event(
         measurements.append(
             {
                 "meter_code": "analysis_artifact_byte",
+                "meter_version": 1,
                 "quantity": _quantity(artifact_bytes, "artifact_bytes"),
                 "unit_code": "byte",
                 "quality_code": "locally_measured",

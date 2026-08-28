@@ -183,6 +183,20 @@ class UsageIngestionService:
                 tenant_reference,
                 RejectionReasonCode.SCHEMA_INVALID,
             )
+        try:
+            available_at = (
+                parse_iso8601_datetime(event["available_at"])
+                if "available_at" in event
+                else None
+            )
+        except TimeWindowError:
+            return _rejected(
+                source_event_key,
+                event_contract_version,
+                source_payload_hash,
+                tenant_reference,
+                RejectionReasonCode.SCHEMA_INVALID,
+            )
         recorded_at = self._clock()
 
         if time_window is not None and not time_window.contains(occurred_at):
@@ -326,6 +340,13 @@ class UsageIngestionService:
                 project_reference=event.get("project_reference"),
                 measurements=measurements,
                 dimensions=tuple(sorted(event.get("dimensions", {}).items())),
+                producer_contract_version=event.get("producer_contract_version", 1),
+                repository_reference=event.get("repository_reference"),
+                trace_reference=event.get("trace_reference"),
+                correlation_reference=event.get("correlation_reference"),
+                causation_reference=event.get("causation_reference"),
+                available_at=available_at,
+                correction_lineage=tuple(sorted(event.get("correction_lineage", {}).items())),
             )
         )
         return EventIngestionReceipt(
@@ -435,6 +456,11 @@ class UsageIngestionService:
             if meter_error is not None:
                 raise _MeasurementRejected(meter_error)
             definition = require_resolved(definition, "meter")
+            if (
+                measurement.get("meter_version") is not None
+                and measurement["meter_version"] != definition.meter_version
+            ):
+                raise _MeasurementRejected(RejectionReasonCode.METER_VERSION_MISMATCH)
             if definition.meter_definition_id in seen_meter_ids:
                 raise _MeasurementRejected(RejectionReasonCode.MEASUREMENT_METER_DUPLICATE)
             seen_meter_ids.add(definition.meter_definition_id)
@@ -447,6 +473,7 @@ class UsageIngestionService:
                     unit_code=definition.unit_code,
                     measured_quantity=quantity,
                     quality_code=measurement["quality_code"],
+                    meter_version=definition.meter_version,
                 )
             )
         return tuple(built)
