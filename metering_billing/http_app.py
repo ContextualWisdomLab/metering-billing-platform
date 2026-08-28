@@ -437,6 +437,7 @@ from metering_billing.tenant_api_credential_presentment import (
 from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
+from metering_billing.observability import create_tracer, instrument_wsgi
 from metering_billing.postgres_usage_ledger import PostgresUsageLedger, UsageLedger
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
 from metering_billing.time_window import TimeWindow
@@ -731,6 +732,7 @@ def create_http_app(
     stays a static liveness reply, while ``GET /readyz`` probes the bound
     backend and reports which one is serving.
     """
+    tracer = create_tracer()
     shared_ledger = MemoryUsageLedger() if ledger is None else ledger
     ingestion = UsageIngestionService(shared_ledger)
     rating = UsageRatingService(shared_ledger)
@@ -2810,7 +2812,7 @@ def create_http_app(
             return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
         return _send_json(start_response, status_code, body)
 
-    return application
+    return instrument_wsgi(application, tracer, _resolve_route)
 
 
 def main(arguments: tuple[str, ...] | None = None) -> int:
