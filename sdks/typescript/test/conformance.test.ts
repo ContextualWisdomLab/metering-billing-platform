@@ -56,6 +56,14 @@ test("rejects tampered hashes and sensitive measurement fields", () => {
       }),
     { name: "ProducerContractError" },
   );
+  assert.throws(
+    () =>
+      buildUsageEvent({
+        ...input,
+        occurred_at: "2026-08-16T10:27:42.1234567Z",
+      }),
+    { name: "ProducerContractError" },
+  );
 });
 
 test("matches Python for allowlisted provider dimensions", () => {

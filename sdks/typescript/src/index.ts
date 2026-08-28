@@ -399,6 +399,9 @@ function canonicalTimestamp(timestamp: string): string {
     throw new ProducerContractError("occurred_at must be an RFC3339 date-time");
   }
   const [, dateTime, fraction = "", offset] = match;
+  if (fraction.length > 6) {
+    throw new ProducerContractError("timestamps cannot contain sub-microsecond precision");
+  }
   const parsed = Date.parse(dateTime + offset);
   if (Number.isNaN(parsed)) {
     throw new ProducerContractError("occurred_at must be an RFC3339 date-time");
