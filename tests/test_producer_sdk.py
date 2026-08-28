@@ -163,12 +163,21 @@ class ProducerSdkTests(unittest.TestCase):
             outbox.flush(lambda _: {}, batch_size=0)
         with self.assertRaises(ProducerContractError):
             outbox.enqueue({})
-        with unittest.mock.patch(
-            "metering_billing.producer_outbox.validate_usage_event",
-            return_value=(),
+        with (
+            unittest.mock.patch(
+                "metering_billing.producer_outbox.validate_usage_event",
+                return_value=(),
+            ),
+            unittest.mock.patch(
+                "metering_billing.producer_outbox.source_payload_hash_errors",
+                return_value=(),
+            ),
         ):
             with self.assertRaises(ProducerContractError):
                 outbox.enqueue({"event_id": 123})
+        stale = dict(event, source_payload_hash="sha256:" + "0" * 64)
+        with self.assertRaises(ProducerContractError):
+            outbox.enqueue(stale)
         outbox.enqueue(event)
         outbox.enqueue(event)
         changed = dict(event, dimensions={"model_code": "other-model"})
@@ -230,6 +239,12 @@ class ProducerSdkTests(unittest.TestCase):
         ):
             with self.assertRaises(TransientDeliveryError):
                 transport([])
+        for status in (408, 429):
+            with unittest.mock.patch(
+                "metering_billing.producer_outbox.urlopen", return_value=response(status)
+            ):
+                with self.assertRaises(TransientDeliveryError):
+                    transport([])
         with unittest.mock.patch(
             "metering_billing.producer_outbox.urlopen", return_value=response(400)
         ):
@@ -256,6 +271,18 @@ class ProducerSdkTests(unittest.TestCase):
             "metering_billing.producer_outbox.urlopen",
             side_effect=HTTPError(
                 "https://metering.invalid", 500, "server", {}, BytesIO()
+            ),
+        ):
+            with self.assertRaises(TransientDeliveryError):
+                transport([])
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen",
+            side_effect=HTTPError(
+                "https://metering.invalid",
+                429,
+                "rate limited",
+                {},
+                BytesIO(json.dumps(body).encode()),
             ),
         ):
             with self.assertRaises(TransientDeliveryError):

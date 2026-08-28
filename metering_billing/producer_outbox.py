@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from metering_billing.contracts import validate_usage_event
+from metering_billing.payload_integrity import source_payload_hash_errors
 from metering_billing.producer_sdk import ProducerContractError
 
 DeliverySender = Callable[[Sequence[Mapping[str, Any]]], Mapping[str, Any]]
@@ -87,6 +88,9 @@ class DurableUsageOutbox:
         errors = validate_usage_event(event)
         if errors:
             raise ProducerContractError("invalid usage event: " + "; ".join(errors))
+        hash_errors = source_payload_hash_errors(event)
+        if hash_errors:
+            raise ProducerContractError("invalid usage event: " + "; ".join(hash_errors))
         event_id = event["event_id"]
         if not isinstance(event_id, str):
             raise ProducerContractError("event_id must be a string")
@@ -295,6 +299,8 @@ class HttpUsageIngestionTransport:
         except HTTPError as error:
             if error.code >= 500:
                 raise TransientDeliveryError("http_5xx") from error
+            if error.code in {408, 429}:
+                raise TransientDeliveryError(f"http_{error.code}") from error
             try:
                 body = json.loads(error.read().decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -304,6 +310,8 @@ class HttpUsageIngestionTransport:
             raise TransientDeliveryError("network") from error
         if status >= 500:
             raise TransientDeliveryError("http_5xx")
+        if status in {408, 429}:
+            raise TransientDeliveryError(f"http_{status}")
         if status < 200 or (status >= 300 and status != 422):
             raise PermanentDeliveryError(f"http_{status}")
         if not isinstance(body, Mapping) or not isinstance(

@@ -116,7 +116,7 @@ export class FileUsageOutbox {
     const records = this.read();
     const existing = records.find((record) => record.event.event_id === event.event_id);
     if (existing !== undefined) {
-      if (JSON.stringify(existing.event) !== JSON.stringify(event)) {
+      if (stableJson(existing.event) !== stableJson(event)) {
         throw new ProducerContractError("event_id already has different event bytes");
       }
       return;
@@ -228,7 +228,9 @@ export function httpUsageIngestionTransport(endpoint: string, headers: Record<st
     } catch (error) {
       throw new TransientDeliveryError("network");
     }
-    if (response.status >= 500) throw new TransientDeliveryError("http_5xx");
+    if (response.status >= 500 || response.status === 408 || response.status === 429) {
+      throw new TransientDeliveryError(response.status >= 500 ? "http_5xx" : `http_${response.status}`);
+    }
     if (!response.ok && response.status !== 422) throw new PermanentDeliveryError(`http_${response.status}`);
     let body: unknown;
     try {
@@ -360,6 +362,17 @@ export function canonicalSourcePayloadJson(event: UsageEvent): string {
 
 function computeSourcePayloadHash(event: UsageEvent): string {
   return "sha256:" + createHash("sha256").update(canonicalSourcePayloadJson(event), "utf8").digest("hex");
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+    return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableJson(entryValue)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 function canonicalQuantity(quantity: string): string {

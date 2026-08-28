@@ -9,6 +9,7 @@ import {
   buildUsageEvent,
   canonicalSourcePayloadJson,
   FileUsageOutbox,
+  httpUsageIngestionTransport,
 } from "../src/index.ts";
 
 const fixture = JSON.parse(
@@ -77,6 +78,21 @@ test("matches Python for allowlisted provider dimensions", () => {
   );
 });
 
+test("HTTP transport retries timeout and rate-limit responses", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const status of [408, 429]) {
+      globalThis.fetch = async () => new Response(null, { status });
+      await assert.rejects(
+        () => httpUsageIngestionTransport("https://metering.invalid")([]),
+        { name: "TransientDeliveryError" },
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("durable outbox keeps failed events and accepts a matched replay receipt", async () => {
   const { source_payload_hash: _sourcePayloadHash, ...input } = fixture.event;
   const event = buildUsageEvent(input);
@@ -84,6 +100,8 @@ test("durable outbox keeps failed events and accepts a matched replay receipt", 
   try {
     const outbox = new FileUsageOutbox(join(directory, "outbox.json"));
     outbox.enqueue(event);
+    outbox.enqueue(Object.fromEntries(Object.entries(event).reverse()) as typeof event);
+    assert.equal(outbox.pendingCount(), 1);
     let calls = 0;
     const result = await outbox.flush(async (events) => {
       calls += 1;
