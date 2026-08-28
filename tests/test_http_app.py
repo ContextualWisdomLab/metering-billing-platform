@@ -6,6 +6,7 @@ import io
 import json
 import os
 import runpy
+import signal
 import unittest
 from decimal import Decimal
 from typing import Any, Mapping
@@ -603,6 +604,25 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         self.assertIs(maker.call_args.kwargs["server_class"], ThreadingWSGIServer)
         self.assertTrue(callable(app))
         fake_server.serve_forever.assert_called_once()
+        fake_server.server_close.assert_called_once()
+
+        shutdown_server = mock.Mock()
+        registered_handlers: dict[int, Any] = {}
+
+        def register_handler(signal_number: int, handler: Any) -> object:
+            registered_handlers[signal_number] = handler
+            return object()
+
+        def serve_until_shutdown() -> None:
+            registered_handlers[signal.SIGTERM](signal.SIGTERM, None)
+            registered_handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        shutdown_server.serve_forever.side_effect = serve_until_shutdown
+        with mock.patch("metering_billing.http_app.signal.signal", side_effect=register_handler):
+            with mock.patch("metering_billing.http_app.make_server", return_value=shutdown_server):
+                self.assertEqual(main(()), 0)
+        shutdown_server.shutdown.assert_called_once()
+        shutdown_server.server_close.assert_called_once()
 
         fake_server_two = mock.Mock()
         with mock.patch("metering_billing.http_app.make_server", return_value=fake_server_two) as maker_two:

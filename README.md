@@ -231,7 +231,7 @@ export METERING_BILLING_POSTGRES_DSN="postgresql:///metering_billing?host=/tmp&p
 python3 -c "from metering_billing.http_app import create_default_ledger, create_http_app; app = create_http_app(create_default_ledger())"
 ```
 
-Unauthenticated `GET /healthz` stays a static liveness reply, and `GET /readyz` reports the serving backend: healthy processes answer `200 {"status": "ready", "backend": "memory" | "postgres"}` while a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` with stable reason codes only (see ADR 0123).
+Unauthenticated `GET /healthz` stays a static liveness reply, and `GET /readyz` reports the serving backend: healthy processes answer `200 {"status": "ready", "backend": "memory" | "postgres"}` while a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` with stable reason codes only (see ADR 0123). `python -m metering_billing.http_app` handles `SIGTERM` and `SIGINT` by stopping the accept loop, waiting for active requests to drain, restoring the process signal handlers, and closing the listener.
 
 Until a tenant has an active API credential, the existing tenant pin is enough (bootstrap window). AIS can keep pulling with `X-CWL-Tenant-Reference` until a key is issued for that tenant. After a key exists, send it on every `/v1` call.
 

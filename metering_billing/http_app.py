@@ -284,7 +284,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 from socketserver import ThreadingMixIn
+import threading
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qs, unquote
 from uuid import UUID
@@ -449,9 +451,10 @@ WSGIApp = Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
-    """Serve one daemon thread per connection so tenant reads never serialize."""
+    """Serve concurrent requests and wait for active work during shutdown."""
 
-    daemon_threads = True
+    daemon_threads = False
+    block_on_close = True
 
 
 COLLECTION_CASE_COLLECTION_PATH = "/v1/collection-cases"
@@ -2836,7 +2839,31 @@ def main(arguments: tuple[str, ...] | None = None) -> int:
         create_http_app(create_default_ledger(), ais_base_url=ais_base_url),
         server_class=ThreadingWSGIServer,
     )
-    httpd.serve_forever()
+    shutdown_requested = False
+
+    def request_shutdown(signum: int, frame: Any) -> None:
+        """Stop accepting work while allowing active requests to drain."""
+        del signum, frame
+        nonlocal shutdown_requested
+        if shutdown_requested:
+            return
+        shutdown_requested = True
+        threading.Thread(
+            target=httpd.shutdown,
+            name="metering-billing-http-shutdown",
+            daemon=True,
+        ).start()
+
+    previous_handlers = {
+        signal_number: signal.signal(signal_number, request_shutdown)
+        for signal_number in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        httpd.serve_forever()
+    finally:
+        for signal_number, previous_handler in previous_handlers.items():
+            signal.signal(signal_number, previous_handler)
+        httpd.server_close()
     return 0
 
 
