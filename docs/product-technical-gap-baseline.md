@@ -180,8 +180,8 @@ not merge evidence:
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `f239558b58d28c3ec3a7f524a14451db3fdbfbbe`; open, blocked, ordinary checks passed, zero unresolved threads, zero approvals; OpenCode current-head verdict is unavailable and Strix is provider-running evidence |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `9b236a765dfc6ee05d49e305f0400deb07d48a23`; open, clean, dependent on #146; Repository contracts and Devin pass, CodeRabbit is skipped for this base branch, zero unresolved threads and zero approvals |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `5af1ed4dc8f960fa4798e68d73aee52725d601ea`; open, blocked, review required, zero unresolved threads, zero approvals; hosted checks are still pending after the current-head push |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `d2e29618a935b949390e08098d2cbd52129e008d`; open, dependent on #146, current source synchronized by a normal merge; hosted checks and independent approval remain required |
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
