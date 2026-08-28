@@ -22,6 +22,9 @@
   package manifests include repository metadata and exclude repository-only
   tests from published artifacts; actual registry publication remains pending
   release-environment configuration and protected merge evidence.
+- The producer release job now re-packages the Rust crate from the released tag
+  and compares its SHA-256 with the uploaded build artifact before publishing,
+  keeping the verified package boundary explicit.
 - The platform now builds an installable Python distribution containing the
   canonical producer SDK and its checked-in schemas, so producer repositories
   can consume the same builder instead of copying contract logic.
