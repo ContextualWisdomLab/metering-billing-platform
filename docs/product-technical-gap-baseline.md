@@ -51,11 +51,11 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
 > PRs `#142`–`#145` remain `BLOCKED`/`REVIEW_REQUIRED`; PR `#146` is
-> `BLOCKED` at `ab3175b27737cab665898d3ed840e62e03ffbe8d` with ordinary
-> repository checks passing, but OpenCode failed closed twice for a missing
-> provider verdict and Strix failed its first run with provider HTTP 500s while
-> a same-head retry is queued. PR `#147` is at `61ce5624eda7c77f8fcce293948225f541e4ab89`
-> with its repository contract check passing, but remains dependent on #146.
+> `BLOCKED` at `9f58c8f67e29fd4e11d9eb3099afdacd1ef15ab0` with ordinary
+> repository checks passing, but OpenCode failed closed for a missing provider
+> verdict while Strix and Devin remain pending on this exact head. PR `#147`
+> is at `9287517005ceabbab602324e1bf4404bee38a3f4` after a normal merge of
+> #146, with Repository contracts and Devin pending on this exact head.
 > Both have zero independent approvals and neither is merge evidence for
 > `develop`. The external producer onboarding PRs remain separate:
 > contextual-orchestrator `#908` at `2f7b177a1631e3f1c845748e2a4bd312664e0759`,
@@ -186,8 +186,8 @@ not merge evidence:
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `ab3175b27737cab665898d3ed840e62e03ffbe8d`; open, blocked, zero independent approvals; repository/coverage/security checks pass, while OpenCode and Strix provider evidence is not green |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | source merge baseline `7ae0da1cc3daca80305c3a2983ef4e6cbccacb6a`, current source/evidence refresh through `61ce5624eda7c77f8fcce293948225f541e4ab89`; open, dependent on #146, repository contracts pass, zero independent approvals |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `9f58c8f67e29fd4e11d9eb3099afdacd1ef15ab0`; open, blocked, zero independent approvals; repository/coverage/security checks pass, OpenCode failed closed, and Strix/Devin remain pending |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `9287517005ceabbab602324e1bf4404bee38a3f4`; open after normal merge of #146, Repository contracts and Devin pending, zero independent approvals |
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
