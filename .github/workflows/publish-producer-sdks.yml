@@ -156,6 +156,17 @@ jobs:
         with:
           name: producer-rust-dist
           path: dist/rust
+      - name: Verify Rust artifact before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo package --locked --manifest-path sdks/rust/Cargo.toml
+          mapfile -t uploaded < <(printf '%s\n' dist/rust/*.crate)
+          mapfile -t rebuilt < <(printf '%s\n' sdks/rust/target/package/*.crate)
+          test "${#uploaded[@]}" -eq 1
+          test "${#rebuilt[@]}" -eq 1
+          test "$(sha256sum "${uploaded[0]}" | awk '{print $1}')" = \
+            "$(sha256sum "${rebuilt[0]}" | awk '{print $1}')"
       - name: Download TypeScript artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
