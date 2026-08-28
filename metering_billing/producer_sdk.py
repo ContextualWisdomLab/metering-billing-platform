@@ -13,8 +13,8 @@ from uuid import UUID
 
 from metering_billing.contracts import validate_usage_event
 from metering_billing.payload_integrity import (
-    canonical_source_payload_json,
     compute_source_payload_hash,
+    source_payload_hash_errors,
 )
 
 CLOUD_EVENTS_SPECVERSION = "1.0"
@@ -97,6 +97,12 @@ def build_usage_cloud_event(event: Mapping[str, Any], *, source: str) -> dict[st
     errors = validate_usage_event(event)
     if errors:
         raise ProducerContractError("invalid usage event: " + "; ".join(errors))
+    try:
+        hash_errors = source_payload_hash_errors(event)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProducerContractError("usage event hash cannot be verified") from error
+    if hash_errors:
+        raise ProducerContractError("invalid usage event: " + "; ".join(hash_errors))
     data = dict(event)
     data["measurements"] = [dict(measurement) for measurement in event["measurements"]]
     return {
@@ -117,5 +123,4 @@ __all__ = (
     "USAGE_CLOUD_EVENT_TYPE",
     "build_usage_cloud_event",
     "build_usage_event",
-    "canonical_source_payload_json",
 )

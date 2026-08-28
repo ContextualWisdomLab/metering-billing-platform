@@ -5,14 +5,15 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 from uuid import UUID
 
 from metering_billing.producer_sdk import (
     ProducerContractError,
     build_usage_cloud_event,
     build_usage_event,
-    canonical_source_payload_json,
 )
+from metering_billing.payload_integrity import canonical_source_payload_json
 
 
 FIXTURE_PATH = (
@@ -89,6 +90,15 @@ class ProducerSdkTests(unittest.TestCase):
             build_usage_cloud_event(arguments, source=None)
         with self.assertRaises(ProducerContractError):
             build_usage_cloud_event({}, source="urn:cwl:producer:test")
+        invalid_hash = dict(arguments, source_payload_hash="sha256:" + "0" * 64)
+        with self.assertRaises(ProducerContractError):
+            build_usage_cloud_event(invalid_hash, source="urn:cwl:producer:test")
+        with mock.patch(
+            "metering_billing.producer_sdk.source_payload_hash_errors",
+            side_effect=ValueError("hash failure"),
+        ):
+            with self.assertRaises(ProducerContractError):
+                build_usage_cloud_event(fixture["event"], source="urn:cwl:producer:test")
 
 
 if __name__ == "__main__":
