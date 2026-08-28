@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -57,6 +58,23 @@ class FakeTransport:
         if callable(self.results):
             return self.results(self.events)
         return self.results or ()
+
+
+class BlockingTransport(FakeTransport):
+    """Hold delivery I/O so local enqueue can be checked independently."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def ingest_batch(self, events, *, auth, credential):
+        self.events = tuple(events)
+        self.auth = auth
+        self.credential = credential
+        self.started.set()
+        self.release.wait(timeout=2)
+        return [ProducerDeliveryResult(event["source_event_key"], "accepted") for event in events]
 
 
 def event_for(index: int, tenant_reference: str | None = None) -> dict[str, object]:
@@ -238,6 +256,48 @@ class ProducerOutboxTests(unittest.TestCase):
             self.assertEqual(transport.events, (tenant_event,))
             self.assertEqual(
                 outbox.get_status(str(other_event["event_id"])).status, "pending"
+            )
+            outbox.close()
+
+    def test_drain_does_not_hold_connection_lock_during_transport_io(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = ProducerOutbox(Path(directory) / "outbox.sqlite3", clock=lambda: NOW)
+            draining = event_for(15)
+            enqueued_during_drain = event_for(16)
+            outbox.enqueue(draining, auth=AUTH)
+            transport = BlockingTransport()
+            drain_results = []
+            drain_errors = []
+
+            def run_drain() -> None:
+                try:
+                    drain_results.append(outbox.drain(transport, auth=AUTH, now=NOW))
+                except Exception as error:  # pragma: no cover - assertion below reports it
+                    drain_errors.append(error)
+
+            drain_thread = threading.Thread(target=run_drain)
+            drain_thread.start()
+            self.assertTrue(transport.started.wait(timeout=1))
+            enqueue_done = threading.Event()
+
+            def run_enqueue() -> None:
+                try:
+                    outbox.enqueue(enqueued_during_drain, auth=AUTH)
+                finally:
+                    enqueue_done.set()
+
+            enqueue_thread = threading.Thread(target=run_enqueue)
+            enqueue_thread.start()
+            try:
+                self.assertTrue(enqueue_done.wait(timeout=1))
+            finally:
+                transport.release.set()
+                drain_thread.join(timeout=2)
+                enqueue_thread.join(timeout=2)
+            self.assertEqual(drain_errors, [])
+            self.assertEqual(drain_results[0].accepted_event_count, 1)
+            self.assertEqual(
+                outbox.get_status(str(enqueued_during_drain["event_id"])).status, "pending"
             )
             outbox.close()
 

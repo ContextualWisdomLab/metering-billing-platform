@@ -26,7 +26,6 @@ from metering_billing.producer_sdk import ProducerContractError
 _DELIVERY_OUTCOMES = frozenset(
     {"accepted", "duplicate_replay", "rejected", "retryable"}
 )
-_OUTBOX_STATUSES = frozenset({"pending", "delivered", "dead_letter"})
 
 
 class ProducerOutboxError(RuntimeError):
@@ -150,7 +149,7 @@ class ProducerOutbox:
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA busy_timeout = 5000")
         self._lock = threading.RLock()
-        # ponytail: one lock per shared SQLite connection; use a connection pool for higher throughput.
+        # ponytail: lock shared SQLite operations only; use a connection pool for higher throughput.
         self._clock = clock or (lambda: datetime.now(UTC))
         self._max_attempts = max_attempts
         self._base_backoff_seconds = base_backoff_seconds
@@ -268,30 +267,31 @@ class ProducerOutbox:
         limit: int = 50,
     ) -> ProducerDrainReceipt:
         """Deliver one bounded leased batch and apply partial results atomically."""
+        _validate_batch_limit(limit)
+        current = self._clock() if now is None else now
+        now_text = _format_instant(current)
         with self._lock:
-            _validate_batch_limit(limit)
-            current = self._clock() if now is None else now
-            now_text = _format_instant(current)
             rows = self._claim_pending(now_text, limit, auth.tenant_reference)
-            if not rows:
-                return ProducerDrainReceipt(0, 0, 0, 0, 0, 0, ())
-            events = tuple(json.loads(row["event_json"]) for row in rows)
-            try:
-                raw_results = transport.ingest_batch(events, auth=auth, credential=credential)
-                result_by_key = _index_results(raw_results, tuple(row["source_event_key"] for row in rows))
-            except Exception as error:
-                error_code = type(error).__name__
-                result_by_key = {
-                    row["source_event_key"]: ProducerDeliveryResult(
-                        row["source_event_key"], "retryable", error_code
-                    )
-                    for row in rows
-                }
+        if not rows:
+            return ProducerDrainReceipt(0, 0, 0, 0, 0, 0, ())
+        events = tuple(json.loads(row["event_json"]) for row in rows)
+        try:
+            raw_results = transport.ingest_batch(events, auth=auth, credential=credential)
+            result_by_key = _index_results(raw_results, tuple(row["source_event_key"] for row in rows))
+        except Exception as error:
+            error_code = type(error).__name__
+            result_by_key = {
+                row["source_event_key"]: ProducerDeliveryResult(
+                    row["source_event_key"], "retryable", error_code
+                )
+                for row in rows
+            }
 
-            counts = [0, 0, 0, 0, 0]
-            ordered_results = tuple(
-                result_by_key[row["source_event_key"]] for row in rows
-            )
+        counts = [0, 0, 0, 0, 0]
+        ordered_results = tuple(
+            result_by_key[row["source_event_key"]] for row in rows
+        )
+        with self._lock:
             self._begin_write()
             try:
                 for row, result in zip(rows, ordered_results):
@@ -310,7 +310,7 @@ class ProducerOutbox:
             except Exception:
                 self._connection.rollback()
                 raise
-            return ProducerDrainReceipt(len(rows), *counts, ordered_results)
+        return ProducerDrainReceipt(len(rows), *counts, ordered_results)
 
     def _initialize_schema(self) -> None:
         """Create the small durable queue and its due-event index."""
