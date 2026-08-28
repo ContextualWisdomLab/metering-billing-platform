@@ -44,8 +44,8 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
-> **Status update (2026-08-28):** GitHub reports four open pull requests
-> (`#142`–`#145`), all targeting `develop`. The current default branch is
+> **Status update (2026-08-28):** GitHub reports five open pull requests
+> (`#142`–`#146`), all targeting `develop`. The current default branch is
 > `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`, merged from PR #141
 > on 2026-08-26. The merged release train and the Compose, threaded API,
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
@@ -65,7 +65,7 @@ persistence, and operator-console Storybook presentment.
 At assessment time (2026-08-20):
 
 - open issues: **8** (`#84`–`#91`);
-- open pull requests: **4** (`#142`–`#145`), all targeting `develop`;
+- open pull requests: **5** (`#142`–`#146`), all targeting `develop`;
 - latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`;
 - the merged PR #141 rollup included a failed `Semgrep (multi-language SAST)` job alongside successful repository, analysis, dependency, coverage, and other checks; therefore the merge is not a blanket claim that every release/security gate is complete.
 
@@ -162,17 +162,18 @@ Work can be stacked when public contracts are stable, but each PR must remain in
 
 ## Open pull-request inventory
 
-GitHub reports **four open pull requests** on 2026-08-28. The latest merged
+GitHub reports **five open pull requests** on 2026-08-28. The latest merged
 change is PR #141; the following open PR heads are current snapshots and are
 not merge evidence:
 
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
 | #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `0eba48f0c9792e60069dc22243e7d0af9eb47493`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `4e39beef7d25b7612e8b02e09925b42bdce6be39`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #146 | Canonical Python producer SDK reference and CloudEvents conformance vector for #90 | `develop` | `5a7ca3d56bcf0a38fda7a3d66c7a8f112eb5eca0`; open, blocked, review required, zero unresolved threads, zero approvals |
 
 PRs #5–#81 are closed as superseded snapshots. Their closure is not merge or
 production evidence. PR #92 is the current detailed baseline candidate and
