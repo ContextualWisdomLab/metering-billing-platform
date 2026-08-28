@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from uuid import UUID
 
 from metering_billing.producer_sdk import (
     ProducerContractError,
@@ -65,6 +66,29 @@ class ProducerSdkTests(unittest.TestCase):
             build_usage_event(
                 **dict(arguments, measurements=(measurement for measurement in ["text"]))
             )
+
+        with self.assertRaises(ProducerContractError):
+            build_usage_event(**dict(arguments, measurements=None))
+
+        with self.assertRaises(ProducerContractError):
+            build_usage_event(
+                **dict(
+                    arguments,
+                    measurements=[dict(arguments["measurements"][0], quantity="1e3")],
+                )
+            )
+
+        uuid_event = build_usage_event(
+            **dict(arguments, event_id=UUID(arguments["event_id"]))
+        )
+        self.assertEqual(uuid_event["event_id"], arguments["event_id"])
+
+        with self.assertRaises(ProducerContractError):
+            build_usage_cloud_event(arguments, source="")
+        with self.assertRaises(ProducerContractError):
+            build_usage_cloud_event(arguments, source=None)
+        with self.assertRaises(ProducerContractError):
+            build_usage_cloud_event({}, source="urn:cwl:producer:test")
 
 
 if __name__ == "__main__":
