@@ -159,6 +159,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Check out the released tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -191,6 +193,50 @@ jobs:
         with:
           name: producer-typescript-dist
           path: dist/typescript
+      - name: Generate deterministic SPDX 3.0.1 SBOM
+        env:
+          RELEASE_SHA: ${{ needs.resolve-release.outputs.release-sha }}
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
+          created_at="$(date -u -d "@$source_date_epoch" '+%Y-%m-%dT%H:%M:%SZ')"
+          python scripts/build_spdx_sbom.py \
+            --artifact-root dist \
+            --output dist/evidence/producer-sdks.spdx.json \
+            --release-sha "$RELEASE_SHA" \
+            --created-at "$created_at"
+      - name: Attest SLSA 1.2 build provenance
+        id: attest-provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            dist/python/*
+            dist/rust/*
+            dist/typescript/*
+      - name: Attest SPDX SBOM
+        id: attest-sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            dist/python/*
+            dist/rust/*
+            dist/typescript/*
+          sbom-path: dist/evidence/producer-sdks.spdx.json
+      - name: Record artifact checksums and attestation bundles
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.attest-provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.attest-sbom.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum python/* rust/* typescript/* > evidence/subjects.sha256)
+          cp "$PROVENANCE_BUNDLE" dist/evidence/producer-sdks.provenance.sigstore.json
+          cp "$SBOM_BUNDLE" dist/evidence/producer-sdks.sbom.sigstore.json
+      - name: Store release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: producer-release-evidence
+          path: dist
+          if-no-files-found: error
       - name: Publish Python distribution with OIDC provenance
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:

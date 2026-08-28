@@ -33,6 +33,11 @@
   commit for every checkout and compares the uploaded Rust crate with a fresh
   package from that commit before publishing, keeping the verified package
   boundary explicit.
+- The producer release job now emits a deterministic SPDX 3.0.1 SBOM and
+  SHA-256 subject manifest for the three published artifacts, creates signed
+  GitHub artifact attestations for SLSA build provenance and that SBOM, and
+  stores both Sigstore bundles as release evidence. Registry publication still
+  requires the protected release environment and the actual attestation run.
 - Usage-event validation now rejects unpublished contract versions until their
   separate schema and compatibility policy are released.
 - The platform now builds an installable Python distribution containing the
