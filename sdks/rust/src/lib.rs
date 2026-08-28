@@ -4,6 +4,8 @@
 //! canonicalization, and source-payload integrity. It deliberately does not
 //! calculate prices or perform ingestion/network I/O.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
@@ -181,9 +183,52 @@ pub struct FileUsageOutbox {
     records: Vec<OutboxRecord>,
 }
 
+trait SyncableFile: Write {
+    fn sync_all(&self) -> io::Result<()>;
+}
+
+impl SyncableFile for File {
+    fn sync_all(&self) -> io::Result<()> {
+        File::sync_all(self)
+    }
+}
+
+fn write_and_sync<T: SyncableFile>(
+    file: &mut T,
+    bytes: &[u8],
+) -> Result<(), ProducerContractError> {
+    file.write_all(bytes).map_err(io_error)?;
+    file.sync_all().map_err(io_error)
+}
+
+fn persist_file<F, T>(path: &Path, bytes: &[u8], create: F) -> Result<(), ProducerContractError>
+where
+    F: FnOnce(&Path) -> io::Result<T>,
+    T: SyncableFile,
+{
+    let mut file = create(path).map_err(io_error)?;
+    write_and_sync(&mut file, bytes)
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), ProducerContractError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(io_error)?;
+    }
+    Ok(())
+}
+
 impl FileUsageOutbox {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ProducerContractError> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_path(path.as_ref())
+    }
+
+    fn open_path(path: &Path) -> Result<Self, ProducerContractError> {
+        let path = path.to_path_buf();
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -266,6 +311,15 @@ impl FileUsageOutbox {
     where
         F: FnOnce(&[UsageEvent]) -> Result<UsageDeliveryResponse, DeliveryError>,
     {
+        self.flush_with_sender(batch_size, max_attempts, Box::new(sender))
+    }
+
+    fn flush_with_sender<'a>(
+        &mut self,
+        batch_size: usize,
+        max_attempts: u32,
+        sender: Box<dyn FnOnce(&[UsageEvent]) -> Result<UsageDeliveryResponse, DeliveryError> + 'a>,
+    ) -> Result<OutboxFlushResult, ProducerContractError> {
         if batch_size == 0 || max_attempts == 0 {
             return Err(ProducerContractError(
                 "batch_size and max_attempts must be positive".into(),
@@ -388,20 +442,9 @@ impl FileUsageOutbox {
     fn persist(&self) -> Result<(), ProducerContractError> {
         let temporary_path = self.path.with_extension("tmp");
         let bytes = serde_json::to_vec(&self.records).expect("outbox records are serializable");
-        let mut file = File::create(&temporary_path).map_err(io_error)?;
-        file.write_all(&bytes).map_err(io_error)?;
-        file.sync_all().map_err(io_error)?;
-        fs::rename(temporary_path, &self.path).map_err(io_error)?;
-        if let Some(parent) = self
-            .path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(io_error)?;
-        }
-        Ok(())
+        persist_file(&temporary_path, &bytes, |path| File::create(path))
+            .and_then(|_| fs::rename(temporary_path, &self.path).map_err(io_error))
+            .and_then(|_| sync_parent_directory(&self.path))
     }
 }
 
@@ -920,7 +963,73 @@ fn validate_quantity(quantity: &str) -> Result<(), ProducerContractError> {
     Ok(())
 }
 
-#[cfg(all(test, not(feature = "coverage")))]
+#[cfg(all(test, feature = "coverage"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_error_tests {
+    use super::*;
+    use std::io;
+
+    struct FailingFile {
+        write_error: bool,
+        sync_error: bool,
+    }
+
+    impl Write for FailingFile {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if self.write_error {
+                Err(io::Error::other("write failed"))
+            } else {
+                Ok(buffer.len())
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SyncableFile for FailingFile {
+        fn sync_all(&self) -> io::Result<()> {
+            if self.sync_error {
+                Err(io::Error::other("sync failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn covers_durable_file_error_paths() {
+        assert!(persist_file(Path::new("unused"), b"payload", |_| {
+            Err::<FailingFile, _>(io::Error::other("create failed"))
+        })
+        .is_err());
+        assert!(persist_file(Path::new("unused"), b"payload", |_| {
+            Ok::<FailingFile, _>(FailingFile {
+                write_error: true,
+                sync_error: false,
+            })
+        })
+        .is_err());
+        assert!(persist_file(Path::new("unused"), b"payload", |_| {
+            Ok::<FailingFile, _>(FailingFile {
+                write_error: false,
+                sync_error: true,
+            })
+        })
+        .is_err());
+        let mut successful_file = FailingFile {
+            write_error: false,
+            sync_error: false,
+        };
+        assert!(write_and_sync(&mut successful_file, b"payload").is_ok());
+        assert!(successful_file.flush().is_ok());
+        assert!(sync_parent_directory(Path::new("/dev/stdout/child")).is_err());
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use serde_json::Value;

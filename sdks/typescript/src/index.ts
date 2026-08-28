@@ -239,6 +239,7 @@ export function httpUsageIngestionTransport(
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify({ events }),
+        redirect: "error",
         signal: controller.signal,
       });
     } catch (error) {

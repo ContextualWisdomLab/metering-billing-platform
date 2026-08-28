@@ -253,6 +253,21 @@ test("HTTP transport classifies malformed successful responses", async () => {
   }
 });
 
+test("HTTP transport fails closed on redirects", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (_input, init) => {
+      assert.equal(init.redirect, "error");
+      return new Response(JSON.stringify({ event_receipts: [] }), { status: 200 });
+    };
+    assert.deepEqual(await httpUsageIngestionTransport("https://metering.invalid")([]), {
+      event_receipts: [],
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("HTTP transport turns an abort into a transient delivery error", async () => {
   const originalFetch = globalThis.fetch;
   try {

@@ -11,6 +11,9 @@ keywords = ["metering", "billing", "cloudevents"]
 categories = ["web-programming"]
 exclude = ["tests/coverage.rs"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)"] }
+
 [features]
 coverage = []
 

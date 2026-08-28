@@ -86,9 +86,20 @@ jobs:
           --manifest-path sdks/rust/Cargo.toml
           --features coverage
           --branch
-          --fail-under-lines 95
+          --fail-under-lines 100
           --fail-under-functions 100
           --summary-only
+      - name: Enforce Rust producer SDK branch coverage
+        run: |
+          set -o pipefail
+          cargo +nightly-2026-08-21 llvm-cov \
+            --locked \
+            --manifest-path sdks/rust/Cargo.toml \
+            --features coverage \
+            --branch \
+            --json \
+            --summary-only \
+            | python -c 'import json, sys; branches = json.load(sys.stdin)["data"][0]["totals"]["branches"]; assert branches["covered"] == branches["count"], "Rust branch coverage is {}/{}".format(branches["covered"], branches["count"])'
       - name: Run TypeScript producer SDK tests
         run: >-
           node --experimental-strip-types --test --experimental-test-coverage
