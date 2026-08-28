@@ -151,6 +151,16 @@ class ProducerOutboxTests(unittest.TestCase):
             self.assertEqual(first.outbox_event_id, str(event["event_id"]))
             self.assertEqual(outbox.get_status(first.outbox_event_id).attempt_count, 0)
             self.assertIsNone(outbox.get_status("missing"))
+            with self.assertRaisesRegex(ProducerOutboxConflict, "delivery context"):
+                outbox.enqueue(
+                    event,
+                    auth=ProducerAuthContext(
+                        AUTH.tenant_reference,
+                        "different_purpose",
+                        credential_reference=AUTH.credential_reference,
+                        correlation_id=AUTH.correlation_id,
+                    ),
+                )
             outbox.close()
 
             reopened = ProducerOutbox(path, clock=lambda: NOW)

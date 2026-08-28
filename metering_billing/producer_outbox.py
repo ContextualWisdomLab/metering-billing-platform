@@ -189,7 +189,8 @@ class ProducerOutbox:
             try:
                 existing = self._connection.execute(
                     """
-                    SELECT outbox_event_id, source_event_key, tenant_reference, event_json
+                    SELECT outbox_event_id, source_event_key, tenant_reference, event_json,
+                           credential_reference, purpose_code, correlation_id
                     FROM producer_outbox_event
                     WHERE outbox_event_id = ?
                        OR (tenant_reference = ? AND source_event_key = ?)
@@ -204,6 +205,14 @@ class ProducerOutbox:
                         and existing["source_event_key"] == source_event_key
                         and existing["event_json"] == event_json
                     ):
+                        if (
+                            existing["credential_reference"] != auth.credential_reference
+                            or existing["purpose_code"] != auth.purpose_code
+                            or existing["correlation_id"] != auth.correlation_id
+                        ):
+                            raise ProducerOutboxConflict(
+                                "producer fact already exists with a different delivery context"
+                            )
                         self._connection.commit()
                         return ProducerEnqueueReceipt(event_id, source_event_key, True)
                     raise ProducerOutboxConflict(

@@ -41,6 +41,9 @@
 - All three SDK outboxes now require the receipt tenant to match the queued
   event before acknowledging accepted or duplicate-replayed delivery; missing
   tenant evidence remains retryable rather than removing the fact.
+- Producer outbox re-enqueue now fails closed when a byte-identical fact is
+  supplied with a different persisted delivery context, preventing a silent
+  context mismatch from making the fact undrainable.
 - Producer integration adapters now restrict source identifiers, references,
   model names, and backend codes to bounded capability-port syntax, rejecting
   prompt-like or document-content strings before they reach an event or outbox.

@@ -23,8 +23,8 @@ producer integration:
   state. It never stores the bearer credential or event content outside the
   closed usage-event contract.
 - The event ID is the stable local outbox ID. Re-enqueueing the same tenant,
-  source key, and byte-stable event is a duplicate enqueue; reusing the key for
-  a different fact fails closed.
+  source key, byte-stable event, and delivery context is a duplicate enqueue;
+  reusing the key for a different fact or context fails closed.
 - A tenant- and context-scoped lease prevents two local workers from delivering
   the same row at once. A drain claims only rows matching its tenant, purpose,
   credential reference, and correlation context. Claiming records the lease but
