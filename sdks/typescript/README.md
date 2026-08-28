@@ -7,7 +7,7 @@ conformance vector as the Python and Rust references.
 
 It does not calculate prices, persist credentials, or include sensitive
 content. `FileUsageOutbox` provides durable local buffering: enqueue validated
-events, call `flush(batchSize, maxAttempts, sender)`, and remove only
+events, call `flush(sender, batchSize, maxAttempts)`, and remove only
 hash-matched accepted or duplicate-replay receipts. Rejected events remain
 dead-lettered until `replayDeadLetter` is called. The sender owns HTTP,
 credentials, and scheduling; `httpUsageIngestionTransport` targets the
