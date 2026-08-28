@@ -51,16 +51,16 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
 > PRs `#142`–`#145` remain `BLOCKED`/`REVIEW_REQUIRED`; PR `#146` is
-> `BLOCKED` at `64700f856213de179d9de209b29aaadf141684cf` while ordinary
-> repository checks are still running; OpenCode failed closed for a missing
-> provider verdict and Strix/Devin remain pending on this exact head. PR `#147`
-> is at `eb4da4159b729cb362e77cb6e50c414ecb2c5a7d` after a normal merge of
-> #146, with Repository contracts and Devin pending on this exact head.
+> `BLOCKED` at `3b4d915cae4a3eee1dcb694db9df83f0126f5490` with ordinary
+> repository checks passing, OpenCode failed closed for a missing provider
+> verdict, and Strix still pending on this exact head. PR `#147` is at
+> `bc556b1a6eca2e45e66bb7384f476cf5361292e2` after a normal merge of #146,
+> with Repository contracts passed and Devin pending on this exact head.
 > Both have zero independent approvals and neither is merge evidence for
 > `develop`. The external producer onboarding PRs remain separate:
 > contextual-orchestrator `#908` at `2f7b177a1631e3f1c845748e2a4bd312664e0759`,
 > NewsDOM `#740` at `2a462e3c8a1b26f2fc991a75c038b1feeb03b7f4`, and fast-mlsirm
-> `#1545` at `55341def4149faa8f2f845681db997e94b725a40`. Their current-head
+> `#1545` at `6ad52f331e2573d2d470ec864486ada8eb153b3d`. Their current-head
 > review threads are resolved, but they have no released SDK pins or protected
 > merge evidence for `develop`.
 
@@ -182,12 +182,12 @@ not merge evidence:
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
 | #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `f7ab9103259b4cd0bd7ce673f0fc36c477ad3b2d`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `8a2f69d923e92a026e806f81e4291811cd475ea0`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `64700f856213de179d9de209b29aaadf141684cf`; open, blocked, zero independent approvals; OpenCode failed closed, while ordinary checks and Strix/Devin are pending |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `eb4da4159b729cb362e77cb6e50c414ecb2c5a7d`; open after normal merge of #146, Repository contracts and Devin pending, zero independent approvals |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `3b4d915cae4a3eee1dcb694db9df83f0126f5490`; open, blocked, zero independent approvals; OpenCode failed closed, ordinary checks pass, and Strix is pending |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `bc556b1a6eca2e45e66bb7384f476cf5361292e2`; open after normal merge of #146, Repository contracts passed, Devin pending, zero independent approvals |
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
