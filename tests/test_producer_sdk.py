@@ -146,6 +146,23 @@ class ProducerSdkTests(unittest.TestCase):
             build_usage_event(**arguments, dimensions={"prompt": "must-not-persist"})
         with self.assertRaises(ProducerContractError):
             build_usage_event(**arguments, dimensions=["must-not-persist"])
+        with self.assertRaisesRegex(ProducerContractError, "maxProperties"):
+            build_usage_event(
+                **arguments,
+                dimensions={
+                    "provider_code": "openai",
+                    "model_code": "gpt-4o-mini",
+                    "workflow_code": "verified_workflow",
+                    "role_code": "assistant",
+                    "orchestration_mode_code": "sync",
+                    "backend_code": "remote",
+                    "document_job_reference": "urn:cwl:job:1",
+                    "shard_reference": "urn:cwl:shard:1",
+                    "run_reference": "urn:cwl:run:1",
+                    "artifact_reference": "urn:cwl:artifact:1",
+                    "configuration_reference": "urn:cwl:config:1",
+                },
+            )
         invalid_lineage = dict(arguments)
         invalid_lineage["correction_lineage"] = ["must-not-persist"]
         with self.assertRaises(ProducerContractError):

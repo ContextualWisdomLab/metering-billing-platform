@@ -707,6 +707,12 @@ def _validate_object(
     for required_name in required:
         if required_name not in instance:
             errors.append(f"{path}: required property is missing: {required_name}")
+    minimum_properties = schema.get("minProperties")
+    maximum_properties = schema.get("maxProperties")
+    if minimum_properties is not None and len(instance) < minimum_properties:
+        errors.append(f"{path}: object has fewer than minProperties")
+    if maximum_properties is not None and len(instance) > maximum_properties:
+        errors.append(f"{path}: object has more than maxProperties")
     properties = schema.get("properties", {})
     if schema.get("additionalProperties") is False:
         for property_name in sorted(set(instance) - set(properties)):
