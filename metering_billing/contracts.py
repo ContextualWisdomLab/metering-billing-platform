@@ -165,6 +165,7 @@ __all__ = (
 )
 
 USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
+SUPPORTED_USAGE_EVENT_CONTRACT_VERSIONS = frozenset({1})
 USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
@@ -320,7 +321,17 @@ def validate_usage_event(
 ) -> tuple[str, ...]:
     """Validate a usage event against the published usage-event contract."""
     schema = load_json_schema(USAGE_EVENT_SCHEMA_NAME, schemas_directory)
-    return validate_schema_instance(schema, event)
+    errors = list(validate_schema_instance(schema, event))
+    if isinstance(event, Mapping):
+        contract_version = event.get("event_contract_version")
+        if (
+            type(contract_version) is int
+            and contract_version not in SUPPORTED_USAGE_EVENT_CONTRACT_VERSIONS
+        ):
+            errors.append(
+                "$.event_contract_version: unsupported usage-event contract version"
+            )
+    return tuple(errors)
 
 
 def validate_usage_ingestion_receipt(

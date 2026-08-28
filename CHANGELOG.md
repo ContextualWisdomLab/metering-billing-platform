@@ -26,6 +26,8 @@
   commit for every checkout and compares the uploaded Rust crate with a fresh
   package from that commit before publishing, keeping the verified package
   boundary explicit.
+- Usage-event validation now rejects unpublished contract versions until their
+  separate schema and compatibility policy are released.
 - The platform now builds an installable Python distribution containing the
   canonical producer SDK and its checked-in schemas, so producer repositories
   can consume the same builder instead of copying contract logic.

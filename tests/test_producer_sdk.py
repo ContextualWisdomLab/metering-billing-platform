@@ -130,6 +130,17 @@ class ProducerSdkTests(unittest.TestCase):
                     fixture["event"], source="urn:cwl:producer:test"
                 )
 
+    def test_builder_rejects_unpublished_event_contract_versions(self) -> None:
+        """A new contract version needs a separately published schema first."""
+        fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+        arguments = dict(fixture["event"])
+        arguments.pop("source_payload_hash")
+        arguments["event_contract_version"] = 2
+        with self.assertRaisesRegex(
+            ProducerContractError, "unsupported usage-event contract version"
+        ):
+            build_usage_event(**arguments)
+
     def test_allowlisted_dimensions_are_hashed_and_unknown_fields_fail_closed(
         self,
     ) -> None:
