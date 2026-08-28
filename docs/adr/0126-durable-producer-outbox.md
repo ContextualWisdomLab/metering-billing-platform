@@ -32,6 +32,11 @@ producer integration:
   is applied. An expired lease is eligible for recovery after a process crash,
   and a late result can update a row only while its original lease is still
   current.
+- `ProducerAuthContext` is a stable delivery-group selector, not a per-attempt
+  request context. A producer must keep its credential reference and optional
+  correlation ID stable from enqueue through drain, and run separate drains for
+  different persisted contexts. The outbox does not widen a selector to a
+  wildcard because that could send a fact under the wrong delivery context.
 - Each drain is capped at 100 events. `accepted` and `duplicate_replay` are
   terminal delivery outcomes; explicit `rejected` results enter dead-letter
   state; transport errors and incomplete receipts retry with capped exponential
@@ -53,10 +58,11 @@ state-machine contract to reproduce.
 
 The Python SDK can buffer and replay events across process restarts with local
 stdlib dependencies only. A producer must supply a durable filesystem path,
-keep the current credential outside the outbox, and expose the same stable
-source key on every retry. The outbox is local durability, not a replacement
-for PostgreSQL Billing persistence or a cross-process queue; those remain in
-issue #84 and the producer deployment boundary.
+keep the current credential outside the outbox, expose the same stable source
+key on every retry, and preserve the delivery context for each drain. The
+outbox is local durability, not a replacement for PostgreSQL Billing
+persistence or a cross-process queue; those remain in issue #84 and the
+producer deployment boundary.
 
 ## References (APA 7)
 
