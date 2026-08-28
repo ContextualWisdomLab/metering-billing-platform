@@ -60,7 +60,7 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 > `develop`. The external producer onboarding PRs remain separate:
 > contextual-orchestrator `#908` at `2f7b177a1631e3f1c845748e2a4bd312664e0759`,
 > NewsDOM `#740` at `2a462e3c8a1b26f2fc991a75c038b1feeb03b7f4`, and fast-mlsirm
-> `#1545` at `14cd7a1b35987d2fc5db9001822003c59263bb2a`. Their current-head
+> `#1545` at `55341def4149faa8f2f845681db997e94b725a40`. Their current-head
 > review threads are resolved, but they have no released SDK pins or protected
 > merge evidence for `develop`.
 
