@@ -325,6 +325,7 @@ class UsageIngestionService:
                 cost_center_reference=event.get("cost_center_reference"),
                 project_reference=event.get("project_reference"),
                 measurements=measurements,
+                dimensions=tuple(sorted(event.get("dimensions", {}).items())),
             )
         )
         return EventIngestionReceipt(

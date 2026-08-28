@@ -12,6 +12,7 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 - Idempotency keys on all state-changing external commands.
 - Usage ingestion deduplicates on tenant-scoped `source_event_key` and on `source_payload_hash` plus `event_contract_version`.
 - CloudEvents-compatible envelopes in the event milestone.
+- Usage-event dimensions use a versioned allowlist of non-sensitive provider, model, workflow, role, backend, and job-reference values; unknown keys and content fields fail closed.
 
 ## Usage-ingestion plane
 

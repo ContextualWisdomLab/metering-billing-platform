@@ -261,6 +261,7 @@ REQUIRED_FILES = (
     "database/migrations/0037_catalog_reference_identity.sql",
     "database/migrations/0038_postgres_rating_vertical_slice.sql",
     "database/migrations/0039_spend_budget_status.sql",
+    "database/migrations/0040_usage_event_dimensions.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
@@ -348,7 +349,7 @@ SCHEMA_NAME_PATTERN = re.compile(
 )
 COLUMN_NAME_PATTERN = re.compile(
     r"(?:^\s+|ADD\s+COLUMN\s+)([a-zA-Z_][a-zA-Z0-9_]*)\s+"
-    r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean)\b",
+    r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean|jsonb)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 TABLE_NAME_PATTERN = re.compile(
@@ -690,6 +691,9 @@ def _validate_object(
     for required_name in required:
         if required_name not in instance:
             errors.append(f"{path}: required property is missing: {required_name}")
+    max_properties = schema.get("maxProperties")
+    if type(max_properties) is int and len(instance) > max_properties:
+        errors.append(f"{path}: object has more than maxProperties")
     properties = schema.get("properties", {})
     if schema.get("additionalProperties") is False:
         for property_name in sorted(set(instance) - set(properties)):

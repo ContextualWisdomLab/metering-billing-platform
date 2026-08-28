@@ -4632,6 +4632,15 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(object_schema, {}),
             ("$: required property is missing: known_value",),
         )
+        bounded_object_schema = {
+            "type": "object",
+            "properties": {"first": {}, "second": {}},
+            "maxProperties": 1,
+        }
+        self.assertEqual(
+            validate_schema_instance(bounded_object_schema, {"first": 1, "second": 2}),
+            ("$: object has more than maxProperties",),
+        )
 
     def test_offline_schema_validator_covers_formats_types_and_references(self) -> None:
         """Formats, unsupported types, and malformed local references fail closed."""

@@ -205,6 +205,30 @@ class UsageIngestionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "tenant resolution succeeded"):
                 service.query_ingestion_receipts(TENANT_ONE)
 
+    def test_allowlisted_dimensions_survive_ingestion(self) -> None:
+        """Provider/model dimensions remain durable without storing content."""
+        event = make_event(
+            dimensions={
+                "model_code": "gpt-4o-mini",
+                "provider_code": "openai",
+                "workflow_code": "verified_workflow",
+            }
+        )
+        ledger = seed_ledger()
+        stored = UsageIngestionService(ledger).ingest_usage_event(event)
+        assert stored.usage_event_id is not None
+        persisted = ledger.get_usage_event(stored.usage_event_id)
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual(
+            persisted.dimensions,
+            (
+                ("model_code", "gpt-4o-mini"),
+                ("provider_code", "openai"),
+                ("workflow_code", "verified_workflow"),
+            ),
+        )
+
     def test_known_batch_reproduces_stored_usage_and_rejects_replays(self) -> None:
         """The same batch must store one usage set and then only acknowledge replays."""
         service = UsageIngestionService(seed_ledger())

@@ -51,6 +51,8 @@ pub struct UsageEvent {
     pub product_code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<BTreeMap<String, String>>,
     pub occurred_at: String,
     pub measurements: Vec<Measurement>,
     pub source_payload_hash: String,
@@ -69,6 +71,7 @@ pub struct UsageEventInput {
     pub project_reference: Option<String>,
     pub product_code: String,
     pub operation_code: Option<String>,
+    pub dimensions: Option<BTreeMap<String, String>>,
     pub occurred_at: String,
     pub measurements: Vec<Measurement>,
 }
@@ -101,6 +104,7 @@ pub fn build_usage_event(input: UsageEventInput) -> Result<UsageEvent, ProducerC
         project_reference: input.project_reference,
         product_code: input.product_code,
         operation_code: input.operation_code,
+        dimensions: input.dimensions,
         occurred_at: input.occurred_at,
         measurements: input.measurements,
         source_payload_hash: String::new(),
@@ -149,6 +153,12 @@ pub fn canonical_source_payload_json(event: &UsageEvent) -> Result<String, Produ
         "billing_principal_reference",
         serde_json::Value::String(event.billing_principal_reference.clone()),
     );
+    if let Some(dimensions) = &event.dimensions {
+        payload.insert(
+            "dimensions",
+            serde_json::to_value(dimensions).expect("BTreeMap of strings is serializable"),
+        );
+    }
     insert_optional(
         &mut payload,
         "cost_center_reference",
@@ -243,9 +253,13 @@ fn canonical_quantity(quantity: &str) -> Result<String, ProducerContractError> {
 fn canonical_timestamp(timestamp: &str) -> Result<String, ProducerContractError> {
     let parsed = DateTime::parse_from_rfc3339(timestamp)
         .map_err(|_| ProducerContractError("occurred_at must be an RFC3339 date-time".into()))?;
-    Ok(parsed
-        .with_timezone(&Utc)
-        .to_rfc3339_opts(SecondsFormat::Micros, true))
+    let normalized = parsed.with_timezone(&Utc);
+    let format = if normalized.timestamp_subsec_micros() == 0 {
+        SecondsFormat::Secs
+    } else {
+        SecondsFormat::Micros
+    };
+    Ok(normalized.to_rfc3339_opts(format, true))
 }
 
 fn validate_input(input: &UsageEventInput) -> Result<(), ProducerContractError> {
@@ -282,6 +296,7 @@ fn validate_input(input: &UsageEventInput) -> Result<(), ProducerContractError> 
     if let Some(operation_code) = &input.operation_code {
         validate_code("operation_code", operation_code, 64)?;
     }
+    validate_dimensions(input.dimensions.as_ref())?;
     canonical_timestamp(&input.occurred_at)?;
     if input.measurements.is_empty() || input.measurements.len() > 64 {
         return Err(ProducerContractError(
@@ -322,10 +337,60 @@ fn validate_event(event: &UsageEvent) -> Result<(), ProducerContractError> {
         project_reference: event.project_reference.clone(),
         product_code: event.product_code.clone(),
         operation_code: event.operation_code.clone(),
+        dimensions: event.dimensions.clone(),
         occurred_at: event.occurred_at.clone(),
         measurements: event.measurements.clone(),
     };
     validate_input(&input)
+}
+
+fn validate_dimensions(
+    dimensions: Option<&BTreeMap<String, String>>,
+) -> Result<(), ProducerContractError> {
+    let Some(dimensions) = dimensions else {
+        return Ok(());
+    };
+    if dimensions.len() > 10 {
+        return Err(ProducerContractError(
+            "dimensions must contain at most 10 allowlisted fields".into(),
+        ));
+    }
+    for (name, value) in dimensions {
+        match name.as_str() {
+            "provider_code"
+            | "workflow_code"
+            | "role_code"
+            | "orchestration_mode_code"
+            | "backend_code" => validate_code(name, value, 64)?,
+            "model_code" => {
+                if value.is_empty()
+                    || value.len() > 128
+                    || !value
+                        .chars()
+                        .next()
+                        .is_some_and(|character| character.is_ascii_alphanumeric())
+                    || !value.chars().all(|character| {
+                        character.is_ascii_alphanumeric()
+                            || matches!(character, '.' | '_' | ':' | '/' | '-')
+                    })
+                {
+                    return Err(ProducerContractError(
+                        "model_code must be a bounded provider model identifier".into(),
+                    ));
+                }
+            }
+            "document_job_reference"
+            | "shard_reference"
+            | "run_reference"
+            | "artifact_reference" => validate_reference(name, value)?,
+            _ => {
+                return Err(ProducerContractError(format!(
+                    "dimension {name} is not in the published allowlist"
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_uuid(value: &str) -> Result<(), ProducerContractError> {
@@ -426,6 +491,7 @@ mod tests {
             project_reference: event.project_reference,
             product_code: event.product_code,
             operation_code: event.operation_code,
+            dimensions: event.dimensions,
             occurred_at: event.occurred_at,
             measurements: event.measurements,
         }
@@ -448,6 +514,36 @@ mod tests {
         assert_eq!(cloud_event.id, event.event_id);
         assert_eq!(cloud_event.subject, event.source_event_key);
         assert_eq!(cloud_event.data, event);
+    }
+
+    #[test]
+    fn matches_python_allowlisted_dimensions_conformance() {
+        let vector = fixture();
+        let mut input = input_from_fixture(&vector);
+        input.dimensions = Some(BTreeMap::from([
+            ("model_code".into(), "gpt-4o-mini".into()),
+            ("provider_code".into(), "openai".into()),
+            ("workflow_code".into(), "verified_workflow".into()),
+        ]));
+
+        let event = build_usage_event(input).unwrap();
+        assert_eq!(
+            event.source_payload_hash,
+            "sha256:48e92ee2293e0c0eda5aaad6de7b4c6657134c6a0200249498c447c8e3aadac9"
+        );
+    }
+
+    #[test]
+    fn matches_python_whole_second_timestamp_conformance() {
+        let vector = fixture();
+        let mut input = input_from_fixture(&vector);
+        input.occurred_at = "2026-08-16T10:27:42.000Z".into();
+
+        let event = build_usage_event(input).unwrap();
+        assert_eq!(
+            event.source_payload_hash,
+            "sha256:23f8cd504adbc694ea715d7840e8c199019cfb6d36b066e82eafb538bcf4eb87"
+        );
     }
 
     #[test]

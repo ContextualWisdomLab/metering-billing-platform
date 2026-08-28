@@ -29,6 +29,7 @@ export interface UsageEventInput {
   project_reference?: string;
   product_code: string;
   operation_code?: string;
+  dimensions?: Record<string, string>;
   occurred_at: string;
   measurements: Measurement[];
 }
@@ -66,6 +67,7 @@ export function buildUsageEvent(input: UsageEventInput): UsageEvent {
     ...(input.project_reference === undefined ? {} : { project_reference: input.project_reference }),
     product_code: input.product_code,
     ...(input.operation_code === undefined ? {} : { operation_code: input.operation_code }),
+    ...(input.dimensions === undefined ? {} : { dimensions: { ...input.dimensions } }),
     occurred_at: input.occurred_at,
     measurements: input.measurements.map((measurement) => ({ ...measurement })),
     source_payload_hash: "",
@@ -105,6 +107,11 @@ export function canonicalSourcePayloadJson(event: UsageEvent): string {
   }
   if (event.credential_reference !== undefined) {
     payload.credential_reference = event.credential_reference;
+  }
+  if (event.dimensions !== undefined) {
+    payload.dimensions = Object.fromEntries(
+      Object.entries(event.dimensions).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+    );
   }
   payload.event_contract_version = event.event_contract_version;
   payload.measurements = event.measurements.map((measurement) => ({
@@ -183,6 +190,7 @@ function validateInput(input: UsageEventInput): void {
   if (input.operation_code !== undefined) {
     validateCode("operation_code", input.operation_code, 64);
   }
+  validateDimensions(input.dimensions);
   canonicalTimestamp(input.occurred_at);
   if (!Array.isArray(input.measurements) || input.measurements.length < 1 || input.measurements.length > 64) {
     throw new ProducerContractError("measurements must contain between 1 and 64 objects");
@@ -227,6 +235,7 @@ function validateEvent(event: UsageEvent): void {
     "project_reference",
     "product_code",
     "operation_code",
+    "dimensions",
     "occurred_at",
     "measurements",
     "source_payload_hash",
@@ -236,6 +245,43 @@ function validateEvent(event: UsageEvent): void {
   }
   if (!/^sha256:[0-9a-f]{64}$/.test(event.source_payload_hash)) {
     throw new ProducerContractError("source_payload_hash must be a sha256 digest");
+  }
+}
+
+function validateDimensions(dimensions: Record<string, string> | undefined): void {
+  if (dimensions === undefined) {
+    return;
+  }
+  if (typeof dimensions !== "object" || dimensions === null || Array.isArray(dimensions)) {
+    throw new ProducerContractError("dimensions must be an object");
+  }
+  const allowed = new Set([
+    "provider_code",
+    "model_code",
+    "workflow_code",
+    "role_code",
+    "orchestration_mode_code",
+    "backend_code",
+    "document_job_reference",
+    "shard_reference",
+    "run_reference",
+    "artifact_reference",
+  ]);
+  const names = Object.keys(dimensions);
+  if (names.length > 10 || names.some((name) => !allowed.has(name))) {
+    throw new ProducerContractError("dimensions contain an unknown or excessive field");
+  }
+  for (const name of names) {
+    const value = dimensions[name];
+    if (name === "model_code") {
+      if (typeof value !== "string" || value.length === 0 || value.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) {
+        throw new ProducerContractError("model_code must be a bounded provider model identifier");
+      }
+    } else if (name.endsWith("_reference")) {
+      validateReference(name, value);
+    } else {
+      validateCode(name, value, 64);
+    }
   }
 }
 

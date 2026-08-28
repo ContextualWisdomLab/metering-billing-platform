@@ -40,13 +40,13 @@ def build_usage_event(
     cost_center_reference: str | None = None,
     project_reference: str | None = None,
     operation_code: str | None = None,
+    dimensions: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build and validate one hash-complete usage event.
 
     The fixed keyword surface intentionally excludes prompts, responses,
-    document text, provider secrets, and arbitrary dimensions.  A producer
-    must send those facts through a separately reviewed contract instead of
-    smuggling them into billable usage.
+    document text, provider secrets, and arbitrary dimensions.  The optional
+    dimensions object is limited by the versioned schema allowlist.
     """
     try:
         copied_measurements = []
@@ -78,6 +78,10 @@ def build_usage_event(
     ):
         if value is not None:
             event[field_name] = value
+    if dimensions is not None:
+        if not isinstance(dimensions, Mapping):
+            raise ProducerContractError("dimensions must be an object")
+        event["dimensions"] = dict(dimensions)
 
     try:
         event["source_payload_hash"] = compute_source_payload_hash(event)
