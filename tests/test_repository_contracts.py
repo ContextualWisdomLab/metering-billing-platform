@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from decimal import Decimal
@@ -109,6 +110,37 @@ class RepositoryContractTests(unittest.TestCase):
             ("ContextualWisdomLab/.github/.github/workflows/reusable.yml@main",),
         )
         self.assertEqual(find_mutable_action_references(pinned), ())
+
+    def test_producer_release_artifacts_have_bounded_publish_contracts(self) -> None:
+        """Published manifests omit repository-only tests and carry provenance metadata."""
+        cargo = tomllib.loads(
+            (ROOT / "sdks/rust/Cargo.toml").read_text(encoding="utf-8")
+        )["package"]
+        self.assertEqual(cargo["readme"], "README.md")
+        self.assertEqual(
+            cargo["repository"],
+            "https://github.com/ContextualWisdomLab/metering-billing-platform",
+        )
+        self.assertEqual(cargo["exclude"], ["tests/coverage.rs"])
+
+        npm = json.loads(
+            (ROOT / "sdks/typescript/package.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(npm["files"], ["README.md", "src"])
+        self.assertEqual(npm["repository"]["directory"], "sdks/typescript")
+
+        workflow = (ROOT / ".github/workflows/publish-producer-sdks.yml").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "release:",
+            "types:\n      - published",
+            "environment: producer-release",
+            "id-token: write",
+            "--provenance",
+            "cargo publish --locked",
+        ):
+            self.assertIn(required, workflow)
 
     def test_node_modules_placeholders_are_ignored(self) -> None:
         """Storybook install trees must not fail repository contract scans."""

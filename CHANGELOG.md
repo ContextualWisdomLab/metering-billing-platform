@@ -16,6 +16,12 @@
 
 ### Added
 
+- A protected release workflow now builds the Python, Rust, and TypeScript
+  producer artifacts from a published tag, publishes Python and npm with OIDC
+  provenance, and publishes the Rust crate with a scoped registry token. The
+  package manifests include repository metadata and exclude repository-only
+  tests from published artifacts; actual registry publication remains pending
+  release-environment configuration and protected merge evidence.
 - The platform now builds an installable Python distribution containing the
   canonical producer SDK and its checked-in schemas, so producer repositories
   can consume the same builder instead of copying contract logic.
