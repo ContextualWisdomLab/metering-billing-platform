@@ -74,6 +74,15 @@ jobs:
           version: "0.11.19"
       - name: Build wheel and source distribution
         run: uv build --out-dir dist
+      - name: Install runtime dependencies for SDK conformance
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r requirements-runtime.txt
+      - name: Run Python producer SDK conformance tests
+        run: python -m unittest discover -s tests -p 'test_producer_sdk.py' -v
       - name: Store Python artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -92,6 +101,8 @@ jobs:
         with:
           ref: ${{ needs.resolve-release.outputs.release-sha }}
           persist-credentials: false
+      - name: Run Rust producer SDK conformance tests
+        run: cargo test --locked --manifest-path sdks/rust/Cargo.toml
       - name: Validate publishable crate
         run: cargo package --locked --manifest-path sdks/rust/Cargo.toml
       - name: Store Rust artifact
@@ -120,6 +131,14 @@ jobs:
       - name: Create npm package
         working-directory: sdks/typescript
         run: mkdir -p dist && npm pack --ignore-scripts --pack-destination dist
+      - name: Run TypeScript producer SDK conformance tests
+        run: >-
+          node --experimental-strip-types --test
+          --test-coverage-include=sdks/typescript/src/index.ts
+          --test-coverage-lines=100
+          --test-coverage-branches=100
+          --test-coverage-functions=100
+          sdks/typescript/test/conformance.test.ts
       - name: Store TypeScript artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

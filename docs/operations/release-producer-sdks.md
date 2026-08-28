@@ -4,9 +4,9 @@ The three producer artifacts are released only from a published GitHub
 release. The protected workflow
 [`publish-producer-sdks.yml`](../../.github/workflows/publish-producer-sdks.yml)
 first resolves the published tag to one immutable commit, packages all
-artifacts from that commit, and publishes them from the `producer-release`
-environment. The Rust publish step also compares its re-packaged crate with
-the uploaded artifact before publishing.
+artifacts from that commit, runs each SDK's conformance tests, and publishes
+them from the `producer-release` environment. The Rust publish step also
+compares its re-packaged crate with the uploaded artifact before publishing.
 
 Current package identities are:
 
