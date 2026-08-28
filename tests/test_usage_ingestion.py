@@ -229,6 +229,45 @@ class UsageIngestionTests(unittest.TestCase):
             ),
         )
 
+    def test_contract_metadata_and_meter_version_survive_ingestion(self) -> None:
+        """Version and trace metadata remain attached to the immutable usage fact."""
+        ledger = seed_ledger()
+        event = make_event(
+            producer_contract_version=2,
+            repository_reference="urn:cwl:repository:producer",
+            trace_reference="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            correlation_reference="urn:cwl:correlation:workflow_381",
+            causation_reference="urn:cwl:causation:step_03",
+            available_at="2026-08-16T10:27:43.482Z",
+            correction_lineage={
+                "prior_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61b",
+                "relationship_code": "corrects",
+                "reason_code": "late_provider_reconciliation",
+            },
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "meter_version": 1,
+                    "quantity": "1810",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        receipt = UsageIngestionService(ledger).ingest_usage_event(event)
+        self.assertEqual(receipt.ingestion_outcome_code, IngestionOutcomeCode.ACCEPTED)
+        stored = ledger.get_usage_event(receipt.usage_event_id)
+        assert stored is not None
+        self.assertEqual(stored.producer_contract_version, 2)
+        self.assertEqual(stored.repository_reference, event["repository_reference"])
+        self.assertEqual(stored.trace_reference, event["trace_reference"])
+        self.assertEqual(
+            stored.available_at,
+            datetime(2026, 8, 16, 10, 27, 43, 482000, tzinfo=UTC),
+        )
+        self.assertEqual(dict(stored.correction_lineage), event["correction_lineage"])
+        self.assertEqual(stored.measurements[0].meter_version, 1)
+
     def test_known_batch_reproduces_stored_usage_and_rejects_replays(self) -> None:
         """The same batch must store one usage set and then only acknowledge replays."""
         service = UsageIngestionService(seed_ledger())
@@ -550,6 +589,21 @@ class UsageIngestionTests(unittest.TestCase):
             service.ingest_usage_event(unit_mismatch).rejection_reason_code,
             RejectionReasonCode.METER_UNIT_MISMATCH,
         )
+        version_mismatch = make_event(
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "meter_version": 2,
+                    "quantity": "1",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ]
+        )
+        self.assertEqual(
+            service.ingest_usage_event(version_mismatch).rejection_reason_code,
+            RejectionReasonCode.METER_VERSION_MISMATCH,
+        )
         quality = make_event(
             measurements=[
                 {
@@ -608,6 +662,19 @@ class UsageIngestionTests(unittest.TestCase):
         ):
             self.assertEqual(
                 service.ingest_usage_event(make_event()).rejection_reason_code,
+                RejectionReasonCode.SCHEMA_INVALID,
+            )
+        with mock.patch(
+            "metering_billing.usage_ingestion.parse_iso8601_datetime",
+            side_effect=[
+                datetime(2026, 8, 16, 10, 27, 42, 482000, tzinfo=UTC),
+                TimeWindowError("bad available_at"),
+            ],
+        ):
+            self.assertEqual(
+                service.ingest_usage_event(
+                    make_event(available_at="2026-08-16T10:27:43.482Z")
+                ).rejection_reason_code,
                 RejectionReasonCode.SCHEMA_INVALID,
             )
 

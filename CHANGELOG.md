@@ -19,14 +19,27 @@
 - The platform now builds an installable Python distribution containing the
   canonical producer SDK and its checked-in schemas, so producer repositories
   can consume the same builder instead of copying contract logic.
+- Python, Rust, and TypeScript producer SDKs now include a durable local
+  outbox with bounded batch delivery, per-event partial receipts, explicit
+  dead-letter replay, and hash-checked removal. Python uses SQLite; Rust and
+  TypeScript use atomic local files. A transport callback owns credentials and
+  scheduling, and the existing server idempotency remains the monetary-effect
+  authority (ADR 0129). This is outage-buffer groundwork; real producer
+  onboarding and released consumer pins under issue #90 remain open.
 - The canonical usage-event schema and Python, Rust, and TypeScript producer
   SDK references now accept a bounded allowlist of non-sensitive provider,
   model, workflow, role, backend, and job-reference dimensions. The dimensions
   participate in the source-payload hash and survive durable PostgreSQL
-  ingestion in `usage_event.dimensions`; arbitrary content, prompts, responses,
+  ingestion in `usage_event.usage_dimensions`; arbitrary content, prompts, responses,
   document text, and secrets remain rejected. This is contract groundwork for
   the three real producer integrations required by issue #90, not an integration
   claim.
+- Usage-event contract metadata now includes producer-contract version, meter
+  version, repository and trace/correlation/causation references, availability
+  time, and correction lineage. The PostgreSQL ledger persists these fields in
+  the append-only event row through migration 0042 and rejects a supplied meter
+  version that differs from the effective catalog version; old v1 events remain
+  valid through the additive optional-field path.
 - A Rust producer SDK reference under sdks/rust builds the closed typed usage
   event, verifies exact-decimal and CloudEvents boundaries, and produces the
   same canonical source-payload JSON and SHA-256 hash as the Python conformance

@@ -22,6 +22,10 @@ from metering_billing.exact_decimal import format_exact_decimal, parse_exact_dec
 from metering_billing.time_window import parse_iso8601_datetime
 
 SOURCE_PAYLOAD_FIELDS = (
+    "available_at",
+    "causation_reference",
+    "correlation_reference",
+    "correction_lineage",
     "event_contract_version",
     "tenant_reference",
     "billing_account_reference",
@@ -30,7 +34,10 @@ SOURCE_PAYLOAD_FIELDS = (
     "cost_center_reference",
     "project_reference",
     "product_code",
+    "producer_contract_version",
     "operation_code",
+    "repository_reference",
+    "trace_reference",
     "dimensions",
     "occurred_at",
     "measurements",
@@ -44,7 +51,7 @@ def canonical_source_payload(event: Mapping[str, Any]) -> dict[str, Any]:
         if field_name not in event:
             continue
         value = event[field_name]
-        if field_name == "occurred_at":
+        if field_name in {"available_at", "occurred_at"}:
             payload[field_name] = (
                 parse_iso8601_datetime(value).astimezone(UTC).isoformat().replace("+00:00", "Z")
             )

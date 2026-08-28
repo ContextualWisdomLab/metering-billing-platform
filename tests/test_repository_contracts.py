@@ -419,6 +419,37 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_usage_event_contract_metadata_migration_is_append_only(self) -> None:
+        """The event table persists producer, trace, availability, and correction metadata."""
+        sql = (ROOT / "database/migrations/0042_usage_event_contract_metadata.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ADD COLUMN producer_contract_version integer NOT NULL DEFAULT 1",
+            "ADD COLUMN repository_reference text",
+            "ADD COLUMN trace_reference text",
+            "ADD COLUMN correlation_reference text",
+            "ADD COLUMN causation_reference text",
+            "ADD COLUMN available_at timestamptz",
+            "ADD COLUMN correction_lineage jsonb",
+            "usage_event_producer_contract_version_positive",
+            "usage_event_correction_lineage_object",
+        ):
+            self.assertIn(expected_fragment, sql)
+
+    def test_correction_uuid_follow_up_migration_matches_schema_uuid_validation(self) -> None:
+        """The follow-up keeps schema-valid non-RFC4122 UUID variants insertable."""
+        sql = (
+            ROOT
+            / "database/migrations/0043_align_correction_uuid_validation.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DROP CONSTRAINT usage_event_correction_lineage_object", sql)
+        self.assertIn("ADD CONSTRAINT usage_event_correction_lineage_object", sql)
+        self.assertIn(
+            "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            sql,
+        )
+
     def test_rating_run_accepts_exact_invoice_intent_totals(self) -> None:
         """A rating-run contract records exact decimal invoice-intent lines."""
         schema = self._schema("rating-run.schema.json")
@@ -4724,6 +4755,16 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(
             validate_sql_object_names("ALTER TABLE usage_event ADD COLUMN status text;\n"),
             ("column name must contain at least two snake_case words: status",),
+        )
+
+    def test_applied_legacy_dimensions_migration_is_allowlisted_by_path(self) -> None:
+        """The immutable 0040 migration remains valid while new SQL stays strict."""
+        self.assertEqual(validate_repository(ROOT), ())
+        self.assertEqual(
+            validate_sql_object_names(
+                "ALTER TABLE usage_event ADD COLUMN dimensions jsonb;\n"
+            ),
+            ("column name must contain at least two snake_case words: dimensions",),
         )
 
     def test_repository_prefixes_sql_name_errors_with_migration_path(self) -> None:
