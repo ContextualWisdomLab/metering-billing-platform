@@ -1,7 +1,7 @@
 # Product and Technical Gap Baseline
 
 **Status:** Active current-state gap baseline
-**Assessment date:** 2026-08-28
+**Assessment date:** 2026-08-29
 **Assessed head:** `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` (PR [#141](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/141))
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
@@ -32,7 +32,7 @@ Until those conditions are satisfied, the accurate product statement is:
 This baseline examined:
 
 - the `develop` branch;
-- all open issues and pull requests visible on 2026-08-28;
+- all open issues and pull requests visible on 2026-08-29;
 - the exact `develop` head after the PR #141 merge;
 - current-head review and GitHub Actions state;
 - `README.md`, `PRD.md`, `TRD.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`, `SECURITY.md`, Storybook documentation, ADRs, schemas, migrations, implementation, and tests present on the candidate branch;
@@ -43,17 +43,19 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
-> **Status update (2026-08-28):** GitHub reports eight open pull requests
-> (`#142`–`#149`). PRs `#142`–`#146` target `develop`; PR `#147` and #148 are stacked on
-> the canonical producer SDK branch from PR `#146`, and #149 is stacked on #148.
+> **Status update (2026-08-29):** GitHub reports six open pull requests
+> (`#142`–`#147`). PRs `#142`–`#146` target `develop`; PR `#147` is stacked on
+> the canonical producer SDK branch from PR `#146`. PRs `#148` and `#149` were
+> merged on 2026-08-28 and are no longer open-PR evidence.
 > The current default branch is
 > `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`, merged from PR #141
 > on 2026-08-26. The merged release train and the Compose, threaded API,
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
-> PRs `#142`–`#146` are `BLOCKED`/`REVIEW_REQUIRED`; PR `#147` and #148 are
-> `CLEAN` on their stacked bases, while #149 is pending Checks. None is merge
-> evidence for `develop`.
+> PRs `#142`–`#146` are `BLOCKED`/`REVIEW_REQUIRED`; PR `#147` is `UNSTABLE`
+> while its Devin review is pending. All six have zero qualifying approvals;
+> current internal review threads are resolved. None is merge evidence for
+> `develop`.
 
 ### Default branch
 
@@ -68,11 +70,11 @@ operational contract.
 
 ### Pull-request topology
 
-As queried from GitHub on 2026-08-28:
+As queried from GitHub on 2026-08-29:
 
 - open issues: **8** (`#84`–`#91`);
-- open pull requests: **8** (`#142`–`#149`); `#142`–`#146` target `develop`, `#147` and `#148` target the branch of `#146`, and `#149` targets the branch of `#148`;
-- stacked producer work: `#146` provides the canonical Python producer reference, `#147` adds the durable producer outbox slice, `#148` adds the Rust reference, and `#149` adds the TypeScript reference;
+- open pull requests: **6** (`#142`–`#147`); `#142`–`#146` target `develop`, and `#147` targets the branch of `#146`;
+- producer work: `#146` provides the canonical Python producer reference and `#147` adds the durable producer outbox slice; the Rust reference from `#148` and TypeScript reference from `#149` were merged on 2026-08-28;
 - latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`;
 - the merged PR #141 rollup included a failed `Semgrep (multi-language SAST)` job alongside successful repository, analysis, dependency, coverage, and other checks; therefore the merge is not a blanket claim that every release/security gate is complete.
 
@@ -165,7 +167,7 @@ Work can be stacked when public contracts are stable, but each PR must remain in
 
 ## Current pull-request inventory
 
-GitHub reports **eight open pull requests** on 2026-08-28. The latest merged
+GitHub reports **six open pull requests** on 2026-08-29. The latest merged
 change is PR #141; the following open PR heads are current snapshots and are
 not merge evidence:
 
@@ -176,10 +178,12 @@ not merge evidence:
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python producer SDK reference and CloudEvents conformance vector for #90 | `develop` | `29b37d73f4a7ae25784d3102aa24d9dd50c7b660`; open, blocked, review required, zero unresolved threads, zero approvals; OpenCode/Strix current-head evidence is unavailable because their providers failed |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `88240fd2cd1c0189db460d949611203e4bcb2773`; open, clean, dependent on #146; all current Checks pass; current GitHub HEAD and Checks remain authoritative |
-| #148 | Canonical Rust producer SDK reference for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `92cb8e46349b986aa869366ccb35b817fb6f8d6b`; open, clean, dependent on #146; current Checks pass; current GitHub HEAD and Checks remain authoritative |
-| #149 | Canonical TypeScript producer SDK reference for #90 | `feat/canonical-rust-sdk-20260828` (stacked on #148) | `13a6a099db8a46869e870fff8c9765407796c6a1`; open, checks pending, dependent on #148/#146; current GitHub HEAD and Checks remain authoritative |
+| #146 | Canonical Python producer SDK reference and CloudEvents conformance vector for #90 | `develop` | `3b4d915cae4a3eee1dcb694db9df83f0126f5490`; open, blocked, review required, zero unresolved threads, zero approvals; OpenCode/Strix current-head evidence is unavailable because their providers failed |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `277b484f099b30dcfb9b2fa5a3d2afaba90b5ed3`; open, unstable, dependent on #146; Repository contracts passed and Devin remains pending; zero unresolved threads and zero approvals |
+
+PRs #148 (Rust SDK) and #149 (TypeScript SDK) merged on 2026-08-28. Their
+historical heads are retained in GitHub, but must not be reused as current
+open-PR or release evidence.
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
