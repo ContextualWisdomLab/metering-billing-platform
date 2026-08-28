@@ -51,7 +51,8 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
 > PRs `#142`–`#146` are `BLOCKED`/`REVIEW_REQUIRED`; PR `#147` is
-> `UNSTABLE` on its stacked base. None is merge evidence for `develop`.
+> `CLEAN` on its stacked base but still depends on #146. None is merge evidence
+> for `develop`.
 
 ### Default branch
 
@@ -170,12 +171,12 @@ not merge evidence:
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
 | #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `f7ab9103259b4cd0bd7ce673f0fc36c477ad3b2d`; open, blocked, review required, zero unresolved threads, zero approvals |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `a3c2d6ef7ed0f0b75605e66093367a2c9eddbaaf`; open, blocked, review required, zero unresolved threads, zero approvals; ordinary Checks pass, OpenCode/Strix fail closed on provider state |
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #146 | Canonical Python producer SDK reference and CloudEvents conformance vector for #90 | `develop` | `29b37d73f4a7ae25784d3102aa24d9dd50c7b660`; open, blocked, review required, zero unresolved threads, zero approvals; OpenCode/Strix current-head evidence is unavailable because their providers failed |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | open, unstable, dependent on #146; local exact suite and repository contracts pass; current GitHub HEAD and Checks remain authoritative |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `88240fd2cd1c0189db460d949611203e4bcb2773`; open, clean, dependent on #146; all current Checks pass; current GitHub HEAD and Checks remain authoritative |
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
