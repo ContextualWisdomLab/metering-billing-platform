@@ -16,6 +16,12 @@
 
 ### Added
 
+- A Rust producer SDK reference under sdks/rust builds the closed typed usage
+  event, verifies exact-decimal and CloudEvents boundaries, and produces the
+  same canonical source-payload JSON and SHA-256 hash as the Python conformance
+  vector (ADR 0127). It does not calculate prices, persist credentials, or
+  perform ingestion; TypeScript and real producer onboarding remain open under
+  issue #90.
 - A dependency-free Python producer SDK reference now builds the closed
   canonical usage-event contract, computes the shared byte-stable source
   payload hash, rejects float quantities and arbitrary sensitive fields, and
