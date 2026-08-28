@@ -36,17 +36,24 @@ def build_usage_event(
     occurred_at: str,
     measurements: Sequence[Mapping[str, Any]],
     event_contract_version: int = 1,
+    producer_contract_version: int = 1,
     credential_reference: str | None = None,
     cost_center_reference: str | None = None,
     project_reference: str | None = None,
+    repository_reference: str | None = None,
+    trace_reference: str | None = None,
+    correlation_reference: str | None = None,
+    causation_reference: str | None = None,
+    available_at: str | None = None,
+    correction_lineage: Mapping[str, Any] | None = None,
     operation_code: str | None = None,
+    dimensions: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build and validate one hash-complete usage event.
 
     The fixed keyword surface intentionally excludes prompts, responses,
-    document text, provider secrets, and arbitrary dimensions.  A producer
-    must send those facts through a separately reviewed contract instead of
-    smuggling them into billable usage.
+    document text, provider secrets, and arbitrary dimensions.  The optional
+    dimensions object is limited by the versioned schema allowlist.
     """
     try:
         copied_measurements = []
@@ -62,6 +69,7 @@ def build_usage_event(
     event: dict[str, Any] = {
         "event_id": str(event_id) if isinstance(event_id, UUID) else event_id,
         "event_contract_version": event_contract_version,
+        "producer_contract_version": producer_contract_version,
         "source_event_key": source_event_key,
         "tenant_reference": tenant_reference,
         "billing_account_reference": billing_account_reference,
@@ -74,10 +82,23 @@ def build_usage_event(
         ("credential_reference", credential_reference),
         ("cost_center_reference", cost_center_reference),
         ("project_reference", project_reference),
+        ("repository_reference", repository_reference),
+        ("trace_reference", trace_reference),
+        ("correlation_reference", correlation_reference),
+        ("causation_reference", causation_reference),
+        ("available_at", available_at),
         ("operation_code", operation_code),
     ):
         if value is not None:
             event[field_name] = value
+    if dimensions is not None:
+        if not isinstance(dimensions, Mapping):
+            raise ProducerContractError("dimensions must be an object")
+        event["dimensions"] = dict(dimensions)
+    if correction_lineage is not None:
+        if not isinstance(correction_lineage, Mapping):
+            raise ProducerContractError("correction_lineage must be an object")
+        event["correction_lineage"] = dict(correction_lineage)
 
     try:
         event["source_payload_hash"] = compute_source_payload_hash(event)

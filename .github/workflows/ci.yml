@@ -72,3 +72,7 @@ jobs:
         run: python scripts/validate_repository.py .
       - name: Compile quality tooling
         run: python -m compileall -q scripts tests metering_billing
+      - name: Run Rust producer SDK tests
+        run: cargo test --manifest-path sdks/rust/Cargo.toml --locked
+      - name: Run TypeScript producer SDK tests
+        run: node --experimental-strip-types --test sdks/typescript/test/conformance.test.ts
