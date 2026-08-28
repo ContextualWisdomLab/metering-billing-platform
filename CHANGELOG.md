@@ -22,6 +22,12 @@
   vector (ADR 0127). It does not calculate prices, persist credentials, or
   perform ingestion; TypeScript and real producer onboarding remain open under
   issue #90.
+- A TypeScript producer SDK reference under sdks/typescript builds the closed
+  typed usage event, verifies exact-decimal and CloudEvents boundaries, and
+  produces the same canonical source-payload JSON and SHA-256 hash as the
+  Python conformance vector (ADR 0128). It uses Node's standard crypto and
+  test runner without a new runtime dependency; real producer onboarding
+  remains open under issue #90.
 - A dependency-free Python producer SDK reference now builds the closed
   canonical usage-event contract, computes the shared byte-stable source
   payload hash, rejects float quantities and arbitrary sensitive fields, and
