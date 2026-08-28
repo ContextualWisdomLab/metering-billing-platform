@@ -395,6 +395,30 @@ class ProducerSdkTests(unittest.TestCase):
             self.assertEqual(outbox.pending_count(), 1)
             outbox.close()
 
+    def test_durable_outbox_requires_tenant_matched_receipts(self) -> None:
+        """A receipt without the queued tenant cannot acknowledge a fact."""
+        fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+        event = fixture["event"]
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = DurableUsageOutbox(Path(directory) / "outbox.sqlite3")
+            outbox.enqueue(event)
+            result = outbox.flush(
+                lambda _: {
+                    "event_receipts": [
+                        {
+                            "source_event_key": event["source_event_key"],
+                            "event_contract_version": event["event_contract_version"],
+                            "source_payload_hash": event["source_payload_hash"],
+                            "ingestion_outcome_code": "accepted",
+                        }
+                    ]
+                }
+            )
+            self.assertEqual(result.accepted_count, 0)
+            self.assertEqual(result.retried_count, 1)
+            self.assertEqual(outbox.pending_count(), 1)
+            outbox.close()
+
     def test_durable_outbox_dead_letters_rejection_and_explicit_replay(self) -> None:
         """A rejected fact is retained for an operator-selected replay."""
         fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))

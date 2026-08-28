@@ -178,3 +178,24 @@ test("durable outbox applies partial receipts per event", async () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("durable outbox requires a tenant-matched receipt", async () => {
+  const { source_payload_hash: _sourcePayloadHash, ...input } = fixture.event;
+  const event = buildUsageEvent(input);
+  const directory = mkdtempSync(join(tmpdir(), "cwl-outbox-"));
+  try {
+    const outbox = new FileUsageOutbox(join(directory, "outbox.json"));
+    outbox.enqueue(event);
+    const result = await outbox.flush(async (events) => ({ event_receipts: [{
+      source_event_key: events[0].source_event_key,
+      event_contract_version: events[0].event_contract_version,
+      source_payload_hash: events[0].source_payload_hash,
+      ingestion_outcome_code: "accepted",
+    }] }));
+    assert.equal(result.acceptedCount, 0);
+    assert.equal(result.retriedCount, 1);
+    assert.equal(outbox.pendingCount(), 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

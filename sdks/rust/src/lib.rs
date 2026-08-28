@@ -401,14 +401,15 @@ fn find_receipt<'a>(
             && receipt
                 .tenant_reference
                 .as_ref()
-                .is_none_or(|tenant| tenant == &event.tenant_reference)
+                .is_some_and(|tenant| tenant == &event.tenant_reference)
     });
     let receipt = matches.next()?;
     matches.next().is_none().then_some(receipt)
 }
 
 fn receipt_matches(receipt: &UsageDeliveryReceipt, event: &UsageEvent) -> bool {
-    receipt.source_payload_hash.as_deref() == Some(event.source_payload_hash.as_str())
+    receipt.tenant_reference.as_deref() == Some(event.tenant_reference.as_str())
+        && receipt.source_payload_hash.as_deref() == Some(event.source_payload_hash.as_str())
         && receipt.event_contract_version == Some(event.event_contract_version)
 }
 
@@ -1114,6 +1115,34 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.accepted_count, 1);
+        assert_eq!(result.retried_count, 1);
+        assert_eq!(outbox.pending_count(), 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn durable_outbox_requires_a_tenant_matched_receipt() {
+        let vector = fixture();
+        let event = build_usage_event(input_from_fixture(&vector)).unwrap();
+        let path = std::env::temp_dir().join(format!("cwl-tenant-outbox-{}.json", event.event_id));
+        let _ = fs::remove_file(&path);
+        let mut outbox = FileUsageOutbox::open(&path).unwrap();
+        outbox.enqueue(event.clone()).unwrap();
+        let result = outbox
+            .flush(1, 3, |_| {
+                Ok(UsageDeliveryResponse {
+                    event_receipts: vec![UsageDeliveryReceipt {
+                        source_event_key: event.source_event_key.clone(),
+                        event_contract_version: Some(event.event_contract_version),
+                        source_payload_hash: Some(event.source_payload_hash.clone()),
+                        tenant_reference: None,
+                        ingestion_outcome_code: "accepted".into(),
+                        rejection_reason_code: None,
+                    }],
+                })
+            })
+            .unwrap();
+        assert_eq!(result.accepted_count, 0);
         assert_eq!(result.retried_count, 1);
         assert_eq!(outbox.pending_count(), 1);
         let _ = fs::remove_file(path);

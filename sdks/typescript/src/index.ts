@@ -533,12 +533,12 @@ function validateEvent(event: UsageEvent): void {
 }
 
 function findReceipt(receipts: Array<Record<string, unknown>>, event: UsageEvent): Record<string, unknown> | undefined {
-  const matches = receipts.filter((receipt) => receipt.source_event_key === event.source_event_key && (receipt.tenant_reference === undefined || receipt.tenant_reference === event.tenant_reference));
+  const matches = receipts.filter((receipt) => receipt.source_event_key === event.source_event_key && receipt.tenant_reference === event.tenant_reference);
   return matches.length === 1 ? matches[0] : undefined;
 }
 
 function receiptMatches(receipt: Record<string, unknown>, event: UsageEvent): boolean {
-  return receipt.source_payload_hash === event.source_payload_hash && receipt.event_contract_version === event.event_contract_version;
+  return receipt.tenant_reference === event.tenant_reference && receipt.source_payload_hash === event.source_payload_hash && receipt.event_contract_version === event.event_contract_version;
 }
 
 function validateDimensions(dimensions: Record<string, string> | undefined): void {
