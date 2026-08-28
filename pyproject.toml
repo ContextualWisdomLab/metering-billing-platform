@@ -19,8 +19,12 @@ dev = [
 [tool.uv]
 package = true
 
-[tool.setuptools.package-data]
-schemas = ["**/*.json"]
+[tool.setuptools]
+packages = ["metering_billing", "metering_billing._schemas", "metering_billing._repository_validation"]
 
-[tool.setuptools.packages.find]
-include = ["metering_billing*", "schemas*", "scripts*"]
+[tool.setuptools.package-dir]
+"metering_billing._schemas" = "schemas"
+"metering_billing._repository_validation" = "scripts"
+
+[tool.setuptools.package-data]
+"metering_billing._schemas" = ["**/*.json"]
