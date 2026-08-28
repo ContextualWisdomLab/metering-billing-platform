@@ -639,6 +639,21 @@ fn canonical_quantity(quantity: &str) -> Result<String, ProducerContractError> {
 }
 
 fn canonical_timestamp(timestamp: &str) -> Result<String, ProducerContractError> {
+    if timestamp
+        .split_once('T')
+        .and_then(|(_, time)| time.split_once('.'))
+        .is_some_and(|(_, fraction_and_zone)| {
+            fraction_and_zone
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .count()
+                > 6
+        })
+    {
+        return Err(ProducerContractError(
+            "timestamps cannot contain sub-microsecond precision".into(),
+        ));
+    }
     let parsed = DateTime::parse_from_rfc3339(timestamp)
         .map_err(|_| ProducerContractError("occurred_at must be an RFC3339 date-time".into()))?;
     let normalized = parsed.with_timezone(&Utc);
@@ -848,7 +863,7 @@ fn validate_bounded_text(
     value: &str,
     maximum: usize,
 ) -> Result<(), ProducerContractError> {
-    if value.is_empty() || value.len() > maximum {
+    if value.is_empty() || value.chars().count() > maximum {
         return Err(ProducerContractError(format!(
             "{name} must be between 1 and {maximum} characters"
         )));
@@ -1001,6 +1016,16 @@ mod tests {
         assert!(build_usage_event(input.clone()).is_ok());
         input.measurements[0].quantity = "1e3".into();
         assert!(build_usage_event(input).is_err());
+
+        let mut submicrosecond = input_from_fixture(&vector);
+        submicrosecond.occurred_at = "2026-08-16T10:27:42.1234567Z".into();
+        assert!(build_usage_event(submicrosecond).is_err());
+
+        let mut unicode_key = input_from_fixture(&vector);
+        unicode_key.source_event_key = "가".repeat(256);
+        assert!(build_usage_event(unicode_key.clone()).is_ok());
+        unicode_key.source_event_key.push('가');
+        assert!(build_usage_event(unicode_key).is_err());
     }
 
     #[test]
