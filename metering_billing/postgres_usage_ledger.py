@@ -4570,7 +4570,7 @@ class PostgresUsageLedger:
         tenant_account_id: UUID,
         commitment: StoredSpendCommitment,
         now: datetime,
-    ) -> tuple[StoredSpendAuthorization, str]:
+    ) -> tuple[StoredSpendAuthorization, str, UUID | None]:
         """Lock an authorization and append one exact actual-use commitment."""
         with self._cursor() as cursor:
             authorization = self._locked_spend_authorization(
@@ -4580,7 +4580,7 @@ class PostgresUsageLedger:
                 raise KeyError(commitment.spend_authorization_id)
             cursor.execute(
                 """
-                SELECT committed_amount
+                SELECT spend_commitment_id, committed_amount
                 FROM billing_core.spend_commitment
                 WHERE tenant_account_id = %s
                   AND spend_authorization_id = %s
@@ -4594,15 +4594,15 @@ class PostgresUsageLedger:
             )
             existing_row = cursor.fetchone()
             if existing_row is not None:
-                if parse_exact_decimal(format_exact_decimal(existing_row[0])) != commitment.committed_amount:
+                if parse_exact_decimal(format_exact_decimal(existing_row[1])) != commitment.committed_amount:
                     raise ValueError("idempotency key already stores a different commitment")
-                return authorization, "duplicate_replay"
+                return authorization, "duplicate_replay", UUID(str(existing_row[0]))
             if authorization.authorization_status == "expired":
-                return authorization, "authorization_expired"
+                return authorization, "authorization_expired", None
             if authorization.authorization_status == "denied":
-                return authorization, "authorization_status_invalid"
+                return authorization, "authorization_status_invalid", None
             if now >= authorization.valid_until:
-                return authorization, "authorization_expired"
+                return authorization, "authorization_expired", None
             committed_amount = parse_exact_decimal(
                 format_exact_decimal(commitment.committed_amount)
             )
@@ -4612,7 +4612,7 @@ class PostgresUsageLedger:
                 - authorization.released_amount
             )
             if committed_amount > remaining:
-                return authorization, "commitment_amount_exceeded"
+                return authorization, "commitment_amount_exceeded", None
             new_committed = authorization.committed_amount + committed_amount
             new_status = _authorization_status(
                 authorization.requested_amount,
@@ -4656,7 +4656,7 @@ class PostgresUsageLedger:
                 )
             return self._fetch_spend_authorization(
                 cursor, commitment.spend_authorization_id
-            ), "accepted"
+            ), "accepted", commitment.spend_commitment_id
 
     def apply_spend_release(
         self,
@@ -4664,7 +4664,7 @@ class PostgresUsageLedger:
         release: StoredSpendRelease,
         now: datetime,
         target_status: str = "released",
-    ) -> tuple[StoredSpendAuthorization, str]:
+    ) -> tuple[StoredSpendAuthorization, str, UUID | None]:
         """Lock an authorization and append one exact release receipt."""
         with self._cursor() as cursor:
             authorization = self._locked_spend_authorization(
@@ -4674,7 +4674,7 @@ class PostgresUsageLedger:
                 raise KeyError(release.spend_authorization_id)
             cursor.execute(
                 """
-                SELECT released_amount
+                SELECT spend_release_id, released_amount
                 FROM billing_core.spend_release
                 WHERE tenant_account_id = %s
                   AND spend_authorization_id = %s
@@ -4688,9 +4688,9 @@ class PostgresUsageLedger:
             )
             existing_row = cursor.fetchone()
             if existing_row is not None:
-                if parse_exact_decimal(format_exact_decimal(existing_row[0])) != release.released_amount:
+                if parse_exact_decimal(format_exact_decimal(existing_row[1])) != release.released_amount:
                     raise ValueError("idempotency key already stores a different release")
-                return authorization, "duplicate_replay"
+                return authorization, "duplicate_replay", UUID(str(existing_row[0]))
             released_amount = parse_exact_decimal(
                 format_exact_decimal(release.released_amount)
             )
@@ -4700,7 +4700,7 @@ class PostgresUsageLedger:
                 - authorization.released_amount
             )
             if released_amount > remaining:
-                return authorization, "release_amount_exceeded"
+                return authorization, "release_amount_exceeded", None
             new_released = authorization.released_amount + released_amount
             new_status = _authorization_status(
                 authorization.requested_amount,
@@ -4745,7 +4745,7 @@ class PostgresUsageLedger:
                 )
             return self._fetch_spend_authorization(
                 cursor, release.spend_authorization_id
-            ), "accepted"
+            ), "accepted", release.spend_release_id
 
     def find_journal_proposal(
         self,

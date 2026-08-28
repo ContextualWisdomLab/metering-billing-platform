@@ -364,7 +364,7 @@ class SpendAuthorizationService:
                 self._now(),
             )
             try:
-                stored, outcome = self.ledger.apply_spend_commitment(
+                stored, outcome, mutation_id = self.ledger.apply_spend_commitment(
                     tenant.tenant_account_id, commitment, self._now()
                 )
             except ValueError:
@@ -390,7 +390,7 @@ class SpendAuthorizationService:
                 else SpendAuthorizationOutcomeCode.ACCEPTED,
                 tenant_reference,
                 stored,
-                commitment.spend_commitment_id,
+                mutation_id,
                 None,
             )
 
@@ -404,7 +404,7 @@ class SpendAuthorizationService:
     ) -> SpendAuthorizationResult:
         """Run one release receipt through the atomic ledger method."""
         try:
-            stored, outcome = self.ledger.apply_spend_release(
+            stored, outcome, mutation_id = self.ledger.apply_spend_release(
                 tenant_account_id, release, self._now(), target_status
             )
         except ValueError:
@@ -425,7 +425,7 @@ class SpendAuthorizationService:
             else SpendAuthorizationOutcomeCode.ACCEPTED,
             tenant_reference,
             stored,
-            release.spend_release_id,
+            mutation_id,
             None,
         )
 

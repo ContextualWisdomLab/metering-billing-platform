@@ -3261,7 +3261,7 @@ class MemoryUsageLedger:
         tenant_account_id: UUID,
         commitment: StoredSpendCommitment,
         now: datetime,
-    ) -> tuple[StoredSpendAuthorization, str]:
+    ) -> tuple[StoredSpendAuthorization, str, UUID | None]:
         """Append one commitment and update its authorization projection."""
         authorization = self.get_spend_authorization(
             tenant_account_id, commitment.spend_authorization_id
@@ -3275,20 +3275,20 @@ class MemoryUsageLedger:
             existing = self.spend_commitments[existing_id]
             if existing.committed_amount != commitment.committed_amount:
                 raise ValueError("idempotency key already stores a different commitment")
-            return authorization, "duplicate_replay"
+            return authorization, "duplicate_replay", existing.spend_commitment_id
         if authorization.authorization_status == "expired":
-            return authorization, "authorization_expired"
+            return authorization, "authorization_expired", None
         if authorization.authorization_status == "denied":
-            return authorization, "authorization_status_invalid"
+            return authorization, "authorization_status_invalid", None
         if now >= authorization.valid_until:
-            return authorization, "authorization_expired"
+            return authorization, "authorization_expired", None
         remaining = (
             authorization.requested_amount
             - authorization.committed_amount
             - authorization.released_amount
         )
         if commitment.committed_amount > remaining:
-            return authorization, "commitment_amount_exceeded"
+            return authorization, "commitment_amount_exceeded", None
         committed = authorization.committed_amount + commitment.committed_amount
         status = _authorization_status(
             authorization.requested_amount,
@@ -3319,7 +3319,7 @@ class MemoryUsageLedger:
                     now,
                 )
             )
-        return updated, "accepted"
+        return updated, "accepted", commitment.spend_commitment_id
 
     def apply_spend_release(
         self,
@@ -3327,7 +3327,7 @@ class MemoryUsageLedger:
         release: StoredSpendRelease,
         now: datetime,
         target_status: str = "released",
-    ) -> tuple[StoredSpendAuthorization, str]:
+    ) -> tuple[StoredSpendAuthorization, str, UUID | None]:
         """Append one release and update its authorization projection."""
         authorization = self.get_spend_authorization(
             tenant_account_id, release.spend_authorization_id
@@ -3341,14 +3341,14 @@ class MemoryUsageLedger:
             existing = self.spend_releases[existing_id]
             if existing.released_amount != release.released_amount:
                 raise ValueError("idempotency key already stores a different release")
-            return authorization, "duplicate_replay"
+            return authorization, "duplicate_replay", existing.spend_release_id
         remaining = (
             authorization.requested_amount
             - authorization.committed_amount
             - authorization.released_amount
         )
         if release.released_amount > remaining:
-            return authorization, "release_amount_exceeded"
+            return authorization, "release_amount_exceeded", None
         released = authorization.released_amount + release.released_amount
         status = _authorization_status(
             authorization.requested_amount,
@@ -3380,7 +3380,7 @@ class MemoryUsageLedger:
                     now,
                 )
             )
-        return updated, "accepted"
+        return updated, "accepted", release.spend_release_id
 
     def find_journal_proposal(
         self,

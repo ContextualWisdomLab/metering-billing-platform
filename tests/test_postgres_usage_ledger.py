@@ -5963,7 +5963,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         second_commit = replace(first_commit, spend_commitment_id=uuid4(), idempotency_key="second-commit")
         self.assertEqual(self.ledger.apply_spend_commitment(tenant_id, first_commit, published_at)[1], "accepted")
         self.assertEqual(self.ledger.apply_spend_commitment(tenant_id, second_commit, published_at)[1], "accepted")
-        self.assertEqual(self.ledger.apply_spend_commitment(tenant_id, second_commit, published_at)[1], "duplicate_replay")
+        replayed_commit = self.ledger.apply_spend_commitment(tenant_id, second_commit, published_at)
+        self.assertEqual(replayed_commit[1], "duplicate_replay")
+        self.assertEqual(replayed_commit[2], second_commit.spend_commitment_id)
+        service_commit_replay = SpendAuthorizationService(self.ledger, clock=lambda: published_at).commit_authorization(
+            TENANT_ONE, authorization.spend_authorization_id, "1", "second-commit", "usage"
+        )
+        self.assertEqual(service_commit_replay.outcome_code.value, "duplicate_replay")
+        self.assertEqual(service_commit_replay.mutation_id, second_commit.spend_commitment_id)
         with self.assertRaises(ValueError):
             self.ledger.apply_spend_commitment(
                 tenant_id, replace(second_commit, committed_amount=Decimal("0.1")), published_at
@@ -6021,7 +6028,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         second_release = replace(first_release, spend_release_id=uuid4(), idempotency_key="second-release")
         self.assertEqual(self.ledger.apply_spend_release(tenant_id, first_release, published_at)[1], "accepted")
         self.assertEqual(self.ledger.apply_spend_release(tenant_id, second_release, published_at)[1], "accepted")
-        self.assertEqual(self.ledger.apply_spend_release(tenant_id, second_release, published_at)[1], "duplicate_replay")
+        replayed_release = self.ledger.apply_spend_release(tenant_id, second_release, published_at)
+        self.assertEqual(replayed_release[1], "duplicate_replay")
+        self.assertEqual(replayed_release[2], second_release.spend_release_id)
+        service_release_replay = SpendAuthorizationService(self.ledger, clock=lambda: published_at).release_authorization(
+            TENANT_ONE, authorization.spend_authorization_id, "1", "second-release", "cancelled"
+        )
+        self.assertEqual(service_release_replay.outcome_code.value, "duplicate_replay")
+        self.assertEqual(service_release_replay.mutation_id, second_release.spend_release_id)
         with self.assertRaises(ValueError):
             self.ledger.apply_spend_release(
                 tenant_id, replace(second_release, released_amount=Decimal("0.1")), published_at

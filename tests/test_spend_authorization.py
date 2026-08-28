@@ -75,11 +75,19 @@ class SpendAuthorizationTests(unittest.TestCase):
         self.assertEqual(
             committed_replay.outcome_code, SpendAuthorizationOutcomeCode.DUPLICATE_REPLAY
         )
+        self.assertEqual(committed_replay.mutation_id, committed.mutation_id)
         self.assertEqual(len(ledger.spend_commitments), 1)
 
         released = service.release_authorization(
             TENANT_ONE, authorization_id, "50.00", "release-1", "cancelled"
         )
+        released_replay = service.release_authorization(
+            TENANT_ONE, authorization_id, "50.00", "release-1", "cancelled"
+        )
+        self.assertEqual(
+            released_replay.outcome_code, SpendAuthorizationOutcomeCode.DUPLICATE_REPLAY
+        )
+        self.assertEqual(released_replay.mutation_id, released.mutation_id)
         self.assertEqual(released.authorization.authorization_status, "released")
         self.assertEqual(released.authorization.committed_amount, Decimal("20.00"))
         self.assertEqual(released.authorization.released_amount, Decimal("50.00"))
@@ -272,8 +280,11 @@ class SpendAuthorizationTests(unittest.TestCase):
         zero_commit = StoredSpendCommitment(
             uuid4(), tenant_id, authorization.spend_authorization_id, "zero-commit", Decimal("0"), "usage", NOW
         )
-        self.assertEqual(ledger.apply_spend_commitment(tenant_id, zero_commit, NOW)[1], "accepted")
-        self.assertEqual(ledger.apply_spend_commitment(tenant_id, zero_commit, NOW)[1], "duplicate_replay")
+        accepted_commit = ledger.apply_spend_commitment(tenant_id, zero_commit, NOW)
+        replayed_commit = ledger.apply_spend_commitment(tenant_id, zero_commit, NOW)
+        self.assertEqual(accepted_commit[1], "accepted")
+        self.assertEqual(replayed_commit[1], "duplicate_replay")
+        self.assertEqual(replayed_commit[2], accepted_commit[2])
         with self.assertRaises(ValueError):
             ledger.apply_spend_commitment(
                 tenant_id,
@@ -310,8 +321,11 @@ class SpendAuthorizationTests(unittest.TestCase):
         zero_release = StoredSpendRelease(
             uuid4(), tenant_id, authorization.spend_authorization_id, "zero-release", Decimal("0"), "cancelled", NOW
         )
-        self.assertEqual(ledger.apply_spend_release(tenant_id, zero_release, NOW)[1], "accepted")
-        self.assertEqual(ledger.apply_spend_release(tenant_id, zero_release, NOW)[1], "duplicate_replay")
+        accepted_release = ledger.apply_spend_release(tenant_id, zero_release, NOW)
+        replayed_release = ledger.apply_spend_release(tenant_id, zero_release, NOW)
+        self.assertEqual(accepted_release[1], "accepted")
+        self.assertEqual(replayed_release[1], "duplicate_replay")
+        self.assertEqual(replayed_release[2], accepted_release[2])
         with self.assertRaises(ValueError):
             ledger.apply_spend_release(
                 tenant_id,

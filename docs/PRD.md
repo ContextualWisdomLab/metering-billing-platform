@@ -507,7 +507,7 @@ contextual-orchestrator usage
 ## Spend-authorization acceptance
 
 - A known tenant can reserve an exact amount against an immutable published budget with actor, purpose, policy-version, idempotency, and bounded-validity metadata. PostgreSQL locks the budget row before summing prior exposure, so concurrent requests cannot reserve more than the hard-limit remainder.
-- `POST /v1/spend-authorizations`, `GET /v1/spend-authorizations/{id}`, `POST /v1/spend-authorizations/{id}/commitments`, and `POST /v1/spend-authorizations/{id}/releases` expose the request, read, actual-use, and unused-exposure lifecycle. Retries replay the prior result and do not create a second monetary receipt.
+- `POST /v1/spend-authorizations`, `GET /v1/spend-authorizations/{id}`, `POST /v1/spend-authorizations/{id}/commitments`, and `POST /v1/spend-authorizations/{id}/releases` expose the request, read, actual-use, and unused-exposure lifecycle. Retries replay the prior result with the same persisted commitment or release receipt ID and do not create a second monetary receipt.
 - `requested_amount = committed_amount + released_amount + remaining_amount` is exact decimal arithmetic. Partial commits, cancellation releases, timeout expiry, cross-tenant identifiers, invalid metadata, and over-reservation fail closed.
 - `spend_budget` remains immutable and payment-provider state does not grant entitlement. Credential/principal/project/cost-center/contract policies, quotas, credits, and entitlement grants remain later slices.
 
