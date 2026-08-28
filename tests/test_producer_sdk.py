@@ -100,6 +100,28 @@ class ProducerSdkTests(unittest.TestCase):
             with self.assertRaises(ProducerContractError):
                 build_usage_cloud_event(fixture["event"], source="urn:cwl:producer:test")
 
+    def test_allowlisted_dimensions_are_hashed_and_unknown_fields_fail_closed(self) -> None:
+        """Provider/model attribution is bounded without accepting arbitrary content."""
+        fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+        arguments = dict(fixture["event"])
+        arguments.pop("source_payload_hash")
+        event = build_usage_event(
+            **arguments,
+            dimensions={
+                "model_code": "gpt-4o-mini",
+                "provider_code": "openai",
+                "workflow_code": "verified_workflow",
+            },
+        )
+        self.assertEqual(
+            event["source_payload_hash"],
+            "sha256:48e92ee2293e0c0eda5aaad6de7b4c6657134c6a0200249498c447c8e3aadac9",
+        )
+        with self.assertRaises(ProducerContractError):
+            build_usage_event(**arguments, dimensions={"prompt": "must-not-persist"})
+        with self.assertRaises(ProducerContractError):
+            build_usage_event(**arguments, dimensions=["must-not-persist"])
+
 
 if __name__ == "__main__":
     unittest.main()

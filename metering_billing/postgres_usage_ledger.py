@@ -15,6 +15,7 @@ subsequent slices of the persistence port.
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from datetime import datetime
 from threading import RLock
@@ -1475,8 +1476,8 @@ class PostgresUsageLedger:
                      billing_account_id, billing_principal_id, credential_record_id,
                      source_event_key, event_contract_version, event_payload_hash,
                      product_code, operation_code, occurred_at, recorded_at,
-                     cost_center_reference, project_reference)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     cost_center_reference, project_reference, dimensions)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 RETURNING usage_event_id
                 """,
@@ -1496,6 +1497,7 @@ class PostgresUsageLedger:
                     event.recorded_at,
                     event.cost_center_reference,
                     event.project_reference,
+                    json.dumps(dict(event.dimensions), sort_keys=True),
                 ),
             )
             inserted = cursor.fetchone()
@@ -5717,7 +5719,8 @@ class PostgresUsageLedger:
             SELECT usage_event_id, producer_event_id, tenant_account_id, billing_account_id,
                    billing_principal_id, credential_record_id, source_event_key,
                    event_contract_version, event_payload_hash, product_code, operation_code,
-                   occurred_at, recorded_at, cost_center_reference, project_reference
+                   occurred_at, recorded_at, cost_center_reference, project_reference,
+                   dimensions
             FROM billing_core.usage_event
             WHERE usage_event_id = %s
             """,
@@ -5755,6 +5758,7 @@ class PostgresUsageLedger:
             cost_center_reference=row[13],
             project_reference=row[14],
             measurements=measurements,
+            dimensions=tuple(sorted((row[15] or {}).items())),
         )
 
     @staticmethod

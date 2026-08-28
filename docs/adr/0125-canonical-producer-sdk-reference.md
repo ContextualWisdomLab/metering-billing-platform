@@ -12,9 +12,10 @@ validate differently.
 
 Add a dependency-free Python reference builder that:
 
-- exposes only the fields in the published usage contract;
+- exposes only the fields in the published usage contract, including the
+  versioned allowlist for non-sensitive producer dimensions;
 - computes `source_payload_hash` from the shared canonical representation;
-- rejects schema-invalid quantities, arbitrary dimensions, and sensitive text;
+- rejects schema-invalid quantities, unknown dimensions, and sensitive text;
 - wraps the validated data in a CloudEvents 1.0 JSON envelope; and
 - publishes one checked-in conformance vector containing the canonical JSON
   bytes and expected SHA-256 digest.

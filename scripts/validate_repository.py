@@ -261,6 +261,7 @@ REQUIRED_FILES = (
     "database/migrations/0037_catalog_reference_identity.sql",
     "database/migrations/0038_postgres_rating_vertical_slice.sql",
     "database/migrations/0039_spend_budget_status.sql",
+    "database/migrations/0040_usage_event_dimensions.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",

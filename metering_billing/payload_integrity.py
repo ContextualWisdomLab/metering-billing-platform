@@ -31,6 +31,7 @@ SOURCE_PAYLOAD_FIELDS = (
     "project_reference",
     "product_code",
     "operation_code",
+    "dimensions",
     "occurred_at",
     "measurements",
 )

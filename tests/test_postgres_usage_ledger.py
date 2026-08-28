@@ -185,7 +185,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
         if len(applied) != 39:
-            raise AssertionError(f"expected 39 migrations, got {len(applied)}")
+            raise AssertionError(f"expected 40 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:

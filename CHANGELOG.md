@@ -16,6 +16,14 @@
 
 ### Added
 
+- The canonical usage-event schema and Python, Rust, and TypeScript producer
+  SDK references now accept a bounded allowlist of non-sensitive provider,
+  model, workflow, role, backend, and job-reference dimensions. The dimensions
+  participate in the source-payload hash and survive durable PostgreSQL
+  ingestion in `usage_event.dimensions`; arbitrary content, prompts, responses,
+  document text, and secrets remain rejected. This is contract groundwork for
+  the three real producer integrations required by issue #90, not an integration
+  claim.
 - A Rust producer SDK reference under sdks/rust builds the closed typed usage
   event, verifies exact-decimal and CloudEvents boundaries, and produces the
   same canonical source-payload JSON and SHA-256 hash as the Python conformance

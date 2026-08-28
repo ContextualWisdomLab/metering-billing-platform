@@ -173,6 +173,7 @@ class StoredUsageEvent:
     cost_center_reference: str | None
     project_reference: str | None
     measurements: tuple[StoredUsageMeasurement, ...]
+    dimensions: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

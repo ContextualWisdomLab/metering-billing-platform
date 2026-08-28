@@ -53,3 +53,23 @@ test("rejects tampered hashes and sensitive measurement fields", () => {
     { name: "ProducerContractError" },
   );
 });
+
+test("matches Python for allowlisted provider dimensions", () => {
+  const { source_payload_hash: _sourcePayloadHash, ...input } = fixture.event;
+  const event = buildUsageEvent({
+    ...input,
+    dimensions: {
+      model_code: "gpt-4o-mini",
+      provider_code: "openai",
+      workflow_code: "verified_workflow",
+    },
+  });
+  assert.equal(
+    event.source_payload_hash,
+    "sha256:48e92ee2293e0c0eda5aaad6de7b4c6657134c6a0200249498c447c8e3aadac9",
+  );
+  assert.throws(
+    () => buildUsageEvent({ ...input, dimensions: { prompt: "must-not-persist" } }),
+    { name: "ProducerContractError" },
+  );
+});

@@ -27,6 +27,23 @@
     "project_reference": {"type": "string", "pattern": "^urn:cwl:"},
     "product_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
     "operation_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "dimensions": {
+      "type": "object",
+      "maxProperties": 10,
+      "additionalProperties": false,
+      "properties": {
+        "provider_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "model_code": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+        "workflow_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "role_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "orchestration_mode_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "backend_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "document_job_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "shard_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "run_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "artifact_reference": {"type": "string", "pattern": "^urn:cwl:"}
+      }
+    },
     "occurred_at": {"type": "string", "format": "date-time"},
     "recorded_at": {"type": "string", "format": "date-time"},
     "measurements": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/measurement"}},
