@@ -169,7 +169,7 @@ class DurableUsageOutbox:
                 dead_lettered += self._fail(
                     event_id, "transport_permanent", max_attempts, force_dead=True
                 )
-        except (TransientDeliveryError, OSError, TimeoutError):
+        except Exception:
             for event_id, _ in rows:
                 dead_lettered += self._fail(
                     event_id, "transport_transient", max_attempts

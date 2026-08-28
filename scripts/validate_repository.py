@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Collection
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -262,6 +263,7 @@ REQUIRED_FILES = (
     "database/migrations/0038_postgres_rating_vertical_slice.sql",
     "database/migrations/0039_spend_budget_status.sql",
     "database/migrations/0040_usage_event_dimensions.sql",
+    "database/migrations/0041_usage_event_dimensions_column.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
@@ -374,8 +376,10 @@ def find_placeholder_tokens(text: str) -> tuple[str, ...]:
     return tuple(sorted({match.group(1) for match in PLACEHOLDER_PATTERN.finditer(text)}))
 
 
-def validate_sql_object_names(sql_text: str) -> tuple[str, ...]:
-    """Require created PostgreSQL schemas and tables to use two-word snake case."""
+def validate_sql_object_names(
+    sql_text: str, *, legacy_column_names: Collection[str] = ()
+) -> tuple[str, ...]:
+    """Require PostgreSQL object names to use two-word snake case."""
     errors: list[str] = []
     for schema_name in SCHEMA_NAME_PATTERN.findall(sql_text):
         if SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(schema_name) is None:
@@ -388,7 +392,10 @@ def validate_sql_object_names(sql_text: str) -> tuple[str, ...]:
                 f"table name must contain at least two snake_case words: {table_name}"
             )
     for column_name in COLUMN_NAME_PATTERN.findall(sql_text):
-        if SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(column_name) is None:
+        if (
+            SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(column_name) is None
+            and column_name not in legacy_column_names
+        ):
             errors.append(
                 f"column name must contain at least two snake_case words: {column_name}"
             )
@@ -449,7 +456,14 @@ def validate_repository(root: Path) -> tuple[str, ...]:
         for migration_path in sorted(migrations_directory.glob("*.sql")):
             sql_text = migration_path.read_text(encoding="utf-8")
             relative_path = migration_path.relative_to(root).as_posix()
-            for sql_error in validate_sql_object_names(sql_text):
+            legacy_column_names = (
+                {"dimensions"}
+                if relative_path == "database/migrations/0040_usage_event_dimensions.sql"
+                else set()
+            )
+            for sql_error in validate_sql_object_names(
+                sql_text, legacy_column_names=legacy_column_names
+            ):
                 errors.append(f"{relative_path}: {sql_error}")
             if "provider_customer_id" in sql_text or "stripe_customer_id" in sql_text:
                 errors.append(

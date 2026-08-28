@@ -30,7 +30,7 @@
   SDK references now accept a bounded allowlist of non-sensitive provider,
   model, workflow, role, backend, and job-reference dimensions. The dimensions
   participate in the source-payload hash and survive durable PostgreSQL
-  ingestion in `usage_event.dimensions`; arbitrary content, prompts, responses,
+  ingestion in `usage_event.usage_dimensions`; arbitrary content, prompts, responses,
   document text, and secrets remain rejected. This is contract groundwork for
   the three real producer integrations required by issue #90, not an integration
   claim.

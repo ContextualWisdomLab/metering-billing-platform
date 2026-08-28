@@ -12,7 +12,7 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 - Idempotency keys on all state-changing external commands.
 - Usage ingestion deduplicates on tenant-scoped `source_event_key` and on `source_payload_hash` plus `event_contract_version`.
 - CloudEvents-compatible envelopes in the event milestone.
-- Usage-event dimensions use a versioned allowlist of non-sensitive provider, model, workflow, role, backend, and job-reference values; unknown keys and content fields fail closed.
+- Usage-event dimensions use a versioned allowlist of non-sensitive provider, model, workflow, role, backend, and job-reference values and persist in PostgreSQL as `usage_event.usage_dimensions`; unknown keys and content fields fail closed.
 - Python, Rust, and TypeScript producer SDKs persist validated events locally
   before delivery. Bounded flushes apply per-event ingestion receipts, keep
   missing or transient outcomes pending, and require explicit replay for dead

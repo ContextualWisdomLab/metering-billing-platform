@@ -382,6 +382,26 @@ class ProducerSdkTests(unittest.TestCase):
             self.assertEqual(outbox.dead_letter_count(), 1)
             outbox.close()
 
+    def test_durable_outbox_bounds_unclassified_sender_errors(self) -> None:
+        """Unexpected sender exceptions use the same durable retry boundary."""
+        event = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["event"]
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = DurableUsageOutbox(Path(directory) / "outbox.sqlite3")
+            outbox.enqueue(event)
+
+            def sender(_: object) -> dict[str, object]:
+                raise RuntimeError("unexpected sender failure")
+
+            first = outbox.flush(sender, max_attempts=2)
+            self.assertEqual(first.retried_count, 1)
+            self.assertEqual(first.dead_lettered_count, 0)
+            self.assertEqual(outbox.pending_count(), 1)
+            second = outbox.flush(sender, max_attempts=2)
+            self.assertEqual(second.retried_count, 0)
+            self.assertEqual(second.dead_lettered_count, 1)
+            self.assertEqual(outbox.dead_letter_count(), 1)
+            outbox.close()
+
 
 if __name__ == "__main__":
     unittest.main()
