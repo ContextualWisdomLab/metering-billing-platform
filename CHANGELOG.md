@@ -16,6 +16,11 @@
 
 ### Added
 
+- A protected hourly producer smoke workflow now exercises contextual-orchestrator,
+  NewsDOM, and fast-mlsirm count-only adapters through the durable outbox across
+  an injected Billing outage, process reopen, and server duplicate replay. It is
+  pre-release evidence and does not claim real producer deployment or registry
+  publication.
 - A protected release workflow now builds the Python, Rust, and TypeScript
   producer artifacts from a published tag, publishes Python and npm with OIDC
   provenance, and publishes the Rust crate with a scoped registry token. The

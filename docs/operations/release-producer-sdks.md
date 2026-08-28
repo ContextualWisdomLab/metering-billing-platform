@@ -14,6 +14,15 @@ Current package identities are:
 - Rust: `cwl-metering-producer`
 - TypeScript: `@contextualwisdomlab/metering-producer`
 
+The hourly [`Producer smoke and replay`](../../.github/workflows/producer-smoke-replay.yml)
+workflow also supports manual dispatch. It builds one count-only event through
+each of the contextual-orchestrator, NewsDOM, and fast-mlsirm adapters, persists
+them in the SQLite producer outbox, injects a Billing outage, reopens the
+outbox, and verifies accepted delivery plus server duplicate replay. It never
+stores content or credentials. This is pre-release integration evidence; the
+issue #90 GA criterion still requires the released SDK pins and real producer
+production/staging endpoints.
+
 Before creating a release:
 
 1. Bump the relevant package versions and update `CHANGELOG.md`.
