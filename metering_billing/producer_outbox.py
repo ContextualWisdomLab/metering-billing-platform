@@ -36,7 +36,11 @@ class PermanentDeliveryError(DeliveryError):
 
 @dataclass(frozen=True)
 class OutboxFlushResult:
-    """One bounded flush outcome, including events still pending."""
+    """One bounded flush outcome, including events still pending.
+
+    ``rejected_count`` describes a delivery outcome; ``dead_lettered_count``
+    describes a queue state transition, so the counters may overlap.
+    """
 
     attempted_count: int
     accepted_count: int
@@ -173,6 +177,12 @@ class DurableUsageOutbox:
             for event_id, _ in rows:
                 dead_lettered += self._fail(
                     event_id, "transport_transient", max_attempts
+                )
+                retried += self._was_retried(event_id, max_attempts)
+        except Exception:
+            for event_id, _ in rows:
+                dead_lettered += self._fail(
+                    event_id, "transport_unexpected", max_attempts
                 )
                 retried += self._was_retried(event_id, max_attempts)
         else:

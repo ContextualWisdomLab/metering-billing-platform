@@ -185,6 +185,21 @@ class ProducerSdkTests(unittest.TestCase):
             self.assertEqual(result.retried_count, 0)
             outbox.close()
 
+    def test_outbox_retries_unexpected_sender_failures(self) -> None:
+        """Unexpected sender failures still advance durable retry state."""
+        event = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["event"]
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = DurableUsageOutbox(Path(directory) / "outbox.sqlite3")
+            outbox.enqueue(event)
+
+            def sender(_: object) -> object:
+                raise RuntimeError("unexpected sender failure")
+
+            result = outbox.flush(sender, max_attempts=2)
+            self.assertEqual(result.retried_count, 1)
+            self.assertEqual(outbox.pending_count(), 1)
+            outbox.close()
+
     def test_http_transport_classifies_success_http_and_network_results(self) -> None:
         """The stdlib sender separates retryable and operator-actionable failures."""
         transport = HttpUsageIngestionTransport(

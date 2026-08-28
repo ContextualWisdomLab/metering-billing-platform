@@ -4726,6 +4726,16 @@ class RepositoryContractTests(unittest.TestCase):
             ("column name must contain at least two snake_case words: status",),
         )
 
+    def test_applied_legacy_dimensions_migration_is_allowlisted_by_path(self) -> None:
+        """The immutable 0040 migration remains valid while new SQL stays strict."""
+        self.assertEqual(validate_repository(ROOT), ())
+        self.assertEqual(
+            validate_sql_object_names(
+                "ALTER TABLE usage_event ADD COLUMN dimensions jsonb;\n"
+            ),
+            ("column name must contain at least two snake_case words: dimensions",),
+        )
+
     def test_repository_prefixes_sql_name_errors_with_migration_path(self) -> None:
         """SQL naming failures name the migration that introduced them."""
         with tempfile.TemporaryDirectory() as temporary_directory:
