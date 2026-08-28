@@ -76,6 +76,16 @@ class ProducerIntegrationTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             build_contextual_usage_event(
+                {**record, "workflow_run_id": ""},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
+                {**record, "workflow_run_id": 0},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
                 {**record, "provider_name": "OpenAI"},
                 **IDENTITY,
             )

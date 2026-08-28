@@ -25,7 +25,7 @@ def build_contextual_usage_event(
 ) -> dict[str, Any]:
     """Map one contextual-orchestrator usage record without prompt content."""
     usage_record_id = _required_text(record, "usage_record_id")
-    workflow_run_id = record.get("workflow_run_id") or "request"
+    workflow_run_id = record["workflow_run_id"] if "workflow_run_id" in record else "request"
     if not isinstance(workflow_run_id, str) or not workflow_run_id:
         raise ValueError("workflow_run_id must be a non-empty string when present")
     source_event_key = f"contextual-orchestrator:{workflow_run_id}:{usage_record_id}"
