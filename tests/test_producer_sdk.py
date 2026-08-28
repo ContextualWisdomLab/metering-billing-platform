@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import unittest
+import unittest.mock
 from pathlib import Path
-from unittest import mock
 from uuid import UUID
 
 from metering_billing.producer_sdk import (
@@ -93,7 +93,7 @@ class ProducerSdkTests(unittest.TestCase):
         invalid_hash = dict(arguments, source_payload_hash="sha256:" + "0" * 64)
         with self.assertRaises(ProducerContractError):
             build_usage_cloud_event(invalid_hash, source="urn:cwl:producer:test")
-        with mock.patch(
+        with unittest.mock.patch(
             "metering_billing.producer_sdk.source_payload_hash_errors",
             side_effect=ValueError("hash failure"),
         ):
