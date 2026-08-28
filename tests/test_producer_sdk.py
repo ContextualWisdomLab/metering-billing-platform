@@ -6,7 +6,9 @@ import json
 import unittest
 import unittest.mock
 import tempfile
+from io import BytesIO
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from uuid import UUID
 
 from metering_billing.producer_sdk import (
@@ -16,6 +18,8 @@ from metering_billing.producer_sdk import (
 )
 from metering_billing.producer_outbox import (
     DurableUsageOutbox,
+    HttpUsageIngestionTransport,
+    OutboxFlushResult,
     PermanentDeliveryError,
     TransientDeliveryError,
 )
@@ -139,6 +143,126 @@ class ProducerSdkTests(unittest.TestCase):
             build_usage_event(**arguments, dimensions={"prompt": "must-not-persist"})
         with self.assertRaises(ProducerContractError):
             build_usage_event(**arguments, dimensions=["must-not-persist"])
+
+    def test_outbox_guards_duplicate_bytes_and_empty_flush(self) -> None:
+        """Durability guards reject collisions and keep no-op flushes explicit."""
+        fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+        event = fixture["event"]
+        outbox = DurableUsageOutbox(":memory:")
+        self.assertEqual(
+            outbox.flush(lambda _: {}), OutboxFlushResult(0, 0, 0, 0, 0, 0, 0)
+        )
+        with self.assertRaises(ValueError):
+            outbox.flush(lambda _: {}, batch_size=0)
+        with self.assertRaises(ProducerContractError):
+            outbox.enqueue({})
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.validate_usage_event",
+            return_value=(),
+        ):
+            with self.assertRaises(ProducerContractError):
+                outbox.enqueue({"event_id": 123})
+        outbox.enqueue(event)
+        outbox.enqueue(event)
+        changed = dict(event, dimensions={"model_code": "other-model"})
+        changed.pop("source_payload_hash")
+        changed = build_usage_event(**changed)
+        with self.assertRaises(ProducerContractError):
+            outbox.enqueue(changed)
+        with self.assertRaises(KeyError):
+            outbox.replay_dead_letter("missing")
+        self.assertEqual(outbox._fail("missing", "test", 1), 0)
+        outbox.close()
+
+    def test_outbox_dead_letters_invalid_batch_response(self) -> None:
+        """A response without receipts reaches the bounded dead-letter path."""
+        event = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["event"]
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = DurableUsageOutbox(Path(directory) / "outbox.sqlite3")
+            outbox.enqueue(event)
+            result = outbox.flush(lambda _: {"not_receipts": []}, max_attempts=1)
+            self.assertEqual(result.dead_lettered_count, 1)
+            self.assertEqual(result.retried_count, 0)
+            outbox.close()
+
+    def test_http_transport_classifies_success_http_and_network_results(self) -> None:
+        """The stdlib sender separates retryable and operator-actionable failures."""
+        transport = HttpUsageIngestionTransport(
+            "https://metering.invalid/v1/usage-events"
+        )
+        body = {"event_receipts": []}
+
+        def response(status: int, payload: bytes = b'{"event_receipts": []}'):
+            result = unittest.mock.MagicMock()
+            result.status = status
+            result.read.return_value = payload
+            result.__enter__.return_value = result
+            return result
+
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen", return_value=response(200)
+        ):
+            self.assertEqual(transport([]), body)
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen", return_value=response(500)
+        ):
+            with self.assertRaises(TransientDeliveryError):
+                transport([])
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen", return_value=response(400)
+        ):
+            with self.assertRaises(PermanentDeliveryError):
+                transport([])
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen", return_value=response(300)
+        ):
+            with self.assertRaises(PermanentDeliveryError):
+                transport([])
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen",
+            return_value=response(200, b"bad"),
+        ):
+            with self.assertRaises(TransientDeliveryError):
+                transport([])
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen",
+            return_value=response(200, b'{"not_receipts": []}'),
+        ):
+            with self.assertRaises(TransientDeliveryError):
+                transport([])
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen",
+            side_effect=HTTPError(
+                "https://metering.invalid", 500, "server", {}, BytesIO()
+            ),
+        ):
+            with self.assertRaises(TransientDeliveryError):
+                transport([])
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen",
+            side_effect=HTTPError(
+                "https://metering.invalid",
+                422,
+                "invalid",
+                {},
+                BytesIO(json.dumps(body).encode()),
+            ),
+        ):
+            self.assertEqual(transport([]), body)
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen",
+            side_effect=HTTPError(
+                "https://metering.invalid", 422, "invalid", {}, BytesIO(b"bad")
+            ),
+        ):
+            with self.assertRaises(PermanentDeliveryError):
+                transport([])
+        with unittest.mock.patch(
+            "metering_billing.producer_outbox.urlopen",
+            side_effect=URLError("offline"),
+        ):
+            with self.assertRaises(TransientDeliveryError):
+                transport([])
 
     def test_durable_outbox_retries_partial_receipts_and_replays(self) -> None:
         """Only hash-matched accepted receipts remove durable rows."""

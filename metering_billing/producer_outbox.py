@@ -284,7 +284,10 @@ class HttpUsageIngestionTransport:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 status = int(response.status)
-                body = json.loads(response.read().decode("utf-8"))
+                try:
+                    body = json.loads(response.read().decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                    raise TransientDeliveryError("invalid_json") from error
         except HTTPError as error:
             if error.code >= 500:
                 raise TransientDeliveryError("http_5xx") from error
