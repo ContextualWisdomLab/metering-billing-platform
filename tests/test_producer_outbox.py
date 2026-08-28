@@ -59,12 +59,14 @@ class FakeTransport:
         return self.results or ()
 
 
-def event_for(index: int) -> dict[str, object]:
+def event_for(index: int, tenant_reference: str | None = None) -> dict[str, object]:
     fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     arguments = dict(fixture["event"])
     arguments.pop("source_payload_hash")
     arguments["event_id"] = UUID(int=index + 1)
     arguments["source_event_key"] = f"producer-event-{index}"
+    if tenant_reference is not None:
+        arguments["tenant_reference"] = tenant_reference
     return build_usage_event(**arguments)
 
 
@@ -209,6 +211,28 @@ class ProducerOutboxTests(unittest.TestCase):
             self.assertEqual(empty.attempted_event_count, 0)
             outbox.close()
 
+    def test_drain_is_scoped_to_delivery_tenant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = ProducerOutbox(Path(directory) / "outbox.sqlite3", clock=lambda: NOW)
+            tenant_event = event_for(13)
+            other_event = event_for(14, "urn:cwl:tenant_002")
+            outbox.enqueue(tenant_event, auth=AUTH)
+            outbox.enqueue(
+                other_event,
+                auth=ProducerAuthContext("urn:cwl:tenant_002", "usage_delivery"),
+            )
+            key = tenant_event["source_event_key"]
+            transport = FakeTransport([ProducerDeliveryResult(key, "accepted")])
+
+            receipt = outbox.drain(transport, auth=AUTH, now=NOW)
+
+            self.assertEqual(receipt.attempted_event_count, 1)
+            self.assertEqual(transport.events, (tenant_event,))
+            self.assertEqual(
+                outbox.get_status(str(other_event["event_id"])).status, "pending"
+            )
+            outbox.close()
+
     def test_drain_retries_with_backoff_then_delivers_after_persistence_reopen(self) -> None:
         event = event_for(20)
         with tempfile.TemporaryDirectory() as directory:
@@ -231,7 +255,9 @@ class ProducerOutboxTests(unittest.TestCase):
             reopened = ProducerOutbox(path, clock=lambda: NOW, max_attempts=2)
             delivered = FakeTransport([ProducerDeliveryResult(key, "accepted")])
             second = reopened.drain(
-                delivered, auth=AUTH, now=NOW + timedelta(seconds=5)
+                delivered,
+                auth=AUTH,
+                now=NOW + timedelta(seconds=5, microseconds=500_000),
             )
             self.assertEqual(second.accepted_event_count, 1)
             self.assertEqual(reopened.get_status(str(event["event_id"])).status, "delivered")

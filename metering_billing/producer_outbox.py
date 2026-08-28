@@ -264,7 +264,7 @@ class ProducerOutbox:
         _validate_batch_limit(limit)
         current = self._clock() if now is None else now
         now_text = _format_instant(current)
-        rows = self._claim_pending(now_text, limit)
+        rows = self._claim_pending(now_text, limit, auth.tenant_reference)
         if not rows:
             return ProducerDrainReceipt(0, 0, 0, 0, 0, 0, ())
         events = tuple(json.loads(row["event_json"]) for row in rows)
@@ -333,7 +333,9 @@ class ProducerOutbox:
         """Serialize claims and state transitions across local workers."""
         self._connection.execute("BEGIN IMMEDIATE")
 
-    def _claim_pending(self, now_text: str, limit: int) -> tuple[sqlite3.Row, ...]:
+    def _claim_pending(
+        self, now_text: str, limit: int, tenant_reference: str
+    ) -> tuple[sqlite3.Row, ...]:
         """Lease due rows so a crashed worker can be recovered after expiry."""
         lease_until = _format_instant(
             _parse_instant(now_text) + timedelta(seconds=self._lease_seconds)
@@ -345,13 +347,14 @@ class ProducerOutbox:
                     """
                     SELECT outbox_event_id, source_event_key, event_json, attempt_count
                     FROM producer_outbox_event
-                    WHERE status = 'pending'
+                    WHERE tenant_reference = ?
+                      AND status = 'pending'
                       AND next_attempt_at <= ?
                       AND (lease_until IS NULL OR lease_until <= ?)
                     ORDER BY next_attempt_at, outbox_event_id
                     LIMIT ?
                     """,
-                    (now_text, now_text, limit),
+                    (tenant_reference, now_text, now_text, limit),
                 ).fetchall()
             )
             for row in rows:
@@ -470,7 +473,7 @@ def _format_instant(value: datetime) -> str:
     """Render an aware instant in stable UTC form."""
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("outbox clock must return a timezone-aware datetime")
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _parse_instant(value: str) -> datetime:
