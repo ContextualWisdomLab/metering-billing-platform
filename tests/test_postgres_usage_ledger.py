@@ -855,7 +855,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
     def test_ingestion_is_atomic_replay_safe_and_tenant_scoped(self) -> None:
         """A restart-safe repository keeps one event, normalized measurements, and receipts."""
         service = UsageIngestionService(self.ledger)
-        event = make_event()
+        event = make_event(
+            dimensions={
+                "model_code": "gpt-4o-mini",
+                "provider_code": "openai",
+                "workflow_code": "verified_workflow",
+            }
+        )
         accepted = service.ingest_usage_event(event)
         replay = service.ingest_usage_event(event)
         self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
@@ -870,6 +876,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         stored = self.ledger.get_usage_event(accepted.usage_event_id)
         self.assertIsNotNone(stored)
         self.assertEqual(len(stored.measurements), 1)
+        self.assertEqual(
+            stored.dimensions,
+            (
+                ("model_code", "gpt-4o-mini"),
+                ("provider_code", "openai"),
+                ("workflow_code", "verified_workflow"),
+            ),
+        )
         self.assertEqual(len(self.ledger.stored_usage_set(self.ledger.require_tenant(TENANT_ONE).tenant_account_id)), 1)
         self.assertEqual(
             len(self.ledger.list_usage_events(self.ledger.require_tenant(TENANT_TWO).tenant_account_id)),
