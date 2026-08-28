@@ -61,6 +61,7 @@ services:
       PORT: ${BILLING_API_PORT:-8000}
       METERING_BILLING_LEDGER_BACKEND: postgres
       METERING_BILLING_POSTGRES_DSN: ${METERING_BILLING_POSTGRES_DSN:-postgresql://metering_billing:metering_billing_dev_only_change_me@postgres_database:5432/metering_billing}
+      METERING_BILLING_POSTGRES_POOL_SIZE: ${METERING_BILLING_POSTGRES_POOL_SIZE:-4}
       AIS_BASE_URL: ${AIS_BASE_URL:-}
     healthcheck:
       # Stdlib-only probe: no curl needed inside the image.
