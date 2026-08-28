@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from threading import Barrier
 import unittest
+import unittest.mock as mock
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -5747,6 +5748,165 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             4,
         )
+
+    def test_spend_authorization_same_key_concurrent_requests_replay(self) -> None:
+        """Concurrent identical requests return one durable authorization replay."""
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        account, account_error = self.ledger.resolve_billing_account(tenant, ACCOUNT_ONE)
+        self.assertIsNone(account_error)
+        assert account is not None
+        published_at = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
+        budget = SpendBudgetService(self.ledger, clock=lambda: published_at).publish_spend_budget(
+            TENANT_ONE, account.billing_account_id, "USD", Decimal("100"), MORNING_WINDOW
+        )
+        assert budget.spend_budget_id is not None
+        deadline = datetime(2026, 8, 16, 10, 30, tzinfo=UTC)
+        workers = [
+            PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
+            PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
+        ]
+        barrier = Barrier(2)
+
+        def request(worker: PostgresUsageLedger):
+            barrier.wait()
+            return SpendAuthorizationService(worker, clock=lambda: published_at).request_authorization(
+                TENANT_ONE,
+                budget.spend_budget_id,
+                "60",
+                "same-concurrent-key",
+                "worker",
+                "batch",
+                "policy-v1",
+                deadline,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = tuple(pool.map(request, workers))
+        for worker in workers:
+            worker.close()
+        self.assertEqual(
+            sorted(result.outcome_code.value for result in results),
+            ["accepted", "duplicate_replay"],
+        )
+        self.assertEqual(
+            results[0].authorization.spend_authorization_id,
+            results[1].authorization.spend_authorization_id,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.spend_authorization"
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_spend_authorization_concurrent_insert_conflicts_stay_idempotent(self) -> None:
+        """Concurrent insert conflicts replay or reject without aborting the transaction."""
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        account, account_error = self.ledger.resolve_billing_account(tenant, ACCOUNT_ONE)
+        self.assertIsNone(account_error)
+        assert account is not None
+        published_at = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
+        deadline = datetime(2026, 8, 16, 10, 30, tzinfo=UTC)
+
+        def run_pair(budget_amount: str, requested_amount: str, actors: tuple[str, str], key: str):
+            budget = SpendBudgetService(self.ledger, clock=lambda: published_at).publish_spend_budget(
+                TENANT_ONE,
+                account.billing_account_id,
+                "USD",
+                Decimal(budget_amount),
+                MORNING_WINDOW,
+            )
+            assert budget.spend_budget_id is not None
+            workers = [
+                PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
+                PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
+            ]
+            barrier = Barrier(2)
+
+            def request(item: tuple[int, str]):
+                index, actor = item
+                barrier.wait()
+                return SpendAuthorizationService(workers[index], clock=lambda: published_at).request_authorization(
+                    TENANT_ONE,
+                    budget.spend_budget_id,
+                    requested_amount,
+                    key,
+                    actor,
+                    "batch",
+                    "policy-v1",
+                    deadline,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = tuple(pool.map(request, enumerate(actors)))
+            for worker in workers:
+                worker.close()
+            return results
+
+        reserved_conflict_results = run_pair(
+            "100", "40", ("worker-a", "worker-b"), "reserved-race"
+        )
+        self.assertEqual(
+            sum(
+                result.rejection_reason_code == "idempotency_key_conflict"
+                for result in reserved_conflict_results
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                result.outcome_code.value == "accepted"
+                for result in reserved_conflict_results
+            ),
+            1,
+        )
+        conflict_results = run_pair("101", "60", ("worker-a", "worker-b"), "denied-race")
+        self.assertEqual(
+            sum(result.rejection_reason_code == "idempotency_key_conflict" for result in conflict_results),
+            1,
+        )
+        self.assertEqual(
+            sum(result.outcome_code.value == "accepted" for result in conflict_results),
+            1,
+        )
+        accepted_authorization = next(
+            result.authorization
+            for result in reserved_conflict_results
+            if result.outcome_code.value == "accepted"
+        )
+        assert accepted_authorization is not None
+        candidate = replace(
+            accepted_authorization,
+            spend_authorization_id=uuid4(),
+            idempotency_key="reserved-replay-seam",
+            authorization_status="requested",
+            created_at=published_at,
+            updated_at=published_at,
+        )
+        reservation = StoredSpendReservation(
+            uuid4(),
+            candidate.tenant_account_id,
+            candidate.spend_authorization_id,
+            candidate.requested_amount,
+            candidate.idempotency_key,
+            published_at,
+            deadline,
+        )
+        with (
+            mock.patch.object(
+                PostgresUsageLedger, "_insert_spend_authorization", return_value=False
+            ),
+            mock.patch.object(
+                PostgresUsageLedger,
+                "_fetch_spend_authorization_by_idempotency_key",
+                return_value=candidate,
+            ),
+        ):
+            stored, outcome = self.ledger.create_spend_authorization(
+                candidate, reservation
+            )
+        self.assertEqual(stored, candidate)
+        self.assertEqual(outcome, "duplicate_replay")
 
     def test_spend_authorization_postgres_edges_are_idempotent_and_tenant_scoped(self) -> None:
         """Exercise direct durable authorization branches that the service guards."""

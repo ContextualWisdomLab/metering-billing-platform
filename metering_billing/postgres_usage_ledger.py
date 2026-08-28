@@ -4521,13 +4521,25 @@ class PostgresUsageLedger:
                     rejection_reason_code="authorization_exposure_exceeded",
                     updated_at=authorization.created_at,
                 )
-                self._insert_spend_authorization(cursor, denied)
+                if not self._insert_spend_authorization(cursor, denied):
+                    existing = self._fetch_spend_authorization_by_idempotency_key(
+                        cursor, authorization.tenant_account_id, authorization.idempotency_key
+                    )
+                    if _authorization_identity(existing) != _authorization_identity(authorization):
+                        raise ValueError("idempotency key already stores a different authorization")
+                    return existing, "duplicate_replay"
                 self._insert_spend_authorization_transition(
                     cursor, denied, "requested", "denied", denied.idempotency_key
                 )
                 return denied, "authorization_exposure_exceeded"
             reserved = replace(authorization, authorization_status="reserved")
-            self._insert_spend_authorization(cursor, reserved)
+            if not self._insert_spend_authorization(cursor, reserved):
+                existing = self._fetch_spend_authorization_by_idempotency_key(
+                    cursor, authorization.tenant_account_id, authorization.idempotency_key
+                )
+                if _authorization_identity(existing) != _authorization_identity(authorization):
+                    raise ValueError("idempotency key already stores a different authorization")
+                return existing, "duplicate_replay"
             cursor.execute(
                 """
                 INSERT INTO billing_core.spend_reservation
@@ -6939,6 +6951,23 @@ class PostgresUsageLedger:
             raise KeyError(spend_authorization_id)
         return self._spend_authorization_from_row(row)
 
+    def _fetch_spend_authorization_by_idempotency_key(
+        self, cursor: Any, tenant_account_id: UUID, idempotency_key: str
+    ) -> StoredSpendAuthorization:
+        """Hydrate the authorization that won a concurrent idempotency race."""
+        cursor.execute(
+            """
+            SELECT spend_authorization_id
+            FROM billing_core.spend_authorization
+            WHERE tenant_account_id = %s AND idempotency_key = %s
+            """,
+            (tenant_account_id, idempotency_key),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - ON CONFLICT selected an existing row
+            raise KeyError(idempotency_key)  # pragma: no cover - defensive invariant
+        return self._fetch_spend_authorization(cursor, UUID(str(row[0])))
+
     def _locked_spend_authorization(
         self, cursor: Any, tenant_account_id: UUID, spend_authorization_id: UUID
     ) -> StoredSpendAuthorization | None:
@@ -6963,8 +6992,8 @@ class PostgresUsageLedger:
     @staticmethod
     def _insert_spend_authorization(
         cursor: Any, authorization: StoredSpendAuthorization
-    ) -> None:
-        """Insert one authorization projection."""
+    ) -> bool:
+        """Insert one projection, returning false for a concurrent replay."""
         cursor.execute(
             """
             INSERT INTO billing_core.spend_authorization
@@ -6976,6 +7005,7 @@ class PostgresUsageLedger:
                  authorization_status, rejection_reason_code, created_at, updated_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (tenant_account_id, idempotency_key) DO NOTHING
             """,
             (
                 authorization.spend_authorization_id,
@@ -7000,6 +7030,7 @@ class PostgresUsageLedger:
                 authorization.updated_at,
             ),
         )
+        return cursor.rowcount == 1
 
     @staticmethod
     def _update_spend_authorization(
