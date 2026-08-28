@@ -63,16 +63,14 @@ checks 100% (17,373 / 17,373), HTTP failures 0%.**
 
 ### Next actions
 
-1. Introduce per-request database sessions (connection pool or session-per-
-   request wiring) so reads stop queueing behind one shared connection.
-2. Re-run this exact scenario after the pooling change and append a dated
-   section comparing p50/p95 per request kind.
-3. Move per-request access logging behind an environment flag to remove
+1. Merge the bounded pool described in ADR 0125, then re-run this exact
+   scenario and append a dated section comparing p50/p95 per request kind.
+2. Move per-request access logging behind an environment flag to remove
    synchronous stderr writes from the hot path.
-4. Add k6 thresholds (sanity ceilings on p95 and error rate) once numbers
+3. Add k6 thresholds (sanity ceilings on p95 and error rate) once numbers
    stabilize across hardware, keeping this first baseline threshold-free for
    comparability.
-5. Re-baseline on target production hardware before any capacity commitment;
+4. Re-baseline on target production hardware before any capacity commitment;
    these Apple-Silicon-container numbers are not transferable sizing data.
 
 ## Method contract

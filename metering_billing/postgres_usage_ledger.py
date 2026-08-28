@@ -15,10 +15,13 @@ subsequent slices of the persistence port.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
-from threading import RLock
-from typing import Any, Iterator
+import os
+import queue
+import threading
+from typing import Any
 from uuid import UUID
 
 from metering_billing.errors import (
@@ -88,97 +91,369 @@ from metering_billing.usage_ledger import (
 MIGRATION_HISTORY_TABLE = "public.metering_billing_schema_migration"
 """Migration-history table mirrored from ``scripts/migrate_postgres.py``."""
 
+DEFAULT_POSTGRES_POOL_SIZE = 4
+"""Default number of live PostgreSQL sessions one pooled ledger may open."""
+
+POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE = "METERING_BILLING_POSTGRES_POOL_SIZE"
+"""Environment knob overriding :data:`DEFAULT_POSTGRES_POOL_SIZE`."""
+
+
+def _resolve_pool_size(size: Any) -> int:
+    """Return *size* when it is a valid positive pool size, else fail closed."""
+    if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+        raise ValueError(
+            f"{POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE} must be a positive "
+            f"integer, got {size!r}"
+        )
+    return size
+
+
+def _environment_pool_size(environ: Mapping[str, str]) -> int:
+    """Resolve the configured pool size from *environ*, failing closed."""
+    raw_value = environ.get(POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE)
+    if raw_value is None:
+        return DEFAULT_POSTGRES_POOL_SIZE
+    try:
+        parsed_value = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            f"{POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE} must be a positive "
+            f"integer, got {raw_value!r}"
+        ) from error
+    return _resolve_pool_size(parsed_value)
+
+
+def _session_is_usable(connection: Any) -> bool:
+    """Return True when a pooled session looks healthy enough to reuse."""
+    if getattr(connection, "closed", False):
+        return False
+    return not bool(getattr(connection, "broken", False))
+
+
+def _is_operational_session_error(error: BaseException) -> bool:
+    """Return True when *error* means the underlying session itself is broken."""
+    try:
+        from psycopg import OperationalError
+    except ImportError:  # pragma: no cover - packaging smoke mirrors connect()
+        return False
+    return isinstance(error, OperationalError)
+
+
+class _ConnectionPool:
+    """Queue-backed pool of live PostgreSQL sessions with a hard open cap.
+
+    Sessions open lazily through ``factory`` up to ``size``.  Healthy sessions
+    return to an idle :class:`queue.Queue` on check-in; a closed or broken
+    session is retired instead so it is never handed out again, and the next
+    checkout opens its replacement.  When every slot is leased, checkout polls
+    the idle queue with a short timeout so a retirement that frees capacity can
+    never strand a waiting caller (no lost-wakeup window).
+    """
+
+    _CHECKOUT_POLL_SECONDS = 0.05
+    """Idle-queue wait ceiling between capacity re-evaluations."""
+
+    def __init__(
+        self,
+        size: int,
+        factory: Callable[[], Any],
+        *,
+        owns_sessions: bool,
+        initial_connection: Any | None = None,
+    ) -> None:
+        """Validate *size* and bind the lazy session *factory*.
+
+        ``initial_connection`` preserves the eager lifecycle of the historical
+        injected-connection form while pooled ``connect`` remains lazy.
+        """
+        self._size = _resolve_pool_size(size)
+        self._factory = factory
+        self._owns_sessions = owns_sessions
+        self._idle: queue.Queue[Any] = queue.Queue()
+        self._gate = threading.Lock()
+        self._open_count = 0
+        self._closed = False
+        if initial_connection is not None:
+            self._open_count = 1
+            self._idle.put(initial_connection)
+
+    @property
+    def size(self) -> int:
+        """Return the maximum number of simultaneously live sessions."""
+        return self._size
+
+    @property
+    def open_count(self) -> int:
+        """Return how many factory-built sessions are currently tracked."""
+        with self._gate:
+            return self._open_count
+
+    def checkout(self) -> Any:
+        """Return one healthy session, opening or waiting when required."""
+        while True:
+            candidate = None
+            try:
+                candidate = self._idle.get_nowait()
+            except queue.Empty:
+                pass
+            if candidate is not None:
+                if _session_is_usable(candidate):
+                    return candidate
+                self._retire(candidate)
+                continue
+            may_open = False
+            with self._gate:
+                if self._closed:
+                    raise RuntimeError(
+                        "PostgreSQL connection pool is closed; refusing to "
+                        "open replacement sessions"
+                    )
+                if self._open_count < self._size:
+                    self._open_count += 1
+                    may_open = True
+            if may_open:
+                try:
+                    return self._factory()
+                except BaseException:
+                    with self._gate:
+                        self._open_count -= 1
+                    raise
+            try:
+                candidate = self._idle.get(timeout=self._CHECKOUT_POLL_SECONDS)
+            except queue.Empty:
+                continue
+            if _session_is_usable(candidate):  # pragma: no cover - defensive: only healthy sessions are enqueued
+                return candidate
+            self._retire(candidate)
+
+    def checkin(self, connection: Any) -> None:
+        """Return one leased session to the pool or retire it when unhealthy."""
+        if self._closed_state() or not _session_is_usable(connection):
+            self._retire(connection)
+            return
+        self._idle.put(connection)
+
+    def discard(self, connection: Any) -> None:
+        """Retire one poisoned session without returning it to the idle queue."""
+        self._retire(connection)
+
+    def close(self) -> None:
+        """Refuse further checkouts and close every currently idle session."""
+        drained: list[Any] = []
+        with self._gate:
+            self._closed = True
+            while True:
+                try:
+                    drained.append(self._idle.get_nowait())
+                except queue.Empty:
+                    break
+            self._open_count -= len(drained)
+        if self._owns_sessions:
+            for connection in drained:
+                self._close_quietly(connection)
+
+    def _closed_state(self) -> bool:
+        """Return whether this pool stopped handing out sessions."""
+        with self._gate:
+            return self._closed
+
+    @staticmethod
+    def _close_quietly(connection: Any) -> None:
+        """Close one owned session, swallowing secondary close failures."""
+        try:
+            close = getattr(connection, "close", None)
+            if callable(close):
+                close()
+        except Exception:  # noqa: BLE001 - shutdown must not mask the original error
+            pass
+
+    def _retire(self, connection: Any) -> None:
+        """Forget one dead session and close it only when this pool owns it."""
+        with self._gate:
+            self._open_count -= 1
+            owns_sessions = self._owns_sessions
+        if owns_sessions:
+            self._close_quietly(connection)
+
 
 class PostgresUsageLedger:
     """Persist usage attribution and immutable facts in PostgreSQL.
 
-    ``connection`` is a psycopg 3 connection.  It is injected so callers can
-    control pooling and lifecycle; :meth:`connect` is the small convenience
-    entry point for a standalone process.  The connection is not closed by
-    :meth:`close` unless this repository created it.
+    The repository funnels every operation through a small dependency-free
+    connection pool so threaded callers stop serializing behind one shared
+    psycopg session (ADR 0125).  Two construction forms exist:
+
+    * ``PostgresUsageLedger(connection)`` wraps exactly the injected psycopg 3
+      session; the pool degenerates to that one connection and access stays
+      serialized as before.  The session is never closed by :meth:`close`
+      unless ``owns_connection=True`` was supplied.
+    * :meth:`connect` builds a pooled repository that opens up to
+      ``METERING_BILLING_POSTGRES_POOL_SIZE`` (default
+      :data:`DEFAULT_POSTGRES_POOL_SIZE`) sessions lazily, discards sessions
+      broken by operational errors, and replaces them on the next checkout.
+      Outer :meth:`transaction`/:meth:`ingestion_transaction` blocks hold one
+      lease per thread so nested operations join the same transaction.
     """
 
-    def __init__(self, connection: Any, *, owns_connection: bool = False) -> None:
-        self.connection = connection
-        self._owns_connection = owns_connection
-        self._transaction_active = False
+    def __init__(
+        self,
+        connection: Any | None = None,
+        *,
+        owns_connection: bool = False,
+        pool_size: int | None = None,
+        connection_factory: Callable[[], Any] | None = None,
+    ) -> None:
+        """Bind this repository to one injected session or a pooled factory.
+
+        ``connection`` keeps the historical single-session form.  Pool mode
+        requires ``connection_factory`` and optionally ``pool_size``; passing
+        both an injected connection and pool settings fails closed.
+        """
         self.webhook_subscription_secrets: dict[UUID, str] = {}
-        # One psycopg connection serializes its transactions; the threaded web
-        # tier must funnel every session touch through this reentrant lock so
-        # concurrent requests never interleave transaction nesting.
-        self._connection_lock = RLock()
+        # Process-local webhook secrets are genuine shared mutable state
+        # unrelated to database I/O, so they keep their own dedicated lock.
+        self._secrets_lock = threading.Lock()
+        self._active_sessions = threading.local()
+        if connection is not None:
+            if pool_size is not None or connection_factory is not None:
+                raise ValueError(
+                    "an injected connection cannot be combined with pool settings"
+                )
+            resolved_size = 1
+            resolved_factory: Callable[[], Any] = lambda: connection
+            owns_sessions = owns_connection
+        else:
+            if connection_factory is None:
+                raise ValueError(
+                    "a PostgreSQL connection or connection factory is required"
+                )
+            resolved_size = (
+                _environment_pool_size(os.environ) if pool_size is None else pool_size
+            )
+            resolved_factory = connection_factory
+            owns_sessions = True
+        self._owns_pool_sessions = owns_sessions
+        self._pool = _ConnectionPool(
+            resolved_size,
+            resolved_factory,
+            owns_sessions=owns_sessions,
+            initial_connection=connection,
+        )
 
     @classmethod
-    def connect(cls, dsn: str) -> "PostgresUsageLedger":
-        """Open a psycopg connection for the current migration set."""
+    def connect(
+        cls,
+        dsn: str,
+        *,
+        pool_size: int | None = None,
+        connection_factory: Callable[[], Any] | None = None,
+    ) -> "PostgresUsageLedger":
+        """Open a pooled PostgreSQL repository for the current migration set.
+
+        Sessions open lazily through psycopg (or *connection_factory* in
+        tests) up to *pool_size* or ``METERING_BILLING_POSTGRES_POOL_SIZE``;
+        both validate to a positive integer and fail closed otherwise.
+        """
         try:
             import psycopg
         except ImportError as error:  # pragma: no cover - exercised by packaging smoke
             raise RuntimeError(
                 "PostgreSQL support requires the project dependency psycopg[binary]"
             ) from error
-        return cls(psycopg.connect(dsn), owns_connection=True)
+        resolved_factory = (
+            connection_factory
+            if connection_factory is not None
+            else (lambda: psycopg.connect(dsn))
+        )
+        return cls(
+            None,
+            pool_size=pool_size,
+            connection_factory=resolved_factory,
+        )
+
+    @contextmanager
+    def lease(self) -> Iterator[Any]:
+        """Yield one pooled PostgreSQL connection with guaranteed return semantics.
+
+        The connection returns to the pool on normal exit.  A session broken
+        by an operational error — or reported closed/broken at exit — is
+        discarded instead, and the next checkout opens its replacement.
+        Exceptions raised by the body always restore pool state.
+        """
+        connection = self._pool.checkout()
+        poisoned = False
+        try:
+            yield connection
+        except BaseException as error:
+            poisoned = _is_operational_session_error(error)
+            raise
+        finally:
+            if poisoned:
+                self._pool.discard(connection)
+            else:
+                self._pool.checkin(connection)
+
+    def _thread_session(self) -> Any | None:
+        """Return this thread's outer-transaction session, if any."""
+        return getattr(self._active_sessions, "connection", None)
 
     @contextmanager
     def _cursor(self) -> Iterator[Any]:
         """Yield a cursor in the caller transaction or a one-operation transaction."""
-        if self._transaction_active:
-            with self.connection.cursor() as cursor:
+        active = self._thread_session()
+        if active is not None:
+            with active.cursor() as cursor:
                 yield cursor
             return
-        self._connection_lock.acquire()
-        try:
-            with self.connection.transaction():
-                with self.connection.cursor() as cursor:
+        with self.lease() as connection:
+            with connection.transaction():
+                with connection.cursor() as cursor:  # pragma: no branch
                     yield cursor
-        finally:
-            self._connection_lock.release()
 
     @contextmanager
     def ingestion_transaction(self) -> Iterator[None]:
         """Commit one ingest decision and its audit receipt atomically."""
-        self._connection_lock.acquire()
-        try:
-            if self._transaction_active:
-                yield
-                return
-            self._transaction_active = True
+        if self._thread_session() is not None:
+            yield
+            return
+        with self.lease() as connection:
+            self._active_sessions.connection = connection
             try:
-                with self.connection.transaction():
+                with connection.transaction():
                     yield
             finally:
-                self._transaction_active = False
-        finally:
-            self._connection_lock.release()
+                self._active_sessions.connection = None
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
         """Commit one multi-record commercial command atomically."""
-        self._connection_lock.acquire()
-        try:
-            if self._transaction_active:
-                yield
-                return
-            self._transaction_active = True
+        if self._thread_session() is not None:
+            yield
+            return
+        with self.lease() as connection:
+            self._active_sessions.connection = connection
             try:
-                with self.connection.transaction():
+                with connection.transaction():
                     yield
             finally:
-                self._transaction_active = False
-        finally:
-            self._connection_lock.release()
+                self._active_sessions.connection = None
 
     def close(self) -> None:
-        """Close the connection when this repository owns it."""
-        if self._owns_connection:
-            self.connection.close()
+        """Close pooled sessions when this repository created them.
+
+        A repository built around one injected connection leaves lifecycle
+        management with its owner and stays usable after :meth:`close`,
+        matching the historical contract.
+        """
+        if self._owns_pool_sessions:
+            self._pool.close()
 
     def migration_history_row_count(self) -> int:
         """Return one cheap liveness-probe row count from the migration history.
 
-        The probe runs through the same connection and transaction conventions
-        as every other repository operation, so ``/readyz`` never opens an
-        ad-hoc PostgreSQL connection beside the ledger's own session.
+        The probe runs through the pooled-session lease conventions as every
+        other repository operation, so ``/readyz`` never opens an ad-hoc
+        PostgreSQL connection beside the ledger's own sessions.
         """
         with self._cursor() as cursor:
             cursor.execute(f"SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE}")
@@ -5221,11 +5496,13 @@ class PostgresUsageLedger:
         """Keep the one-time secret in the worker process; SQL stores only its hash."""
         if not webhook_secret:
             raise ValueError("webhook secret must be a non-empty string")
-        self.webhook_subscription_secrets[webhook_subscription_id] = webhook_secret
+        with self._secrets_lock:
+            self.webhook_subscription_secrets[webhook_subscription_id] = webhook_secret
 
     def get_webhook_subscription_secret(self, webhook_subscription_id: UUID) -> str | None:
         """Return the process-local secret for one subscription, if present."""
-        return self.webhook_subscription_secrets.get(webhook_subscription_id)
+        with self._secrets_lock:
+            return self.webhook_subscription_secrets.get(webhook_subscription_id)
 
     def get_webhook_subscription(
         self, webhook_subscription_id: UUID
