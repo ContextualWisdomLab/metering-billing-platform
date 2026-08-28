@@ -490,7 +490,7 @@ class SpendAuthorizationTests(unittest.TestCase):
             app,
             "POST",
             "/v1/spend-authorizations",
-            {**request, "card_pan": "4111111111111111"},
+            {**request, "card_pan": "unsupported-field-value"},
         )
         self.assertEqual(bad_status, 422)
         self.assertEqual(bad_body["rejection_reason_code"], "request_invalid")
