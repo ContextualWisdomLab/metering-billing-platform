@@ -26,6 +26,9 @@
   scheduling, and the existing server idempotency remains the monetary-effect
   authority (ADR 0129). This is outage-buffer groundwork; real producer
   onboarding and released consumer pins under issue #90 remain open.
+- All three SDK outboxes now require the receipt tenant to match the queued
+  event before acknowledging accepted or duplicate-replayed delivery; missing
+  tenant evidence remains retryable rather than removing the fact.
 - The canonical usage-event schema and Python, Rust, and TypeScript producer
   SDK references now accept a bounded allowlist of non-sensitive provider,
   model, workflow, role, backend, and job-reference dimensions. The dimensions

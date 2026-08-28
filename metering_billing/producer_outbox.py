@@ -335,7 +335,7 @@ def _find_receipt(
         for receipt in receipts
         if isinstance(receipt, Mapping)
         and receipt.get("source_event_key") == event.get("source_event_key")
-        and (receipt.get("tenant_reference") in {None, event.get("tenant_reference")})
+        and receipt.get("tenant_reference") == event.get("tenant_reference")
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -345,6 +345,7 @@ def _receipt_matches(
 ) -> bool:
     return bool(
         receipt is not None
+        and receipt.get("tenant_reference") == event.get("tenant_reference")
         and receipt.get("source_payload_hash") == event.get("source_payload_hash")
         and receipt.get("event_contract_version") == event.get("event_contract_version")
     )
