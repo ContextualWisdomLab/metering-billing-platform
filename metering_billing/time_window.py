@@ -9,11 +9,14 @@ not an interchange instant (ISO 8601-1:2019).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from metering_billing.errors import TimeWindowError
+
+_SECOND_FRACTION_PATTERN = re.compile(r"T\d{2}:\d{2}:\d{2}\.(\d+)")
 
 
 def parse_iso8601_datetime(value: Any) -> datetime:
@@ -23,6 +26,9 @@ def parse_iso8601_datetime(value: Any) -> datetime:
     """
     if not isinstance(value, str):
         raise TimeWindowError("timestamp must be an ISO 8601 string")
+    fraction_match = _SECOND_FRACTION_PATTERN.search(value)
+    if fraction_match is not None and len(fraction_match.group(1)) > 6:
+        raise TimeWindowError("timestamp cannot contain sub-microsecond precision")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:

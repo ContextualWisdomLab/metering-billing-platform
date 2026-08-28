@@ -74,5 +74,26 @@ jobs:
         run: python -m compileall -q scripts tests metering_billing
       - name: Run Rust producer SDK tests
         run: cargo test --manifest-path sdks/rust/Cargo.toml --locked
+      - name: Install pinned Rust coverage toolchain
+        run: |
+          rustup toolchain install nightly-2026-08-21 --profile minimal --no-self-update
+          rustup component add llvm-tools-preview --toolchain nightly-2026-08-21
+          cargo install cargo-llvm-cov --version 0.8.6 --locked
+      - name: Report Rust producer SDK coverage
+        run: >-
+          cargo +nightly-2026-08-21 llvm-cov
+          --locked
+          --manifest-path sdks/rust/Cargo.toml
+          --features coverage
+          --branch
+          --fail-under-lines 95
+          --fail-under-functions 100
+          --summary-only
       - name: Run TypeScript producer SDK tests
-        run: node --experimental-strip-types --test sdks/typescript/test/conformance.test.ts
+        run: >-
+          node --experimental-strip-types --test --experimental-test-coverage
+          --test-coverage-include=sdks/typescript/src/index.ts
+          --test-coverage-lines=100
+          --test-coverage-branches=100
+          --test-coverage-functions=100
+          sdks/typescript/test/conformance.test.ts

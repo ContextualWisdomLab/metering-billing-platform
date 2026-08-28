@@ -11,6 +11,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from metering_billing.producer_sdk import build_usage_cloud_event, build_usage_event
 
 _CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_REFERENCE_PATTERN = re.compile(r"^urn:cwl:[A-Za-z0-9][A-Za-z0-9._:/-]{0,247}$")
 
 
 def build_contextual_usage_event(
@@ -24,10 +26,13 @@ def build_contextual_usage_event(
     cost_center_reference: str | None = None,
 ) -> dict[str, Any]:
     """Map one contextual-orchestrator usage record without prompt content."""
-    usage_record_id = _required_text(record, "usage_record_id")
-    workflow_run_id = record.get("workflow_run_id") or "request"
-    if not isinstance(workflow_run_id, str) or not workflow_run_id:
-        raise ValueError("workflow_run_id must be a non-empty string when present")
+    usage_record_id = _identifier(
+        _required_text(record, "usage_record_id"), "usage_record_id"
+    )
+    workflow_run_id = record.get("workflow_run_id")
+    workflow_run_id = _identifier(
+        "request" if workflow_run_id is None else workflow_run_id, "workflow_run_id"
+    )
     source_event_key = f"contextual-orchestrator:{workflow_run_id}:{usage_record_id}"
     quality = (
         "provider_reported"
@@ -41,7 +46,9 @@ def build_contextual_usage_event(
     )
     dimensions = {
         "provider_code": provider,
-        "model_code": _required_text(record, "model_name"),
+        "model_code": _identifier(
+            _required_text(record, "model_name"), "model_name"
+        ),
         "workflow_code": "orchestration_workflow",
         "orchestration_mode_code": route_mode,
     }
@@ -107,8 +114,12 @@ def build_newsdom_usage_event(
     project_reference: str | None = None,
 ) -> dict[str, Any]:
     """Map one NewsDOM parse result using counts, never document text."""
-    if not document_id:
-        raise ValueError("document_id must be non-empty")
+    document_id = _identifier(document_id, "document_id")
+    document_job_reference = _reference(
+        document_job_reference, "document_job_reference"
+    )
+    if shard_reference is not None:
+        shard_reference = _reference(shard_reference, "shard_reference")
     source_event_key = (
         f"newsdom:{document_job_reference}:{shard_reference or document_id}"
     )
@@ -185,6 +196,14 @@ def build_fast_mlsirm_usage_event(
     project_reference: str | None = None,
 ) -> dict[str, Any]:
     """Map one fast-mlsirm run using dimensions and result sizes only."""
+    run_reference = _reference(run_reference, "run_reference")
+    artifact_reference = _reference(artifact_reference, "artifact_reference")
+    configuration_reference = _reference(
+        configuration_reference, "configuration_reference"
+    )
+    seed_reference = _reference(seed_reference, "seed_reference")
+    model_code = _identifier(model_code, "model_code")
+    backend_code = _code(backend_code, "backend_code")
     source_event_key = f"fast-mlsirm:{run_reference}:fit"
     measurements = [
         {
@@ -251,6 +270,18 @@ def _required_text(record: Mapping[str, Any], field_name: str) -> str:
     value = record.get(field_name)
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _identifier(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or _IDENTIFIER_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a bounded identifier")
+    return value
+
+
+def _reference(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or _REFERENCE_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a bounded urn:cwl reference")
     return value
 
 

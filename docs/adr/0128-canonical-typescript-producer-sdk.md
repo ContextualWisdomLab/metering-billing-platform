@@ -20,8 +20,12 @@ Publish a small TypeScript reference package under sdks/typescript that:
 - verifies the committed cross-language conformance vector in Node's built-in
   test runner.
 
-The package performs no price calculation, credential persistence, or network
-ingestion. Durable buffering remains the producer outbox boundary.
+The package performs no price calculation or credential persistence. Its
+`FileUsageOutbox` provides process-local durable buffering and its optional
+`httpUsageIngestionTransport` sends batches only to HTTPS endpoints with a
+bounded timeout. Applications still own endpoint selection, credential values,
+and scheduling; the server remains the ingestion and monetary-effect
+authority.
 
 ## Consequences
 

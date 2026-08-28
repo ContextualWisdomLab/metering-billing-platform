@@ -370,7 +370,6 @@ class RepositoryContractTests(unittest.TestCase):
             "FOREIGN KEY (meter_definition_id, quality_code)",
         ):
             self.assertIn(expected_fragment, sql)
-
     def test_persistence_integrity_migration_protects_references_and_intervals(self) -> None:
         """Database constraints preserve proposal identity and half-open assignments."""
         sql = (
@@ -384,7 +383,6 @@ class RepositoryContractTests(unittest.TestCase):
             "tstzrange(valid_from, COALESCE(valid_to, 'infinity'::timestamptz), '[)')",
         ):
             self.assertIn(expected_fragment, sql)
-
     def test_catalog_reference_migration_preserves_resolver_identity(self) -> None:
         """Catalog rows must retain the URNs used by the in-memory resolver."""
         sql = (ROOT / "database/migrations/0037_catalog_reference_identity.sql").read_text(
@@ -436,6 +434,7 @@ class RepositoryContractTests(unittest.TestCase):
             "usage_event_correction_lineage_object",
         ):
             self.assertIn(expected_fragment, sql)
+        self.assertNotRegex(sql, r"(?im)^\s*(?:DROP|DELETE|UPDATE)\b")
 
     def test_correction_uuid_follow_up_migration_matches_schema_uuid_validation(self) -> None:
         """The follow-up keeps schema-valid non-RFC4122 UUID variants insertable."""
@@ -449,6 +448,16 @@ class RepositoryContractTests(unittest.TestCase):
             "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
             sql,
         )
+        self.assertIn(") NOT VALID", sql)
+        validation_sql = (
+            ROOT / "database/migrations/0044_validate_usage_event_contract_constraints.sql"
+        ).read_text(encoding="utf-8")
+        for constraint in (
+            "usage_event_usage_dimensions_object",
+            "usage_event_producer_contract_version_positive",
+            "usage_event_correction_lineage_object",
+        ):
+            self.assertIn(f"VALIDATE CONSTRAINT {constraint}", validation_sql)
 
     def test_rating_run_accepts_exact_invoice_intent_totals(self) -> None:
         """A rating-run contract records exact decimal invoice-intent lines."""

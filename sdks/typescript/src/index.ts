@@ -178,7 +178,7 @@ export class FileUsageOutbox {
           } else if (receipt?.ingestion_outcome_code === "duplicate_replay" && receiptMatches(receipt, record.event)) {
             records.splice(records.indexOf(record), 1);
             duplicateReplay += 1;
-          } else if (receipt?.ingestion_outcome_code === "rejected") {
+          } else if (receipt?.ingestion_outcome_code === "rejected" && receiptMatches(receipt, record.event)) {
             fail(record, typeof receipt.rejection_reason_code === "string" ? receipt.rejection_reason_code : "rejected", true);
             rejected += 1;
           } else {
@@ -216,15 +216,19 @@ export class FileUsageOutbox {
 }
 
 /** Fetch-based sender for the platform's existing POST /v1/usage-events route. */
-export function httpUsageIngestionTransport(endpoint: string, headers: Record<string, string> = {}): UsageDeliverySender {
+export function httpUsageIngestionTransport(
+  endpoint: string,
+  headers: Record<string, string> = {},
+  timeoutMilliseconds = 10_000,
+): UsageDeliverySender {
   let parsedEndpoint: URL;
   try {
     parsedEndpoint = new URL(endpoint);
   } catch {
-    throw new ProducerContractError("endpoint must be an absolute HTTP(S) URL");
+    throw new ProducerContractError("endpoint must be an absolute HTTPS URL");
   }
-  if (!["http:", "https:"].includes(parsedEndpoint.protocol) || !parsedEndpoint.host) {
-    throw new ProducerContractError("endpoint must be an absolute HTTP(S) URL");
+  if (parsedEndpoint.protocol !== "https:" || !parsedEndpoint.host) {
+    throw new ProducerContractError("endpoint must be an absolute HTTPS URL");
   }
   return async (events) => {
     let response: Response;
@@ -233,6 +237,7 @@ export function httpUsageIngestionTransport(endpoint: string, headers: Record<st
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify({ events }),
+        signal: AbortSignal.timeout(timeoutMilliseconds),
       });
     } catch (error) {
       throw new TransientDeliveryError("network");
@@ -339,7 +344,7 @@ export function canonicalSourcePayloadJson(event: UsageEvent): string {
   }
   if (event.dimensions !== undefined) {
     payload.dimensions = Object.fromEntries(
-      Object.entries(event.dimensions).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+      Object.entries(event.dimensions).sort(([left], [right]) => (left > right ? 1 : -1)),
     );
   }
   payload.event_contract_version = event.event_contract_version;
@@ -378,10 +383,10 @@ function stableJson(value: unknown): string {
   if (value !== null && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, entryValue]) => entryValue !== undefined)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+      .sort(([left], [right]) => (left > right ? 1 : -1));
     return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableJson(entryValue)}`).join(",")}}`;
   }
-  return JSON.stringify(value) ?? "null";
+  return JSON.stringify(value) as string;
 }
 
 function canonicalQuantity(quantity: string): string {
@@ -414,7 +419,7 @@ function canonicalTimestamp(timestamp: string): string {
 }
 
 function validateInput(input: UsageEventInput): void {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.event_id)) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.event_id)) {
     throw new ProducerContractError("event_id must be a UUID");
   }
   if (!Number.isInteger(input.event_contract_version) || input.event_contract_version < 1) {
@@ -456,7 +461,7 @@ function validateInput(input: UsageEventInput): void {
     canonicalTimestamp(input.available_at);
   }
   if (input.correction_lineage !== undefined) {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.correction_lineage.prior_event_id)) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.correction_lineage.prior_event_id)) {
       throw new ProducerContractError("correction_lineage.prior_event_id must be a UUID");
     }
     if (!(["corrects", "reverses", "supersedes"] as const).includes(input.correction_lineage.relationship_code)) {
@@ -587,7 +592,7 @@ function validateReference(name: string, value: string): void {
 }
 
 function validateBoundedText(name: string, value: string, maximum: number): void {
-  if (typeof value !== "string" || value.length === 0 || value.length > maximum) {
+  if (typeof value !== "string" || value.length === 0 || [...value].length > maximum) {
     throw new ProducerContractError(name + " must be between 1 and " + maximum + " characters");
   }
 }

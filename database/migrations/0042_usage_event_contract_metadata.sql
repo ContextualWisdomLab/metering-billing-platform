@@ -11,7 +11,7 @@ ALTER TABLE billing_core.usage_event
 
 ALTER TABLE billing_core.usage_event
     ADD CONSTRAINT usage_event_producer_contract_version_positive
-        CHECK (producer_contract_version > 0),
+        CHECK (producer_contract_version > 0) NOT VALID,
     ADD CONSTRAINT usage_event_correction_lineage_object
         CHECK (
             correction_lineage IS NULL
@@ -23,6 +23,6 @@ ALTER TABLE billing_core.usage_event
                     '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
                 AND correction_lineage->>'relationship_code' IN ('corrects', 'reverses', 'supersedes')
             )
-        );
+        ) NOT VALID;
 
 COMMIT;

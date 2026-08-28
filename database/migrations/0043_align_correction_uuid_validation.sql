@@ -15,6 +15,6 @@ ALTER TABLE billing_core.usage_event
                     '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
                 AND correction_lineage->>'relationship_code' IN ('corrects', 'reverses', 'supersedes')
             )
-        );
+        ) NOT VALID;
 
 COMMIT;

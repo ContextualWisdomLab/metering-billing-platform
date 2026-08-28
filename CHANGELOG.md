@@ -29,6 +29,15 @@
 - All three SDK outboxes now require the receipt tenant to match the queued
   event before acknowledging accepted or duplicate-replayed delivery; missing
   tenant evidence remains retryable rather than removing the fact.
+- Producer integration adapters now restrict source identifiers, references,
+  model names, and backend codes to bounded capability-port syntax, rejecting
+  prompt-like or document-content strings before they reach an event or outbox.
+- Accepted, duplicate-replay, and rejected SDK receipts now require the full
+  tenant/source-hash/contract-version binding; transports require HTTPS and a
+  bounded timeout, and file outboxes sync the parent directory after rename.
+- Producer contract migrations stage new checks as `NOT VALID` and validate
+  them in a following append-only migration, avoiding an unbounded lock during
+  rollout.
 - The canonical usage-event schema and Python, Rust, and TypeScript producer
   SDK references now accept a bounded allowlist of non-sensitive provider,
   model, workflow, role, backend, and job-reference dimensions. The dimensions
