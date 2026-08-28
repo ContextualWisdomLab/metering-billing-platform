@@ -25,11 +25,13 @@ producer integration:
 - The event ID is the stable local outbox ID. Re-enqueueing the same tenant,
   source key, and byte-stable event is a duplicate enqueue; reusing the key for
   a different fact fails closed.
-- A tenant-scoped lease prevents two local workers from delivering the same row
-  at once. Claiming records the lease but does not consume an attempt; the
-  attempt count advances only when the result is applied. An expired lease is
-  eligible for recovery after a process crash, and a late result can update a
-  row only while its original lease is still current.
+- A tenant- and context-scoped lease prevents two local workers from delivering
+  the same row at once. A drain claims only rows matching its tenant, purpose,
+  credential reference, and correlation context. Claiming records the lease but
+  does not consume an attempt; the attempt count advances only when the result
+  is applied. An expired lease is eligible for recovery after a process crash,
+  and a late result can update a row only while its original lease is still
+  current.
 - Each drain is capped at 100 events. `accepted` and `duplicate_replay` are
   terminal delivery outcomes; explicit `rejected` results enter dead-letter
   state; transport errors and incomplete receipts retry with capped exponential

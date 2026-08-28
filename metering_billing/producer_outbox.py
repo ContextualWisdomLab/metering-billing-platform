@@ -271,7 +271,7 @@ class ProducerOutbox:
         current = self._clock() if now is None else now
         now_text = _format_instant(current)
         with self._lock:
-            rows = self._claim_pending(now_text, limit, auth.tenant_reference)
+            rows = self._claim_pending(now_text, limit, auth)
         if not rows:
             return ProducerDrainReceipt(0, 0, 0, 0, 0, 0, ())
         events = tuple(json.loads(row["event_json"]) for row in rows)
@@ -344,7 +344,7 @@ class ProducerOutbox:
         self._connection.execute("BEGIN IMMEDIATE")
 
     def _claim_pending(
-        self, now_text: str, limit: int, tenant_reference: str
+        self, now_text: str, limit: int, auth: ProducerAuthContext
     ) -> tuple[dict[str, Any], ...]:
         """Lease due rows so a crashed worker can be recovered after expiry."""
         lease_until = _format_instant(
@@ -358,13 +358,24 @@ class ProducerOutbox:
                     SELECT outbox_event_id, source_event_key, event_json, attempt_count
                     FROM producer_outbox_event
                     WHERE tenant_reference = ?
+                      AND purpose_code = ?
+                      AND credential_reference IS ?
+                      AND correlation_id IS ?
                       AND delivery_status = 'pending'
                       AND next_attempt_at <= ?
                       AND (lease_until IS NULL OR lease_until <= ?)
                     ORDER BY next_attempt_at, outbox_event_id
                     LIMIT ?
                     """,
-                    (tenant_reference, now_text, now_text, limit),
+                    (
+                        auth.tenant_reference,
+                        auth.purpose_code,
+                        auth.credential_reference,
+                        auth.correlation_id,
+                        now_text,
+                        now_text,
+                        limit,
+                    ),
                 ).fetchall()
             )
             for row in rows:

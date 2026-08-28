@@ -254,11 +254,11 @@ class ProducerOutboxTests(unittest.TestCase):
             event = event_for(53)
             first.enqueue(event, auth=AUTH)
             first_rows = first._claim_pending(
-                _format_instant(NOW), 1, AUTH.tenant_reference
+                _format_instant(NOW), 1, AUTH
             )
             second = ProducerOutbox(path, clock=lambda: NOW, lease_seconds=1)
             second_rows = second._claim_pending(
-                _format_instant(NOW + timedelta(seconds=2)), 1, AUTH.tenant_reference
+                _format_instant(NOW + timedelta(seconds=2)), 1, AUTH
             )
             self.assertEqual(len(second_rows), 1)
 
@@ -329,10 +329,19 @@ class ProducerOutboxTests(unittest.TestCase):
             outbox = ProducerOutbox(Path(directory) / "outbox.sqlite3", clock=lambda: NOW)
             tenant_event = event_for(13)
             other_event = event_for(14, "urn:cwl:tenant_002")
+            other_context_event = event_for(15)
             outbox.enqueue(tenant_event, auth=AUTH)
             outbox.enqueue(
                 other_event,
                 auth=ProducerAuthContext("urn:cwl:tenant_002", "usage_delivery"),
+            )
+            outbox.enqueue(
+                other_context_event,
+                auth=ProducerAuthContext(
+                    AUTH.tenant_reference,
+                    "different_purpose",
+                    correlation_id="different-correlation",
+                ),
             )
             key = tenant_event["source_event_key"]
             transport = FakeTransport([ProducerDeliveryResult(key, "accepted")])
@@ -343,6 +352,9 @@ class ProducerOutboxTests(unittest.TestCase):
             self.assertEqual(transport.events, (tenant_event,))
             self.assertEqual(
                 outbox.get_status(str(other_event["event_id"])).status, "pending"
+            )
+            self.assertEqual(
+                outbox.get_status(str(other_context_event["event_id"])).status, "pending"
             )
             outbox.close()
 
