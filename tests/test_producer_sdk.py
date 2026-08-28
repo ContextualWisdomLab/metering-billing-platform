@@ -313,6 +313,12 @@ class ProducerSdkTests(unittest.TestCase):
             with self.assertRaises(TransientDeliveryError):
                 transport([])
 
+    def test_http_transport_rejects_non_http_endpoints(self) -> None:
+        """The sender cannot be redirected to local files or relative paths."""
+        for endpoint in ("file:///etc/passwd", "https://"):
+            with self.assertRaises(ValueError):
+                HttpUsageIngestionTransport(endpoint)
+
     def test_durable_outbox_retries_partial_receipts_and_replays(self) -> None:
         """Only hash-matched accepted receipts remove durable rows."""
         fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from metering_billing.contracts import validate_usage_event
@@ -276,6 +277,9 @@ class HttpUsageIngestionTransport:
         headers: Mapping[str, str] | None = None,
         timeout: float = 10.0,
     ) -> None:
+        parsed_endpoint = urlparse(endpoint)
+        if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.netloc:
+            raise ValueError("endpoint must be an absolute HTTP(S) URL")
         self.endpoint = endpoint
         self.headers = {"Content-Type": "application/json", **(headers or {})}
         self.timeout = timeout

@@ -93,6 +93,17 @@ test("HTTP transport retries timeout and rate-limit responses", async () => {
   }
 });
 
+test("HTTP transport rejects non-HTTP endpoints", () => {
+  assert.throws(
+    () => httpUsageIngestionTransport("file:///etc/passwd"),
+    { name: "ProducerContractError" },
+  );
+  assert.throws(
+    () => httpUsageIngestionTransport("https://"),
+    { name: "ProducerContractError" },
+  );
+});
+
 test("durable outbox keeps failed events and accepts a matched replay receipt", async () => {
   const { source_payload_hash: _sourcePayloadHash, ...input } = fixture.event;
   const event = buildUsageEvent(input);

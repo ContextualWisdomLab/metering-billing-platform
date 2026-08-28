@@ -217,6 +217,15 @@ export class FileUsageOutbox {
 
 /** Fetch-based sender for the platform's existing POST /v1/usage-events route. */
 export function httpUsageIngestionTransport(endpoint: string, headers: Record<string, string> = {}): UsageDeliverySender {
+  let parsedEndpoint: URL;
+  try {
+    parsedEndpoint = new URL(endpoint);
+  } catch {
+    throw new ProducerContractError("endpoint must be an absolute HTTP(S) URL");
+  }
+  if (!["http:", "https:"].includes(parsedEndpoint.protocol) || !parsedEndpoint.host) {
+    throw new ProducerContractError("endpoint must be an absolute HTTP(S) URL");
+  }
   return async (events) => {
     let response: Response;
     try {
