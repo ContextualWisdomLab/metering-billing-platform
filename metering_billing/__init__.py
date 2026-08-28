@@ -355,6 +355,17 @@ from metering_billing.producer_sdk import (
     build_usage_cloud_event,
     build_usage_event,
 )
+from metering_billing.producer_outbox import (
+    ProducerAuthContext,
+    ProducerDeliveryResult,
+    ProducerDrainReceipt,
+    ProducerEnqueueReceipt,
+    ProducerOutbox,
+    ProducerOutboxConflict,
+    ProducerOutboxError,
+    ProducerOutboxStatus,
+    ProducerOutboxTransport,
+)
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
 from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
@@ -604,6 +615,15 @@ __all__ = (
     "USAGE_CLOUD_EVENT_TYPE",
     "build_usage_cloud_event",
     "build_usage_event",
+    "ProducerAuthContext",
+    "ProducerDeliveryResult",
+    "ProducerDrainReceipt",
+    "ProducerEnqueueReceipt",
+    "ProducerOutbox",
+    "ProducerOutboxConflict",
+    "ProducerOutboxError",
+    "ProducerOutboxStatus",
+    "ProducerOutboxTransport",
     "canonical_source_payload_json",
     "compute_source_payload_hash",
     "create_http_app",
