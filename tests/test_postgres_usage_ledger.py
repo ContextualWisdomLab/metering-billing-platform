@@ -201,8 +201,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 44:
-            raise AssertionError(f"expected 44 migrations, got {len(applied)}")
+        if len(applied) != 45:
+            raise AssertionError(f"expected 45 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -657,10 +657,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             blocking_exception_count=3,
         )
         self.assertEqual(validate_reconciliation_run(run.as_contract_dict()), ())
-        self.assertEqual(self.ledger.insert_reconciliation_run(run), run)
-        self.assertEqual(self.ledger.insert_reconciliation_run(run), run)
-        self.assertEqual(self.ledger.get_reconciliation_run(run.run_id), run)
-        self.assertIsNone(self.ledger.get_reconciliation_run(uuid4()))
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_run(TENANT_TWO, run)
+        self.assertEqual(self.ledger.insert_reconciliation_run(TENANT_ONE, run), run)
+        self.assertEqual(self.ledger.insert_reconciliation_run(TENANT_ONE, run), run)
+        self.assertEqual(self.ledger.get_reconciliation_run(TENANT_ONE, run.run_id), run)
+        self.assertIsNone(self.ledger.get_reconciliation_run(TENANT_ONE, uuid4()))
+        self.assertIsNone(self.ledger.get_reconciliation_run(TENANT_TWO, run.run_id))
         self.assertEqual(self.ledger.list_reconciliation_runs(TENANT_TWO), ())
         self.assertEqual(
             self.ledger.list_reconciliation_runs(TENANT_ONE, period_id=period.period_id),
@@ -668,14 +671,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_run(
+                TENANT_ONE,
                 replace(run, blocking_exception_count=4)
             )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_run(
+                TENANT_ONE,
                 replace(run, run_id=uuid4(), reconciliation_line_ids=(uuid4(),))
             )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_run(
+                TENANT_ONE,
                 replace(run, run_id=uuid4(), period_id=uuid4())
             )
         self.assertIsNone(self.ledger.get_reconciliation_line(TENANT_ONE, uuid4()))

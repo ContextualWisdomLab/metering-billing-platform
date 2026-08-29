@@ -667,14 +667,22 @@ class PostgresUsageLedger:
             )
         return tuple(item for item in evidence if item is not None)
 
-    def get_reconciliation_run(self, run_id: UUID) -> ReconciliationRun | None:
-        """Return one immutable completed reconciliation run."""
+    def get_reconciliation_run(
+        self, tenant_reference: str, run_id: UUID
+    ) -> ReconciliationRun | None:
+        """Return one tenant-scoped immutable completed reconciliation run."""
         with self._cursor() as cursor:
-            return self._fetch_reconciliation_run(cursor, run_id)
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_reconciliation_run(
+                cursor, run_id, tenant_account_id=tenant_account_id
+            )
 
-    def insert_reconciliation_run(self, run: ReconciliationRun) -> ReconciliationRun:
-        """Persist a completed run and its ordered line membership atomically."""
+    def insert_reconciliation_run(
+        self, tenant_reference: str, run: ReconciliationRun
+    ) -> ReconciliationRun:
+        """Persist one tenant-owned run and its ordered line membership atomically."""
         with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
             cursor.execute(
                 """
                 SELECT tenant_account_id
@@ -684,9 +692,8 @@ class PostgresUsageLedger:
                 (run.period_id,),
             )
             period = cursor.fetchone()
-            if period is None:
+            if period is None or UUID(str(period[0])) != tenant_account_id:
                 raise KeyError(run.period_id)
-            tenant_account_id = UUID(str(period[0]))
             cursor.execute(
                 """
                 INSERT INTO billing_core.reconciliation_run
@@ -747,7 +754,9 @@ class PostgresUsageLedger:
                 row = cursor.fetchone()
                 if row != (tenant_account_id, run.period_id, reconciliation_line_id):  # pragma: no cover - protected by composite identity constraints
                     raise ValueError("reconciliation run line identity cannot change")
-            stored = self._fetch_reconciliation_run(cursor, run.run_id)
+            stored = self._fetch_reconciliation_run(
+                cursor, run.run_id, tenant_account_id=tenant_account_id
+            )
             if stored is None:  # pragma: no cover - the insert or conflict must expose a row
                 raise RuntimeError("reconciliation run insert did not return a row")
             if stored.as_contract_dict() != run.as_contract_dict():
@@ -6642,30 +6651,37 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _fetch_reconciliation_run(
-        cursor: Any, run_id: UUID
+        cursor: Any,
+        run_id: UUID,
+        *,
+        tenant_account_id: UUID | None = None,
     ) -> ReconciliationRun | None:
         """Hydrate one completed run with ordered line membership."""
-        cursor.execute(
-            """
+        query = """
             SELECT run_id, period_id, started_at, completed_at,
                    blocking_exception_count, reconciliation_run_contract_version
             FROM billing_core.reconciliation_run
             WHERE run_id = %s
-            """,
-            (run_id,),
-        )
+        """
+        parameters: tuple[Any, ...] = (run_id,)
+        if tenant_account_id is not None:
+            query += " AND tenant_account_id = %s"
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
         row = cursor.fetchone()
         if row is None:
             return None
-        cursor.execute(
-            """
+        line_query = """
             SELECT reconciliation_line_id
             FROM billing_core.reconciliation_run_line
             WHERE run_id = %s
-            ORDER BY line_number
-            """,
-            (run_id,),
-        )
+        """
+        line_parameters: tuple[Any, ...] = (run_id,)
+        if tenant_account_id is not None:
+            line_query += " AND tenant_account_id = %s"
+            line_parameters += (tenant_account_id,)
+        line_query += " ORDER BY line_number"
+        cursor.execute(line_query, line_parameters)
         line_ids = tuple(UUID(str(item[0])) for item in cursor.fetchall())
         return ReconciliationRun(
             run_id=UUID(str(row[0])),
