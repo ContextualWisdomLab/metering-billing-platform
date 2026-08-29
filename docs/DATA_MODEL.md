@@ -249,7 +249,9 @@ FOCUS export.
 `LateAdjustmentPresentmentService` projects that fact as a tenant-scoped item
 or recorded-at/ID keyset page. Presentment exposes `apply_late_adjustment` as
 the next operator action; it stores no application snapshot and does not mutate
-the late adjustment.
+the late adjustment. The list read passes the decoded cursor and `limit + 1` to
+the ledger, and PostgreSQL evaluates one tenant-scoped ordered keyset query so
+the page never scans or hydrates the complete history.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

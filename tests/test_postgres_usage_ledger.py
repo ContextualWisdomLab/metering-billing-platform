@@ -556,6 +556,21 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             self.ledger.insert_late_adjustment(TENANT_ONE, adjustment), adjustment
         )
+        second_adjustment = create_late_adjustment(
+            period.period_id,
+            target_period.period_id,
+            "correction",
+            "1.00",
+            "USD",
+            "provider:event_002",
+            "sha256:" + "b" * 64,
+            CATALOG_START + timedelta(hours=5),
+            late_adjustment_id=uuid4(),
+        )
+        self.assertEqual(
+            self.ledger.insert_late_adjustment(TENANT_ONE, second_adjustment),
+            second_adjustment,
+        )
         self.assertEqual(
             self.ledger.insert_late_adjustment(TENANT_ONE, adjustment), adjustment
         )
@@ -567,7 +582,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.get_late_adjustment(TENANT_TWO, adjustment.late_adjustment_id)
         )
         self.assertIsNone(self.ledger.get_late_adjustment(TENANT_ONE, uuid4()))
-        self.assertEqual(self.ledger.list_late_adjustments(TENANT_ONE), (adjustment,))
+        self.assertEqual(
+            self.ledger.list_late_adjustments(TENANT_ONE),
+            (adjustment, second_adjustment),
+        )
         self.assertEqual(self.ledger.list_late_adjustments(TENANT_TWO), ())
         presentment = LateAdjustmentPresentmentService(self.ledger)
         statement = presentment.present_late_adjustment(
@@ -577,7 +595,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(statement.next_operator_action, "apply_late_adjustment")
         page = presentment.list_late_adjustments(TENANT_ONE, page_limit="1")
         self.assertEqual(len(page.late_adjustments), 1)
-        self.assertIsNone(page.next_cursor)
+        self.assertIsNotNone(page.next_cursor)
+        next_page = presentment.list_late_adjustments(
+            TENANT_ONE, cursor=page.next_cursor, page_limit="1"
+        )
+        self.assertEqual(
+            tuple(item.late_adjustment_id for item in next_page.late_adjustments),
+            (second_adjustment.late_adjustment_id,),
+        )
+        self.assertIsNone(next_page.next_cursor)
         with self.assertRaises(ValueError):
             self.ledger.insert_late_adjustment(
                 TENANT_ONE, replace(adjustment, adjustment_amount=Decimal("12.35"))

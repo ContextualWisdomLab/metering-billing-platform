@@ -72,7 +72,10 @@ snapshot table. `GET /v1/late-adjustments/{late_adjustment_id}` and
 `GET /v1/late-adjustments` are tenant-scoped read-only routes returning the
 closed presentment contract and recorded-at/ID keyset pagination. The next
 operator action is `apply_late_adjustment`; the read does not apply, re-rate,
-post, call a provider, or create a tax document.
+post, call a provider, or create a tax document. The list repository contract
+accepts a decoded `(recorded_at, late_adjustment_id)` cursor and bounded limit;
+the PostgreSQL adapter performs one ordered tenant-scoped keyset query with
+`limit + 1`.
 
 ## Provider plane
 

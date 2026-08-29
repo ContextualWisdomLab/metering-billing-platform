@@ -64,7 +64,9 @@ at or after the source end, and PostgreSQL rejects update/delete. Replays are
 idempotent within a tenant; application, re-rating, provider settlement,
 FOCUS export, and statutory accounting remain downstream capabilities.
 `LateAdjustmentPresentmentService` exposes the fact through tenant-scoped
-item/list reads and reports `apply_late_adjustment` without applying it.
+item/list reads and reports `apply_late_adjustment` without applying it. List
+reads pass the decoded cursor and `limit + 1` to the ledger; PostgreSQL applies
+the tenant-scoped keyset predicate and hydrates only those bounded rows.
 
 ## Usage ingestion
 

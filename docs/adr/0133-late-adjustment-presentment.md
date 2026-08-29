@@ -18,7 +18,9 @@ Add a tenant-scoped read-only presentment contract:
 
 - `GET /v1/late-adjustments/{late_adjustment_id}` presents the stored fact;
 - `GET /v1/late-adjustments` returns `{late_adjustments, next_cursor}` with
-  recorded-at/opaque-ID keyset pagination;
+  recorded-at/opaque-ID keyset pagination; the decoded cursor and `limit + 1`
+  are passed to the ledger so PostgreSQL can execute one bounded tenant-scoped
+  ordered query;
 - the item contract publishes the signed exact amount, source and target
   period IDs, adjustment kind, source reference/hash, and recorded instant;
 - `next_operator_action` is the closed value `apply_late_adjustment`.
