@@ -119,7 +119,6 @@ from metering_billing.usage_ledger import (
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
     StoredTenantApiCredential,
-    StoredUnappliedCash,
     StoredUnappliedCashApplication,
     StoredUnappliedCashRefund,
     StoredSpendBudget,
@@ -4337,7 +4336,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         second_case_amount = Decimal("20.00")
         leftover_apply_remaining = Decimal("19.999")
         exclusive_amount = Decimal("100.00")
-        tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
         credit_exclusive = Decimal("10.00")
         credit_tax = Decimal("1.00")
@@ -5040,8 +5038,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         exclusive_amount = Decimal("100.00")
         tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
-        credit_exclusive = Decimal("10.00")
-        credit_tax = Decimal("1.00")
         credit_voided_amount = Decimal("11.00")
         UsageIngestionService(self.ledger).ingest_usage_event(make_event())
         RateCardService(self.ledger).publish_rate_card(
