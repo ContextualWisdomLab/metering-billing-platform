@@ -11,13 +11,15 @@ Python 3.12 and CI Python 3.13 behave identically at the API boundary.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import re
+from threading import RLock
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from types import ModuleType
-from typing import Callable
+from typing import Callable, Iterator
 from uuid import UUID
 
 from metering_billing.errors import (
@@ -991,6 +993,11 @@ class StoredWebhookDeliveryAttempt:
 class MemoryUsageLedger:
     """Mutable catalog plus append-only usage tables with tenant isolation."""
 
+    # ponytail: one ledger lock keeps command transactions correct; use per-draft
+    # locks only if measured in-memory throughput needs finer granularity.
+    _transaction_lock: object = field(
+        default_factory=RLock, init=False, repr=False, compare=False
+    )
     tenant_accounts: dict[str, TenantAccount] = field(default_factory=dict)
     billing_accounts: dict[str, BillingAccount] = field(default_factory=dict)
     billing_principals: dict[str, BillingPrincipal] = field(default_factory=dict)
@@ -1168,6 +1175,12 @@ class MemoryUsageLedger:
     unapplied_cash_refund_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Serialize one multi-record command like the PostgreSQL adapter."""
+        with self._transaction_lock:  # type: ignore[union-attr]
+            yield
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""

@@ -297,8 +297,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 60:
-            raise AssertionError(f"expected 60 migrations, got {len(applied)}")
+        if len(applied) != 61:
+            raise AssertionError(f"expected 61 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13453,6 +13453,54 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM billing_core.issued_invoice_line"
             ).fetchone()[0],
             0,
+        )
+
+    def test_postgres_direct_issued_invoice_requires_composition_lines(self) -> None:
+        """A direct issued header cannot omit linked late-adjustment lines."""
+        adjustment, draft = prepare_postgres_late_adjustment(
+            self.ledger, "-0.002", "provider:line-completeness-001", quantity="1840"
+        )
+        composed = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        self.assertEqual(composed.late_adjustment_invoice_adjustment_outcome_code.value, "accepted")
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+        issued_invoice_id = uuid4()
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.issued_invoice
+                        (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                         issued_invoice_contract_version, rating_run_id,
+                         usage_snapshot_hash, source_payload_hash, currency_code,
+                         tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                         issued_invoice_status, issued_at)
+                    VALUES (%s, %s, %s, 2, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                    """,
+                    (
+                        issued_invoice_id,
+                        tenant.tenant_account_id,
+                        draft.invoice_draft_id,
+                        stored_draft.rating_run_id,
+                        stored_draft.usage_snapshot_hash,
+                        "sha256:" + "f" * 64,
+                        stored_draft.currency_code,
+                        stored_draft.drafted_total_amount,
+                        stored_draft.drafted_total_amount,
+                        CATALOG_START,
+                    ),
+                )
+        self.assertIsNone(
+            self.ledger.find_issued_invoice(
+                tenant.tenant_account_id, draft.invoice_draft_id
+            )
         )
 
     def test_late_adjustment_invoice_adjustment_adapter_boundaries(self) -> None:

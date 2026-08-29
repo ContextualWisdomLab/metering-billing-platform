@@ -11,10 +11,21 @@ from unittest import mock
 from uuid import UUID, uuid4
 
 from metering_billing import (
+    AccountingExportService,
+    CollectionCaseService,
+    CollectionCaseSettlementService,
+    CollectionWriteOffService,
+    CreditAdjustmentService,
+    InvoiceDraftService,
     IssuedInvoicePresentmentService,
     IssuedInvoiceService,
+    LateAdjustmentInvoiceAdjustmentService,
+    MemoryUsageLedger,
+    PaymentSettlementService,
+    RateCardService,
     TaxAssessmentService,
     TaxRateService,
+    UsageRatingService,
     create_http_app,
     format_exact_decimal,
 )
@@ -39,6 +50,7 @@ from test_usage_ingestion import TENANT_ONE, TENANT_TWO
 from test_usage_rating import (
     KNOWN_MORNING_QUANTITY,
     KNOWN_MORNING_TOTAL,
+    MORNING_WINDOW,
     TOKEN_UNIT_PRICE,
     seed_rated_ledger,
 )
@@ -51,6 +63,32 @@ DUE_AT = datetime(2026, 9, 16, 21, 0, tzinfo=UTC)
 
 class IssuedInvoiceTests(unittest.TestCase):
     """Verify idempotent issue, immutable totals, and metadata-only GET."""
+
+    def test_memory_commands_support_a_nontransactional_adapter(self) -> None:
+        """Command wrappers retain compatibility with duck-typed adapters."""
+        ledger = MemoryUsageLedger()
+        ledger.transaction = None  # type: ignore[method-assign]
+        commands = (
+            lambda: AccountingExportService(ledger).propose_journal("", uuid4()),
+            lambda: CollectionCaseService(ledger).open_collection_case("", uuid4()),
+            lambda: CollectionCaseSettlementService(ledger).settle_collection_case("", uuid4()),
+            lambda: CollectionWriteOffService(ledger).write_off_collection_case("", uuid4()),
+            lambda: CreditAdjustmentService(ledger).record_credit_adjustment(
+                "", uuid4(), "0.001", "rating_correction"
+            ),
+            lambda: InvoiceDraftService(ledger).draft_invoice("", uuid4()),
+            lambda: IssuedInvoiceService(ledger).issue_invoice("", uuid4()),
+            lambda: LateAdjustmentInvoiceAdjustmentService(ledger).record_invoice_adjustment(
+                "", uuid4(), uuid4(), recorded_by="operator:test", authorization_reference="approval:test"
+            ),
+            lambda: PaymentSettlementService(ledger).record_payment_receipt("", uuid4(), "1"),
+            lambda: RateCardService(ledger).publish_rate_card("", "test", "USD", ()),
+            lambda: TaxAssessmentService(ledger).assess_tax("", uuid4(), 1),
+            lambda: TaxRateService(ledger).publish_tax_rate("", "vat", "0.10"),
+            lambda: UsageRatingService(ledger).rate_usage_window("", MORNING_WINDOW, 1),
+        )
+        for command in commands:
+            command()
 
     def test_known_draft_issues_immutable_untaxed_snapshot(self) -> None:
         """A known morning draft freezes exact line and tax-zero totals."""
@@ -155,6 +193,12 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(payload["issued_invoice_presentment_contract_version"], 2)
         self.assertEqual(payload["issued_invoice_contract_version"], 2)
         self.assertEqual(validate_issued_invoice_presentment(payload), ())
+        replayed = IssuedInvoiceService(ledger).issue_invoice(
+            TENANT_ONE, issued.invoice_draft_id
+        )
+        self.assertEqual(replayed.issued_invoice_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replayed.issued_invoice_contract_version, 2)
+        self.assertEqual(validate_issued_invoice(replayed.as_contract_dict()), ())
 
     def test_taxed_draft_freezes_assessment_totals_and_optional_due_at(self) -> None:
         """A taxed draft copies exclusive/tax/inclusive and stores caller due_at."""

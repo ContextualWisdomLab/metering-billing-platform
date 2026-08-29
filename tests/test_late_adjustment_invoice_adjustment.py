@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from threading import Barrier
 import unittest
 from uuid import uuid4
 from unittest import mock
@@ -279,6 +281,42 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
             TENANT_ONE, draft.invoice_draft_id
         )
         self.assertEqual(replay.collection_case_outcome_code.value, "duplicate_replay")
+
+    def test_concurrent_memory_composition_and_issue_have_one_ordering(self) -> None:
+        """Memory command transactions serialize composition and issuance."""
+        ledger, adjustment, draft = prepare_invoice_adjustment("-0.002")
+        barrier = Barrier(2)
+
+        def compose():
+            barrier.wait()
+            return LateAdjustmentInvoiceAdjustmentService(ledger).record_invoice_adjustment(
+                TENANT_ONE,
+                adjustment.late_adjustment_id,
+                draft.invoice_draft_id,
+                recorded_by="operator:finance",
+                authorization_reference="approval:invoice-adjustment",
+            )
+
+        def issue():
+            barrier.wait()
+            return IssuedInvoiceService(ledger).issue_invoice(
+                TENANT_ONE, draft.invoice_draft_id
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            composed, issued = pool.map(lambda task: task(), (compose, issue))
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        if composed.late_adjustment_invoice_adjustment_outcome_code.value == "accepted":
+            self.assertEqual(len(issued.issued_invoice_lines), 2)
+            self.assertEqual(issued.issued_invoice_lines[-1].line_total_amount, Decimal("-0.002"))
+            self.assertEqual(len(ledger.late_adjustment_invoice_adjustments), 1)
+        else:
+            self.assertEqual(
+                composed.rejection_reason_code.value if composed.rejection_reason_code else None,
+                "invoice_already_issued",
+            )
+            self.assertEqual(len(issued.issued_invoice_lines), 1)
+            self.assertEqual(len(ledger.late_adjustment_invoice_adjustments), 0)
 
     def test_taxed_composition_requires_tax_reassessment_before_issue(self) -> None:
         """A stale tax snapshot cannot silently absorb a late signed delta."""

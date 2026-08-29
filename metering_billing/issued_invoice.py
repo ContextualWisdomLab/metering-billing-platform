@@ -543,7 +543,7 @@ def _from_stored(
     """Project a persisted snapshot into the buyer-facing result."""
     return IssuedInvoiceResult(
         issued_invoice_outcome_code=outcome,
-        issued_invoice_contract_version=stored.issued_invoice_contract_version,
+        issued_invoice_contract_version=ISSUED_INVOICE_CONTRACT_VERSION,
         issued_invoice_id=stored.issued_invoice_id,
         invoice_draft_id=stored.invoice_draft_id,
         tenant_reference=tenant_reference,
