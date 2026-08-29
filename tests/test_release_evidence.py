@@ -157,7 +157,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "scripts.release_evidence._source_commit", return_value="a" * 40
             ), mock.patch(
                 "scripts.release_evidence._tracked_paths",
-                return_value=("manifest.json",),
+                return_value=("tracked.txt",),
             ), mock.patch(
                 "scripts.release_evidence._worktree_root", return_value=root
             ), mock.patch("scripts.release_evidence._require_clean_checkout"):
