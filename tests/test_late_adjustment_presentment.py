@@ -11,8 +11,8 @@ from uuid import uuid4
 from metering_billing import (
     BillingPeriodStatus,
     LateAdjustmentPresentmentService,
-    create_http_app,
     create_billing_period,
+    create_http_app,
     create_late_adjustment,
     validate_late_adjustment_presentment,
 )
@@ -51,7 +51,7 @@ def seed_adjustment_periods(
     target_status=BillingPeriodStatus.OPEN,
     target_start=date(2026, 8, 1),
 ):
-    """Seed the source and target lifecycle rows required by the memory adapter."""
+    """Seed lifecycle rows required by the in-memory late-adjustment adapter."""
     source = create_billing_period(
         period_tenant_reference,
         date(2026, 7, 1),
@@ -86,8 +86,6 @@ def seed_adjustment_periods(
         )
     ledger.insert_billing_period(source)
     ledger.insert_billing_period(target)
-
-
 
 
 class LateAdjustmentPresentmentTests(unittest.TestCase):
@@ -206,7 +204,7 @@ class LateAdjustmentPresentmentTests(unittest.TestCase):
         )
 
     def test_memory_late_adjustment_requires_period_lifecycle_and_order(self) -> None:
-        """The memory adapter applies the same period boundary as PostgreSQL."""
+        """The memory adapter rejects the same invalid periods as PostgreSQL."""
         missing_ledger = seed_ledger()
         missing = make_adjustment(
             source_reference="provider:late_missing_period", recorded_at=RECORDED_AT
@@ -262,41 +260,34 @@ class LateAdjustmentPresentmentTests(unittest.TestCase):
         target_missing = make_adjustment(
             source_reference="provider:late_target_missing", recorded_at=RECORDED_AT
         )
-        source_only = create_billing_period(
-            TENANT_ONE,
-            date(2026, 7, 1),
-            date(2026, 8, 1),
-            opened_by="operator:test_source",
-            opened_at=RECORDED_AT,
-            period_id=target_missing.source_period_id,
-        ).advance(
-            BillingPeriodStatus.SOFT_CLOSED,
-            actor_reference="operator:test_source",
-            authorization_reference="change:test_source",
-            reason="close source",
-            transitioned_at=RECORDED_AT,
-        )
-        target_missing_ledger.insert_billing_period(source_only)
+        seed_adjustment_periods(target_missing_ledger, target_missing)
+        del target_missing_ledger.billing_periods[target_missing.target_period_id]
         with self.assertRaises(ValueError):
             target_missing_ledger.insert_late_adjustment(TENANT_ONE, target_missing)
-
         self.assertIsNone(
             target_missing_ledger.get_billing_period("urn:cwl:missing", uuid4())
         )
-        stored_source = ordered_ledger.get_billing_period(
-            TENANT_ONE, incorrectly_ordered.source_period_id
+
+        identity_ledger = seed_ledger()
+        identity_adjustment = make_adjustment(
+            source_reference="provider:late_identity", recorded_at=RECORDED_AT
         )
-        self.assertIsNotNone(stored_source)
-        assert stored_source is not None
+        seed_adjustment_periods(identity_ledger, identity_adjustment)
+        identity_ledger.insert_late_adjustment(TENANT_ONE, identity_adjustment)
+        source = identity_ledger.get_billing_period(
+            TENANT_ONE, identity_adjustment.source_period_id
+        )
+        assert source is not None
+        self.assertEqual(identity_ledger.insert_billing_period(source), source)
         with self.assertRaises(ValueError):
-            ordered_ledger.insert_billing_period(
-                replace(stored_source, opened_by="operator:rewrite")
+            identity_ledger.insert_billing_period(
+                replace(source, opened_by="operator:rewrite")
             )
         with self.assertRaises(ValueError):
-            ordered_ledger.insert_billing_period(
+            identity_ledger.insert_billing_period(
                 replace(
-                    stored_source,
-                    transitions=(replace(stored_source.transitions[0], reason="rewrite"),),
+                    source,
+                    transitions=(replace(source.transitions[0], reason="rewrite"),),
                 )
             )
 

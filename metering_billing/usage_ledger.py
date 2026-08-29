@@ -2939,18 +2939,37 @@ class MemoryUsageLedger:
         return self.late_adjustments.get(late_adjustment_id)
 
     def list_late_adjustments(
-        self, tenant_reference: str
+        self,
+        tenant_reference: str,
+        *,
+        after: tuple[datetime, UUID] | None = None,
+        limit: int | None = None,
     ) -> tuple[LateAdjustment, ...]:
-        """Return late adjustments for one tenant in insertion order."""
+        """Return one tenant's ordered late adjustments after an optional cursor."""
         tenant, tenant_error = self.resolve_tenant(tenant_reference)
         if tenant_error is not None or tenant is None:
             return ()
-        return tuple(
-            adjustment
-            for adjustment_id, adjustment in self.late_adjustments.items()
-            if self.late_adjustment_tenant_index.get(adjustment_id)
-            == tenant.tenant_account_id
+        adjustments = sorted(
+            (
+                adjustment
+                for adjustment_id, adjustment in self.late_adjustments.items()
+                if self.late_adjustment_tenant_index.get(adjustment_id)
+                == tenant.tenant_account_id
+            ),
+            key=lambda adjustment: (
+                adjustment.recorded_at,
+                adjustment.late_adjustment_id,
+            ),
         )
+        if after is not None:
+            adjustments = [
+                adjustment
+                for adjustment in adjustments
+                if (adjustment.recorded_at, adjustment.late_adjustment_id) > after
+            ]
+        if limit is not None:
+            adjustments = adjustments[:limit]
+        return tuple(adjustments)
 
     def insert_late_adjustment(
         self, tenant_reference: str, adjustment: LateAdjustment

@@ -69,6 +69,9 @@ contextual-orchestrator usage
   closed. Operators inspect the evidence, then apply it through a later
   workflow. The read does not apply or re-rate usage, rewrite periods, emit a
   journal or webhook, call a provider, or create a tax/statutory document.
+- The ledger read receives the decoded cursor and `page_limit + 1`; PostgreSQL
+  evaluates the tenant-scoped recorded-at/ID keyset predicate in one ordered
+  query so `next_cursor` is derived only from a bounded result.
 
 ## Late-adjustment-application acceptance
 

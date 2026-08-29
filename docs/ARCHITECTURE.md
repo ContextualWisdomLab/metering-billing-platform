@@ -75,6 +75,8 @@ references, enforces source equality and tenant scope, and then reports
 and maps missing or closed targets to `target_period_not_found` or
 `target_period_not_open` rejected results (HTTP 422). It never rewrites the late fact, period, usage, rating,
 tax, journal, provider state, or webhook.
+List reads pass the decoded cursor and `limit + 1` to the ledger; PostgreSQL
+applies the tenant-scoped keyset predicate and hydrates only those bounded rows.
 
 ## Usage ingestion
 

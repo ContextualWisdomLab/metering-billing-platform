@@ -259,6 +259,9 @@ composite source/target foreign keys and immutable update/delete triggers; it
 does not mutate the late adjustment. The memory reference adapter stores the
 same billing-period aggregate and enforces source/target tenant, lifecycle, and
 ordering invariants before storing a late-adjustment fact.
+The list read passes the decoded cursor and `limit + 1` to the ledger, and
+PostgreSQL evaluates one tenant-scoped ordered keyset query so the page never
+scans or hydrates the complete history.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

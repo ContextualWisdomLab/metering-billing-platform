@@ -84,6 +84,9 @@ The memory reference adapter stores billing periods and applies the same
 source/target lifecycle and ordering checks as PostgreSQL; target lifecycle
 rejections remain stable `target_period_not_found` or `target_period_not_open`
 422 results.
+The list repository contract accepts a decoded `(recorded_at,
+late_adjustment_id)` cursor and bounded limit; the PostgreSQL adapter performs
+one ordered tenant-scoped keyset query with `limit + 1`.
 
 ## Provider plane
 
