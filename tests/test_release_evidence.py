@@ -14,6 +14,7 @@ from scripts.release_evidence import (
     _checked_out_artifact,
     _load_manifest,
     _sha256,
+    _source_commit,
     _tracked_paths,
     _worktree_root,
     build_manifest,
@@ -59,7 +60,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             "scripts.release_evidence._run_git", return_value="not-a-sha\n"
         ):
             with self.assertRaisesRegex(ReleaseEvidenceError, "full source commit"):
-                build_manifest(ROOT, "0.3.0", ROOT / "manifest.json")
+                _source_commit(ROOT)
         for unsafe_path in ("/absolute", "../parent"):
             with mock.patch(
                 "scripts.release_evidence._run_git", return_value=f"{unsafe_path}\0"
