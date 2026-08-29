@@ -34,6 +34,7 @@ from metering_billing import (
     IssuedInvoiceService,
     IssuedInvoiceVoidPresentmentService,
     IssuedInvoiceVoidService,
+    LateAdjustmentPresentmentService,
     PaymentIntentService,
     PostgresUsageLedger,
     UnappliedCashApplicationPresentmentService,
@@ -568,6 +569,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertIsNone(self.ledger.get_late_adjustment(TENANT_ONE, uuid4()))
         self.assertEqual(self.ledger.list_late_adjustments(TENANT_ONE), (adjustment,))
         self.assertEqual(self.ledger.list_late_adjustments(TENANT_TWO), ())
+        presentment = LateAdjustmentPresentmentService(self.ledger)
+        statement = presentment.present_late_adjustment(
+            TENANT_ONE, adjustment.late_adjustment_id
+        )
+        self.assertEqual(statement.adjustment_amount, Decimal("12.3400"))
+        self.assertEqual(statement.next_operator_action, "apply_late_adjustment")
+        page = presentment.list_late_adjustments(TENANT_ONE, page_limit="1")
+        self.assertEqual(len(page.late_adjustments), 1)
+        self.assertIsNone(page.next_cursor)
         with self.assertRaises(ValueError):
             self.ledger.insert_late_adjustment(
                 TENANT_ONE, replace(adjustment, adjustment_amount=Decimal("12.35"))

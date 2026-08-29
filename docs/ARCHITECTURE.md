@@ -63,6 +63,8 @@ The source must be at least `soft_closed`, the target must be `open` and start
 at or after the source end, and PostgreSQL rejects update/delete. Replays are
 idempotent within a tenant; application, re-rating, provider settlement,
 FOCUS export, and statutory accounting remain downstream capabilities.
+`LateAdjustmentPresentmentService` exposes the fact through tenant-scoped
+item/list reads and reports `apply_late_adjustment` without applying it.
 
 ## Usage ingestion
 

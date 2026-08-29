@@ -246,6 +246,11 @@ the source end, and immutable rows. The fact does not rewrite usage, rating,
 or source period history and does not itself create a journal, tax document, or
 FOCUS export.
 
+`LateAdjustmentPresentmentService` projects that fact as a tenant-scoped item
+or recorded-at/ID keyset page. Presentment exposes `apply_late_adjustment` as
+the next operator action; it stores no application snapshot and does not mutate
+the late adjustment.
+
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception
 summary must equal the run's persisted exception rows, and every exception must

@@ -26,6 +26,7 @@ from metering_billing.exact_decimal import (
     parse_exact_decimal,
     require_postable_journal_line_amounts,
 )
+from metering_billing.period_close import LateAdjustment
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
 TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
@@ -983,6 +984,11 @@ class MemoryUsageLedger:
     )
     credit_adjustments: dict[UUID, StoredCreditAdjustment] = field(default_factory=dict)
     credit_adjustment_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
+        default_factory=dict
+    )
+    late_adjustments: dict[UUID, LateAdjustment] = field(default_factory=dict)
+    late_adjustment_tenant_index: dict[UUID, UUID] = field(default_factory=dict)
+    late_adjustment_source_index: dict[tuple[UUID, str], UUID] = field(
         default_factory=dict
     )
     spend_budgets: dict[UUID, StoredSpendBudget] = field(default_factory=dict)
@@ -2861,6 +2867,59 @@ class MemoryUsageLedger:
     ) -> StoredCreditAdjustment | None:
         """Return one credit adjustment by internal identifier, if present."""
         return self.credit_adjustments.get(credit_adjustment_id)
+
+    def get_late_adjustment(
+        self, tenant_reference: str, late_adjustment_id: UUID
+    ) -> LateAdjustment | None:
+        """Return one same-tenant late adjustment by opaque identifier."""
+        tenant, tenant_error = self.resolve_tenant(tenant_reference)
+        if tenant_error is not None or tenant is None:
+            return None
+        if self.late_adjustment_tenant_index.get(late_adjustment_id) != tenant.tenant_account_id:
+            return None
+        return self.late_adjustments.get(late_adjustment_id)
+
+    def list_late_adjustments(
+        self, tenant_reference: str
+    ) -> tuple[LateAdjustment, ...]:
+        """Return late adjustments for one tenant in insertion order."""
+        tenant, tenant_error = self.resolve_tenant(tenant_reference)
+        if tenant_error is not None or tenant is None:
+            return ()
+        return tuple(
+            adjustment
+            for adjustment_id, adjustment in self.late_adjustments.items()
+            if self.late_adjustment_tenant_index.get(adjustment_id)
+            == tenant.tenant_account_id
+        )
+
+    def insert_late_adjustment(
+        self, tenant_reference: str, adjustment: LateAdjustment
+    ) -> LateAdjustment:
+        """Store one immutable late adjustment with tenant-scoped replay identity."""
+        tenant = self.require_tenant(tenant_reference)
+        existing_id = self.late_adjustment_source_index.get(
+            (tenant.tenant_account_id, adjustment.source_reference)
+        )
+        if existing_id is not None:
+            existing = self.late_adjustments[existing_id]
+            existing_contract = existing.as_contract_dict()
+            incoming_contract = adjustment.as_contract_dict()
+            existing_contract.pop("late_adjustment_id")
+            incoming_contract.pop("late_adjustment_id")
+            if existing_contract != incoming_contract:
+                raise ValueError("late adjustment identity cannot change")
+            return existing
+        if adjustment.late_adjustment_id in self.late_adjustments:
+            raise ValueError("late adjustment identity conflicts with another tenant")
+        self.late_adjustments[adjustment.late_adjustment_id] = adjustment
+        self.late_adjustment_tenant_index[adjustment.late_adjustment_id] = (
+            tenant.tenant_account_id
+        )
+        self.late_adjustment_source_index[
+            (tenant.tenant_account_id, adjustment.source_reference)
+        ] = adjustment.late_adjustment_id
+        return adjustment
 
     def insert_credit_adjustment(
         self, credit: StoredCreditAdjustment

@@ -65,6 +65,7 @@ from metering_billing.contracts import (
     ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME,
     BILLING_PERIOD_SCHEMA_NAME,
     LATE_ADJUSTMENT_SCHEMA_NAME,
+    LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME,
     COLLECTION_CASE_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_SCHEMA_NAME,
     RATE_CARD_SCHEMA_NAME,
@@ -190,6 +191,7 @@ from metering_billing.contracts import (
     validate_journal_proposal,
     validate_billing_period,
     validate_late_adjustment,
+    validate_late_adjustment_presentment,
     validate_fx_rate,
     validate_fx_conversion,
     validate_reconciliation_line,
@@ -277,6 +279,7 @@ from metering_billing.errors import (
     IssuedCreditNoteVoidRejectionReasonCode,
     PaymentIntentPresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
+    LateAdjustmentPresentmentQueryError,
     RateCardPresentmentQueryError,
     UsageEventPresentmentQueryError,
     RatingRunPresentmentQueryError,
@@ -382,6 +385,11 @@ from metering_billing.payment_intent_presentment import PaymentIntentPresentment
 from metering_billing.credit_adjustment_presentment import (
     CreditAdjustmentPresentmentService,
 )
+from metering_billing.late_adjustment_presentment import (
+    LateAdjustmentPresentmentPage,
+    LateAdjustmentPresentmentResult,
+    LateAdjustmentPresentmentService,
+)
 from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.usage_event_presentment import UsageEventPresentmentService
 from metering_billing.rating_run_presentment import RatingRunPresentmentService
@@ -437,6 +445,7 @@ __all__ = (
     "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
     "BILLING_PERIOD_SCHEMA_NAME",
     "LATE_ADJUSTMENT_SCHEMA_NAME",
+    "LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
@@ -506,6 +515,10 @@ __all__ = (
     "BillingPeriodTransition",
     "LateAdjustment",
     "LateAdjustmentKind",
+    "LateAdjustmentPresentmentPage",
+    "LateAdjustmentPresentmentQueryError",
+    "LateAdjustmentPresentmentResult",
+    "LateAdjustmentPresentmentService",
     "CollectionAgingPresentmentQueryError",
     "CollectionAgingPresentmentService",
     "CollectionCaseOutcomeCode",
@@ -703,6 +716,7 @@ __all__ = (
     "validate_billing_account_budget_status_presentment",
     "validate_billing_period",
     "validate_late_adjustment",
+    "validate_late_adjustment_presentment",
     "validate_collection_aging_presentment",
     "validate_collection_case",
     "validate_collection_case_presentment",

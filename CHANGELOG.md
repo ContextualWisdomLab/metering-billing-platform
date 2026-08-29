@@ -24,6 +24,10 @@
 - Migration `0049` keeps duplicate late-adjustment replays idempotent after a
   target period closes, allowing PostgreSQL conflict handling to return the
   stored immutable fact without weakening validation for new facts.
+- Issue #87 now presents stored late-adjustment evidence through tenant-scoped
+  item/list reads with exact signed amounts, keyset pagination, and the closed
+  `apply_late_adjustment` next action. Presentment does not apply, re-rate, or
+  post the fact (ADR 0133).
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

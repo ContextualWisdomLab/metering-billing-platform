@@ -50,6 +50,7 @@ __all__ = (
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
     "LATE_ADJUSTMENT_SCHEMA_NAME",
+    "LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_VOID_PRESENTMENT_SCHEMA_NAME",
@@ -126,6 +127,7 @@ __all__ = (
     "validate_invoice_draft",
     "validate_invoice_presentment",
     "validate_late_adjustment",
+    "validate_late_adjustment_presentment",
     "validate_issued_credit_note",
     "validate_issued_credit_note_presentment",
     "validate_issued_credit_note_void",
@@ -185,6 +187,7 @@ RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
 LATE_ADJUSTMENT_SCHEMA_NAME = "late-adjustment.schema.json"
+LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "late-adjustment-presentment.schema.json"
 COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
 COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME = "collection-aging-presentment.schema.json"
 ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME = "account-statement-presentment.schema.json"
@@ -374,6 +377,28 @@ def validate_late_adjustment(
     if errors or not isinstance(adjustment, Mapping):
         return tuple(errors)
     errors.extend(_late_adjustment_semantic_errors(adjustment))
+    return tuple(errors)
+
+
+def validate_late_adjustment_presentment(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one late-adjustment presentment and its exact signed amount."""
+    schema = load_json_schema(
+        LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    amount = statement.get("adjustment_amount")
+    if isinstance(amount, str):
+        try:
+            if Decimal(amount) == 0:
+                errors.append("$: adjustment_amount must not be zero")
+        except Exception:
+            errors.append("$: adjustment_amount must be an exact decimal")
+    if statement.get("next_operator_action") not in (None, "apply_late_adjustment"):
+        errors.append("$: stored late adjustment must be applied downstream")
     return tuple(errors)
 
 

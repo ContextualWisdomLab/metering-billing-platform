@@ -67,6 +67,13 @@ contract records commercial evidence only; a later application or re-rating
 workflow must explicitly consume it and no FX, tax, FOCUS, or statutory
 posting is inferred here.
 
+`LateAdjustmentPresentmentService` projects the stored fact without adding a
+snapshot table. `GET /v1/late-adjustments/{late_adjustment_id}` and
+`GET /v1/late-adjustments` are tenant-scoped read-only routes returning the
+closed presentment contract and recorded-at/ID keyset pagination. The next
+operator action is `apply_late_adjustment`; the read does not apply, re-rate,
+post, call a provider, or create a tax document.
+
 ## Provider plane
 
 Provider integration is capability-based. Checkout, subscription, usage export, invoice export, collection, refund, dispute, tax document, and settlement are separate ports. A provider implements only declared capabilities.

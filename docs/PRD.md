@@ -54,6 +54,22 @@ contextual-orchestrator usage
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
   posting remain separate workflows.
 
+## Late-adjustment-presentment acceptance
+
+- A known stored late adjustment presents one tenant-scoped statement with
+  the signed exact amount, source/target period IDs, adjustment kind, source
+  reference/hash, recorded instant, and `next_operator_action`
+  (`apply_late_adjustment`).
+- `GET /v1/late-adjustments/{late_adjustment_id}` is HTTP 200 for the same
+  tenant. Cross-tenant or unknown is HTTP 404 with no leak.
+- `GET /v1/late-adjustments` lists `{late_adjustments, next_cursor}`. Never
+  `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is
+  `{recorded_at}|{late_adjustment_id}`.
+- Missing tenant, malformed UUID, illegal cursor, and illegal `page_limit` fail
+  closed. Operators inspect the evidence, then apply it through a later
+  workflow. The read does not apply or re-rate usage, rewrite periods, emit a
+  journal or webhook, call a provider, or create a tax/statutory document.
+
 ## Tax-assessment acceptance
 
 - A known tenant publishes one `tax_rate_schedule` and one immutable `tax_rate_version` whose `tax_rate` is an exact decimal in `[0, 1]`.
@@ -647,3 +663,6 @@ contextual-orchestrator usage
 - SQL object names satisfy the two-word `snake_case` rule.
 - Mutable GitHub Action tags are rejected.
 - Repository tooling, the usage-ingestion package, the windowed-rating package, invoice-draft, accounting-export, collection-case, payment-intent, payment-settlement, cash-journal export, the HTTP accept surface, journal-proposal query, posting-receipt observation, credit adjustment, the versioned rate-card catalog, tax assessment, tax-payable unwind, invoice-draft presentment, collection-case presentment, payment-intent presentment, payment-receipt presentment, tenant API credentials, operator-console fixture checks, webhook outbox, AIS outbox drain, tax-assessment presentment, posting-receipt observation presentment, webhook-delivery presentment, tenant-api-credential presentment, webhook-subscription presentment, dunning-event presentment, and webhook-outbox-event presentment reach 100% statement and branch coverage.
+- The period-close fact, reconciliation, and late-adjustment presentment tests
+  also reach 100% statement and branch coverage; the real PostgreSQL suite
+  covers durable late-adjustment reads.

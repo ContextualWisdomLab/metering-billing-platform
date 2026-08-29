@@ -295,6 +295,7 @@ from metering_billing.ais_outbox_drain import AisOutboxDrainService
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
 from metering_billing.credit_adjustment import CreditAdjustmentService
+from metering_billing.late_adjustment_presentment import LateAdjustmentPresentmentService
 from metering_billing.errors import (
     AccountStatementPresentmentQueryError,
     RatedSpendPresentmentQueryError,
@@ -306,6 +307,7 @@ from metering_billing.errors import (
     CollectionCasePresentmentQueryError,
     DunningEventPresentmentQueryError,
     CreditAdjustmentPresentmentQueryError,
+    LateAdjustmentPresentmentQueryError,
     RateCardPresentmentQueryError,
     UsageEventPresentmentQueryError,
     RatingRunPresentmentQueryError,
@@ -539,6 +541,10 @@ CREDIT_ADJUSTMENT_COLLECTION_PATH = "/v1/credit-adjustments"
 CREDIT_ADJUSTMENT_ITEM_PATH = re.compile(r"^/v1/credit-adjustments/([0-9a-fA-F-]{36})$")
 USAGE_EVENT_COLLECTION_PATH = "/v1/usage-events"
 USAGE_EVENT_ITEM_PATH = re.compile(r"^/v1/usage-events/([0-9a-fA-F-]{36})$")
+LATE_ADJUSTMENT_COLLECTION_PATH = "/v1/late-adjustments"
+LATE_ADJUSTMENT_ITEM_PATH = re.compile(
+    r"^/v1/late-adjustments/([0-9a-fA-F-]{36})$"
+)
 RATING_RUN_COLLECTION_PATH = "/v1/rating-runs"
 RATING_RUN_ITEM_PATH = re.compile(r"^/v1/rating-runs/([0-9a-fA-F-]{36})$")
 RATE_CARD_COLLECTION_PATH = "/v1/rate-cards"
@@ -818,6 +824,7 @@ def create_http_app(
     credit_presentments = CreditAdjustmentPresentmentService(shared_ledger)
     catalog_presentments = RateCardPresentmentService(shared_ledger)
     usage_presentments = UsageEventPresentmentService(shared_ledger)
+    late_adjustment_presentments = LateAdjustmentPresentmentService(shared_ledger)
     rating_presentments = RatingRunPresentmentService(shared_ledger)
     tax_assessment_presentments = TaxAssessmentPresentmentService(shared_ledger)
     observation_presentments = PostingReceiptObservationPresentmentService(shared_ledger)
@@ -1285,6 +1292,45 @@ def create_http_app(
                 )
             except (ExactDecimalError, TimeWindowError, ValueError):
                 return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name in {"list_late_adjustments", "get_late_adjustment"}:
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                if route_name == "list_late_adjustments":
+                    page = late_adjustment_presentments.list_late_adjustments(
+                        tenant_reference,
+                        cursor=query.get("cursor"),
+                        page_limit=query.get("page_limit"),
+                    )
+                    return _send_json(start_response, 200, page.as_contract_dict())
+                result = late_adjustment_presentments.present_late_adjustment(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["late_adjustment_id"], "late_adjustment_id"
+                    ),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except LateAdjustmentPresentmentQueryError as error:
+                status_code = (
+                    404
+                    if error.rejection_reason_code == "late_adjustment_not_found"
+                    else 422
+                )
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(
+                    start_response, 422, {"rejection_reason_code": "request_invalid"}
+                )
         if route_name in {"list_rating_runs", "get_rating_run"}:
             try:
                 query = _read_query(environ)
@@ -3270,6 +3316,17 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if usage_match is not None:
         if method == "GET":
             return "get_usage_event", {"usage_event_id": usage_match.group(1)}
+        return "method_not_allowed", {}
+    if path == LATE_ADJUSTMENT_COLLECTION_PATH:
+        if method == "GET":
+            return "list_late_adjustments", {}
+        return "method_not_allowed", {}
+    late_adjustment_match = LATE_ADJUSTMENT_ITEM_PATH.fullmatch(path)
+    if late_adjustment_match is not None:
+        if method == "GET":
+            return "get_late_adjustment", {
+                "late_adjustment_id": late_adjustment_match.group(1)
+            }
         return "method_not_allowed", {}
     if path == RATING_RUN_COLLECTION_PATH:
         if method == "POST":
