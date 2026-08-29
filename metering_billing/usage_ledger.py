@@ -3059,6 +3059,33 @@ class MemoryUsageLedger:
             ):
                 raise ValueError("late adjustment application identity cannot change")
             return existing
+        adjustment = self.late_adjustments.get(application.late_adjustment_id)
+        if (
+            adjustment is None
+            or self.late_adjustment_tenant_index.get(application.late_adjustment_id)
+            != application.tenant_account_id
+        ):
+            raise ValueError("late adjustment application source is missing")
+        if (
+            application.target_period_id != adjustment.target_period_id
+            or format(application.adjustment_amount, "f")
+            != format(adjustment.adjustment_amount, "f")
+            or application.currency_code != adjustment.currency_code
+        ):
+            raise ValueError("late adjustment application source does not match")
+        target = self.billing_periods.get(application.target_period_id)
+        tenant_reference = next(
+            (
+                tenant.tenant_reference
+                for tenant in self.tenant_accounts.values()
+                if tenant.tenant_account_id == application.tenant_account_id
+            ),
+            None,
+        )
+        if target is None or tenant_reference != target.tenant_reference:
+            raise ValueError("late adjustment application target period is missing")
+        if target.status != BillingPeriodStatus.OPEN:
+            raise ValueError("late adjustment application target period must be open")
         self.late_adjustment_applications[application.late_adjustment_application_id] = application
         self.late_adjustment_application_index[identity_key] = application.late_adjustment_application_id
         return application

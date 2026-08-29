@@ -19,6 +19,7 @@ from metering_billing import (
     validate_late_adjustment_application,
     validate_late_adjustment_presentment,
 )
+from metering_billing.usage_ledger import StoredLateAdjustmentApplication
 from test_http_app import invoke_http
 from test_usage_ingestion import TENANT_ONE, TENANT_TWO, seed_ledger
 
@@ -333,6 +334,21 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         self.assertIsNotNone(target)
         assert target is not None
         del ledger.billing_periods[adjustment.target_period_id]
+        candidate = StoredLateAdjustmentApplication(
+            late_adjustment_application_id=uuid4(),
+            tenant_account_id=ledger.require_tenant(TENANT_ONE).tenant_account_id,
+            late_adjustment_id=adjustment.late_adjustment_id,
+            target_period_id=adjustment.target_period_id,
+            adjustment_amount=adjustment.adjustment_amount,
+            currency_code=adjustment.currency_code,
+            applied_by="operator:alice",
+            authorization_reference="change:target-state",
+            applied_at=datetime(2026, 8, 17, 22, 0, tzinfo=UTC),
+            late_adjustment_application_contract_version=1,
+            late_adjustment_application_status="applied",
+        )
+        with self.assertRaisesRegex(ValueError, "target period is missing"):
+            ledger.insert_late_adjustment_application(candidate)
         missing = LateAdjustmentApplicationService(ledger).apply_late_adjustment(
             TENANT_ONE,
             adjustment.late_adjustment_id,
@@ -349,6 +365,12 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             authorization_reference="change:target-state",
         )
         self.assertEqual(accepted.late_adjustment_application_outcome_code, "accepted")
+        second_adjustment = replace(
+            adjustment,
+            late_adjustment_id=uuid4(),
+            source_reference="provider:application-target-state-second",
+        )
+        ledger.insert_late_adjustment(TENANT_ONE, second_adjustment)
         closed_target = target.advance(
             BillingPeriodStatus.SOFT_CLOSED,
             actor_reference="operator:alice",
@@ -357,6 +379,14 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             transitioned_at=datetime(2026, 8, 18, tzinfo=UTC),
         )
         ledger.insert_billing_period(closed_target)
+        with self.assertRaisesRegex(ValueError, "target period must be open"):
+            ledger.insert_late_adjustment_application(
+                replace(
+                    candidate,
+                    late_adjustment_application_id=uuid4(),
+                    late_adjustment_id=second_adjustment.late_adjustment_id,
+                )
+            )
         replay = LateAdjustmentApplicationService(ledger).apply_late_adjustment(
             TENANT_ONE,
             adjustment.late_adjustment_id,
