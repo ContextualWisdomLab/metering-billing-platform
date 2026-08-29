@@ -201,8 +201,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 45:
-            raise AssertionError(f"expected 45 migrations, got {len(applied)}")
+        if len(applied) != 46:
+            raise AssertionError(f"expected 46 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -673,6 +673,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.list_reconciliation_runs(TENANT_ONE, period_id=period.period_id),
             (run,),
         )
+        empty_run = ReconciliationRun(
+            run_id=uuid4(),
+            period_id=period.period_id,
+            started_at=CATALOG_START + timedelta(minutes=9),
+            completed_at=CATALOG_START + timedelta(minutes=10),
+            reconciliation_line_ids=(),
+            blocking_exception_count=0,
+        )
+        self.assertEqual(self.ledger.insert_reconciliation_run(TENANT_ONE, empty_run), empty_run)
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_run(
                 TENANT_ONE,
@@ -849,6 +858,25 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (
                 "DELETE FROM billing_core.reconciliation_resolution WHERE resolution_id = %s",
                 (resolution.resolution_id,),
+            ),
+            (
+                "UPDATE billing_core.reconciliation_run SET blocking_exception_count = 4 "
+                "WHERE run_id = %s",
+                (run.run_id,),
+            ),
+            (
+                "DELETE FROM billing_core.reconciliation_run WHERE run_id = %s",
+                (empty_run.run_id,),
+            ),
+            (
+                "UPDATE billing_core.reconciliation_run_line SET reconciliation_line_id = %s "
+                "WHERE run_id = %s AND line_number = 1",
+                (exception.reconciliation_line_id, run.run_id),
+            ),
+            (
+                "DELETE FROM billing_core.reconciliation_run_line "
+                "WHERE run_id = %s AND line_number = 1",
+                (run.run_id,),
             ),
         )
         for statement, parameters in immutable_mutations:
