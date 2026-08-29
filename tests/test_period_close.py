@@ -589,6 +589,61 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(validate_reconciliation_line(expanded_line.as_contract_dict()), ())
 
+    def test_period_close_fact_versions_are_positive_integers(self) -> None:
+        """Every published period-close fact rejects schema-invalid versions."""
+        rate = make_rate()
+        conversion = convert_currency_amount("1", "USD", 2, rate)
+        line = assess_reconciliation_line(
+            PERIOD_ID,
+            "provider_account:001",
+            "USD",
+            "1",
+            "1",
+            "1",
+            assessed_at=OPENED_AT,
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        evidence = ReconciliationEvidence(
+            evidence_id=uuid4(),
+            reconciliation_line_id=PERIOD_ID,
+            exception_code=ReconciliationExceptionCode.PRICE_MISMATCH,
+            evidence_kind="provider_document",
+            evidence_reference="urn:cwl:evidence:version-001",
+            evidence_sha256="sha256:" + "a" * 64,
+            captured_by="operator:finance_001",
+            captured_at=OPENED_AT,
+        )
+        resolution = ReconciliationResolution(
+            resolution_id=uuid4(),
+            reconciliation_line_id=PERIOD_ID,
+            exception_code=ReconciliationExceptionCode.PRICE_MISMATCH,
+            resolution_status=ReconciliationResolutionStatus.RESOLVED,
+            owner_reference="operator:finance_001",
+            resolution_reason="corrected provider quantity",
+            evidence_reference="urn:cwl:evidence:version-001",
+            maker_reference="operator:finance_001",
+            checker_reference="operator:finance_002",
+            resolved_at=OPENED_AT,
+        )
+        versioned_facts = (
+            (make_period(), "period_contract_version"),
+            (rate, "fx_rate_contract_version"),
+            (conversion, "fx_conversion_contract_version"),
+            (line, "reconciliation_line_contract_version"),
+            (evidence, "reconciliation_evidence_contract_version"),
+            (resolution, "reconciliation_resolution_contract_version"),
+        )
+        for fact, field_name in versioned_facts:
+            with self.subTest(field_name=field_name):
+                with self.assertRaises(PeriodCloseValidationError):
+                    replace(fact, **{field_name: 0})
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(make_period(), period_contract_version=False)
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(make_period(), period_contract_version="1")  # type: ignore[arg-type]
+
     def test_raw_contract_validators_apply_domain_invariants(self) -> None:
         """Schema-valid documents cannot bypass lifecycle, arithmetic, or FX invariants."""
         period = make_period().as_contract_dict()

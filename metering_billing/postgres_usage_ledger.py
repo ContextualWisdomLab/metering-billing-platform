@@ -585,17 +585,26 @@ class PostgresUsageLedger:
             )
 
     def insert_reconciliation_evidence(
-        self, evidence: ReconciliationEvidence
+        self, tenant_reference: str, evidence: ReconciliationEvidence
     ) -> ReconciliationEvidence:
-        """Persist one evidence record only when its exception already exists."""
+        """Persist one tenant-owned evidence record for an existing exception."""
         with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
             cursor.execute(
                 """
                 SELECT 1
-                FROM billing_core.reconciliation_exception
-                WHERE reconciliation_line_id = %s AND exception_code = %s
+                FROM billing_core.reconciliation_line AS line
+                JOIN billing_core.reconciliation_exception AS exception
+                  ON exception.reconciliation_line_id = line.reconciliation_line_id
+                WHERE line.tenant_account_id = %s
+                  AND line.reconciliation_line_id = %s
+                  AND exception.exception_code = %s
                 """,
-                (evidence.reconciliation_line_id, evidence.exception_code.value),
+                (
+                    tenant_account_id,
+                    evidence.reconciliation_line_id,
+                    evidence.exception_code.value,
+                ),
             )
             if cursor.fetchone() is None:
                 raise KeyError(evidence.exception_code.value)
@@ -677,17 +686,26 @@ class PostgresUsageLedger:
             )
 
     def insert_reconciliation_resolution(
-        self, resolution: ReconciliationResolution
+        self, tenant_reference: str, resolution: ReconciliationResolution
     ) -> ReconciliationResolution:
-        """Persist one exception resolution without replacing prior approvals."""
+        """Persist one tenant-owned exception resolution without replacing approvals."""
         with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
             cursor.execute(
                 """
                 SELECT 1
-                FROM billing_core.reconciliation_exception
-                WHERE reconciliation_line_id = %s AND exception_code = %s
+                FROM billing_core.reconciliation_line AS line
+                JOIN billing_core.reconciliation_exception AS exception
+                  ON exception.reconciliation_line_id = line.reconciliation_line_id
+                WHERE line.tenant_account_id = %s
+                  AND line.reconciliation_line_id = %s
+                  AND exception.exception_code = %s
                 """,
-                (resolution.reconciliation_line_id, resolution.exception_code.value),
+                (
+                    tenant_account_id,
+                    resolution.reconciliation_line_id,
+                    resolution.exception_code.value,
+                ),
             )
             if cursor.fetchone() is None:
                 raise KeyError(resolution.exception_code.value)

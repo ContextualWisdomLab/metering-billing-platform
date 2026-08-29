@@ -142,6 +142,13 @@ def _not_future(value: datetime, field_name: str) -> datetime:
     return value
 
 
+def _contract_version(value: Any, field_name: str) -> int:
+    """Require a positive integer contract version at the domain boundary."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PeriodCloseValidationError(f"{field_name} must be a positive integer")
+    return value
+
+
 def _format_datetime(value: datetime) -> str:
     """Render a timezone-aware instant as a stable UTC ISO-8601 string."""
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -275,6 +282,7 @@ class BillingPeriod:
 
     def __post_init__(self) -> None:
         """Validate dates, identity, and a contiguous forward-only history."""
+        _contract_version(self.period_contract_version, "period_contract_version")
         if not isinstance(self.period_id, UUID):
             raise PeriodCloseValidationError("period_id must be a UUID")
         _tenant_reference(self.tenant_reference)
@@ -408,6 +416,7 @@ class FxRate:
 
     def __post_init__(self) -> None:
         """Validate exact rate metadata and preserve the supplied versioned value."""
+        _contract_version(self.fx_rate_contract_version, "fx_rate_contract_version")
         if not isinstance(self.fx_rate_id, UUID):
             raise PeriodCloseValidationError("fx_rate_id must be a UUID")
         _reference(self.rate_source, "rate_source")
@@ -495,6 +504,9 @@ class FxConversion:
 
     def __post_init__(self) -> None:
         """Validate a conversion result without recalculating or mutating it."""
+        _contract_version(
+            self.fx_conversion_contract_version, "fx_conversion_contract_version"
+        )
         if not isinstance(self.fx_conversion_id, UUID) or not isinstance(self.fx_rate_id, UUID):
             raise PeriodCloseValidationError("FX conversion identifiers must be UUIDs")
         object.__setattr__(
@@ -635,6 +647,10 @@ class ReconciliationEvidence:
 
     def __post_init__(self) -> None:
         """Require a source reference and a verifiable content hash."""
+        _contract_version(
+            self.reconciliation_evidence_contract_version,
+            "reconciliation_evidence_contract_version",
+        )
         if not isinstance(self.evidence_id, UUID) or not isinstance(
             self.reconciliation_line_id, UUID
         ):
@@ -688,6 +704,10 @@ class ReconciliationResolution:
 
     def __post_init__(self) -> None:
         """Require an explicit exception disposition and distinct approvers."""
+        _contract_version(
+            self.reconciliation_resolution_contract_version,
+            "reconciliation_resolution_contract_version",
+        )
         if not isinstance(self.resolution_id, UUID) or not isinstance(
             self.reconciliation_line_id, UUID
         ):
@@ -755,6 +775,10 @@ class ReconciliationLine:
 
     def __post_init__(self) -> None:
         """Validate exact amounts and the deterministic status/exception invariant."""
+        _contract_version(
+            self.reconciliation_line_contract_version,
+            "reconciliation_line_contract_version",
+        )
         if not isinstance(self.reconciliation_line_id, UUID) or not isinstance(self.period_id, UUID):
             raise PeriodCloseValidationError("reconciliation identifiers must be UUIDs")
         _reference(self.provider_account_reference, "provider_account_reference")
