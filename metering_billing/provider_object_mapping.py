@@ -175,6 +175,15 @@ class ProviderObjectMappingRegistry:
                 raise ProviderObjectMappingError("replacement_time_mismatch")
             if mapping.provider_code != active.provider_code:
                 raise ProviderObjectMappingError("replacement_provider_mismatch")
+            for stored in self._mappings:
+                current = stored.mapping
+                if current is not active and self._same_internal(current, mapping) and _overlap(
+                    current.valid_from,
+                    current.valid_to,
+                    mapping.valid_from,
+                    mapping.valid_to,
+                ):
+                    raise ProviderObjectMappingError("internal_mapping_conflict")
             self._mappings.remove(_StoredMapping(active))
             closed = ProviderObjectMapping(
                 active.provider_account_reference,

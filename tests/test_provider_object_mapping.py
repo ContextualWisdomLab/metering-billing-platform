@@ -194,6 +194,38 @@ class ProviderObjectMappingTests(unittest.TestCase):
             first,
         )
 
+    def test_replacement_rejects_retroactive_overlap(self) -> None:
+        """A scheduled replacement cannot be shadowed by an earlier one."""
+        registry = ProviderObjectMappingRegistry()
+        first = mapping()
+        registry.record(first)
+        scheduled_at = NOW + timedelta(days=2)
+        scheduled = mapping(
+            provider_object_type="orders",
+            provider_object_reference="order_001",
+            valid_from=scheduled_at,
+        )
+        registry.replace(scheduled, effective_from=scheduled_at)
+        retroactive_at = NOW + timedelta(days=1)
+        with self.assertRaises(ProviderObjectMappingError) as error:
+            registry.replace(
+                mapping(
+                    provider_object_type="invoices",
+                    provider_object_reference="invoice_001",
+                    valid_from=retroactive_at,
+                ),
+                effective_from=retroactive_at,
+            )
+        self.assertEqual(error.exception.reason_code, "internal_mapping_conflict")
+        resolved = registry.resolve_internal(
+            "provider_account_001",
+            "payment_intent",
+            "payment_intent_001",
+            at=retroactive_at,
+        )
+        self.assertEqual(resolved.provider_object_reference, first.provider_object_reference)
+        self.assertEqual(resolved.valid_to, scheduled_at)
+
     def test_contract_rejects_runtime_only_mapping_invariants(self) -> None:
         """Published validation stays aligned with runtime reference rules."""
         body = mapping().as_contract_dict()
