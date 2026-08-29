@@ -126,7 +126,10 @@ class RepositoryContractTests(unittest.TestCase):
         npm = json.loads(
             (ROOT / "sdks/typescript/package.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(npm["files"], ["README.md", "src"])
+        self.assertEqual(npm["files"], ["README.md", "dist"])
+        self.assertEqual(npm["exports"]["."]["types"], "./dist/index.d.ts")
+        self.assertEqual(npm["exports"]["."]["default"], "./dist/index.js")
+        self.assertEqual(npm["scripts"]["build"], "tsc -p tsconfig.json")
         self.assertEqual(npm["repository"]["directory"], "sdks/typescript")
 
         workflow = (ROOT / ".github/workflows/publish-producer-sdks.yml").read_text(
@@ -139,6 +142,9 @@ class RepositoryContractTests(unittest.TestCase):
             "id-token: write",
             "--provenance",
             "cargo publish --locked",
+            "npm ci --ignore-scripts",
+            "npm run build",
+            "package-artifacts",
         ):
             self.assertIn(required, workflow)
 

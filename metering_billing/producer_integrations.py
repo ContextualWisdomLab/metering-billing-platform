@@ -54,7 +54,7 @@ def build_contextual_usage_event(
         "orchestration_mode_code": route_mode,
     }
     event = build_usage_event(
-        event_id=_stable_event_id(source_event_key),
+        event_id=_stable_event_id(tenant_reference, source_event_key),
         source_event_key=source_event_key,
         tenant_reference=tenant_reference,
         billing_account_reference=billing_account_reference,
@@ -129,7 +129,7 @@ def build_newsdom_usage_event(
     if shard_reference is not None:
         dimensions["shard_reference"] = shard_reference
     return build_usage_event(
-        event_id=_stable_event_id(source_event_key),
+        event_id=_stable_event_id(tenant_reference, source_event_key),
         source_event_key=source_event_key,
         tenant_reference=tenant_reference,
         billing_account_reference=billing_account_reference,
@@ -239,7 +239,7 @@ def build_fast_mlsirm_usage_event(
             }
         )
     return build_usage_event(
-        event_id=_stable_event_id(source_event_key),
+        event_id=_stable_event_id(tenant_reference, source_event_key),
         source_event_key=source_event_key,
         tenant_reference=tenant_reference,
         billing_account_reference=billing_account_reference,
@@ -269,8 +269,8 @@ def build_fast_mlsirm_cloud_event(**kwargs: Any) -> dict[str, Any]:
     )
 
 
-def _stable_event_id(source_event_key: str) -> UUID:
-    return uuid5(NAMESPACE_URL, source_event_key)
+def _stable_event_id(tenant_reference: str, source_event_key: str) -> UUID:
+    return uuid5(NAMESPACE_URL, f"{tenant_reference}:{source_event_key}")
 
 
 def _required_text(record: Mapping[str, Any], field_name: str) -> str:

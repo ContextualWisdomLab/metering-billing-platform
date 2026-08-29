@@ -128,9 +128,15 @@ jobs:
         with:
           node-version: "22.6.0"
           registry-url: "https://registry.npmjs.org"
+      - name: Install TypeScript build dependencies
+        working-directory: sdks/typescript
+        run: npm ci --ignore-scripts
+      - name: Build TypeScript package
+        working-directory: sdks/typescript
+        run: npm run build
       - name: Create npm package
         working-directory: sdks/typescript
-        run: mkdir -p dist && npm pack --ignore-scripts --pack-destination dist
+        run: mkdir -p package-artifacts && npm pack --ignore-scripts --pack-destination package-artifacts
       - name: Run TypeScript producer SDK conformance tests
         run: >-
           node --experimental-strip-types --test
@@ -143,7 +149,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: producer-typescript-dist
-          path: sdks/typescript/dist/*.tgz
+          path: sdks/typescript/package-artifacts/*.tgz
           if-no-files-found: error
 
   publish:

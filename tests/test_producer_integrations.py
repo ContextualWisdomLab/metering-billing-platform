@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from metering_billing.contracts import validate_usage_event
 from metering_billing.producer_integrations import (
@@ -13,6 +15,7 @@ from metering_billing.producer_integrations import (
     build_newsdom_cloud_event,
     build_newsdom_usage_event,
 )
+from metering_billing.producer_outbox import DurableUsageOutbox
 
 
 IDENTITY = {
@@ -213,6 +216,37 @@ class ProducerIntegrationTests(unittest.TestCase):
         self.assertEqual(
             first["cost_center_reference"], "urn:cwl:tenant_001:cost_center:01"
         )
+
+    def test_stable_replay_identity_is_tenant_scoped_in_one_outbox(self) -> None:
+        arguments = {
+            **IDENTITY,
+            "run_reference": "urn:cwl:shared:run:01",
+            "artifact_reference": "urn:cwl:shared:artifact:01",
+            "configuration_reference": "urn:cwl:shared:configuration:01",
+            "seed_reference": "urn:cwl:shared:seed:01",
+            "model_code": "mls2plm",
+            "backend_code": "rust",
+            "occurred_at": "2026-08-28T01:02:03Z",
+            "response_rows": 1,
+            "response_items": 1,
+        }
+        other_tenant = {
+            **arguments,
+            "tenant_reference": "urn:cwl:tenant_002",
+            "billing_account_reference": "urn:cwl:tenant_002:billing_account:019d7001",
+            "billing_principal_reference": "urn:cwl:tenant_002:billing_principal:019d7002",
+        }
+        first = build_fast_mlsirm_usage_event(**arguments)
+        second = build_fast_mlsirm_usage_event(**other_tenant)
+        self.assertNotEqual(first["event_id"], second["event_id"])
+        with TemporaryDirectory() as directory:
+            outbox = DurableUsageOutbox(Path(directory) / "outbox.sqlite3")
+            try:
+                outbox.enqueue(first)
+                outbox.enqueue(second)
+                self.assertEqual(outbox.pending_count(), 2)
+            finally:
+                outbox.close()
 
     def test_fast_mlsirm_cloud_event_and_dimension_guards(self) -> None:
         """Optional artifacts and invalid response shapes remain explicit."""

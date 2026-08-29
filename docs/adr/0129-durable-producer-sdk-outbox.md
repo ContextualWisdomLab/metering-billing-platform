@@ -48,6 +48,14 @@ use a new event contract version and never reinterpret or remove a v1 field.
 Until that schema is published and added to the supported-version registry,
 the SDK and ingestion validator reject the version before enqueue or storage.
 
+### Distinct queue roles
+
+`DurableUsageOutbox` is the canonical Python usage-producer API backed by
+SQLite. Rust and TypeScript `FileUsageOutbox` implementations are language-
+native reference queues for the same wire contract. Server-side AIS and
+webhook outboxes are separate domain queues, not aliases or interchangeable
+producer APIs.
+
 Release artifacts are built only from a published GitHub release tag. The
 repository workflow resolves that tag to one commit before any checkout,
 packages the Python distribution, Rust crate, and TypeScript tarball from that

@@ -30,8 +30,10 @@ Before creating a release:
 
 1. Bump the relevant package versions and update `CHANGELOG.md`.
 2. Run `uv build --out-dir dist`, `cargo package --locked --manifest-path
-   sdks/rust/Cargo.toml`, and `npm pack --dry-run` from
-   `sdks/typescript`.
+   sdks/rust/Cargo.toml`, then `npm ci --ignore-scripts`, `npm run build`, and
+   `npm pack --ignore-scripts --pack-destination package-artifacts` from
+   `sdks/typescript`. Run `npm run test:package` to verify that a clean Node
+   process can import the packed module without experimental flags.
 3. Merge the release commit through the normal protected PR gates.
 4. Create and publish a GitHub release for the merged tag. The workflow does
    not run for an unpublished draft release or an arbitrary branch push.

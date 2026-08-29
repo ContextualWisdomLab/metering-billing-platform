@@ -104,6 +104,8 @@ type OutboxRecord = {
 /** A process-local durable queue; the file is atomically replaced per change. */
 export class FileUsageOutbox {
   private readonly filePath: string;
+  // ponytail: process-local flush lock; use an inter-process queue if multi-process writers are supported.
+  private flushTail: Promise<void> = Promise.resolve();
 
   constructor(filePath: string) {
     this.filePath = filePath;
@@ -147,6 +149,24 @@ export class FileUsageOutbox {
     if (!Number.isInteger(batchSize) || batchSize < 1 || !Number.isInteger(maxAttempts) || maxAttempts < 1) {
       throw new RangeError("batchSize and maxAttempts must be positive integers");
     }
+    const previous = this.flushTail;
+    let release!: () => void;
+    this.flushTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await this.flushExclusive(sender, batchSize, maxAttempts);
+    } finally {
+      release();
+    }
+  }
+
+  private async flushExclusive(
+    sender: UsageDeliverySender,
+    batchSize: number,
+    maxAttempts: number,
+  ): Promise<OutboxFlushResult> {
     const records = this.read();
     const batch = records.filter((record) => record.state === "pending").slice(0, batchSize);
     if (batch.length === 0) return this.result(0, 0, 0, 0, 0, 0);
@@ -167,31 +187,47 @@ export class FileUsageOutbox {
     };
     try {
       const response = await sender(batch.map((record) => record.event));
+      const latestRecords = this.read();
       if (!response || !Array.isArray(response.event_receipts)) {
-        for (const record of batch) fail(record, "invalid_delivery_response");
+        for (const record of batch) {
+          const latest = latestRecords.find((candidate) => candidate.event.event_id === record.event.event_id);
+          if (latest !== undefined) fail(latest, "invalid_delivery_response");
+        }
+        this.write(latestRecords);
+        return this.result(batch.length, accepted, duplicateReplay, rejected, retried, deadLettered);
       } else {
         for (const record of batch) {
-          const receipt = findReceipt(response.event_receipts, record.event);
-          if (receipt?.ingestion_outcome_code === "accepted" && receiptMatches(receipt, record.event)) {
-            records.splice(records.indexOf(record), 1);
+          const latest = latestRecords.find((candidate) => candidate.event.event_id === record.event.event_id);
+          if (latest === undefined) continue;
+          const receipt = findReceipt(response.event_receipts, latest.event);
+          if (receipt?.ingestion_outcome_code === "accepted" && receiptMatches(receipt, latest.event)) {
+            latestRecords.splice(latestRecords.indexOf(latest), 1);
             accepted += 1;
-          } else if (receipt?.ingestion_outcome_code === "duplicate_replay" && receiptMatches(receipt, record.event)) {
-            records.splice(records.indexOf(record), 1);
+          } else if (receipt?.ingestion_outcome_code === "duplicate_replay" && receiptMatches(receipt, latest.event)) {
+            latestRecords.splice(latestRecords.indexOf(latest), 1);
             duplicateReplay += 1;
-          } else if (receipt?.ingestion_outcome_code === "rejected" && receiptMatches(receipt, record.event)) {
-            fail(record, typeof receipt.rejection_reason_code === "string" ? receipt.rejection_reason_code : "rejected", true);
+          } else if (receipt?.ingestion_outcome_code === "rejected" && receiptMatches(receipt, latest.event)) {
+            fail(latest, typeof receipt.rejection_reason_code === "string" ? receipt.rejection_reason_code : "rejected", true);
             rejected += 1;
           } else {
-            fail(record, "invalid_delivery_receipt");
+            fail(latest, "invalid_delivery_receipt");
           }
         }
+        this.write(latestRecords);
+        return this.result(batch.length, accepted, duplicateReplay, rejected, retried, deadLettered);
       }
     } catch (error) {
       const permanent = error instanceof PermanentDeliveryError;
-      for (const record of batch) fail(record, permanent ? "transport_permanent" : "transport_transient", permanent);
+      const latestRecords = this.read();
+      for (const record of batch) {
+        const latest = latestRecords.find((candidate) => candidate.event.event_id === record.event.event_id);
+        if (latest !== undefined) {
+          fail(latest, permanent ? "transport_permanent" : "transport_transient", permanent);
+        }
+      }
+      this.write(latestRecords);
+      return this.result(batch.length, accepted, duplicateReplay, rejected, retried, deadLettered);
     }
-    this.write(records);
-    return this.result(batch.length, accepted, duplicateReplay, rejected, retried, deadLettered);
   }
 
   private result(attemptedCount: number, acceptedCount: number, duplicateReplayCount: number, rejectedCount: number, retriedCount: number, deadLetteredCount: number): OutboxFlushResult {
@@ -267,7 +303,7 @@ export function httpUsageIngestionTransport(
 }
 
 export function buildUsageEvent(input: UsageEventInput): UsageEvent {
-  validateInput(input);
+  const correctionLineage = validateInput(input);
   const event: UsageEvent = {
     event_id: input.event_id,
     event_contract_version: input.event_contract_version,
@@ -288,7 +324,7 @@ export function buildUsageEvent(input: UsageEventInput): UsageEvent {
     ...(input.correlation_reference === undefined ? {} : { correlation_reference: input.correlation_reference }),
     ...(input.causation_reference === undefined ? {} : { causation_reference: input.causation_reference }),
     ...(input.available_at === undefined ? {} : { available_at: input.available_at }),
-    ...(input.correction_lineage === undefined ? {} : { correction_lineage: { ...input.correction_lineage } }),
+    ...(correctionLineage === undefined ? {} : { correction_lineage: correctionLineage }),
     product_code: input.product_code,
     ...(input.operation_code === undefined ? {} : { operation_code: input.operation_code }),
     ...(input.dimensions === undefined ? {} : { dimensions: { ...input.dimensions } }),
@@ -411,13 +447,29 @@ function canonicalTimestamp(timestamp: string): string {
     throw new ProducerContractError("occurred_at must be an RFC3339 date-time");
   }
   const [, dateTime, fraction = "", offset] = match;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(dateTime)!;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (daysInMonth === undefined || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) {
+    throw new ProducerContractError("occurred_at must be an RFC3339 date-time");
+  }
+  if (offset !== "Z") {
+    const [, , offsetHour, offsetMinute] = /^(\+|-)(\d{2}):(\d{2})$/.exec(offset)!;
+    if (Number(offsetHour) > 23 || Number(offsetMinute) > 59) {
+      throw new ProducerContractError("occurred_at must be an RFC3339 date-time");
+    }
+  }
   if (fraction.length > 6) {
     throw new ProducerContractError("timestamps cannot contain sub-microsecond precision");
   }
   const parsed = Date.parse(dateTime + offset);
-  if (Number.isNaN(parsed)) {
-    throw new ProducerContractError("occurred_at must be an RFC3339 date-time");
-  }
   const utcDateTime = new Date(parsed).toISOString().slice(0, 19);
   const microseconds = fraction.padEnd(6, "0").slice(0, 6);
   return microseconds === "000000"
@@ -425,12 +477,12 @@ function canonicalTimestamp(timestamp: string): string {
     : utcDateTime + "." + microseconds + "Z";
 }
 
-function validateInput(input: UsageEventInput): void {
+function validateInput(input: UsageEventInput): CorrectionLineage | undefined {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.event_id)) {
     throw new ProducerContractError("event_id must be a UUID");
   }
-  if (!Number.isInteger(input.event_contract_version) || input.event_contract_version < 1) {
-    throw new ProducerContractError("event_contract_version must be at least 1");
+  if (input.event_contract_version !== 1) {
+    throw new ProducerContractError("event_contract_version must be the supported version 1");
   }
   if (!Number.isInteger(input.producer_contract_version) || input.producer_contract_version < 1) {
     throw new ProducerContractError("producer_contract_version must be at least 1");
@@ -467,17 +519,7 @@ function validateInput(input: UsageEventInput): void {
   if (input.available_at !== undefined) {
     canonicalTimestamp(input.available_at);
   }
-  if (input.correction_lineage !== undefined) {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.correction_lineage.prior_event_id)) {
-      throw new ProducerContractError("correction_lineage.prior_event_id must be a UUID");
-    }
-    if (!(["corrects", "reverses", "supersedes"] as const).includes(input.correction_lineage.relationship_code)) {
-      throw new ProducerContractError("correction_lineage relationship_code is not in the published enum");
-    }
-    if (input.correction_lineage.reason_code !== undefined) {
-      validateCode("correction_lineage reason_code", input.correction_lineage.reason_code, 64);
-    }
-  }
+  const correctionLineage = normalizeCorrectionLineage(input.correction_lineage);
   if (!Array.isArray(input.measurements) || input.measurements.length < 1 || input.measurements.length > 64) {
     throw new ProducerContractError("measurements must contain between 1 and 64 objects");
   }
@@ -508,6 +550,35 @@ function validateInput(input: UsageEventInput): void {
       throw new ProducerContractError("quality_code is not in the published enum");
     }
   }
+  return correctionLineage;
+}
+
+function normalizeCorrectionLineage(value: CorrectionLineage | undefined): CorrectionLineage | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProducerContractError("correction_lineage must be an object");
+  }
+  const record = value as unknown as Record<string, unknown>;
+  const allowedKeys = new Set(["prior_event_id", "relationship_code", "reason_code"]);
+  if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
+    throw new ProducerContractError("correction_lineage cannot contain arbitrary fields");
+  }
+  if (typeof record.prior_event_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(record.prior_event_id)) {
+    throw new ProducerContractError("prior_event_id must be a UUID");
+  }
+  if (!(["corrects", "reverses", "supersedes"] as const).includes(record.relationship_code as "corrects" | "reverses" | "supersedes")) {
+    throw new ProducerContractError("relationship_code is not in the published enum");
+  }
+  if (record.reason_code !== undefined) {
+    validateCode("reason_code", record.reason_code as string, 64);
+  }
+  return {
+    prior_event_id: record.prior_event_id,
+    relationship_code: record.relationship_code as CorrectionLineage["relationship_code"],
+    ...(record.reason_code === undefined ? {} : { reason_code: record.reason_code as string }),
+  };
 }
 
 function validateEvent(event: UsageEvent): void {

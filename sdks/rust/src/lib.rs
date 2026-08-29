@@ -265,18 +265,21 @@ impl FileUsageOutbox {
             }
             return Ok(());
         }
-        self.records.push(OutboxRecord {
+        let mut records = self.records.clone();
+        records.push(OutboxRecord {
             event,
             attempts: 0,
             state: OutboxState::Pending,
             last_error_code: None,
         });
-        self.persist()
+        self.persist_records(&records)?;
+        self.records = records;
+        Ok(())
     }
 
     pub fn replay_dead_letter(&mut self, event_id: &str) -> Result<(), ProducerContractError> {
-        let record = self
-            .records
+        let mut records = self.records.clone();
+        let record = records
             .iter_mut()
             .find(|record| {
                 record.event.event_id == event_id && record.state == OutboxState::DeadLetter
@@ -285,7 +288,9 @@ impl FileUsageOutbox {
         record.attempts = 0;
         record.state = OutboxState::Pending;
         record.last_error_code = None;
-        self.persist()
+        self.persist_records(&records)?;
+        self.records = records;
+        Ok(())
     }
 
     pub fn pending_count(&self) -> usize {
@@ -325,8 +330,8 @@ impl FileUsageOutbox {
                 "batch_size and max_attempts must be positive".into(),
             ));
         }
-        let batch: Vec<UsageEvent> = self
-            .records
+        let mut records = self.records.clone();
+        let batch: Vec<UsageEvent> = records
             .iter()
             .filter(|record| record.state == OutboxState::Pending)
             .take(batch_size)
@@ -343,8 +348,7 @@ impl FileUsageOutbox {
         let mut dead_lettered_count = 0;
         let mut remove_ids = HashSet::new();
         let mut fail = |event_id: &str, code: &str, force_dead: bool| {
-            let record = self
-                .records
+            let record = records
                 .iter_mut()
                 .find(|record| record.event.event_id == event_id)
                 .expect("every flushed event remains in the outbox");
@@ -406,9 +410,9 @@ impl FileUsageOutbox {
                 }
             }
         }
-        self.records
-            .retain(|record| !remove_ids.contains(&record.event.event_id));
-        self.persist()?;
+        records.retain(|record| !remove_ids.contains(&record.event.event_id));
+        self.persist_records(&records)?;
+        self.records = records;
         Ok(self.result(
             batch.len(),
             accepted_count,
@@ -440,8 +444,12 @@ impl FileUsageOutbox {
     }
 
     fn persist(&self) -> Result<(), ProducerContractError> {
+        self.persist_records(&self.records)
+    }
+
+    fn persist_records(&self, records: &[OutboxRecord]) -> Result<(), ProducerContractError> {
         let temporary_path = self.path.with_extension("tmp");
-        let bytes = serde_json::to_vec(&self.records).expect("outbox records are serializable");
+        let bytes = serde_json::to_vec(records).expect("outbox records are serializable");
         persist_file(&temporary_path, &bytes, |path| File::create(path))
             .and_then(|_| fs::rename(temporary_path, &self.path).map_err(io_error))
             .and_then(|_| sync_parent_directory(&self.path))
@@ -717,9 +725,9 @@ fn canonical_timestamp(timestamp: &str) -> Result<String, ProducerContractError>
 
 fn validate_input(input: &UsageEventInput) -> Result<(), ProducerContractError> {
     validate_uuid(&input.event_id)?;
-    if input.event_contract_version == 0 {
+    if input.event_contract_version != 1 {
         return Err(ProducerContractError(
-            "event_contract_version must be at least 1".into(),
+            "event_contract_version must be the supported version 1".into(),
         ));
     }
     if input.producer_contract_version == 0 {
@@ -1157,6 +1165,9 @@ mod tests {
         input.event_contract_version = 0;
         assert!(build_usage_event(input).is_err());
         let mut input = base.clone();
+        input.event_contract_version = 2;
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
         input.producer_contract_version = 0;
         assert!(build_usage_event(input).is_err());
         let mut input = base.clone();
@@ -1180,6 +1191,15 @@ mod tests {
         let mut input = base.clone();
         input.occurred_at = "not-a-timestamp".into();
         assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.occurred_at = "2026-02-30T00:00:00Z".into();
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.occurred_at = "2023-02-29T00:00:00Z".into();
+        assert!(build_usage_event(input).is_err());
+        let mut input = base.clone();
+        input.occurred_at = "2024-02-29T00:00:00Z".into();
+        assert!(build_usage_event(input).is_ok());
         let mut input = base.clone();
         input.available_at = Some("not-a-timestamp".into());
         assert!(build_usage_event(input).is_err());
@@ -1379,6 +1399,88 @@ mod tests {
         assert_eq!(second.duplicate_replay_count, 1);
         assert_eq!(outbox.pending_count(), 0);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn durable_outbox_keeps_memory_transactional_when_persist_fails() {
+        let vector = fixture();
+        let event = build_usage_event(input_from_fixture(&vector)).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("cwl-transactional-outbox-{}.json", event.event_id));
+        let blocker =
+            std::env::temp_dir().join(format!("cwl-transactional-blocker-{}", event.event_id));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&blocker);
+        fs::write(&blocker, b"file").unwrap();
+        let blocked_path = blocker.join("child").join("outbox.json");
+        let mut outbox = FileUsageOutbox::open(&path).unwrap();
+
+        outbox.path = blocked_path.clone();
+        assert!(outbox.enqueue(event.clone()).is_err());
+        assert_eq!(outbox.pending_count(), 0);
+        outbox.path = path.clone();
+        outbox.enqueue(event.clone()).unwrap();
+
+        outbox.path = blocked_path.clone();
+        assert!(outbox
+            .flush(1, 2, |_| {
+                Ok(UsageDeliveryResponse {
+                    event_receipts: vec![UsageDeliveryReceipt {
+                        source_event_key: event.source_event_key.clone(),
+                        event_contract_version: Some(event.event_contract_version),
+                        source_payload_hash: Some(event.source_payload_hash.clone()),
+                        tenant_reference: Some(event.tenant_reference.clone()),
+                        ingestion_outcome_code: "accepted".into(),
+                        rejection_reason_code: None,
+                    }],
+                })
+            })
+            .is_err());
+        assert_eq!(outbox.pending_count(), 1);
+        outbox.path = path.clone();
+        assert_eq!(
+            outbox
+                .flush(1, 2, |_| {
+                    Ok(UsageDeliveryResponse {
+                        event_receipts: vec![UsageDeliveryReceipt {
+                            source_event_key: event.source_event_key.clone(),
+                            event_contract_version: Some(event.event_contract_version),
+                            source_payload_hash: Some(event.source_payload_hash.clone()),
+                            tenant_reference: Some(event.tenant_reference.clone()),
+                            ingestion_outcome_code: "accepted".into(),
+                            rejection_reason_code: None,
+                        }],
+                    })
+                })
+                .unwrap()
+                .accepted_count,
+            1
+        );
+
+        outbox.enqueue(event.clone()).unwrap();
+        outbox
+            .flush(1, 1, |_| {
+                Ok(UsageDeliveryResponse {
+                    event_receipts: vec![UsageDeliveryReceipt {
+                        source_event_key: event.source_event_key.clone(),
+                        event_contract_version: Some(event.event_contract_version),
+                        source_payload_hash: Some(event.source_payload_hash.clone()),
+                        tenant_reference: Some(event.tenant_reference.clone()),
+                        ingestion_outcome_code: "rejected".into(),
+                        rejection_reason_code: Some("meter_not_found".into()),
+                    }],
+                })
+            })
+            .unwrap();
+        outbox.path = blocked_path;
+        assert!(outbox.replay_dead_letter(&event.event_id).is_err());
+        assert_eq!(outbox.dead_letter_count(), 1);
+        outbox.path = path.clone();
+        outbox.replay_dead_letter(&event.event_id).unwrap();
+        assert_eq!(outbox.pending_count(), 1);
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(blocker);
     }
 
     #[test]

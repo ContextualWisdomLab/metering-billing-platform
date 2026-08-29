@@ -93,6 +93,7 @@ test("rejects invalid contract edges and preserves optional fields", () => {
   invalid({ event_id: "not-a-uuid" });
   invalid({ event_id: null });
   invalid({ event_contract_version: 0 });
+  invalid({ event_contract_version: 2 });
   invalid({ event_contract_version: 1.5 });
   invalid({ producer_contract_version: 0 });
   invalid({ producer_contract_version: 1.5 });
@@ -111,6 +112,10 @@ test("rejects invalid contract edges and preserves optional fields", () => {
   invalid({ dimensions: { model_code: "a".repeat(129) } });
   invalid({ correction_lineage: { ...input.correction_lineage, prior_event_id: "bad" } });
   invalid({ correction_lineage: { ...input.correction_lineage, relationship_code: "other" } });
+  invalid({ correction_lineage: { ...input.correction_lineage, secret: "do not persist" } });
+  invalid({ correction_lineage: null });
+  invalid({ correction_lineage: [] });
+  invalid({ correction_lineage: "not-an-object" });
   invalid({ measurements: [] });
   invalid({ measurements: null });
   invalid({ measurements: Array.from({ length: 65 }, () => ({ ...input.measurements[0] })) });
@@ -123,6 +128,15 @@ test("rejects invalid contract edges and preserves optional fields", () => {
   invalid({ measurements: [{ ...input.measurements[0], quantity: null }] });
   invalid({ occurred_at: "not-a-timestamp" });
   invalid({ occurred_at: "2026-99-99T00:00:00Z" });
+  invalid({ occurred_at: "2026-02-30T00:00:00Z" });
+  invalid({ occurred_at: "2023-02-29T00:00:00Z" });
+  invalid({ occurred_at: "2026-00-01T00:00:00Z" });
+  invalid({ occurred_at: "2026-01-00T00:00:00Z" });
+  invalid({ occurred_at: "2026-01-01T24:00:00Z" });
+  invalid({ occurred_at: "2026-01-01T00:60:00Z" });
+  invalid({ occurred_at: "2026-01-01T00:00:60Z" });
+  invalid({ occurred_at: "2026-01-01T00:00:00+24:00" });
+  invalid({ occurred_at: "1900-02-29T00:00:00Z" });
   invalid({ product_code: "Not_lower_snake_case" });
   invalid({ product_code: null });
   invalid({ product_code: "" });
@@ -153,6 +167,16 @@ test("rejects invalid contract edges and preserves optional fields", () => {
     },
   });
   assert.equal(noReasonEvent.correction_lineage.reason_code, undefined);
+  assert.equal(
+    buildUsageEvent({ ...input, occurred_at: "2024-02-29T00:00:00Z" }).occurred_at,
+    "2024-02-29T00:00:00Z",
+  );
+  const offsetEvent = buildUsageEvent({ ...input, occurred_at: "2024-02-29T01:02:03+01:00" });
+  assert.match(canonicalSourcePayloadJson(offsetEvent), /"occurred_at":"2024-02-29T00:02:03Z"/);
+  assert.equal(
+    buildUsageEvent({ ...input, occurred_at: "2000-02-29T00:00:00Z" }).occurred_at,
+    "2000-02-29T00:00:00Z",
+  );
   assert.throws(() => buildUsageCloudEvent(event, ""), { name: "ProducerContractError" });
   assert.throws(() => buildUsageCloudEvent(event, null), { name: "ProducerContractError" });
   assert.throws(() => buildUsageCloudEvent({ ...event, prompt: "do not persist" }, "urn:cwl:test"), { name: "ProducerContractError" });
@@ -439,6 +463,89 @@ test("durable outbox requires full receipt binding for rejection", async () => {
     assert.equal(result.retriedCount, 1);
     assert.equal(outbox.pendingCount(), 1);
     assert.equal(outbox.deadLetterCount(), 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("durable outbox preserves events enqueued during an in-flight flush", async () => {
+  const { source_payload_hash: _sourcePayloadHash, ...input } = fixture.event;
+  const first = buildUsageEvent(input);
+  const second = buildUsageEvent({
+    ...input,
+    event_id: "019d7b92-1aa0-7a7f-b61c-962c0f4bf6ad",
+    source_event_key: "producer-reference:workflow-381:step-05",
+  });
+  const directory = mkdtempSync(join(tmpdir(), "cwl-outbox-"));
+  try {
+    const outbox = new FileUsageOutbox(join(directory, "outbox.json"));
+    outbox.enqueue(first);
+    let release!: () => void;
+    let started!: () => void;
+    const senderStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const firstFlush = outbox.flush(async (events) => {
+      started();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { event_receipts: [{
+        source_event_key: events[0].source_event_key,
+        tenant_reference: events[0].tenant_reference,
+        event_contract_version: events[0].event_contract_version,
+        source_payload_hash: events[0].source_payload_hash,
+        ingestion_outcome_code: "accepted",
+      }] };
+    }, 1);
+    await senderStarted;
+    outbox.enqueue(second);
+    release();
+    const firstResult = await firstFlush;
+    assert.equal(firstResult.acceptedCount, 1);
+    assert.equal(outbox.pendingCount(), 1);
+    const secondResult = await outbox.flush(async (events) => ({ event_receipts: [{
+      source_event_key: events[0].source_event_key,
+      tenant_reference: events[0].tenant_reference,
+      event_contract_version: events[0].event_contract_version,
+      source_payload_hash: events[0].source_payload_hash,
+      ingestion_outcome_code: "accepted",
+    }] }));
+    assert.equal(secondResult.acceptedCount, 1);
+    assert.equal(outbox.pendingCount(), 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("durable outbox tolerates an event acknowledged by another writer", async () => {
+  const { source_payload_hash: _sourcePayloadHash, ...input } = fixture.event;
+  const event = buildUsageEvent(input);
+  const directory = mkdtempSync(join(tmpdir(), "cwl-outbox-"));
+  try {
+    const outbox = new FileUsageOutbox(join(directory, "outbox.json"));
+    const otherWriter = new FileUsageOutbox(join(directory, "outbox.json"));
+    outbox.enqueue(event);
+    const result = await outbox.flush(async (events) => {
+      const otherResult = await otherWriter.flush(async (otherEvents) => ({ event_receipts: [{
+        source_event_key: otherEvents[0].source_event_key,
+        tenant_reference: otherEvents[0].tenant_reference,
+        event_contract_version: otherEvents[0].event_contract_version,
+        source_payload_hash: otherEvents[0].source_payload_hash,
+        ingestion_outcome_code: "accepted",
+      }] }));
+      assert.equal(otherResult.acceptedCount, 1);
+      return { event_receipts: [{
+        source_event_key: events[0].source_event_key,
+        tenant_reference: events[0].tenant_reference,
+        event_contract_version: events[0].event_contract_version,
+        source_payload_hash: events[0].source_payload_hash,
+        ingestion_outcome_code: "accepted",
+      }] };
+    });
+    assert.equal(result.attemptedCount, 1);
+    assert.equal(result.acceptedCount, 0);
+    assert.equal(outbox.pendingCount(), 0);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
