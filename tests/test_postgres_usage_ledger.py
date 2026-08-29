@@ -297,8 +297,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 61:
-            raise AssertionError(f"expected 61 migrations, got {len(applied)}")
+        if len(applied) != 62:
+            raise AssertionError(f"expected 62 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13094,6 +13094,23 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
         self.assertEqual(collection.outstanding_amount, issued.tax_inclusive_amount)
+        stored_issued = self.ledger.get_issued_invoice(issued.issued_invoice_id)
+        assert stored_issued is not None
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    "UPDATE billing_core.issued_invoice "
+                    "SET tax_exclusive_amount = tax_exclusive_amount + 1 "
+                    "WHERE issued_invoice_id = %s",
+                    (issued.issued_invoice_id,),
+                )
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    "DELETE FROM billing_core.issued_invoice_line "
+                    "WHERE issued_invoice_line_id = %s",
+                    (stored_issued.issued_invoice_lines[-1].issued_invoice_line_id,),
+                )
         for statement in (
             "UPDATE billing_core.late_adjustment_invoice_adjustment "
             "SET recorded_by = 'operator:rewrite' "
@@ -13502,6 +13519,82 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 tenant.tenant_account_id, draft.invoice_draft_id
             )
         )
+
+    def test_postgres_issued_line_requires_explicit_line_type(self) -> None:
+        """Direct issued-line inserts cannot rely on a usage-line default."""
+        accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_typed_line",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+        issued_invoice_id = uuid4()
+        self.assertIsNone(
+            self.connection.execute(
+                """
+                SELECT column_default
+                FROM information_schema.columns
+                WHERE table_schema = 'billing_core'
+                  AND table_name = 'issued_invoice_line'
+                  AND column_name = 'line_type'
+                """
+            ).fetchone()[0]
+        )
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.issued_invoice
+                        (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                         issued_invoice_contract_version, rating_run_id,
+                         usage_snapshot_hash, source_payload_hash, currency_code,
+                         tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                         issued_invoice_status, issued_at)
+                    VALUES (%s, %s, %s, 2, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                    """,
+                    (
+                        issued_invoice_id,
+                        tenant.tenant_account_id,
+                        draft.invoice_draft_id,
+                        stored_draft.rating_run_id,
+                        stored_draft.usage_snapshot_hash,
+                        "sha256:" + "a" * 64,
+                        stored_draft.currency_code,
+                        stored_draft.drafted_total_amount,
+                        stored_draft.drafted_total_amount,
+                        CATALOG_START,
+                    ),
+                )
+                line = stored_draft.invoice_draft_lines[0]
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.issued_invoice_line
+                        (issued_invoice_line_id, issued_invoice_id, tenant_account_id,
+                         line_number, billing_account_reference, meter_code, unit_code,
+                         rated_quantity, unit_price_amount, line_total_amount)
+                    VALUES (%s, %s, %s, 1, %s, 'gen_ai_output_token', 'token', %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        issued_invoice_id,
+                        tenant.tenant_account_id,
+                        line.billing_account_reference,
+                        line.rated_quantity,
+                        line.unit_price_amount,
+                        line.line_total_amount,
+                    ),
+                )
 
     def test_late_adjustment_invoice_adjustment_adapter_boundaries(self) -> None:
         """The PostgreSQL adapter rejects malformed, missing, and racing evidence."""
