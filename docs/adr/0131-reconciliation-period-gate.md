@@ -9,8 +9,9 @@ Accepted for the next implementation slice of issue #87.
 Add a PostgreSQL command that locks one tenant-owned billing period and permits
 only the `soft_closed` to `reconciled` transition. It selects the latest
 completed reconciliation run, requires its blocking-exception summary to equal
-the persisted exception rows, and requires every exception in that run to have
-at least one immutable `resolved` or `waived` resolution.
+the persisted exception rows, requires the run membership to cover exactly all
+persisted reconciliation lines for the period, and requires every exception in
+that run to have at least one immutable `resolved` or `waived` resolution.
 
 The checks and append-only transition use the repository's existing transaction
 and period-history path. No exception, run, or resolution is updated or

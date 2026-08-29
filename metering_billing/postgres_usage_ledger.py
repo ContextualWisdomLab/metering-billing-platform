@@ -213,6 +213,14 @@ class PostgresUsageLedger:
 
     def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
         """Persist a period and append only transitions not already stored."""
+        return self._insert_billing_period(period, allow_reconciled=False)
+
+    def _insert_billing_period(
+        self, period: BillingPeriod, *, allow_reconciled: bool
+    ) -> BillingPeriod:
+        """Persist a period, allowing reconciled only from the gated command."""
+        if period.status == BillingPeriodStatus.RECONCILED and not allow_reconciled:
+            raise ValueError("reconciled periods require reconcile_billing_period")
         with self._cursor() as cursor:
             tenant_account_id = self._tenant_account_id_with_cursor(
                 cursor, period.tenant_reference
@@ -341,7 +349,14 @@ class PostgresUsageLedger:
                                    WHERE resolution.reconciliation_line_id = exception.reconciliation_line_id
                                      AND resolution.exception_code = exception.exception_code
                                )
-                           ) AS unresolved_exception_count
+                           ) AS unresolved_exception_count,
+                           COUNT(run_line.reconciliation_line_id) AS run_line_count,
+                           (
+                               SELECT COUNT(*)
+                               FROM billing_core.reconciliation_line AS period_line
+                               WHERE period_line.tenant_account_id = run.tenant_account_id
+                                 AND period_line.period_id = run.period_id
+                           ) AS period_line_count
                     FROM billing_core.reconciliation_run AS run
                     LEFT JOIN billing_core.reconciliation_run_line AS run_line
                       ON run_line.run_id = run.run_id
@@ -358,9 +373,17 @@ class PostgresUsageLedger:
                 run = cursor.fetchone()
                 if run is None:
                     raise ValueError("a completed reconciliation run is required")
-                blocking_count, exception_count, unresolved_count = map(int, run)
+                (
+                    blocking_count,
+                    exception_count,
+                    unresolved_count,
+                    run_line_count,
+                    period_line_count,
+                ) = map(int, run)
                 if blocking_count != exception_count:
                     raise ValueError("reconciliation run exception summary is inconsistent")
+                if run_line_count != period_line_count:
+                    raise ValueError("reconciliation run does not cover every period line")
                 if unresolved_count:
                     raise ValueError("blocking reconciliation exceptions remain unresolved")
             reconciled = period.advance(
@@ -371,7 +394,7 @@ class PostgresUsageLedger:
                 transitioned_at=transitioned_at,
                 transition_id=transition_id,
             )
-            return self.insert_billing_period(reconciled)
+            return self._insert_billing_period(reconciled, allow_reconciled=True)
 
     def list_billing_periods(self, tenant_reference: str) -> tuple[BillingPeriod, ...]:
         """Return period aggregates for one registered tenant only."""

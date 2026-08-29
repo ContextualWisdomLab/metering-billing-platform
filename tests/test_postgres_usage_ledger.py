@@ -433,7 +433,29 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             transitioned_at=CATALOG_START + timedelta(hours=1),
             transition_id=uuid4(),
         )
-        self.assertEqual(self.ledger.insert_billing_period(reconciled), reconciled)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_billing_period(reconciled)
+        empty_run = ReconciliationRun(
+            run_id=uuid4(),
+            period_id=period.period_id,
+            started_at=CATALOG_START,
+            completed_at=CATALOG_START + timedelta(hours=1),
+            reconciliation_line_ids=(),
+            blocking_exception_count=0,
+        )
+        self.ledger.insert_reconciliation_run(TENANT_ONE, empty_run)
+        self.assertEqual(
+            self.ledger.reconcile_billing_period(
+                TENANT_ONE,
+                period.period_id,
+                actor_reference="operator:finance_005",
+                authorization_reference="approval:period_003",
+                reason="reconcile usage window",
+                transitioned_at=CATALOG_START + timedelta(hours=1),
+                transition_id=reconciled.transitions[-1].transition_id,
+            ),
+            reconciled,
+        )
         invoiced = reconciled.advance(
             "invoiced",
             actor_reference="operator:finance_006",
@@ -673,7 +695,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.list_reconciliation_runs(TENANT_TWO), ())
         self.assertEqual(
             self.ledger.list_reconciliation_runs(TENANT_ONE, period_id=period.period_id),
-            (run,),
+            (run, empty_run),
         )
         empty_run = ReconciliationRun(
             run_id=uuid4(),
@@ -998,10 +1020,44 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 reason="reconcile period",
                 transitioned_at=CATALOG_START + timedelta(hours=5),
             )
-        inconsistent_run = replace(
+        partial_run = replace(
+            run,
+            run_id=uuid4(),
+            completed_at=CATALOG_START + timedelta(hours=4, minutes=30),
+            reconciliation_line_ids=(matched.reconciliation_line_id,),
+            blocking_exception_count=0,
+        )
+        self.ledger.insert_reconciliation_run(TENANT_ONE, partial_run)
+        with self.assertRaises(ValueError):
+            self.ledger.reconcile_billing_period(
+                TENANT_ONE,
+                period.period_id,
+                actor_reference="operator:finance_003",
+                authorization_reference="approval:period_002",
+                reason="partial run must not reconcile",
+                transitioned_at=CATALOG_START + timedelta(hours=5),
+            )
+        empty_latest_run = replace(
             run,
             run_id=uuid4(),
             completed_at=CATALOG_START + timedelta(hours=5),
+            reconciliation_line_ids=(),
+            blocking_exception_count=0,
+        )
+        self.ledger.insert_reconciliation_run(TENANT_ONE, empty_latest_run)
+        with self.assertRaises(ValueError):
+            self.ledger.reconcile_billing_period(
+                TENANT_ONE,
+                period.period_id,
+                actor_reference="operator:finance_003",
+                authorization_reference="approval:period_002",
+                reason="empty run must not reconcile",
+                transitioned_at=CATALOG_START + timedelta(hours=5),
+            )
+        inconsistent_run = replace(
+            run,
+            run_id=uuid4(),
+            completed_at=CATALOG_START + timedelta(hours=5, minutes=30),
             blocking_exception_count=2,
         )
         self.ledger.insert_reconciliation_run(TENANT_ONE, inconsistent_run)

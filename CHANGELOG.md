@@ -17,9 +17,9 @@
 ### Added
 
 - Issue #87 now gates the PostgreSQL `soft_closed` to `reconciled` transition
-  on the latest completed run's exact exception count and resolved-or-waived
-  exception facts. The check and append-only transition commit atomically
-  (ADR 0131).
+  on the latest completed run's exact period-line membership, exception count,
+  and resolved-or-waived exception facts. Direct persistence cannot bypass the
+  gate, and the check plus append-only transition commit atomically (ADR 0131).
 - Issue #87 now exposes tenant-scoped reconciliation-exception aging derived
   from immutable line assessment timestamps. Explicit UTC calendar-day buckets
   preserve `current`, 1-30, 31-60, 61-90, and 90+ boundaries without adding a
