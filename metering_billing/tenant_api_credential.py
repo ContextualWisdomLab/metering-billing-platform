@@ -228,13 +228,12 @@ class TenantApiCredentialService:
     def authorize_request(
         self, tenant_reference: str, presented_secret: str | None
     ) -> None:
-        """Require an active same-tenant key once any active key exists.
+        """Require a key after the tenant's one-time bootstrap has been used.
 
         A presented secret is always verified.  Unknown and revoked keys are
         indistinguishable.  A key whose tenant does not match the pin is
-        ``request_invalid``.  An unknown tenant with no secret stays in the
-        bootstrap window so downstream services can reject with their own
-        contracts.
+        ``request_invalid``.  A tenant with no credential history keeps the
+        initial bootstrap window; revoking every key does not reopen it.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if presented_secret is not None:
@@ -252,7 +251,7 @@ class TenantApiCredentialService:
             return
         if tenant_error is not None or tenant is None:
             return
-        if self.ledger.list_active_tenant_api_credentials(tenant.tenant_account_id):
+        if self.ledger.list_tenant_api_credentials(tenant.tenant_account_id):
             raise TenantApiCredentialQueryError("api_credential_missing")
 
     def _require_tenant(self, tenant_reference: str):

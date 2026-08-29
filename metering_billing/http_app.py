@@ -65,8 +65,9 @@ The application is a thin WSGI adapter:
     ``POST /v1/issued-credit-note-voids/{issued_credit_note_void_id}/journal-proposals``
     is the explicit later compose.  AIS pull stays existing GET
     journal-proposal routes.
-    10. Let an operator issue a tenant API credential.  After one active key
-    exists, every ``/v1`` call except credential issue requires that key.
+    10. Let an operator issue a tenant API credential.  The first issue may
+        use the tenant pin; after any credential history exists, every
+        ``/v1`` call, including credential issue, requires that key.
     GET one stored credential or list ``{tenant_api_credentials,
     next_cursor}``.  Issue a key, then send it on every ``/v1`` call;
     revoke when leaked.
@@ -833,13 +834,9 @@ def create_http_app(
     def _authorized_tenant(
         environ: WSGIEnvironment,
         payload: Mapping[str, Any],
-        *,
-        require_credential: bool = True,
     ) -> str:
-        """Resolve the tenant pin and enforce an active key after bootstrap."""
+        """Resolve the tenant pin and enforce an active key after first issue."""
         tenant_reference = _resolve_tenant_pin(environ, payload)
-        if not require_credential:
-            return tenant_reference
         try:
             credentials.authorize_request(tenant_reference, _extract_api_key(environ))
         except TenantApiCredentialQueryError as error:
@@ -920,9 +917,7 @@ def create_http_app(
                 if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
                     raise HttpRequestError("request_invalid")
                 if route_name == "tenant_api_credentials":
-                    tenant_reference = _authorized_tenant(
-                        environ, payload, require_credential=False
-                    )
+                    tenant_reference = _authorized_tenant(environ, payload)
                     result = credentials.issue_credential(
                         tenant_reference, payload.get("credential_label")
                     )

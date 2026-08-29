@@ -124,7 +124,7 @@ contextual-orchestrator usage
 
 - Buyers and AIS can POST the already-built commercial path as JSON without importing in-process Python services.
 - Every write requires `tenant_reference`. Money stays exact-decimal strings.
-- After a tenant has one or more active API credentials, every `/v1` call except credential issue requires a matching bearer or `X-CWL-Api-Key` secret. Zero active keys keep the tenant pin (bootstrap window).
+- After any API credential has been issued for a tenant, every `/v1` call, including credential issue, requires a matching bearer or `X-CWL-Api-Key` secret. Only the first issue for a tenant with no credential history may use the tenant pin; revoking the last key does not reopen bootstrap.
 - HTTP 200 means `accepted` or `duplicate_replay`. HTTP 422 means `rejected` or an unreadable request. HTTP 404 is an unknown route or an unknown/cross-tenant credential.
 - HTTP does not post journals, store a card PAN, or add Stripe, Adyen, or Toss.
 
@@ -318,10 +318,10 @@ contextual-orchestrator usage
 - An operator can issue one append-only `tenant_api_credential` for a known tenant. The secret is returned once (prefix plus secret). The ledger stores only a keyed HMAC.
 - A second issue of the same tenant, optional two-or-more-word `snake_case` `credential_label`, and contract version mints a new secret and a new row. It is not a silent duplicate of the first secret.
 - `revoke_credential` is idempotent. Revoked and unknown keys fail closed as `api_credential_invalid`.
-- After one or more active keys exist, every `/v1` write and GET except credential issue requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals `X-CWL-Tenant-Reference` / `tenant_reference`. A mismatch is HTTP 422.
-- Zero active keys keep the existing tenant pin (bootstrap window). AIS `X-CWL-Tenant-Reference` pull stays up until a key is issued for that tenant.
+- After any credential history exists, every `/v1` write and GET, including credential issue, requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals `X-CWL-Tenant-Reference` / `tenant_reference`. A mismatch is HTTP 422.
+- A tenant with no credential history keeps the existing tenant pin for the one-time bootstrap. AIS `X-CWL-Tenant-Reference` pull stays up until the first key is issued; after that, including after revocation of every key, a matching active key is required.
 - `GET /healthz` stays unauthenticated.
-- `POST /v1/tenant-api-credentials` may use the tenant pin alone. PAN, CVC, and provider secrets are refused on issue and revoke.
+- `POST /v1/tenant-api-credentials` may use the tenant pin alone only for the first key issue. Later issue and revoke require an active key. PAN, CVC, and provider secrets are refused on issue and revoke.
 - A known stored `tenant_api_credential` presents one tenant-scoped metadata statement with `tenant_api_credential_id`, `credential_label`, `credential_prefix`, `credential_status`, timestamps, contract version, and `next_operator_action` (`wait` while active, otherwise `issue`).
 - `GET /v1/tenant-api-credentials/{tenant_api_credential_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak. GET never reconstructs a secret.
 - `GET /v1/tenant-api-credentials` lists summaries as `{tenant_api_credentials, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{tenant_api_credential_id}`.

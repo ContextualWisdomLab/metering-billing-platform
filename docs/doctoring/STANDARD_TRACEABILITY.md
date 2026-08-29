@@ -21,7 +21,7 @@
 | RFC 9421 | HTTP Message Signatures are not implemented in this slice. Receivers verify the HMAC over the raw body rather than a structured signature input. |
 | NIST SP 800-63B | Tenant API credential and webhook-subscription verifiers persist a keyed HMAC, never the recoverable secret. The plaintext secret is returned once on issue or register. |
 | OWASP API2:2023 | Leaked tenant API keys are revocable bearer credentials. Unknown and revoked keys fail closed as `api_credential_invalid`. |
-| SOC 2 CC6 | After a tenant has one or more active keys, every `/v1` call except credential issue requires a matching active key whose tenant equals the pin. Zero active keys remain a documented bootstrap window so AIS can keep pulling with `X-CWL-Tenant-Reference`. |
+| SOC 2 CC6 | After any credential history exists, every `/v1` call, including credential issue, requires a matching active key whose tenant equals the pin. Only the first issue for a tenant with no credential history has the one-time bootstrap window; revocation cannot reopen it. |
 | TM Forum TMF620 | A commercial rate card is a versioned, queryable price list. Publishing writes an immutable `rate_card_version`; rating resolves that persisted version and does not invent a hidden default price. |
 | ISO 4217 | Tax products are half-even rounded to a closed minor-unit exponent table (`0` for JPY and KRW, `2` for listed two-decimal currencies). Unknown currency codes fail closed. |
 | OECD International VAT/GST Guidelines | A published tenant tax rate is separate from later invoice calculation. This slice applies one flat persisted rate and does not implement nexus, exemptions, or an OSS engine. |

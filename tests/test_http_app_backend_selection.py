@@ -16,6 +16,7 @@ import unittest
 from typing import Any
 from urllib.parse import urlencode
 from unittest import mock
+from uuid import uuid4
 
 from metering_billing.http_app import (
     LEDGER_BACKEND_ENVIRONMENT_VARIABLE,
@@ -158,14 +159,15 @@ class ReadyzBackendProbeTests(unittest.TestCase):
         """The durable backend accepts credential issue plus an authorized read."""
         ledger = PostgresUsageLedger.connect(LOCAL_POSTGRES_DSN)
         try:
-            ledger.register_tenant("urn:cwl:k6_http_probe")
+            tenant_reference = f"urn:cwl:k6_http_probe_{uuid4().hex}"
+            ledger.register_tenant(tenant_reference)
             app = create_http_app(ledger=ledger)
             issue_status, issue_body = invoke_http(
                 app,
                 "POST",
                 "/v1/tenant-api-credentials",
                 payload={"credential_label": "k6_baseline_runner"},
-                headers={"X-CWL-Tenant-Reference": "urn:cwl:k6_http_probe"},
+                headers={"X-CWL-Tenant-Reference": tenant_reference},
             )
             self.assertEqual(issue_status, 200)
             secret = issue_body["api_credential_secret"]
@@ -174,7 +176,7 @@ class ReadyzBackendProbeTests(unittest.TestCase):
                 "GET",
                 "/v1/tenant-api-credentials",
                 headers={
-                    "X-CWL-Tenant-Reference": "urn:cwl:k6_http_probe",
+                    "X-CWL-Tenant-Reference": tenant_reference,
                     "X-CWL-Api-Key": secret,
                 },
             )

@@ -11,7 +11,7 @@ Register an https callback, then run deliveries; AIS may keep polling.
 Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.
 
 ```bash
-# Bootstrap: tenant pin only, until a key exists for that tenant.
+# Bootstrap: tenant pin only for the first key issue for that tenant.
 # POST /v1/tenant-api-credentials
 # {"tenant_reference":"urn:cwl:tenant_001","credential_label":"operator_key"}
 
@@ -30,7 +30,7 @@ Drain AIS outbox, then store the receipt observation; AIS may keep being polled 
 
 ## Bootstrap window
 
-A tenant with zero active credentials keeps the existing tenant pin.  AIS can keep pulling journal proposals with `X-CWL-Tenant-Reference` until an operator issues a key for that tenant.  After one or more active keys exist, missing, unknown, and revoked secrets fail closed.  Revoking the last active key reopens the bootstrap window.  `POST /v1/tenant-api-credentials` may still use the tenant pin alone so an operator can mint a replacement.
+A tenant with no credential history keeps the existing tenant pin for its one-time first-key issue.  AIS can keep pulling journal proposals with `X-CWL-Tenant-Reference` until an operator issues the first key for that tenant.  After any credential has been issued, every `/v1` call, including another issue, requires a matching active key; missing, unknown, and revoked secrets fail closed, including after the last active key is revoked.  A replacement therefore requires an authorized active key or a separately provisioned recovery path; revocation never silently reopens tenant-pin access.
 
 ## Stored secrets
 
