@@ -615,8 +615,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             captured_at=CATALOG_START + timedelta(minutes=4, seconds=2),
         )
         self.assertEqual(validate_reconciliation_evidence(evidence.as_contract_dict()), ())
-        self.assertEqual(self.ledger.insert_reconciliation_evidence(evidence), evidence)
-        self.assertEqual(self.ledger.insert_reconciliation_evidence(evidence), evidence)
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_evidence(TENANT_TWO, evidence)
+        self.assertEqual(self.ledger.insert_reconciliation_evidence(TENANT_ONE, evidence), evidence)
+        self.assertEqual(self.ledger.insert_reconciliation_evidence(TENANT_ONE, evidence), evidence)
         self.assertEqual(
             self.ledger.get_reconciliation_evidence(TENANT_ONE, evidence.evidence_id),
             evidence,
@@ -634,10 +636,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.list_reconciliation_evidence(TENANT_TWO), ())
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_evidence(
+                TENANT_ONE,
                 replace(evidence, evidence_reference="urn:cwl:evidence:rewrite")
             )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_evidence(
+                TENANT_ONE,
                 replace(
                     evidence,
                     evidence_id=uuid4(),
@@ -724,8 +728,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             resolved_at=CATALOG_START + timedelta(minutes=6),
         )
         self.assertEqual(validate_reconciliation_resolution(resolution.as_contract_dict()), ())
-        self.assertEqual(self.ledger.insert_reconciliation_resolution(resolution), resolution)
-        self.assertEqual(self.ledger.insert_reconciliation_resolution(resolution), resolution)
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_resolution(TENANT_TWO, resolution)
+        self.assertEqual(self.ledger.insert_reconciliation_resolution(TENANT_ONE, resolution), resolution)
+        self.assertEqual(self.ledger.insert_reconciliation_resolution(TENANT_ONE, resolution), resolution)
         self.assertEqual(
             self.ledger.get_reconciliation_resolution(TENANT_ONE, resolution.resolution_id),
             resolution,
@@ -743,10 +749,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.list_reconciliation_resolutions(TENANT_TWO), ())
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_resolution(
+                TENANT_ONE,
                 replace(resolution, resolution_reason="rewrite")
             )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_resolution(
+                TENANT_ONE,
                 replace(resolution, resolution_id=uuid4(), reconciliation_line_id=matched.reconciliation_line_id)
             )
         with self.assertRaises(ValueError):
