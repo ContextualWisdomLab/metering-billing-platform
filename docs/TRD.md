@@ -75,9 +75,11 @@ operator action is `apply_late_adjustment` until
 `LateAdjustmentApplicationService` records one immutable application through
 `POST /v1/late-adjustments/{late_adjustment_id}/applications`; thereafter it
 is `rate_late_adjustment`. The application requires actor and authorization
-references, preserves the source target/exact signed amount/currency, and is
-replay-safe. Neither command applies a rating, mutates a period, posts a
-journal, calls a provider, or creates a tax document.
+references, preserves the source target/exact signed amount/currency, locks and
+rechecks that the target period is still `open` for a new application, and is
+replay-safe. A stored application replays after the target closes and retains
+its first-writer audit data. Neither command applies a rating, mutates a
+period, posts a journal, calls a provider, or creates a tax document.
 
 ## Provider plane
 

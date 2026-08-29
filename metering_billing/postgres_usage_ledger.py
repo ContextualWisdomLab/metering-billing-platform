@@ -111,7 +111,7 @@ def _same_late_adjustment_application(
     stored: StoredLateAdjustmentApplication,
     incoming: StoredLateAdjustmentApplication,
 ) -> bool:
-    """Compare every immutable application field except its generated id."""
+    """Compare replay identity and immutable source fields, not first-writer audit data."""
     return (
         stored.tenant_account_id == incoming.tenant_account_id
         and stored.late_adjustment_id == incoming.late_adjustment_id
@@ -119,9 +119,6 @@ def _same_late_adjustment_application(
         and format(stored.adjustment_amount, "f")
         == format(incoming.adjustment_amount, "f")
         and stored.currency_code == incoming.currency_code
-        and stored.applied_by == incoming.applied_by
-        and stored.authorization_reference == incoming.authorization_reference
-        and stored.applied_at == incoming.applied_at
         and stored.late_adjustment_application_contract_version
         == incoming.late_adjustment_application_contract_version
         and stored.late_adjustment_application_status

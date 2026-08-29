@@ -124,20 +124,32 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 ledger.insert_late_adjustment_application(invalid)
-        with self.assertRaises(ValueError):
+        self.assertEqual(
             ledger.insert_late_adjustment_application(
                 replace(
                     stored,
                     late_adjustment_application_id=uuid4(),
                     applied_by="operator:other",
+                    authorization_reference="change:456",
+                    applied_at=datetime(2026, 8, 29, 1, 2, 4, tzinfo=UTC),
                 )
-            )
+            ),
+            stored,
+        )
         self.assertEqual(
             ledger.insert_late_adjustment_application(
                 replace(stored, late_adjustment_application_id=uuid4())
             ),
             stored,
         )
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_application(
+                replace(
+                    stored,
+                    late_adjustment_application_id=uuid4(),
+                    adjustment_amount=Decimal("-12.51"),
+                )
+            )
         with self.assertRaises(ValueError):
             ledger.insert_late_adjustment_application(stored)
         for field in (

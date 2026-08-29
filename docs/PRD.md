@@ -77,7 +77,10 @@ contextual-orchestrator usage
 - The application is an append-only, tenant-scoped fact whose target period,
   signed exact amount, and currency must equal the stored late adjustment.
   Identity is `(tenant_account_id, late_adjustment_id)`; replay returns the
-  same application as `duplicate_replay` without a second row.
+  same application as `duplicate_replay` without a second row. The first
+  application requires the current target period to remain `open`; a stored
+  application remains replayable after the target closes and returns its first
+  writer's audit references and timestamp.
 - After application, late-adjustment item/list presentment reports
   `rate_late_adjustment`; before application it reports
   `apply_late_adjustment`. Unknown or cross-tenant facts return 404 and invalid

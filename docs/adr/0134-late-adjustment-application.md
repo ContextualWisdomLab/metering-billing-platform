@@ -21,6 +21,12 @@ Add an append-only, tenant-scoped `late_adjustment_application` fact:
   currency equal to the immutable late-adjustment row;
 - identity is `(tenant_account_id, late_adjustment_id)`, so replay returns the
   stored application as `duplicate_replay` without a second row;
+- a new application locks the target billing-period row, derives its latest
+  append-only transition status, and requires `open`; an existing application
+  bypasses that new-fact guard so retries remain safe after period close;
+- replay comparison covers tenant/source identity, target, amount, currency,
+  contract version, and status. First-writer actor, authorization, and time
+  remain stored audit data rather than mutable identity;
 - item/list presentment changes the next action from `apply_late_adjustment`
   to `rate_late_adjustment` after the application exists;
 - PostgreSQL composite foreign keys and an immutable trigger enforce tenant
@@ -41,3 +47,6 @@ traceable without storing secrets or inventing statutory identifiers.
 
 PostgreSQL Global Development Group. (2026). *CREATE TRIGGER*.
 https://www.postgresql.org/docs/current/sql-createtrigger.html
+
+PostgreSQL Global Development Group. (2026). *Concurrency control*.
+https://www.postgresql.org/docs/current/mvcc.html

@@ -66,10 +66,13 @@ FOCUS export, and statutory accounting remain downstream capabilities.
 `LateAdjustmentPresentmentService` exposes the fact through tenant-scoped
 item/list reads and reports `apply_late_adjustment` until
 `LateAdjustmentApplicationService` records the append-only
-`late_adjustment_application` acknowledgement. The nested application route
-requires actor and authorization references, enforces source equality and
-tenant scope, and then reports `rate_late_adjustment`. It never rewrites the
-late fact, period, usage, rating, tax, journal, provider state, or webhook.
+`late_adjustment_application` acknowledgement. The PostgreSQL trigger locks
+the target period and requires its latest append-only status to be `open` for
+new applications; replays bypass that guard and return the first writer's
+audit data. The nested application route requires actor and authorization
+references, enforces source equality and tenant scope, and then reports
+`rate_late_adjustment`. It never rewrites the late fact, period, usage, rating,
+tax, journal, provider state, or webhook.
 
 ## Usage ingestion
 

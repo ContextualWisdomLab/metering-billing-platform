@@ -1371,7 +1371,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 replace(
                     stored,
                     late_adjustment_application_id=uuid4(),
-                    applied_by="operator:rewriter",
+                    adjustment_amount=Decimal("-12.51"),
                 )
             )
         for invalid in (
@@ -1396,6 +1396,149 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                     self.connection.execute(
                         statement, (accepted.late_adjustment_application_id,)
                     )
+
+    def test_late_adjustment_application_rejects_target_closed_after_recording(
+        self,
+    ) -> None:
+        """A recorded adjustment cannot first apply after its target period closes."""
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 6, 1),
+            date(2026, 7, 1),
+            opened_by="operator:finance_024",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_025",
+            authorization_reference="approval:period_024",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 7, 1),
+            date(2026, 8, 1),
+            opened_by="operator:finance_026",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "3.25",
+            "USD",
+            "provider:application_closed_target",
+            "sha256:" + "7" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        self.ledger.insert_billing_period(
+            target.advance(
+                "soft_closed",
+                actor_reference="operator:finance_027",
+                authorization_reference="approval:period_025",
+                reason="close target after recording",
+                transitioned_at=CATALOG_START + timedelta(hours=3),
+            )
+        )
+
+        with self.assertRaises(psycopg.errors.RaiseException):
+            LateAdjustmentApplicationService(
+                self.ledger,
+                clock=lambda: CATALOG_START + timedelta(hours=4),
+            ).apply_late_adjustment(
+                TENANT_ONE,
+                adjustment.late_adjustment_id,
+                applied_by="operator:finance_028",
+                authorization_reference="approval:application_021",
+            )
+        self.assertIsNone(
+            self.ledger.find_late_adjustment_application(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                adjustment.late_adjustment_id,
+            )
+        )
+
+    def test_concurrent_late_adjustment_applications_replay_first_writer(self) -> None:
+        """Separate PostgreSQL sessions classify one winner and one audit-preserving replay."""
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 9, 1),
+            date(2026, 10, 1),
+            opened_by="operator:finance_029",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_030",
+            authorization_reference="approval:period_026",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 10, 1),
+            date(2026, 11, 1),
+            opened_by="operator:finance_031",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "4.75",
+            "USD",
+            "provider:application_race",
+            "sha256:" + "8" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        barrier = Barrier(2)
+
+        class BarrierLedger(PostgresUsageLedger):
+            def find_late_adjustment_application(self, tenant_account_id, late_adjustment_id):
+                result = super().find_late_adjustment_application(
+                    tenant_account_id, late_adjustment_id
+                )
+                barrier.wait()
+                return result
+
+        def apply_once(worker_number: int) -> str:
+            with psycopg.connect(POSTGRES_DSN) as connection:
+                result = LateAdjustmentApplicationService(
+                    BarrierLedger(connection),
+                    clock=lambda: CATALOG_START + timedelta(hours=4 + worker_number),
+                ).apply_late_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    applied_by=f"operator:finance_{32 + worker_number}",
+                    authorization_reference=f"approval:application_{22 + worker_number}",
+                )
+                return result.late_adjustment_application_outcome_code.value
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(apply_once, (0, 1)))
+        self.assertEqual(sorted(outcomes), ["accepted", "duplicate_replay"])
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT count(*) FROM billing_core.late_adjustment_application "
+                "WHERE tenant_account_id = %s AND late_adjustment_id = %s",
+                (
+                    self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                    adjustment.late_adjustment_id,
+                ),
+            ).fetchone()[0],
+            1,
+        )
 
     def test_reconcile_period_requires_a_complete_latest_run(self) -> None:
         """Advance a soft-closed period only when every latest-run exception is resolved."""

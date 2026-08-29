@@ -252,8 +252,11 @@ append-only `late_adjustment_application` per tenant and late-adjustment ID,
 including the equal target period, signed exact amount, currency, actor,
 authorization reference, and application instant. Presentment exposes
 `apply_late_adjustment` before that row exists and `rate_late_adjustment`
-afterward. The application row has composite source/target foreign keys and
-immutable update/delete triggers; it does not mutate the late adjustment.
+afterward. A new application locks and rechecks the target period's latest
+append-only status and requires `open`; replay bypasses that new-fact guard and
+returns the first writer's immutable audit fields. The application row has
+composite source/target foreign keys and immutable update/delete triggers; it
+does not mutate the late adjustment.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

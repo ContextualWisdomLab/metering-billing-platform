@@ -2997,7 +2997,18 @@ class MemoryUsageLedger:
         identity_key = (application.tenant_account_id, application.late_adjustment_id)
         existing = self.find_late_adjustment_application(*identity_key)
         if existing is not None:
-            if replace(existing, late_adjustment_application_id=application.late_adjustment_application_id) != application:
+            if (
+                existing.tenant_account_id != application.tenant_account_id
+                or existing.late_adjustment_id != application.late_adjustment_id
+                or existing.target_period_id != application.target_period_id
+                or format(existing.adjustment_amount, "f")
+                != format(application.adjustment_amount, "f")
+                or existing.currency_code != application.currency_code
+                or existing.late_adjustment_application_contract_version
+                != application.late_adjustment_application_contract_version
+                or existing.late_adjustment_application_status
+                != application.late_adjustment_application_status
+            ):
                 raise ValueError("late adjustment application identity cannot change")
             return existing
         self.late_adjustment_applications[application.late_adjustment_application_id] = application
