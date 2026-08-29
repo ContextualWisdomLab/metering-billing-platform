@@ -243,12 +243,14 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
         ledger, adjustment, draft = prepare_invoice_adjustment()
         TaxRateService(ledger).publish_tax_rate(TENANT_ONE, "vat", "0.10")
         TaxAssessmentService(ledger).assess_tax(TENANT_ONE, draft.invoice_draft_id, 1)
-        ledger.insert_late_adjustment_invoice_adjustment(
-            stored_candidate(ledger, adjustment, draft)
-        )
-        rejected = IssuedInvoiceService(ledger).issue_invoice(
-            TENANT_ONE, draft.invoice_draft_id
-        )
+        with mock.patch.object(
+            ledger,
+            "list_late_adjustment_invoice_adjustments_for_draft",
+            return_value=(stored_candidate(ledger, adjustment, draft),),
+        ):
+            rejected = IssuedInvoiceService(ledger).issue_invoice(
+                TENANT_ONE, draft.invoice_draft_id
+            )
         self.assertEqual(
             rejected.rejection_reason_code.value,
             "late_adjustment_tax_reassessment_required",
@@ -595,6 +597,63 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
         ), self.assertRaises(ExactDecimalError):
             _tax_amounts(ledger, stored_draft)
 
+    def test_issuer_preserves_large_exact_totals_before_storage_validation(self) -> None:
+        """Large representable totals are not rounded by Decimal's default context."""
+        ledger, adjustment, draft = prepare_invoice_adjustment("-0.002")
+        stored_draft = ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+        candidate = stored_candidate(ledger, adjustment, draft)
+        adjusted_draft = replace(
+            stored_draft,
+            drafted_total_amount=Decimal("99999999999999999999999999.999999999999"),
+        )
+        adjusted_candidate = replace(candidate, adjustment_amount=Decimal("-0.000000000001"))
+        with mock.patch.object(
+            ledger, "get_invoice_draft", return_value=adjusted_draft
+        ), mock.patch.object(
+            ledger, "lock_invoice_draft", return_value=adjusted_draft
+        ), mock.patch.object(
+            ledger,
+            "list_late_adjustment_invoice_adjustments_for_draft",
+            return_value=(adjusted_candidate,),
+        ):
+            issued = IssuedInvoiceService(ledger).issue_invoice(
+                TENANT_ONE, draft.invoice_draft_id
+            )
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        self.assertEqual(
+            issued.tax_exclusive_amount,
+            Decimal("99999999999999999999999999.999999999998"),
+        )
+
+    def test_issuer_rejects_adjusted_invoice_line_limit(self) -> None:
+        """A late line cannot make the issued contract exceed its 10,000-line bound."""
+        ledger, adjustment, draft = prepare_invoice_adjustment("0.002")
+        stored_draft = ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+        candidate = stored_candidate(ledger, adjustment, draft)
+        original = stored_draft.invoice_draft_lines[0]
+        expanded_draft = replace(
+            stored_draft,
+            invoice_draft_lines=tuple(
+                replace(original, line_number=line_number)
+                for line_number in range(1, 10001)
+            ),
+        )
+        with mock.patch.object(
+            ledger, "get_invoice_draft", return_value=expanded_draft
+        ), mock.patch.object(
+            ledger, "lock_invoice_draft", return_value=expanded_draft
+        ), mock.patch.object(
+            ledger,
+            "list_late_adjustment_invoice_adjustments_for_draft",
+            return_value=(candidate,),
+        ):
+            rejected = IssuedInvoiceService(ledger).issue_invoice(
+                TENANT_ONE, draft.invoice_draft_id
+            )
+        self.assertEqual(rejected.rejection_reason_code.value, "request_invalid")
+
     def test_issue_handles_optional_and_missing_draft_locks(self) -> None:
         """The memory adapter remains compatible with both lock outcomes."""
         unlocked_ledger, adjustment, draft = prepare_invoice_adjustment("0.002")
@@ -917,6 +976,52 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ledger.insert_late_adjustment_invoice_adjustment(candidate)
 
+        downstream_ledger, downstream_adjustment, downstream_draft = prepare_invoice_adjustment()
+        downstream_candidate = stored_candidate(
+            downstream_ledger, downstream_adjustment, downstream_draft
+        )
+        self.assertEqual(
+            CollectionCaseService(downstream_ledger)
+            .open_collection_case(TENANT_ONE, downstream_draft.invoice_draft_id)
+            .collection_case_outcome_code.value,
+            "accepted",
+        )
+        with self.assertRaisesRegex(ValueError, "invoice draft has downstream records"):
+            downstream_ledger.insert_late_adjustment_invoice_adjustment(downstream_candidate)
+
+        ambiguous_ledger, ambiguous_adjustment, ambiguous_draft = prepare_invoice_adjustment()
+        ambiguous_stored_draft = ambiguous_ledger.get_invoice_draft(ambiguous_draft.invoice_draft_id)
+        assert ambiguous_stored_draft is not None
+        ambiguous_line = ambiguous_stored_draft.invoice_draft_lines[0]
+        ambiguous_ledger.invoice_drafts[ambiguous_draft.invoice_draft_id] = replace(
+            ambiguous_stored_draft,
+            invoice_draft_lines=(
+                ambiguous_line,
+                replace(
+                    ambiguous_line,
+                    billing_account_id=uuid4(),
+                    billing_account_reference="urn:cwl:other:billing-account",
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "invoice draft billing account is ambiguous"):
+            ambiguous_ledger.insert_late_adjustment_invoice_adjustment(
+                stored_candidate(ambiguous_ledger, ambiguous_adjustment, ambiguous_draft)
+            )
+
+        mismatch_ledger, mismatch_adjustment, mismatch_draft = prepare_invoice_adjustment()
+        mismatch_candidate = stored_candidate(
+            mismatch_ledger, mismatch_adjustment, mismatch_draft
+        )
+        with self.assertRaisesRegex(ValueError, "billing account does not match draft"):
+            mismatch_ledger.insert_late_adjustment_invoice_adjustment(
+                replace(
+                    mismatch_candidate,
+                    billing_account_id=uuid4(),
+                    billing_account_reference="urn:cwl:other:billing-account",
+                )
+            )
+
         for variant in ("missing_rating", "missing_draft", "evidence", "issued"):
             test_ledger, test_adjustment, test_draft = prepare_invoice_adjustment()
             test_candidate = stored_candidate(test_ledger, test_adjustment, test_draft)
@@ -979,6 +1084,28 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
         self.assertEqual(
             precision_race.rejection_reason_code.value,
             "adjustment_amount_not_representable",
+        )
+
+        class IdentityConflictRaceLedger(IssuanceRaceLedger):
+            """Simulate another transaction winning the rated-identity race."""
+
+            def insert_late_adjustment_invoice_adjustment(self, *_args):
+                raise ValueError(
+                    "late adjustment invoice adjustment identity conflicts with an existing row"
+                )
+
+        identity_conflict = LateAdjustmentInvoiceAdjustmentService(
+            IdentityConflictRaceLedger(ledger)
+        ).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:x",
+            authorization_reference="approval:x",
+        )
+        self.assertEqual(
+            identity_conflict.rejection_reason_code.value,
+            "late_adjustment_invoice_adjustment_identity_conflict",
         )
 
         class UnexpectedLedger(IssuanceRaceLedger):

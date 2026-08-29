@@ -342,6 +342,11 @@ class LateAdjustmentInvoiceAdjustmentService:
                     LateAdjustmentInvoiceAdjustmentRejectionReasonCode.ADJUSTMENT_AMOUNT_NOT_REPRESENTABLE,
                     OPERATOR_ACTION_WAIT,
                 )
+            if str(error) == "late adjustment invoice adjustment identity conflicts with an existing row":
+                return _rejected(
+                    LateAdjustmentInvoiceAdjustmentRejectionReasonCode.IDENTITY_CONFLICT,
+                    OPERATOR_ACTION_WAIT,
+                )
             raise
         outcome = (
             LateAdjustmentInvoiceAdjustmentOutcomeCode.ACCEPTED

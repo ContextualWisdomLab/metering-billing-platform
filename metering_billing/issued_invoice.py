@@ -34,6 +34,7 @@ from metering_billing.errors import (
 from metering_billing.exact_decimal import (
     format_exact_decimal,
     issued_invoice_amount_exceeds_storage_precision,
+    sum_exact_decimals,
 )
 from metering_billing.invoice_draft import parse_invoice_amount
 from metering_billing.time_window import parse_iso8601_datetime
@@ -54,6 +55,7 @@ from metering_billing.webhook_outbox import (
 Clock = Callable[[], datetime]
 ISSUED_INVOICE_CONTRACT_VERSION = 2
 ISSUED_INVOICE_STATUS = "issued"
+MAX_ISSUED_INVOICE_LINES = 10000
 OPERATOR_ACTION_COLLECT = "collect"
 ZERO = Decimal("0")
 
@@ -300,8 +302,10 @@ class IssuedInvoiceService:
             )
         except ExactDecimalError:
             return _rejected(IssuedInvoiceRejectionReasonCode.REQUEST_INVALID)
+        if len(invoice_draft.invoice_draft_lines) + len(compositions) > MAX_ISSUED_INVOICE_LINES:
+            return _rejected(IssuedInvoiceRejectionReasonCode.REQUEST_INVALID)
         line_results = _project_draft_lines(
-            invoice_draft, compositions, tenant.tenant_reference
+            invoice_draft, compositions
         )
         source_payload_hash = compute_issued_invoice_payload_hash(
             {
@@ -318,7 +322,7 @@ class IssuedInvoiceService:
         )
         issued_invoice_id = generate_record_id()
         stored_lines = _build_issued_lines(
-            issued_invoice_id, invoice_draft, compositions, tenant.tenant_reference
+            issued_invoice_id, invoice_draft, compositions
         )
         stored = self.ledger.insert_issued_invoice(
             StoredIssuedInvoice(
@@ -358,8 +362,8 @@ def _tax_amounts(
     )
     if assessment is None:
         exclusive = parse_invoice_amount(invoice_draft.drafted_total_amount)
-        exclusive += sum(
-            (composition.adjustment_amount for composition in compositions), ZERO
+        exclusive = sum_exact_decimals(
+            exclusive, *(composition.adjustment_amount for composition in compositions)
         )
         if exclusive <= ZERO:
             raise ExactDecimalError("late adjustment total must be positive")
@@ -369,7 +373,7 @@ def _tax_amounts(
     exclusive = parse_invoice_amount(assessment.tax_exclusive_amount)
     tax_amount = parse_invoice_amount(assessment.tax_amount)
     inclusive = parse_invoice_amount(assessment.tax_inclusive_amount)
-    if exclusive + tax_amount != inclusive:
+    if sum_exact_decimals(exclusive, tax_amount) != inclusive:
         raise ExactDecimalError("tax snapshot does not sum to inclusive")
     if any(
         issued_invoice_amount_exceeds_storage_precision(amount)
@@ -382,7 +386,6 @@ def _tax_amounts(
 def _project_draft_lines(
     invoice_draft: StoredInvoiceDraft,
     compositions: tuple[StoredLateAdjustmentInvoiceAdjustment, ...] = (),
-    tenant_reference: str | None = None,
 ) -> tuple[IssuedInvoiceLineResult, ...]:
     """Project draft lines into exact issued-line results for hashing."""
     draft_lines = tuple(
@@ -421,7 +424,6 @@ def _build_issued_lines(
     issued_invoice_id: UUID,
     invoice_draft: StoredInvoiceDraft,
     compositions: tuple[StoredLateAdjustmentInvoiceAdjustment, ...] = (),
-    tenant_reference: str | None = None,
 ) -> tuple[StoredIssuedInvoiceLine, ...]:
     """Copy draft lines into exact issued lines."""
     draft_lines = tuple(

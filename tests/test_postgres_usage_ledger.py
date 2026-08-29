@@ -138,6 +138,7 @@ from metering_billing.usage_ledger import (
     StoredCollectionDispute,
     StoredCreditNoteApplication,
     StoredLateAdjustmentApplication,
+    StoredLateAdjustmentInvoiceAdjustment,
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
@@ -296,8 +297,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 57:
-            raise AssertionError(f"expected 57 migrations, got {len(applied)}")
+        if len(applied) != 58:
+            raise AssertionError(f"expected 58 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13175,6 +13176,78 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 self.assertEqual(
                     self.connection.execute(
                         f"SELECT COUNT(*) FROM billing_core.{table} WHERE invoice_draft_id = %s",
+                        (draft.invoice_draft_id,),
+                    ).fetchone()[0],
+                    0,
+                    )
+
+    def test_postgres_direct_composition_rejects_after_downstream(self) -> None:
+        """The composition trigger closes the reverse direct-SQL ordering gap."""
+        for downstream in ("collection", "journal", "tax", "credit"):
+            with self.subTest(downstream=downstream):
+                adjustment, draft = prepare_postgres_late_adjustment(
+                    self.ledger,
+                    "0.002",
+                    f"provider:direct-composition-after-{downstream}",
+                    quantity=str(1820 + ("collection", "journal", "tax", "credit").index(downstream)),
+                )
+                if downstream == "collection":
+                    result = CollectionCaseService(self.ledger).open_collection_case(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    self.assertEqual(result.collection_case_outcome_code.value, "accepted")
+                elif downstream == "journal":
+                    result = AccountingExportService(self.ledger).propose_journal(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    self.assertEqual(result.journal_proposal_outcome_code.value, "accepted")
+                elif downstream == "tax":
+                    TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.10")
+                    result = TaxAssessmentService(self.ledger).assess_tax(
+                        TENANT_ONE, draft.invoice_draft_id, 1
+                    )
+                    self.assertEqual(result.tax_assessment_outcome_code.value, "accepted")
+                else:
+                    result = CreditAdjustmentService(self.ledger).record_credit_adjustment(
+                        TENANT_ONE, draft.invoice_draft_id, "0.001", "rating_correction"
+                    )
+                    self.assertEqual(result.credit_adjustment_outcome_code.value, "accepted")
+                tenant = self.ledger.require_tenant(TENANT_ONE)
+                stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+                assert stored_draft is not None
+                rating = self.ledger.find_late_adjustment_rating(
+                    tenant.tenant_account_id, adjustment.late_adjustment_id
+                )
+                assert rating is not None
+                line = stored_draft.invoice_draft_lines[0]
+                candidate = StoredLateAdjustmentInvoiceAdjustment(
+                    late_adjustment_invoice_adjustment_id=uuid4(),
+                    tenant_account_id=tenant.tenant_account_id,
+                    billing_account_id=line.billing_account_id,
+                    billing_account_reference=line.billing_account_reference,
+                    late_adjustment_rating_id=rating.late_adjustment_rating_id,
+                    late_adjustment_application_id=rating.late_adjustment_application_id,
+                    late_adjustment_id=rating.late_adjustment_id,
+                    invoice_draft_id=draft.invoice_draft_id,
+                    target_period_id=rating.target_period_id,
+                    adjustment_amount=rating.adjustment_amount,
+                    currency_code=rating.currency_code,
+                    recorded_by="operator:test",
+                    authorization_reference="approval:test",
+                    recorded_at=CATALOG_START,
+                    source_payload_hash="sha256:" + "d" * 64,
+                    late_adjustment_invoice_adjustment_contract_version=2,
+                    late_adjustment_invoice_adjustment_status="recorded",
+                )
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    self.ledger.insert_late_adjustment_invoice_adjustment(candidate)
+                self.assertEqual(
+                    self.connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM billing_core.late_adjustment_invoice_adjustment
+                        WHERE invoice_draft_id = %s
+                        """,
                         (draft.invoice_draft_id,),
                     ).fetchone()[0],
                     0,

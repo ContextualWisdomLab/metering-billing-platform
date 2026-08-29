@@ -10,7 +10,7 @@ See IEEE (2019) and Cowlishaw (2009) in ``docs/doctoring/REFERENCES.md``.
 from __future__ import annotations
 
 import re
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any
 
 from metering_billing.errors import ExactDecimalError, JournalLineAmountScaleError
@@ -50,6 +50,17 @@ def format_exact_decimal(quantity: Decimal) -> str:
     return format(quantity, "f")
 
 
+def sum_exact_decimals(*amounts: Decimal) -> Decimal:
+    """Sum finite decimal amounts without applying the process precision."""
+    minimum_exponent = min(amount.as_tuple().exponent for amount in amounts)
+    maximum_adjusted = max(amount.adjusted() for amount in amounts)
+    with localcontext() as context:
+        context.prec = max(
+            context.prec, maximum_adjusted - minimum_exponent + 2
+        )
+        return sum(amounts, Decimal("0"))
+
+
 def require_decimal_quantity(value: Any) -> Decimal:
     """Accept only a ``Decimal`` or a canonical decimal string."""
     if isinstance(value, Decimal):
@@ -80,7 +91,7 @@ def issued_invoice_amount_exceeds_storage_precision(amount: Decimal) -> bool:
     """Return True when *amount* would round in PostgreSQL ``numeric(38, 12)``."""
     if not isinstance(amount, Decimal) or amount.is_nan() or amount.is_infinite():
         return True
-    integer, _, fraction = format(abs(amount), "f").partition(".")
+    integer, _, fraction = format(amount.copy_abs(), "f").partition(".")
     return (
         len(integer.lstrip("0") or "0") > POSTGRES_NUMERIC_38_12_MAX_INTEGER_DIGITS
         or len(fraction.rstrip("0")) > POSTGRES_NUMERIC_38_12_MAX_FRACTIONAL_DIGITS

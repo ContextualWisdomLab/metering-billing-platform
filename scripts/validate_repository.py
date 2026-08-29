@@ -302,6 +302,7 @@ REQUIRED_FILES = (
     "database/migrations/0055_signed_issued_invoice_lines.sql",
     "database/migrations/0056_late_adjustment_invoice_adjustment_billing_account.sql",
     "database/migrations/0057_reject_downstream_after_late_adjustment.sql",
+    "database/migrations/0058_reject_late_adjustment_after_downstream.sql",
     "schemas/late-adjustment-application.schema.json",
     "schemas/late-adjustment-rating.schema.json",
     "metering_billing/__init__.py",

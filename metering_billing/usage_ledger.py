@@ -30,6 +30,7 @@ from metering_billing.exact_decimal import (
     issued_invoice_amount_exceeds_storage_precision,
     parse_exact_decimal,
     require_postable_journal_line_amounts,
+    sum_exact_decimals,
 )
 from metering_billing.period_close import BillingPeriod, LateAdjustment
 
@@ -1760,7 +1761,7 @@ class MemoryUsageLedger:
         inclusive = parse_exact_decimal(format_exact_decimal(assessment.tax_inclusive_amount))
         if exclusive <= 0:
             raise ValueError("tax_exclusive_amount must be greater than zero")
-        if inclusive != exclusive + tax_amount:
+        if inclusive != sum_exact_decimals(exclusive, tax_amount):
             raise ValueError("tax_inclusive_amount must equal exclusive plus tax")
         parsed_rate = parse_exact_decimal(format_exact_decimal(assessment.tax_rate))
         if parsed_rate > 1:
@@ -1988,7 +1989,7 @@ class MemoryUsageLedger:
         inclusive = parse_exact_decimal(
             format_exact_decimal(issued_invoice.tax_inclusive_amount)
         )
-        if inclusive != exclusive + tax_amount:
+        if inclusive != sum_exact_decimals(exclusive, tax_amount):
             raise ValueError("tax_inclusive_amount must equal exclusive plus tax")
         if issued_invoice.issued_invoice_id in self.issued_invoices:
             raise ValueError("issued invoices are immutable and cannot be replaced")
@@ -3384,6 +3385,35 @@ class MemoryUsageLedger:
         ) is not None:
             raise ValueError("invoice draft already has an issued invoice")
         if (
+            self.find_collection_case(
+                composition.tenant_account_id, composition.invoice_draft_id
+            ) is not None
+            or self.find_tax_assessment_for_draft(
+                composition.tenant_account_id, composition.invoice_draft_id
+            ) is not None
+            or self.find_journal_proposal_for_invoice_draft(
+                composition.tenant_account_id, composition.invoice_draft_id
+            ) is not None
+            or any(
+                credit.invoice_draft_id == composition.invoice_draft_id
+                for credit in self.list_credit_adjustments(composition.tenant_account_id)
+            )
+        ):
+            raise ValueError("invoice draft has downstream records")
+        draft_billing_accounts = {
+            (line.billing_account_id, line.billing_account_reference)
+            for line in draft.invoice_draft_lines
+        }
+        if len(draft_billing_accounts) != 1:
+            raise ValueError("invoice draft billing account is ambiguous")
+        if next(iter(draft_billing_accounts)) != (
+            composition.billing_account_id,
+            composition.billing_account_reference,
+        ):
+            raise ValueError(
+                "late adjustment invoice adjustment billing account does not match draft"
+            )
+        if (
             composition.late_adjustment_application_id
             != rating.late_adjustment_application_id
             or composition.late_adjustment_id != rating.late_adjustment_id
@@ -3392,11 +3422,6 @@ class MemoryUsageLedger:
             or composition.currency_code != rating.currency_code
             or draft.currency_code != rating.currency_code
             or rating.late_adjustment_rating_status != "rated"
-            or not any(
-                line.billing_account_id == composition.billing_account_id
-                and line.billing_account_reference == composition.billing_account_reference
-                for line in draft.invoice_draft_lines
-            )
         ):
             raise ValueError("late adjustment invoice adjustment does not match evidence")
         self.late_adjustment_invoice_adjustments[
