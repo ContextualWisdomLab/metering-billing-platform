@@ -34,6 +34,66 @@
       "items": {"$ref": "#/$defs/period_transition"}
     }
   },
+  "oneOf": [
+    {
+      "properties": {
+        "period_status": {"const": "open"},
+        "transitions": {"minItems": 0, "maxItems": 0}
+      }
+    },
+    {
+      "properties": {
+        "period_status": {"const": "soft_closed"},
+        "transitions": {
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [{"$ref": "#/$defs/open_to_soft_closed"}]
+        }
+      }
+    },
+    {
+      "properties": {
+        "period_status": {"const": "reconciled"},
+        "transitions": {
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"$ref": "#/$defs/open_to_soft_closed"},
+            {"$ref": "#/$defs/soft_closed_to_reconciled"}
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "period_status": {"const": "invoiced"},
+        "transitions": {
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {"$ref": "#/$defs/open_to_soft_closed"},
+            {"$ref": "#/$defs/soft_closed_to_reconciled"},
+            {"$ref": "#/$defs/reconciled_to_invoiced"}
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "period_status": {"const": "hard_closed"},
+        "transitions": {
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            {"$ref": "#/$defs/open_to_soft_closed"},
+            {"$ref": "#/$defs/soft_closed_to_reconciled"},
+            {"$ref": "#/$defs/reconciled_to_invoiced"},
+            {"$ref": "#/$defs/invoiced_to_hard_closed"}
+          ]
+        }
+      }
+    }
+  ],
   "$defs": {
     "period_transition": {
       "type": "object",
@@ -62,6 +122,30 @@
         "reason": {"type": "string", "minLength": 1},
         "transitioned_at": {"type": "string", "format": "date-time"}
       }
+    },
+    "open_to_soft_closed": {
+      "allOf": [
+        {"$ref": "#/$defs/period_transition"},
+        {"properties": {"from_status": {"const": "open"}, "to_status": {"const": "soft_closed"}}}
+      ]
+    },
+    "soft_closed_to_reconciled": {
+      "allOf": [
+        {"$ref": "#/$defs/period_transition"},
+        {"properties": {"from_status": {"const": "soft_closed"}, "to_status": {"const": "reconciled"}}}
+      ]
+    },
+    "reconciled_to_invoiced": {
+      "allOf": [
+        {"$ref": "#/$defs/period_transition"},
+        {"properties": {"from_status": {"const": "reconciled"}, "to_status": {"const": "invoiced"}}}
+      ]
+    },
+    "invoiced_to_hard_closed": {
+      "allOf": [
+        {"$ref": "#/$defs/period_transition"},
+        {"properties": {"from_status": {"const": "invoiced"}, "to_status": {"const": "hard_closed"}}}
+      ]
     }
   }
 }
