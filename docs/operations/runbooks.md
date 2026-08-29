@@ -55,7 +55,9 @@ provider status and retry controls, the secret/KMS authority, object storage,
 backup and restore service, tenant export/deletion workflow, and budget
 reservation controller to the incident record. Repository-owned references are
 the [Compose topology](../../compose/docker-compose.yml), [migration runner](../../scripts/migrate_postgres.py),
-[load baseline](load-test-baseline.md), [security boundary](../SECURITY.md),
+[PostgreSQL backup helper](../../scripts/postgres_backup.py), [backup and restore procedure](postgres-backup-restore.md),
+[load baseline](load-test-baseline.md),
+[security boundary](../SECURITY.md),
 and [repository validator](../../scripts/validate_repository.py). An absent
 external link is an evidence gap and must not be replaced with an invented
 production claim.
