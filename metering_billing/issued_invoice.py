@@ -39,6 +39,7 @@ from metering_billing.usage_ledger import (
     StoredInvoiceDraft,
     StoredIssuedInvoice,
     StoredIssuedInvoiceLine,
+    StoredLateAdjustmentInvoiceAdjustment,
     generate_record_id,
 )
 from metering_billing.webhook_outbox import (
@@ -82,18 +83,26 @@ class IssuedInvoiceLineResult:
     rated_quantity: Decimal
     unit_price_amount: Decimal
     line_total_amount: Decimal
+    line_type: str = "usage"
+    late_adjustment_invoice_adjustment_id: UUID | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the closed JSON object published in the issued-invoice schema."""
-        return {
+        payload: dict[str, object] = {
             "line_number": self.line_number,
             "billing_account_reference": self.billing_account_reference,
             "meter_code": self.meter_code,
             "unit_code": self.unit_code,
             "rated_quantity": format_exact_decimal(self.rated_quantity),
             "unit_price_amount": format_exact_decimal(self.unit_price_amount),
-            "line_total_amount": format_exact_decimal(self.line_total_amount),
+            "line_total_amount": _format_signed_decimal(self.line_total_amount),
+            "line_type": self.line_type,
         }
+        if self.late_adjustment_invoice_adjustment_id is not None:
+            payload["late_adjustment_invoice_adjustment_id"] = str(
+                self.late_adjustment_invoice_adjustment_id
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -244,6 +253,13 @@ class IssuedInvoiceService:
             or invoice_draft.tenant_account_id != tenant.tenant_account_id
         ):
             return _rejected(IssuedInvoiceRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
+        locked_draft = getattr(self.ledger, "lock_invoice_draft", None)
+        if locked_draft is not None:
+            invoice_draft = locked_draft(
+                tenant.tenant_account_id, invoice_draft.invoice_draft_id
+            )
+            if invoice_draft is None:
+                return _rejected(IssuedInvoiceRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
         existing = self.ledger.find_issued_invoice(
             tenant.tenant_account_id, invoice_draft.invoice_draft_id
         )
@@ -253,11 +269,24 @@ class IssuedInvoiceService:
             )
             _enqueue_invoice_issued(self.ledger, tenant.tenant_reference, result)
             return result
+        compositions = self.ledger.list_late_adjustment_invoice_adjustments_for_draft(
+            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        )
+        if compositions and self.ledger.find_tax_assessment_for_draft(
+            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        ) is not None:
+            return _rejected(
+                IssuedInvoiceRejectionReasonCode.LATE_ADJUSTMENT_TAX_REASSESSMENT_REQUIRED
+            )
         try:
-            exclusive, tax_amount, inclusive = _tax_amounts(self.ledger, invoice_draft)
+            exclusive, tax_amount, inclusive = _tax_amounts(
+                self.ledger, invoice_draft, compositions
+            )
         except ExactDecimalError:
             return _rejected(IssuedInvoiceRejectionReasonCode.REQUEST_INVALID)
-        line_results = _project_draft_lines(invoice_draft)
+        line_results = _project_draft_lines(
+            invoice_draft, compositions, tenant.tenant_reference
+        )
         source_payload_hash = compute_issued_invoice_payload_hash(
             {
                 "currency_code": invoice_draft.currency_code,
@@ -272,7 +301,9 @@ class IssuedInvoiceService:
             }
         )
         issued_invoice_id = generate_record_id()
-        stored_lines = _build_issued_lines(issued_invoice_id, invoice_draft)
+        stored_lines = _build_issued_lines(
+            issued_invoice_id, invoice_draft, compositions, tenant.tenant_reference
+        )
         stored = self.ledger.insert_issued_invoice(
             StoredIssuedInvoice(
                 issued_invoice_id=issued_invoice_id,
@@ -301,7 +332,9 @@ class IssuedInvoiceService:
 
 
 def _tax_amounts(
-    ledger: MemoryUsageLedger, invoice_draft: StoredInvoiceDraft
+    ledger: MemoryUsageLedger,
+    invoice_draft: StoredInvoiceDraft,
+    compositions: tuple[StoredLateAdjustmentInvoiceAdjustment, ...] = (),
 ) -> tuple[Decimal, Decimal, Decimal]:
     """Return exclusive, tax, and inclusive amounts frozen from draft or tax."""
     assessment = ledger.find_tax_assessment_for_draft(
@@ -309,6 +342,11 @@ def _tax_amounts(
     )
     if assessment is None:
         exclusive = parse_invoice_amount(invoice_draft.drafted_total_amount)
+        exclusive += sum(
+            (composition.adjustment_amount for composition in compositions), ZERO
+        )
+        if exclusive < ZERO:
+            raise ExactDecimalError("late adjustment total cannot be negative")
         return exclusive, ZERO, exclusive
     exclusive = parse_invoice_amount(assessment.tax_exclusive_amount)
     tax_amount = parse_invoice_amount(assessment.tax_amount)
@@ -320,9 +358,11 @@ def _tax_amounts(
 
 def _project_draft_lines(
     invoice_draft: StoredInvoiceDraft,
+    compositions: tuple[StoredLateAdjustmentInvoiceAdjustment, ...] = (),
+    tenant_reference: str | None = None,
 ) -> tuple[IssuedInvoiceLineResult, ...]:
     """Project draft lines into exact issued-line results for hashing."""
-    return tuple(
+    draft_lines = tuple(
         IssuedInvoiceLineResult(
             line_number=line.line_number,
             billing_account_reference=line.billing_account_reference,
@@ -334,14 +374,33 @@ def _project_draft_lines(
         )
         for line in invoice_draft.invoice_draft_lines
     )
+    adjustment_lines = tuple(
+        IssuedInvoiceLineResult(
+            line_number=len(draft_lines) + offset,
+            billing_account_reference=tenant_reference or "urn:cwl:unknown",
+            meter_code="late_adjustment",
+            unit_code="adjustment",
+            rated_quantity=Decimal("1"),
+            unit_price_amount=abs(composition.adjustment_amount),
+            line_total_amount=composition.adjustment_amount,
+            line_type="late_adjustment",
+            late_adjustment_invoice_adjustment_id=(
+                composition.late_adjustment_invoice_adjustment_id
+            ),
+        )
+        for offset, composition in enumerate(compositions, start=1)
+    )
+    return draft_lines + adjustment_lines
 
 
 def _build_issued_lines(
     issued_invoice_id: UUID,
     invoice_draft: StoredInvoiceDraft,
+    compositions: tuple[StoredLateAdjustmentInvoiceAdjustment, ...] = (),
+    tenant_reference: str | None = None,
 ) -> tuple[StoredIssuedInvoiceLine, ...]:
     """Copy draft lines into exact issued lines."""
-    return tuple(
+    draft_lines = tuple(
         StoredIssuedInvoiceLine(
             issued_invoice_line_id=generate_record_id(),
             issued_invoice_id=issued_invoice_id,
@@ -356,6 +415,33 @@ def _build_issued_lines(
         )
         for line in invoice_draft.invoice_draft_lines
     )
+    adjustment_lines = tuple(
+        StoredIssuedInvoiceLine(
+            issued_invoice_line_id=generate_record_id(),
+            issued_invoice_id=issued_invoice_id,
+            tenant_account_id=invoice_draft.tenant_account_id,
+            line_number=len(draft_lines) + offset,
+            billing_account_reference=tenant_reference or "urn:cwl:unknown",
+            meter_code="late_adjustment",
+            unit_code="adjustment",
+            rated_quantity=Decimal("1"),
+            unit_price_amount=abs(composition.adjustment_amount),
+            line_total_amount=composition.adjustment_amount,
+            line_type="late_adjustment",
+            late_adjustment_invoice_adjustment_id=(
+                composition.late_adjustment_invoice_adjustment_id
+            ),
+        )
+        for offset, composition in enumerate(compositions, start=1)
+    )
+    return draft_lines + adjustment_lines
+
+
+def _format_signed_decimal(amount: Decimal) -> str:
+    """Render an exact finite signed commercial line amount."""
+    if not isinstance(amount, Decimal) or amount.is_nan() or amount.is_infinite():
+        raise ExactDecimalError("line amount must be a finite decimal")
+    return format(amount, "f")
 
 
 def _parse_optional_due_at(
@@ -459,6 +545,10 @@ def _from_stored(
                 rated_quantity=line.rated_quantity,
                 unit_price_amount=line.unit_price_amount,
                 line_total_amount=line.line_total_amount,
+                line_type=line.line_type,
+                late_adjustment_invoice_adjustment_id=(
+                    line.late_adjustment_invoice_adjustment_id
+                ),
             )
             for line in stored.issued_invoice_lines
         ),

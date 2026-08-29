@@ -34,6 +34,7 @@ from metering_billing import (
     IssuedCreditNoteVoidPresentmentService,
     IssuedCreditNoteVoidService,
     IssuedInvoiceService,
+    IssuedInvoicePresentmentService,
     IssuedInvoiceVoidPresentmentService,
     IssuedInvoiceVoidService,
     LateAdjustmentApplicationService,
@@ -67,6 +68,8 @@ from metering_billing import (
     validate_reconciliation_resolution,
     validate_late_adjustment_rating,
     validate_late_adjustment_invoice_adjustment,
+    validate_issued_invoice,
+    validate_issued_invoice_presentment,
 )
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_dispute import compute_dispute_payload_hash
@@ -213,8 +216,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 54:
-            raise AssertionError(f"expected 54 migrations, got {len(applied)}")
+        if len(applied) != 55:
+            raise AssertionError(f"expected 55 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -12889,7 +12892,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             source.period_id,
             target.period_id,
             "correction",
-            "-12.50",
+            "-0.002",
             "USD",
             "provider:late-invoice-001",
             "sha256:" + "a" * 64,
@@ -12950,6 +12953,41 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             .present_late_adjustment(TENANT_ONE, late.late_adjustment_id)
             .next_operator_action,
             "issue_invoice",
+        )
+        issued = IssuedInvoiceService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=4),
+        ).issue_invoice(TENANT_ONE, draft.invoice_draft_id)
+        self.assertEqual(
+            issued.issued_invoice_outcome_code.value,
+            "accepted",
+            issued.rejection_reason_code,
+        )
+        self.assertEqual(
+            issued.tax_exclusive_amount,
+            draft.drafted_total_amount + Decimal("-0.002"),
+        )
+        assert issued.issued_invoice_lines
+        adjustment_line = issued.issued_invoice_lines[-1]
+        self.assertEqual(adjustment_line.line_type, "late_adjustment")
+        self.assertEqual(adjustment_line.line_total_amount, Decimal("-0.002"))
+        self.assertEqual(
+            adjustment_line.late_adjustment_invoice_adjustment_id,
+            composed.late_adjustment_invoice_adjustment_id,
+        )
+        self.assertEqual(validate_issued_invoice(issued.as_contract_dict()), ())
+        presented = IssuedInvoicePresentmentService(self.ledger).present_issued_invoice(
+            TENANT_ONE, issued.issued_invoice_id
+        )
+        self.assertEqual(
+            presented.issued_invoice_lines[-1].line_total_amount, Decimal("-0.002")
+        )
+        self.assertEqual(
+            presented.issued_invoice_lines[-1].late_adjustment_invoice_adjustment_id,
+            composed.late_adjustment_invoice_adjustment_id,
+        )
+        self.assertEqual(
+            validate_issued_invoice_presentment(presented.as_contract_dict()), ()
         )
         for statement in (
             "UPDATE billing_core.late_adjustment_invoice_adjustment "

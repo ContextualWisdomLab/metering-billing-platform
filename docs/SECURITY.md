@@ -62,5 +62,7 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
 - Invoice-draft currency different from the rated adjustment: `currency_mismatch`
 - Rated adjustment already attached to another draft: `late_adjustment_invoice_adjustment_identity_conflict`
 - Rated adjustment targeting an issued invoice draft: `invoice_already_issued`
+- Late-adjustment composition on a draft with an existing tax assessment:
+  `late_adjustment_tax_reassessment_required`; stale tax is never reused.
 
 Do not store card data, PAT plaintext, prompt text, response text, provider secrets, or webhook-subscription plaintext.  Do not start a web UI in this slice.

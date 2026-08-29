@@ -76,9 +76,13 @@ is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
 `LateAdjustmentInvoiceAdjustmentService` consumes that rating through the
 nested `/invoice-adjustments` command and appends one tenant-scoped
 `late_adjustment_invoice_adjustment` linked to an unissued invoice draft.
-Presentment then reports `issue_invoice`. The draft and any issued invoice
-snapshot remain immutable; provider export and tax/legal-document treatment
-remain downstream boundaries.
+Presentment then reports `issue_invoice`. `IssuedInvoiceService` locks the
+draft, consumes all linked composition facts exactly once, and freezes each as
+a signed `late_adjustment` issued-invoice line while adjusting the untaxed
+exact total. A stale tax assessment rejects issuance with
+`late_adjustment_tax_reassessment_required`; no tax is silently reused. The
+draft and issued snapshot remain immutable; collection, journal, provider
+export, and tax/legal-document settlement remain downstream boundaries.
 
 ## Usage ingestion
 

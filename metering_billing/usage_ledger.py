@@ -366,6 +366,8 @@ class StoredIssuedInvoiceLine:
     rated_quantity: Decimal
     unit_price_amount: Decimal
     line_total_amount: Decimal
+    line_type: str = "usage"
+    late_adjustment_invoice_adjustment_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -1928,6 +1930,17 @@ class MemoryUsageLedger:
         """Return a stored invoice draft by internal identifier."""
         return self.invoice_drafts.get(invoice_draft_id)
 
+    def lock_invoice_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> StoredInvoiceDraft | None:
+        """Return the draft while matching the PostgreSQL row-lock boundary."""
+        draft = self.get_invoice_draft(invoice_draft_id)
+        return (
+            draft
+            if draft is not None and draft.tenant_account_id == tenant_account_id
+            else None
+        )
+
     def find_issued_invoice(
         self, tenant_account_id: UUID, invoice_draft_id: UUID
     ) -> StoredIssuedInvoice | None:
@@ -3261,6 +3274,25 @@ class MemoryUsageLedger:
         """Return one invoice composition by opaque identifier."""
         return self.late_adjustment_invoice_adjustments.get(
             late_adjustment_invoice_adjustment_id
+        )
+
+    def list_late_adjustment_invoice_adjustments_for_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> tuple[StoredLateAdjustmentInvoiceAdjustment, ...]:
+        """Return compositions linked to one tenant-scoped invoice draft."""
+        return tuple(
+            sorted(
+                (
+                    composition
+                    for composition in self.late_adjustment_invoice_adjustments.values()
+                    if composition.tenant_account_id == tenant_account_id
+                    and composition.invoice_draft_id == invoice_draft_id
+                ),
+                key=lambda composition: (
+                    composition.recorded_at,
+                    composition.late_adjustment_invoice_adjustment_id,
+                ),
+            )
         )
 
     def insert_late_adjustment_invoice_adjustment(

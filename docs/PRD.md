@@ -259,6 +259,8 @@ contextual-orchestrator usage
 - `issued_invoice_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, QR/fiscal signatures, Peppol clearance, or jurisdiction-specific compliance claims.
 - Optional `due_at` is stored only when the caller supplies a valid timezone-aware instant. Drafts have no due terms today.
 - `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` is the nested issue command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422. Unknown or cross-tenant drafts reject `invoice_draft_not_found`.
+- Linked rated late-adjustment compositions are consumed under the invoice-draft lock exactly once. Each becomes a `late_adjustment` issued line with its signed exact delta and composition identity; the issued payload hash covers those lines. Positive and negative deltas are supported when the resulting invoice total remains non-negative.
+- A draft with a linked late-adjustment composition and an existing tax assessment rejects `late_adjustment_tax_reassessment_required` until tax reassessment is implemented; the stale tax snapshot is never reused.
 - A known stored issued invoice presents one tenant-scoped statement with identity, draft source, frozen totals, lines, `issued_at`, optional `due_at`, optional stored `tax_assessment_id` when the draft assessment amounts still match those totals, and `next_operator_action` (`collect`).
 - `GET /v1/issued-invoices/{issued_invoice_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/issued-invoices` lists summaries as `{issued_invoices, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{issued_invoice_id}`.

@@ -93,10 +93,21 @@
         },
         "line_total_amount": {
           "type": "string",
-          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "maxLength": 39
+        },
+        "line_type": {"type": "string", "enum": ["usage", "late_adjustment"]},
+        "late_adjustment_invoice_adjustment_id": {"type": "string", "format": "uuid"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["line_type"],
+            "properties": {"line_type": {"const": "late_adjustment"}}
+          },
+          "then": {"required": ["late_adjustment_invoice_adjustment_id"]}
         }
-      }
+      ]
     }
   }
 }

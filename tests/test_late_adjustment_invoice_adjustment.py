@@ -17,19 +17,26 @@ from metering_billing import (
     LateAdjustmentPresentmentService,
     LateAdjustmentRatingService,
     MemoryUsageLedger,
+    IssuedInvoicePresentmentService,
+    TaxAssessmentService,
+    TaxRateService,
     UsageRatingService,
     create_billing_period,
     create_http_app,
     create_late_adjustment,
+    validate_issued_invoice,
+    validate_issued_invoice_presentment,
     validate_late_adjustment_invoice_adjustment,
 )
+from metering_billing.errors import ExactDecimalError
+from metering_billing.issued_invoice import _format_signed_decimal
 from test_http_app import invoke_http
 from test_usage_ingestion import TENANT_ONE, TENANT_TWO
 from test_usage_rating import MORNING_WINDOW, ingest_known_batch
 from metering_billing.usage_ledger import StoredLateAdjustmentInvoiceAdjustment
 
 
-def prepare_invoice_adjustment():
+def prepare_invoice_adjustment(amount: str = "-12.50"):
     """Build a rated late adjustment and one unissued same-currency draft."""
     ingest = ingest_known_batch()
     ledger = ingest.ledger
@@ -65,7 +72,7 @@ def prepare_invoice_adjustment():
         source.period_id,
         target.period_id,
         "correction",
-        "-12.50",
+        amount,
         "USD",
         "provider:late-invoice-001",
         "sha256:" + "a" * 64,
@@ -163,6 +170,113 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
             replay.late_adjustment_invoice_adjustment_id,
             accepted.late_adjustment_invoice_adjustment_id,
         )
+
+    def test_issue_consumes_positive_and_negative_compositions_once(self) -> None:
+        """Issuance freezes signed adjustment lines and adjusted exact totals."""
+        for amount in ("-0.002", "0.002"):
+            with self.subTest(amount=amount):
+                ledger, adjustment, draft = prepare_invoice_adjustment(amount)
+                composed = LateAdjustmentInvoiceAdjustmentService(ledger).record_invoice_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    draft.invoice_draft_id,
+                    recorded_by="operator:finance",
+                    authorization_reference="approval:invoice-adjustment",
+                )
+                issued = IssuedInvoiceService(ledger).issue_invoice(
+                    TENANT_ONE, draft.invoice_draft_id
+                )
+                expected_total = draft.drafted_total_amount + Decimal(amount)
+                self.assertEqual(issued.tax_exclusive_amount, expected_total)
+                self.assertEqual(issued.tax_inclusive_amount, expected_total)
+                self.assertEqual(issued.issued_invoice_lines[-1].line_type, "late_adjustment")
+                self.assertEqual(issued.issued_invoice_lines[-1].line_total_amount, Decimal(amount))
+                self.assertEqual(
+                    issued.issued_invoice_lines[-1].late_adjustment_invoice_adjustment_id,
+                    composed.late_adjustment_invoice_adjustment_id,
+                )
+                self.assertEqual(validate_issued_invoice(issued.as_contract_dict()), ())
+                presented = IssuedInvoicePresentmentService(ledger).present_issued_invoice(
+                    TENANT_ONE, issued.issued_invoice_id
+                )
+                presented_line = presented.issued_invoice_lines[-1]
+                self.assertEqual(presented_line.line_type, "late_adjustment")
+                self.assertEqual(
+                    presented_line.late_adjustment_invoice_adjustment_id,
+                    composed.late_adjustment_invoice_adjustment_id,
+                )
+                self.assertEqual(
+                    validate_issued_invoice_presentment(presented.as_contract_dict()), ()
+                )
+                replay = IssuedInvoiceService(ledger).issue_invoice(
+                    TENANT_ONE, draft.invoice_draft_id
+                )
+                self.assertEqual(replay.issued_invoice_id, issued.issued_invoice_id)
+                self.assertEqual(len(replay.issued_invoice_lines), len(issued.issued_invoice_lines))
+
+    def test_taxed_composition_requires_tax_reassessment_before_issue(self) -> None:
+        """A stale tax snapshot cannot silently absorb a late signed delta."""
+        ledger, adjustment, draft = prepare_invoice_adjustment()
+        TaxRateService(ledger).publish_tax_rate(TENANT_ONE, "vat", "0.10")
+        TaxAssessmentService(ledger).assess_tax(TENANT_ONE, draft.invoice_draft_id, 1)
+        LateAdjustmentInvoiceAdjustmentService(ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        rejected = IssuedInvoiceService(ledger).issue_invoice(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(
+            rejected.rejection_reason_code.value,
+            "late_adjustment_tax_reassessment_required",
+        )
+
+    def test_issue_rejects_a_negative_resulting_total(self) -> None:
+        """A signed correction cannot make the commercial invoice total negative."""
+        ledger, adjustment, draft = prepare_invoice_adjustment()
+        LateAdjustmentInvoiceAdjustmentService(ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        rejected = IssuedInvoiceService(ledger).issue_invoice(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(rejected.rejection_reason_code.value, "request_invalid")
+
+    def test_issue_handles_optional_and_missing_draft_locks(self) -> None:
+        """The memory adapter remains compatible with both lock outcomes."""
+        unlocked_ledger, adjustment, draft = prepare_invoice_adjustment("0.002")
+        LateAdjustmentInvoiceAdjustmentService(unlocked_ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        with mock.patch.object(unlocked_ledger, "lock_invoice_draft", None):
+            accepted = IssuedInvoiceService(unlocked_ledger).issue_invoice(
+                TENANT_ONE, draft.invoice_draft_id
+            )
+        self.assertEqual(accepted.issued_invoice_outcome_code.value, "accepted")
+
+        missing_ledger, _, missing_draft = prepare_invoice_adjustment("0.002")
+        with mock.patch.object(missing_ledger, "lock_invoice_draft", return_value=None):
+            rejected = IssuedInvoiceService(missing_ledger).issue_invoice(
+                TENANT_ONE, missing_draft.invoice_draft_id
+            )
+        self.assertEqual(rejected.rejection_reason_code.value, "invoice_draft_not_found")
+
+    def test_signed_line_formatter_rejects_non_finite_amounts(self) -> None:
+        """Signed line output remains finite and exact at the contract boundary."""
+        for invalid in (object(), Decimal("NaN"), Decimal("Infinity")):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(ExactDecimalError):
+                _format_signed_decimal(invalid)  # type: ignore[arg-type]
 
     def test_requires_rating_and_rejects_other_tenant_or_issued_draft(self) -> None:
         """Composition cannot bypass rating, tenant scope, or invoice immutability."""

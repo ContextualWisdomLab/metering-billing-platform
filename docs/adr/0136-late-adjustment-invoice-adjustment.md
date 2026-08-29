@@ -23,7 +23,13 @@ snapshots are never overwritten.
 
 - The signed late-adjustment delta now has an explicit invoice-intent target.
 - The next operator action after composition is `issue_invoice`.
-- Provider export, tax treatment, and legal invoice authority remain separate
-  downstream boundaries; this fact does not claim any of them.
-- A future issuer/exporter must consume this line explicitly before it can
-  represent the adjustment in a provider document.
+- `IssuedInvoiceService` locks the draft, consumes linked compositions into
+  signed `late_adjustment` lines, and includes them in exact totals, payload
+  hashing, replay, and presentment. The composition fact itself is never
+  rewritten or deleted.
+- An existing tax assessment blocks issuance with
+  `late_adjustment_tax_reassessment_required`; stale tax is not silently
+  reused. A future tax-reassessment slice must explicitly publish the new
+  assessment before issue.
+- Collection, journal, provider export, and legal invoice authority remain
+  separate downstream boundaries; this slice does not claim any of them.

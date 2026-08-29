@@ -304,6 +304,9 @@ class IssuedInvoiceRejectionReasonCode(StrEnum):
 
     TENANT_NOT_FOUND = "tenant_not_found"
     INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    LATE_ADJUSTMENT_TAX_REASSESSMENT_REQUIRED = (
+        "late_adjustment_tax_reassessment_required"
+    )
     REQUEST_INVALID = "request_invalid"
 
 

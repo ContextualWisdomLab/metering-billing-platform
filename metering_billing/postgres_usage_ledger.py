@@ -759,6 +759,31 @@ class PostgresUsageLedger:
                 cursor, late_adjustment_invoice_adjustment_id
             )
 
+    def list_late_adjustment_invoice_adjustments_for_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> tuple[StoredLateAdjustmentInvoiceAdjustment, ...]:
+        """Return compositions linked to one tenant-scoped invoice draft."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT late_adjustment_invoice_adjustment_id
+                FROM billing_core.late_adjustment_invoice_adjustment
+                WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                ORDER BY recorded_at, late_adjustment_invoice_adjustment_id
+                """,
+                (tenant_account_id, invoice_draft_id),
+            )
+            return tuple(
+                stored
+                for row in cursor.fetchall()
+                if (
+                    stored := self._fetch_late_adjustment_invoice_adjustment(
+                        cursor, UUID(str(row[0])), tenant_account_id
+                    )
+                )
+                is not None
+            )
+
     def insert_late_adjustment_invoice_adjustment(
         self, composition: StoredLateAdjustmentInvoiceAdjustment
     ) -> StoredLateAdjustmentInvoiceAdjustment:
@@ -3660,6 +3685,27 @@ class PostgresUsageLedger:
                 else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
             )
 
+    def lock_invoice_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> StoredInvoiceDraft | None:
+        """Load one draft under the issue/composition serialization lock."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT invoice_draft_id
+                FROM billing_core.invoice_draft
+                WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                FOR UPDATE
+                """,
+                (tenant_account_id, invoice_draft_id),
+            )
+            row = cursor.fetchone()
+            return (
+                None
+                if row is None
+                else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
+            )
+
     def find_tax_assessment_for_draft(
         self, tenant_account_id: UUID, invoice_draft_id: UUID
     ) -> StoredTaxAssessment | None:
@@ -3801,8 +3847,9 @@ class PostgresUsageLedger:
                     INSERT INTO billing_core.issued_invoice_line
                         (issued_invoice_line_id, issued_invoice_id, tenant_account_id,
                          line_number, billing_account_reference, meter_code, unit_code,
-                         rated_quantity, unit_price_amount, line_total_amount)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         rated_quantity, unit_price_amount, line_total_amount,
+                         line_type, late_adjustment_invoice_adjustment_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         line.issued_invoice_line_id,
@@ -3815,6 +3862,8 @@ class PostgresUsageLedger:
                         line.rated_quantity,
                         line.unit_price_amount,
                         line.line_total_amount,
+                        line.line_type,
+                        line.late_adjustment_invoice_adjustment_id,
                     ),
                 )
             return self._fetch_issued_invoice(cursor, issued_invoice.issued_invoice_id)
@@ -8530,7 +8579,8 @@ class PostgresUsageLedger:
             """
             SELECT issued_invoice_line_id, issued_invoice_id, tenant_account_id,
                    line_number, billing_account_reference, meter_code, unit_code,
-                   rated_quantity, unit_price_amount, line_total_amount
+                   rated_quantity, unit_price_amount, line_total_amount,
+                   line_type, late_adjustment_invoice_adjustment_id
             FROM billing_core.issued_invoice_line
             WHERE tenant_account_id = %s AND issued_invoice_id = %s
             ORDER BY line_number
@@ -8549,6 +8599,8 @@ class PostgresUsageLedger:
                 line[7],
                 line[8],
                 line[9],
+                line[10],
+                UUID(str(line[11])) if line[11] is not None else None,
             )
             for line in cursor.fetchall()
         )

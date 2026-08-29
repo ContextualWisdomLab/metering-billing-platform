@@ -299,6 +299,7 @@ REQUIRED_FILES = (
     "database/migrations/0052_late_adjustment_application_target_guard.sql",
     "database/migrations/0053_late_adjustment_rating_target_guard.sql",
     "database/migrations/0054_late_adjustment_invoice_adjustment.sql",
+    "database/migrations/0055_signed_issued_invoice_lines.sql",
     "schemas/late-adjustment-application.schema.json",
     "schemas/late-adjustment-rating.schema.json",
     "metering_billing/__init__.py",

@@ -45,6 +45,14 @@
   cross-tenant links, replay identity, and the issued-draft boundary are
   enforced; existing drafts and issued invoice snapshots are never rewritten
   (ADR 0136).
+- Issue #87 now makes `IssuedInvoiceService.issue_invoice` consume linked late
+  adjustment compositions under a draft lock. Each signed delta is frozen as a
+  `late_adjustment` issued line and included in exact untaxed totals, payload
+  hashing, replay, PostgreSQL persistence, and invoice presentment through
+  migration `0055`. Existing tax assessments reject with
+  `late_adjustment_tax_reassessment_required` until reassessment exists; no
+  stale tax, journal, collection, provider, or statutory invoice action is
+  invented.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).
