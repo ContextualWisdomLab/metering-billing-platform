@@ -28,7 +28,8 @@ uv run python scripts/release_evidence.py verify \
   --manifest /secure/release-evidence/source-manifest.json
 ```
 
-Creation refuses to overwrite an existing manifest. Creation and verification
+Creation refuses to overwrite an existing manifest and rejects a manifest
+output path that is already tracked by the checkout. Creation and verification
 fail closed on a non-root or dirty worktree, including untracked files; on
 HEAD changes, missing or added tracked files, symlinked artifacts, malformed
 manifest paths or hashes, or differing artifact bytes. Verification also

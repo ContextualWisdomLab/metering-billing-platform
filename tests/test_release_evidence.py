@@ -132,19 +132,16 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ReleaseEvidenceError, "could not be written"):
                     create_manifest(ROOT, "0.3.0", manifest_path)
 
-    def test_manifest_requires_a_tracked_artifact_and_excludes_its_own_path(self) -> None:
-        """Empty indexes fail and an in-repository manifest is self-excluding."""
+    def test_manifest_requires_a_tracked_artifact_and_rejects_tracked_output(self) -> None:
+        """Empty indexes fail and a tracked output path is rejected."""
         with mock.patch(
             "scripts.release_evidence._source_commit", return_value="a" * 40
         ), mock.patch("scripts.release_evidence._tracked_paths", return_value=()):
             with self.assertRaisesRegex(ReleaseEvidenceError, "tracked artifacts"):
                 build_manifest(ROOT, "0.3.0", ROOT / "manifest.json")
 
-        manifest = build_manifest(ROOT, "0.3.0", ROOT / "scripts/release_evidence.py")
-        self.assertNotIn(
-            "scripts/release_evidence.py",
-            {artifact["path"] for artifact in manifest["artifacts"]},
-        )
+        with self.assertRaisesRegex(ReleaseEvidenceError, "must not be tracked"):
+            build_manifest(ROOT, "0.3.0", ROOT / "scripts/release_evidence.py")
 
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -168,6 +165,26 @@ class ReleaseEvidenceTests(unittest.TestCase):
                     verify_manifest(root, manifest_path, "0.3.0")
                 self.assertIn("missing tracked artifact: README.md", str(error.exception))
                 self.assertIn("missing artifact bytes: README.md", str(error.exception))
+
+        with mock.patch(
+            "scripts.release_evidence._load_manifest",
+            return_value={
+                "release_version": "0.3.0",
+                "source_commit": "a" * 40,
+                "artifacts": [{"path": "README.md", "sha256": "0" * 64}],
+            },
+        ), mock.patch(
+            "scripts.release_evidence._worktree_root", return_value=ROOT
+        ), mock.patch(
+            "scripts.release_evidence._require_clean_checkout"
+        ), mock.patch(
+            "scripts.release_evidence._manifest_relative_path",
+            return_value="README.md",
+        ), mock.patch(
+            "scripts.release_evidence._tracked_paths", return_value=("README.md",)
+        ):
+            with self.assertRaisesRegex(ReleaseEvidenceError, "must not be tracked"):
+                verify_manifest(ROOT, ROOT / "manifest.json", "0.3.0")
 
     def test_manifest_detects_commit_inventory_and_hash_changes(self) -> None:
         """Changed release identity, inventory, and bytes all fail closed."""

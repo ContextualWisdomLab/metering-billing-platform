@@ -133,10 +133,13 @@ def build_manifest(
     version = _require_version(release_version)
     commit = _source_commit(root)
     _require_clean_checkout(root, commit)
+    tracked_paths = _tracked_paths(root)
     excluded_path = _manifest_relative_path(root, manifest_path)
+    if excluded_path is not None and excluded_path in tracked_paths:
+        raise ReleaseEvidenceError("release manifest output must not be tracked")
     artifacts = [
         {"path": path, "sha256": _sha256(_checked_out_artifact(root, path))}
-        for path in _tracked_paths(root)
+        for path in tracked_paths
         if path != excluded_path
     ]
     if not artifacts:
@@ -219,6 +222,8 @@ def verify_manifest(root: Path, manifest_path: Path, expected_version: str) -> N
         errors.append("release version does not match the requested version")
     excluded_path = _manifest_relative_path(root, manifest_path)
     tracked_paths = set(_tracked_paths(root))
+    if excluded_path is not None and excluded_path in tracked_paths:
+        raise ReleaseEvidenceError("release manifest output must not be tracked")
     expected = {artifact["path"]: artifact["sha256"] for artifact in manifest["artifacts"]}
     if excluded_path is not None:
         tracked_paths.discard(excluded_path)
