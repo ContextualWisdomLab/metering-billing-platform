@@ -16,6 +16,11 @@
 
 ### Added
 
+- Added `scripts/postgres_backup.py` and its backup/restore procedure for
+  custom-format PostgreSQL archives. It verifies archives before restore,
+  refuses accidental overwrite, uses an atomic temporary file, requires an
+  explicit destructive-restore confirmation, and keeps live backup, restore,
+  retention, and RPO/RTO evidence deployment-owned.
 - Added a tabletop-ready operational runbook index for usage, rating, budget,
   provider, reconciliation, database, secret, commercial-correction, tenant
   lifecycle, and vulnerability incidents. Each runbook records owner,
