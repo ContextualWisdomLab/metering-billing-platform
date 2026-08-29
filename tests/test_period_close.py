@@ -17,6 +17,7 @@ from metering_billing import (
     PeriodCloseValidationError,
     ReconciliationException,
     ReconciliationExceptionCode,
+    ReconciliationEvidence,
     ReconciliationLine,
     ReconciliationLineStatus,
     ReconciliationResolution,
@@ -29,6 +30,7 @@ from metering_billing import (
     validate_fx_conversion,
     validate_fx_rate,
     validate_reconciliation_line,
+    validate_reconciliation_evidence,
     validate_reconciliation_resolution,
 )
 
@@ -670,6 +672,33 @@ class ReconciliationTests(unittest.TestCase):
         self.assertTrue(validate_reconciliation_resolution(invalid))
         invalid["resolution_status"] = "bad"
         self.assertTrue(validate_reconciliation_resolution(invalid))
+
+    def test_reconciliation_evidence_requires_a_hash_and_source_reference(self) -> None:
+        """Evidence keeps a typed exception linked to immutable source content."""
+        evidence = ReconciliationEvidence(
+            evidence_id=uuid4(),
+            reconciliation_line_id=PERIOD_ID,
+            exception_code=ReconciliationExceptionCode.TAX_MISMATCH,
+            evidence_kind="provider_tax_document",
+            evidence_reference="urn:cwl:evidence:provider-tax-001",
+            evidence_sha256="sha256:" + "a" * 64,
+            captured_by="operator:finance_001",
+            captured_at=OPENED_AT,
+        )
+        self.assertEqual(validate_reconciliation_evidence(evidence.as_contract_dict()), ())
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(evidence, evidence_id="not-a-uuid")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(evidence, reconciliation_line_id="not-a-uuid")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(evidence, exception_code="bad")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(evidence, evidence_sha256="not-a-hash")
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(evidence, evidence_sha256=None)  # type: ignore[arg-type]
+        invalid = evidence.as_contract_dict()
+        invalid["evidence_sha256"] = "not-a-hash"
+        self.assertTrue(validate_reconciliation_evidence(invalid))
 
 
 if __name__ == "__main__":  # pragma: no cover

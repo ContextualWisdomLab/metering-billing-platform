@@ -54,6 +54,7 @@ from metering_billing import (
     WebhookDeliveryService,
     WebhookSubscriptionService,
     format_exact_decimal,
+    validate_reconciliation_evidence,
     validate_reconciliation_resolution,
 )
 from metering_billing.accounting_export import AccountingExportService
@@ -97,6 +98,7 @@ from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.period_close import (
     ReconciliationException,
     ReconciliationExceptionCode,
+    ReconciliationEvidence,
     ReconciliationLine,
     ReconciliationLineStatus,
     ReconciliationResolution,
@@ -196,8 +198,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 42:
-            raise AssertionError(f"expected 42 migrations, got {len(applied)}")
+        if len(applied) != 43:
+            raise AssertionError(f"expected 43 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -209,6 +211,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.reconciliation_evidence,
                 billing_core.reconciliation_resolution,
                 billing_core.reconciliation_exception,
                 billing_core.reconciliation_line,
@@ -575,6 +578,40 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.get_reconciliation_line(expanded_exception.reconciliation_line_id),
             expanded_exception,
         )
+        evidence = ReconciliationEvidence(
+            evidence_id=uuid4(),
+            reconciliation_line_id=expanded_exception.reconciliation_line_id,
+            exception_code=ReconciliationExceptionCode.TAX_MISMATCH,
+            evidence_kind="provider_tax_document",
+            evidence_reference="urn:cwl:evidence:provider-tax-001",
+            evidence_sha256="sha256:" + "b" * 64,
+            captured_by="operator:finance_001",
+            captured_at=CATALOG_START + timedelta(minutes=4, seconds=2),
+        )
+        self.assertEqual(validate_reconciliation_evidence(evidence.as_contract_dict()), ())
+        self.assertEqual(self.ledger.insert_reconciliation_evidence(evidence), evidence)
+        self.assertEqual(self.ledger.insert_reconciliation_evidence(evidence), evidence)
+        self.assertEqual(self.ledger.get_reconciliation_evidence(evidence.evidence_id), evidence)
+        self.assertIsNone(self.ledger.get_reconciliation_evidence(uuid4()))
+        self.assertEqual(
+            self.ledger.list_reconciliation_evidence(
+                TENANT_ONE, reconciliation_line_id=expanded_exception.reconciliation_line_id
+            ),
+            (evidence,),
+        )
+        self.assertEqual(self.ledger.list_reconciliation_evidence(TENANT_TWO), ())
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_evidence(
+                replace(evidence, evidence_reference="urn:cwl:evidence:rewrite")
+            )
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_evidence(
+                replace(
+                    evidence,
+                    evidence_id=uuid4(),
+                    exception_code=ReconciliationExceptionCode.REFUND_MISMATCH,
+                )
+            )
         self.assertIsNone(self.ledger.get_reconciliation_line(uuid4()))
         self.assertEqual(
             {line.reconciliation_line_id for line in self.ledger.list_reconciliation_lines(TENANT_ONE)},

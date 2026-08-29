@@ -16,6 +16,10 @@
 
 ### Added
 
+- Issue #87 now persists immutable hash-backed reconciliation evidence linked to
+  an existing typed exception. Evidence keeps its source reference, SHA-256
+  digest, kind, capture operator, and capture instant with tenant-scoped,
+  idempotent PostgreSQL reads (ADR 0128).
 - Issue #87 now uses the complete minimum typed reconciliation exception
   vocabulary: quantity, price, tax, currency, payment, duplicate charge,
   refund, dispute, settlement, provider fee, cash timing, and unmapped provider

@@ -68,6 +68,7 @@ __all__ = (
     "RATING_RUN_PRESENTMENT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "RECONCILIATION_LINE_SCHEMA_NAME",
+    "RECONCILIATION_EVIDENCE_SCHEMA_NAME",
     "SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME",
     "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
@@ -140,6 +141,7 @@ __all__ = (
     "validate_rating_run",
     "validate_rating_run_presentment",
     "validate_reconciliation_line",
+    "validate_reconciliation_evidence",
     "validate_schema_instance",
     "validate_spend_budget",
     "validate_spend_budget_approaching_signal",
@@ -278,6 +280,7 @@ FX_RATE_SCHEMA_NAME = "fx-rate.schema.json"
 FX_CONVERSION_SCHEMA_NAME = "fx-conversion.schema.json"
 RECONCILIATION_LINE_SCHEMA_NAME = "reconciliation-line.schema.json"
 RECONCILIATION_RESOLUTION_SCHEMA_NAME = "reconciliation-resolution.schema.json"
+RECONCILIATION_EVIDENCE_SCHEMA_NAME = "reconciliation-evidence.schema.json"
 
 
 def default_schemas_directory() -> Path:
@@ -366,6 +369,18 @@ def validate_reconciliation_line(
     if errors or not isinstance(line, Mapping):
         return tuple(errors)
     errors.extend(_reconciliation_line_semantic_errors(line))
+    return tuple(errors)
+
+
+def validate_reconciliation_evidence(
+    evidence: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one hash-backed source-evidence record."""
+    schema = load_json_schema(RECONCILIATION_EVIDENCE_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, evidence))
+    if errors or not isinstance(evidence, Mapping):
+        return tuple(errors)
+    errors.extend(_reconciliation_evidence_semantic_errors(evidence))
     return tuple(errors)
 
 
@@ -537,6 +552,29 @@ def _reconciliation_resolution_semantic_errors(
             resolved_at=_contract_datetime(resolution["resolved_at"]),
             reconciliation_resolution_contract_version=resolution[
                 "reconciliation_resolution_contract_version"
+            ],
+        )
+    )
+
+
+def _reconciliation_evidence_semantic_errors(
+    evidence: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Apply source-evidence and hash invariants after schema validation."""
+    from metering_billing.period_close import ReconciliationEvidence
+
+    return _semantic_error(
+        lambda: ReconciliationEvidence(
+            evidence_id=_contract_uuid(evidence["evidence_id"]),
+            reconciliation_line_id=_contract_uuid(evidence["reconciliation_line_id"]),
+            exception_code=evidence["exception_code"],
+            evidence_kind=evidence["evidence_kind"],
+            evidence_reference=evidence["evidence_reference"],
+            evidence_sha256=evidence["evidence_sha256"],
+            captured_by=evidence["captured_by"],
+            captured_at=_contract_datetime(evidence["captured_at"]),
+            reconciliation_evidence_contract_version=evidence[
+                "reconciliation_evidence_contract_version"
             ],
         )
     )

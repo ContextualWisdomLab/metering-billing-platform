@@ -37,6 +37,7 @@ from metering_billing.period_close import (
     FxConversion,
     FxRate,
     ReconciliationException,
+    ReconciliationEvidence,
     ReconciliationLine,
     ReconciliationResolution,
 )
@@ -510,6 +511,93 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
         return tuple(line for line in lines if line is not None)
+
+    def get_reconciliation_evidence(self, evidence_id: UUID) -> ReconciliationEvidence | None:
+        """Return one immutable hash-backed reconciliation evidence record."""
+        with self._cursor() as cursor:
+            return self._fetch_reconciliation_evidence(cursor, evidence_id)
+
+    def insert_reconciliation_evidence(
+        self, evidence: ReconciliationEvidence
+    ) -> ReconciliationEvidence:
+        """Persist one evidence record only when its exception already exists."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM billing_core.reconciliation_exception
+                WHERE reconciliation_line_id = %s AND exception_code = %s
+                """,
+                (evidence.reconciliation_line_id, evidence.exception_code.value),
+            )
+            if cursor.fetchone() is None:
+                raise KeyError(evidence.exception_code.value)
+            cursor.execute(
+                """
+                INSERT INTO billing_core.reconciliation_evidence
+                    (evidence_id, reconciliation_line_id, exception_code, evidence_kind,
+                     evidence_reference, evidence_sha256, captured_by, captured_at,
+                     reconciliation_evidence_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (evidence_id) DO NOTHING
+                """,
+                (
+                    evidence.evidence_id,
+                    evidence.reconciliation_line_id,
+                    evidence.exception_code.value,
+                    evidence.evidence_kind,
+                    evidence.evidence_reference,
+                    evidence.evidence_sha256,
+                    evidence.captured_by,
+                    evidence.captured_at,
+                    evidence.reconciliation_evidence_contract_version,
+                ),
+            )
+            stored = self._fetch_reconciliation_evidence(cursor, evidence.evidence_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation evidence insert did not return a row")
+            if stored.as_contract_dict() != evidence.as_contract_dict():
+                raise ValueError("reconciliation evidence identity cannot change")
+            return stored
+
+    def list_reconciliation_evidence(
+        self,
+        tenant_reference: str,
+        reconciliation_line_id: UUID | None = None,
+    ) -> tuple[ReconciliationEvidence, ...]:
+        """Return evidence for one tenant, optionally one reconciliation line."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            if reconciliation_line_id is None:
+                cursor.execute(
+                    """
+                    SELECT evidence_id
+                    FROM billing_core.reconciliation_evidence AS evidence
+                    JOIN billing_core.reconciliation_line AS line
+                      ON line.reconciliation_line_id = evidence.reconciliation_line_id
+                    WHERE line.tenant_account_id = %s
+                    ORDER BY evidence.captured_at, evidence.evidence_id
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT evidence_id
+                    FROM billing_core.reconciliation_evidence AS evidence
+                    JOIN billing_core.reconciliation_line AS line
+                      ON line.reconciliation_line_id = evidence.reconciliation_line_id
+                    WHERE line.tenant_account_id = %s
+                      AND evidence.reconciliation_line_id = %s
+                    ORDER BY evidence.captured_at, evidence.evidence_id
+                    """,
+                    (tenant_account_id, reconciliation_line_id),
+                )
+            evidence = tuple(
+                self._fetch_reconciliation_evidence(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(item for item in evidence if item is not None)
 
     def get_reconciliation_resolution(
         self, resolution_id: UUID
@@ -6292,6 +6380,36 @@ class PostgresUsageLedger:
             checker_reference=row[8],
             resolved_at=row[9],
             reconciliation_resolution_contract_version=row[10],
+        )
+
+    @staticmethod
+    def _fetch_reconciliation_evidence(
+        cursor: Any, evidence_id: UUID
+    ) -> ReconciliationEvidence | None:
+        """Hydrate one immutable hash-backed evidence record."""
+        cursor.execute(
+            """
+            SELECT evidence_id, reconciliation_line_id, exception_code, evidence_kind,
+                   evidence_reference, evidence_sha256, captured_by, captured_at,
+                   reconciliation_evidence_contract_version
+            FROM billing_core.reconciliation_evidence
+            WHERE evidence_id = %s
+            """,
+            (evidence_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return ReconciliationEvidence(
+            evidence_id=UUID(str(row[0])),
+            reconciliation_line_id=UUID(str(row[1])),
+            exception_code=row[2],
+            evidence_kind=row[3],
+            evidence_reference=row[4],
+            evidence_sha256=row[5],
+            captured_by=row[6],
+            captured_at=row[7],
+            reconciliation_evidence_contract_version=row[8],
         )
 
     def _find_event(self, query: str, parameters: tuple[Any, ...]) -> StoredUsageEvent | None:

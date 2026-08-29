@@ -23,6 +23,7 @@ FX_RATE_CONTRACT_VERSION = 1
 FX_CONVERSION_CONTRACT_VERSION = 1
 RECONCILIATION_LINE_CONTRACT_VERSION = 1
 RECONCILIATION_RESOLUTION_CONTRACT_VERSION = 1
+RECONCILIATION_EVIDENCE_CONTRACT_VERSION = 1
 ROUNDING_MODE = "ROUND_HALF_UP"
 
 _CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
@@ -30,6 +31,7 @@ _SIGNED_DECIMAL_PATTERN = re.compile(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$")
 _FX_RATE_MAX_LENGTH = 39
 _SIGNED_AMOUNT_MAX_LENGTH = 40
 _NON_NEGATIVE_AMOUNT_MAX_LENGTH = 39
+_SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class BillingPeriodStatus(StrEnum):
@@ -600,6 +602,57 @@ class ReconciliationException:
         return {
             "exception_code": self.exception_code.value,
             "next_action": self.next_action,
+        }
+
+
+@dataclass(frozen=True)
+class ReconciliationEvidence:
+    """Immutable hash-backed source evidence for one reconciliation exception."""
+
+    evidence_id: UUID
+    reconciliation_line_id: UUID
+    exception_code: ReconciliationExceptionCode
+    evidence_kind: str
+    evidence_reference: str
+    evidence_sha256: str
+    captured_by: str
+    captured_at: datetime
+    reconciliation_evidence_contract_version: int = (
+        RECONCILIATION_EVIDENCE_CONTRACT_VERSION
+    )
+
+    def __post_init__(self) -> None:
+        """Require a source reference and a verifiable content hash."""
+        if not isinstance(self.evidence_id, UUID) or not isinstance(
+            self.reconciliation_line_id, UUID
+        ):
+            raise PeriodCloseValidationError("evidence identifiers must be UUIDs")
+        try:
+            exception_code = ReconciliationExceptionCode(self.exception_code)
+        except ValueError as error:
+            raise PeriodCloseValidationError("reconciliation evidence code is unsupported") from error
+        object.__setattr__(self, "exception_code", exception_code)
+        _reference(self.evidence_kind, "evidence_kind")
+        _reference(self.evidence_reference, "evidence_reference")
+        if not isinstance(self.evidence_sha256, str) or _SHA256_PATTERN.fullmatch(
+            self.evidence_sha256
+        ) is None:
+            raise PeriodCloseValidationError("evidence_sha256 must be a sha256 digest")
+        _reference(self.captured_by, "captured_by")
+        _aware_datetime(self.captured_at, "captured_at")
+
+    def as_contract_dict(self) -> dict[str, object]:
+        """Return the immutable source-evidence contract."""
+        return {
+            "reconciliation_evidence_contract_version": self.reconciliation_evidence_contract_version,
+            "evidence_id": str(self.evidence_id),
+            "reconciliation_line_id": str(self.reconciliation_line_id),
+            "exception_code": self.exception_code.value,
+            "evidence_kind": self.evidence_kind,
+            "evidence_reference": self.evidence_reference,
+            "evidence_sha256": self.evidence_sha256,
+            "captured_by": self.captured_by,
+            "captured_at": _format_datetime(self.captured_at),
         }
 
 
