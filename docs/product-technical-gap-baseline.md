@@ -43,20 +43,19 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
-> **Status update (2026-08-29):** GitHub reports fifteen open pull requests
-> (`#142`–`#147` and `#153`–`#161`). PRs `#142`–`#146`, `#153`–`#160`
-> target `develop`; PR `#147` is stacked on the canonical producer SDK branch
-> from PR `#146`, and PR `#161` is stacked on the provider capability branch
-> from PR `#160`. PRs `#148` and `#149` were
+> **Status update (2026-08-29):** GitHub reports thirteen open pull requests
+> (`#142`–`#146` and `#153`–`#160`). All of these PRs target `develop`.
+> PR `#147` was merged into the canonical producer SDK branch from PR `#146`,
+> and PR `#161` was merged into the provider capability branch from PR `#160`;
+> neither merge is on `develop` yet. PRs `#148` and `#149` were
 > merged on 2026-08-28 and are no longer open-PR evidence.
 > The current default branch is
 > `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`, merged from PR #141
 > on 2026-08-26. The merged release train and the Compose, threaded API,
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
-> PRs `#142`–`#146`, `#153`–`#160` are `BLOCKED`; PRs `#147` and `#161` are
-> `CLEAN` only relative to their stacked bases and remain dependent on
-> unmerged parents. The live inventory has zero qualifying approvals, and
+> all thirteen open PRs are `BLOCKED`; #147 and #161 are merged only into
+> their respective feature parents, not `develop`. The live inventory has zero qualifying approvals, and
 > current internal review threads observed in this audit are resolved. None
 > is merge evidence for `develop`.
 
@@ -76,9 +75,9 @@ operational contract.
 As queried from GitHub on 2026-08-29:
 
 - open issues: **8** (`#84`–`#91`);
-- open pull requests: **15** (`#142`–`#147` and `#153`–`#161`); `#142`–`#146`, `#153`–`#160` target `develop`, `#147` targets the branch of `#146`, and `#161` targets the branch of `#160`;
+- open pull requests: **13** (`#142`–`#146` and `#153`–`#160`), all targeting `develop`; #147 and #161 are merged into feature-parent branches and are not default-branch evidence;
 - producer work: `#146` provides the canonical Python producer reference and `#147` adds the durable producer outbox slice; the Rust reference from `#148` and TypeScript reference from `#149` were merged on 2026-08-28; provider capability routing and provider-sticky object mappings are open in `#160` and `#161`;
-- latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`;
+- latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`; stacked merges #147 (`9f3455370331802efe5e0158290a88e95e182d5f`) and #161 (`55cd9a37d320eed35e6838378abc81152b98ea2c`) remain off `develop`;
 - the merged PR #141 rollup included a failed `Semgrep (multi-language SAST)` job alongside successful repository, analysis, dependency, coverage, and other checks; therefore the merge is not a blanket claim that every release/security gate is complete.
 
 The current head has useful implementation and hosted-check evidence, but the
@@ -177,12 +176,11 @@ not merge evidence:
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
 | #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `a8ea5d13c7a68d9b78a77e49dd0ec627cb2ff93b`; open, blocked, current OpenCode check failed and Strix is in progress after the latest push; review decision pending; zero qualifying approvals |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `c5b63d316bbfd3ba14239711a52706d28c946eff`; open, blocked, current OpenCode and Strix checks failed; review decision pending; zero qualifying approvals |
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required; implementation, security, coverage, Noema, and OpenCode checks passed; zero qualifying approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
-| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `3b4d915cae4a3eee1dcb694db9df83f0126f5490`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `55f5ee2643ac14c90dfb0f2dd283e71e7f175d05`; open, clean, dependent on #146; Repository contracts and Devin passed, zero unresolved threads and zero approvals |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `9f3455370331802efe5e0158290a88e95e182d5f`; open, blocked after the #147 stacked merge; current OpenCode check failed and zero qualifying approvals |
 | #153 | Bounded PostgreSQL connection pool and lifecycle hardening for #84 | `develop` | `cffa535a19068ebc13f3090684afef324e946e95`; open, blocked, review required; current OpenCode check is provider-failed; zero qualifying approvals |
 | #154 | Opt-in OpenTelemetry HTTP tracing for #91 | `develop` | `f8414fcbcde07d99b50add8b7e698a1a85d99902`; open, blocked, review required; current OpenCode check is provider-failed; zero qualifying approvals |
 | #155 | Stoppable AIS outbox scheduler and drain-cycle reporting for #91 | `develop` | `47b8f2ef6a01ae2b95f911a6abf39e08a03a007e`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
@@ -190,12 +188,13 @@ not merge evidence:
 | #157 | Validated incident runbooks for #91 | `develop` | `38c8e46a8a4721cf123b6f075af61d42731094a0`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
 | #158 | Exact-head release evidence manifest for #91 | `develop` | `c55a1925c9063da727fc25dd42d1cf2810e6c587`; open, blocked, no formal review decision; Repository contracts passed and remaining hosted checks are re-running after the latest push; zero qualifying approvals |
 | #159 | PostgreSQL backup and restore rehearsal for #84 | `develop` | `35a1e467b6b6dd77ab5594d3adcbc2293dc9af67`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
-| #160 | Provider capability routing foundation for #86 | `develop` | `a7cf09cc754ae15333c21c694347f371732e37cd`; open, blocked, review required; implementation/security/coverage/Noema/Devin checks passed, but OpenCode failed and Strix is provider-failed; zero qualifying approvals |
-| #161 | Provider-sticky object mappings for #86 | `feat/provider-capability-foundation-20260829` (stacked on #160) | `04e13d9b71a60db51f5e03b69bc34d644f3646a4`; open, clean only as a stacked PR; Repository contracts and Devin passed; no formal review decision or qualifying approval |
+| #160 | Provider capability routing foundation for #86 | `develop` | `55cd9a37d320eed35e6838378abc81152b98ea2c`; open, blocked after the #161 stacked merge; current OpenCode check failed and zero qualifying approvals |
 
-PRs #148 (Rust SDK) and #149 (TypeScript SDK) merged on 2026-08-28. Their
-historical heads are retained in GitHub, but must not be reused as current
-open-PR or release evidence.
+PRs #147 (durable producer outbox) and #161 (provider-sticky object mappings)
+merged into their feature-parent branches on 2026-08-29. PRs #148 (Rust SDK)
+and #149 (TypeScript SDK) merged on 2026-08-28. Their historical heads and
+stacked merge commits are retained in GitHub, but must not be reused as
+default-branch release evidence.
 
 Earlier PRs are closed or superseded. Their closure is not proof that the
 remaining #84–#91 acceptance criteria are complete. GitHub records remain
