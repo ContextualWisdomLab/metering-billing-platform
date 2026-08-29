@@ -21,6 +21,7 @@ from scripts.validate_repository import (
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "LEMON_SQUEEZY_WEBHOOK_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
@@ -150,6 +151,8 @@ __all__ = (
     "validate_journal_proposal",
     "validate_rating_run",
     "validate_schema_instance",
+    "validate_provider_capability",
+    "validate_lemon_squeezy_webhook",
     "validate_usage_event",
     "validate_usage_ingestion_receipt",
     "ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME",
@@ -260,6 +263,7 @@ TAX_RATE_SCHEMA_NAME = "tax-rate.schema.json"
 TAX_ASSESSMENT_SCHEMA_NAME = "tax-assessment.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
+LEMON_SQUEEZY_WEBHOOK_SCHEMA_NAME = "lemon-squeezy-webhook.schema.json"
 ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
 
 
@@ -302,6 +306,22 @@ def load_json_schema(
     if not isinstance(loaded, dict):
         raise ValueError(f"schema root must be an object: {schema_file_name}")
     return loaded
+
+
+def validate_provider_capability(
+    manifest: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate a provider capability manifest against its published schema."""
+    schema = load_json_schema(PROVIDER_CAPABILITY_SCHEMA_NAME, schemas_directory)
+    return validate_schema_instance(schema, manifest)
+
+
+def validate_lemon_squeezy_webhook(
+    webhook: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate the PII-free reference emitted after webhook verification."""
+    schema = load_json_schema(LEMON_SQUEEZY_WEBHOOK_SCHEMA_NAME, schemas_directory)
+    return validate_schema_instance(schema, webhook)
 
 
 def validate_usage_event(

@@ -41,9 +41,15 @@
 - `webhook_subscription`: tenant-scoped https callback. Stores `webhook_secret_prefix` and a keyed `webhook_secret_hash` only; never the plaintext secret. The one-time secret is process-local for delivery. Status is `active` or `revoked`.
 - `webhook_outbox_event`: append-only commercial fact (`journal_proposal.validated`, `payment_receipt.applied`, `credit_adjustment.recorded`, `invoice.issued`, `invoice.voided`, `credit_note.issued`, `credit_note.voided`, `credit_note.applied`, `collection.settled`, `write_off.recorded`, `unapplied_cash.applied`, `refund.recorded`, `dispute.held`, `dispute.released`, `spend_budget.published`, `spend_budget.over`, `spend_budget.approaching`) identified by `(tenant_account_id, event_type_code, source_id, payload_hash)`. Presentment is a metadata read of this row and never returns `payload_json` or the webhook secret. `GET /v1/webhook-outbox-events/{outbox_event_id}` projects one stored event. `GET /v1/webhook-outbox-events` lists `{webhook_outbox_events, next_cursor}` ordered by `enqueued_at` then `outbox_event_id`. This is the Billing commercial webhook outbox, not the AIS posting-receipt outbox.
 - `webhook_delivery_attempt`: append-only POST attempt against one outbox event and subscription. Identity is `delivery_attempt_id`; PostgreSQL derives the tenant key from the parent outbox row and enforces composite foreign keys. Presentment is a read of this row plus the parent `webhook_outbox_event` event type and `source_id`; it never returns `payload_json` or the webhook secret.
-- `provider_account`: provider and role registration.
-- `provider_capability`: effective-dated supported capability.
-- `provider_object_mapping`: provider-neutral internal-to-external mapping.
+- `provider_account`: provider and role registration; external credentials are
+  not part of the commercial contract.
+- `provider_capability`: effective-dated supported capability plus optional
+  currency, jurisdiction, contract-type, and tenant-policy routing dimensions.
+- `provider_object_mapping`: provider-neutral internal-to-external mapping;
+  once an external object is recorded, later commands remain provider-sticky.
+- `lemon_squeezy_webhook` contract: normalized event/resource reference after
+  raw-body HMAC verification; raw payload, provider secret, and PII are not
+  stored in this contract.
 - `accounting_export_record`: proposal lifecycle and payload integrity. `proposal_reference` is unique within a tenant.
 - `outbox_event`: transactional publication record.
 

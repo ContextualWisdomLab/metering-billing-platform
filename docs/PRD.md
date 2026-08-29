@@ -35,6 +35,24 @@ contextual-orchestrator usage
 -> accounting journal proposal
 ```
 
+## Provider-capability foundation acceptance
+
+- A provider manifest declares one or more closed capabilities, provider roles,
+  an effective half-open interval, and optional currency, jurisdiction,
+  contract-type, and tenant-policy dimensions. Invalid or overlapping
+  declarations fail closed.
+- A route request selects only a healthy manifest satisfying every requested
+  capability and dimension. Selection is deterministic; provider health
+  exceptions do not authorize a fallback transaction.
+- The foundation ships Lemon Squeezy merchant-of-record and manual-enterprise
+  wire-transfer declarations without making a provider call. External
+  checkout, subscription, collection, refund, dispute, tax, settlement, and
+  manual maker-checker commands remain issue #86 work.
+- A Lemon Squeezy webhook is authenticated over its exact raw body before JSON
+  parsing. The normalized asynchronous contract contains only event name,
+  resource type, and resource reference; raw payload, PII, and secrets are
+  excluded.
+
 ## Tax-assessment acceptance
 
 - A known tenant publishes one `tax_rate_schedule` and one immutable `tax_rate_version` whose `tax_rate` is an exact decimal in `[0, 1]`.

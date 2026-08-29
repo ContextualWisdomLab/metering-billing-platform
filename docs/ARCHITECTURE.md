@@ -53,6 +53,24 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 | posted journal and trial balance | Accounting Information Platform |
 | bank transaction | bank or treasury provider; accounting projection in Accounting Information Platform |
 
+## Provider plane
+
+Provider integration is capability-based. `ProviderCapabilityManifest` records
+effective half-open intervals and optional currency, jurisdiction, contract,
+and tenant-policy dimensions. `ProviderCapabilityRegistry` selects a healthy
+manifest only when it satisfies every requested capability and dimension, then
+breaks deterministic ties by provider code and effective date. The shipped
+Lemon Squeezy merchant-of-record and manual-enterprise wire-transfer
+manifests are declarations, not provider calls. `verify_lemon_squeezy_webhook`
+checks HMAC-SHA256 over the exact raw body before parsing and passes only a
+bounded event/resource reference to asynchronous processing; raw bodies,
+credentials, and PII remain outside the normalized contract. Separate
+checkout, subscription, usage-export, invoice-export, collection, refund,
+dispute, tax-document, settlement, and webhook-verification adapter ports,
+KMS-backed secrets, raw-artifact storage, and reconciliation remain the open
+provider backlog under issue #86. Existing provider objects must never fail
+over automatically to a different provider.
+
 ## Usage ingestion
 
 `metering_billing.UsageIngestionService` is the write path for canonical usage events.  It validates the published schema, verifies the source-payload hash for the declared contract version, resolves tenant-scoped attribution, stores exact decimal measurements, and returns a receipt.  It accepts either the in-memory reference ledger or `PostgresUsageLedger`; the latter writes the event, normalized measurements, and receipt in one PostgreSQL transaction and lets tenant-scoped unique constraints arbitrate concurrent retries.  Optional batch bounds and usage queries use half-open ISO 8601 windows.  `POST /v1/usage-events` stays that ingest and refuses PAN and provider secrets.  `UsageEventPresentmentService` projects a stored event as a statement.  `GET /v1/usage-events/{usage_event_id}` is HTTP 200 for the same tenant and HTTP 404 across tenants.  `GET /v1/usage-events` lists `{usage_events, next_cursor}` ordered by `recorded_at` then `usage_event_id`.  Ingestion never writes a posted journal and never calls a payment provider.  The durable PostgreSQL path continues through rate-card publish, rating, invoice drafting, issued-invoice snapshot, tenant-scoped tax-rate publish, tax assessment, atomic `invoice.issued` outbox enqueue, tenant-scoped webhook subscription metadata, delivery attempts, and delivered status; the one-time webhook secret remains process-local.  Collection, payment, provider, recovery, and telemetry controls are not implied to be durable by this slice.

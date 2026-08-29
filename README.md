@@ -29,6 +29,14 @@ The current milestone contains:
 - offline repository validation with 100% line and branch coverage;
 - exact-head CI with commit-pinned actions.
 
+Provider routing now has a small capability foundation: register effective
+manifests, select a healthy provider by requested capability and commercial
+dimensions, and verify Lemon Squeezy webhook raw-body signatures before
+normalizing a PII-free event reference. The included Lemon Squeezy and manual
+enterprise manifests are declarations only. Provider command ports, KMS-backed
+secrets, raw-artifact retention, manual maker-checker settlement, and live
+provider sandbox evidence remain open under issue #86.
+
 ## Run the platform in three commands
 
 Start your own billing platform with Docker Compose.  The database starts,

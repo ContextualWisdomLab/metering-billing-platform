@@ -1,5 +1,12 @@
 # Changelog
 
+- Added the provider-capability foundation: effective manifest validation and
+  deterministic healthy-provider routing across capability, currency,
+  jurisdiction, contract, and tenant-policy dimensions; Lemon Squeezy raw-body
+  HMAC verification emits a PII-free normalized reference. This slice makes no
+  provider call and leaves adapter commands, KMS secrets, raw-artifact storage,
+  manual maker-checker settlement, and live sandbox evidence in issue #86.
+
 - Extended the real PostgreSQL runtime slice through tenant-scoped rate-card
   publish, rating, invoice drafting, issued-invoice snapshots, tax-rate
   publish, tax assessments, collection cases and dunning events, payment
