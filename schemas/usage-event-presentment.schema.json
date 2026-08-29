@@ -22,8 +22,48 @@
     "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
     "source_event_key": {"type": "string", "minLength": 1, "maxLength": 256},
     "event_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "event_contract_version": {"type": "integer", "minimum": 1},
+    "producer_contract_version": {"type": "integer", "minimum": 1},
+    "product_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "operation_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "cost_center_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "project_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "repository_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "trace_reference": {"type": "string", "minLength": 1, "maxLength": 256},
+    "correlation_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "causation_reference": {"type": "string", "pattern": "^urn:cwl:"},
     "occurred_at": {"type": "string", "format": "date-time"},
     "recorded_at": {"type": "string", "format": "date-time"},
+    "available_at": {"type": "string", "format": "date-time"},
+    "dimensions": {
+      "type": "object",
+      "maxProperties": 10,
+      "additionalProperties": false,
+      "properties": {
+        "provider_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "model_code": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+        "workflow_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "role_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "orchestration_mode_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "backend_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+        "document_job_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "shard_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "run_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "artifact_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "configuration_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "seed_reference": {"type": "string", "pattern": "^urn:cwl:"}
+      }
+    },
+    "correction_lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prior_event_id", "relationship_code"],
+      "properties": {
+        "prior_event_id": {"type": "string", "format": "uuid"},
+        "relationship_code": {"type": "string", "enum": ["corrects", "reverses", "supersedes"]},
+        "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"}
+      }
+    },
     "next_operator_action": {
       "type": "string",
       "enum": ["rate_window"]
@@ -34,28 +74,29 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["meter_code", "quantity", "unit_code", "quality_code"],
-        "properties": {
-          "meter_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,95}$"},
-          "quantity": {
-            "type": "string",
-            "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
-            "maxLength": 39
-          },
-          "unit_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,31}$"},
-          "quality_code": {
-            "type": "string",
-            "enum": [
-              "provider_reported",
-              "locally_measured",
-              "deterministically_derived",
-              "estimated",
-              "reconstructed",
-              "corrected"
-            ]
+          "required": ["meter_code", "quantity", "unit_code", "quality_code"],
+          "properties": {
+            "meter_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,95}$"},
+            "meter_version": {"type": "integer", "minimum": 1},
+            "quantity": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+              "maxLength": 39
+            },
+            "unit_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,31}$"},
+            "quality_code": {
+              "type": "string",
+              "enum": [
+                "provider_reported",
+                "locally_measured",
+                "deterministically_derived",
+                "estimated",
+                "reconstructed",
+                "corrected"
+              ]
+            }
           }
         }
       }
     }
   }
-}

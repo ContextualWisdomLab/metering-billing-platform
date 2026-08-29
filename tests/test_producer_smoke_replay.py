@@ -78,6 +78,9 @@ class DirectBilling:
                     if result.rejection_reason_code is not None
                     else None
                 ),
+                tenant_reference=result.tenant_reference,
+                event_contract_version=result.event_contract_version,
+                source_payload_hash=result.source_payload_hash,
             )
             for result in receipt.event_receipts
         )

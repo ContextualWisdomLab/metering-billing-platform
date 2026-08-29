@@ -74,7 +74,7 @@ class BlockingTransport(FakeTransport):
         self.credential = credential
         self.started.set()
         self.release.wait(timeout=2)
-        return [ProducerDeliveryResult(event["source_event_key"], "accepted") for event in events]
+        return [delivery_result(event, "accepted") for event in events]
 
 
 def event_for(index: int, tenant_reference: str | None = None) -> dict[str, object]:
@@ -86,6 +86,18 @@ def event_for(index: int, tenant_reference: str | None = None) -> dict[str, obje
     if tenant_reference is not None:
         arguments["tenant_reference"] = tenant_reference
     return build_usage_event(**arguments)
+
+
+def delivery_result(event, outcome, reason_code=None):
+    """Build a receipt bound to the exact event sent by the transport."""
+    return ProducerDeliveryResult(
+        event["source_event_key"],
+        outcome,
+        reason_code,
+        event["tenant_reference"],
+        event["event_contract_version"],
+        event["source_payload_hash"],
+    )
 
 
 class ProducerOutboxTests(unittest.TestCase):
@@ -200,7 +212,7 @@ class ProducerOutboxTests(unittest.TestCase):
             outbox = ProducerOutbox(path, clock=lambda: NOW)
             event = event_for(50)
             outbox.enqueue(event, auth=AUTH)
-            transport = FakeTransport([ProducerDeliveryResult(event["source_event_key"], "accepted")])
+            transport = FakeTransport([delivery_result(event, "accepted")])
             with mock.patch.object(outbox, "_apply_result", side_effect=RuntimeError("write failed")):
                 with self.assertRaisesRegex(RuntimeError, "write failed"):
                     outbox.drain(transport, auth=AUTH, now=NOW)
@@ -223,7 +235,7 @@ class ProducerOutboxTests(unittest.TestCase):
             with mock.patch.object(stale, "_apply_result", return_value=(False, False)):
                 receipt = stale.drain(
                     FakeTransport(
-                        [ProducerDeliveryResult(stale_event["source_event_key"], "accepted")]
+                        [delivery_result(stale_event, "accepted")]
                     ),
                     auth=AUTH,
                     now=NOW,
@@ -280,7 +292,7 @@ class ProducerOutboxTests(unittest.TestCase):
                 outbox.get_status(str(event["event_id"])).attempt_count, 0
             )
             recovered = FakeTransport(
-                [ProducerDeliveryResult(event["source_event_key"], "accepted")]
+                [delivery_result(event, "accepted")]
             )
             receipt = outbox.drain(
                 recovered,
@@ -313,7 +325,7 @@ class ProducerOutboxTests(unittest.TestCase):
                 first._begin_write()
                 applied, dead_lettered = first._apply_result(
                     first_rows[0],
-                    ProducerDeliveryResult(event["source_event_key"], "accepted"),
+                    delivery_result(event, "accepted"),
                     NOW + timedelta(seconds=2),
                 )
                 first._connection.commit()
@@ -326,7 +338,7 @@ class ProducerOutboxTests(unittest.TestCase):
             )
             second.drain(
                 FakeTransport(
-                    [ProducerDeliveryResult(event["source_event_key"], "accepted")]
+                    [delivery_result(event, "accepted")]
                 ),
                 auth=AUTH,
                 now=NOW + timedelta(seconds=3, microseconds=500_000),
@@ -347,9 +359,9 @@ class ProducerOutboxTests(unittest.TestCase):
                 outbox.enqueue(event, auth=AUTH)
             transport = FakeTransport(
                 [
-                    ProducerDeliveryResult(accepted["source_event_key"], "accepted"),
-                    ProducerDeliveryResult(duplicate["source_event_key"], "duplicate_replay"),
-                    ProducerDeliveryResult(rejected["source_event_key"], "rejected", "schema_invalid"),
+                    delivery_result(accepted, "accepted"),
+                    delivery_result(duplicate, "duplicate_replay"),
+                    delivery_result(rejected, "rejected", "schema_invalid"),
                 ]
             )
             receipt = outbox.drain(
@@ -378,7 +390,7 @@ class ProducerOutboxTests(unittest.TestCase):
             self.assertEqual(replayed.attempt_count, 0)
             self.assertEqual(replayed.next_attempt_at, NOW)
             replay_receipt = outbox.drain(
-                FakeTransport([ProducerDeliveryResult(rejected["source_event_key"], "accepted")]),
+                FakeTransport([delivery_result(rejected, "accepted")]),
                 auth=AUTH,
                 now=NOW + timedelta(seconds=2),
             )
@@ -411,8 +423,7 @@ class ProducerOutboxTests(unittest.TestCase):
                     correlation_id="different-correlation",
                 ),
             )
-            key = tenant_event["source_event_key"]
-            transport = FakeTransport([ProducerDeliveryResult(key, "accepted")])
+            transport = FakeTransport([delivery_result(tenant_event, "accepted")])
 
             receipt = outbox.drain(transport, auth=AUTH, now=NOW)
 
@@ -476,8 +487,7 @@ class ProducerOutboxTests(unittest.TestCase):
                 path, clock=lambda: NOW, base_backoff_seconds=5, max_backoff_seconds=6
             )
             outbox.enqueue(event, auth=AUTH)
-            key = event["source_event_key"]
-            retry = FakeTransport([ProducerDeliveryResult(key, "retryable", "timeout")])
+            retry = FakeTransport([delivery_result(event, "retryable", "timeout")])
             first = outbox.drain(retry, auth=AUTH, now=NOW)
             self.assertEqual(first.retry_scheduled_event_count, 1)
             status = outbox.get_status(str(event["event_id"]))
@@ -488,7 +498,7 @@ class ProducerOutboxTests(unittest.TestCase):
             outbox.close()
 
             reopened = ProducerOutbox(path, clock=lambda: NOW, max_attempts=2)
-            delivered = FakeTransport([ProducerDeliveryResult(key, "accepted")])
+            delivered = FakeTransport([delivery_result(event, "accepted")])
             second = reopened.drain(
                 delivered,
                 auth=AUTH,
@@ -525,6 +535,36 @@ class ProducerOutboxTests(unittest.TestCase):
                 missing_receipt.event_results[0].reason_code, "missing_transport_receipt"
             )
             retrying_outbox.close()
+            outbox.close()
+
+    def test_terminal_receipt_mismatch_stays_retryable(self) -> None:
+        """A receipt for another event fact cannot acknowledge the leased row."""
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = ProducerOutbox(Path(directory) / "outbox.sqlite3", clock=lambda: NOW)
+            event = event_for(39)
+            outbox.enqueue(event, auth=AUTH)
+            mismatched = ProducerDeliveryResult(
+                event["source_event_key"],
+                "accepted",
+                tenant_reference=event["tenant_reference"],
+                event_contract_version=event["event_contract_version"],
+                source_payload_hash="sha256:" + "0" * 64,
+            )
+
+            receipt = outbox.drain(FakeTransport([mismatched]), auth=AUTH, now=NOW)
+
+            self.assertEqual(receipt.accepted_event_count, 0)
+            self.assertEqual(receipt.retry_scheduled_event_count, 1)
+            self.assertEqual(receipt.event_results[0].reason_code, "invalid_delivery_receipt")
+            self.assertEqual(outbox.get_status(str(event["event_id"])).status, "pending")
+            self.assertEqual(outbox.get_status(str(event["event_id"])).attempt_count, 1)
+
+            missing = ProducerDeliveryResult(event["source_event_key"], "accepted")
+            second = outbox.drain(
+                FakeTransport([missing]), auth=AUTH, now=NOW + timedelta(seconds=5)
+            )
+            self.assertEqual(second.retry_scheduled_event_count, 1)
+            self.assertEqual(second.event_results[0].reason_code, "invalid_delivery_receipt")
             outbox.close()
 
     def test_invalid_transport_receipts_fail_closed_as_retryable(self) -> None:

@@ -12,7 +12,7 @@ This repository is not the statutory accounting authority.  HTTP must expose the
 
 - Keep `POST /v1/usage-events` as the #5 ingest.  Refuse PAN, CVC, and provider-secret fields on the write and on each batch event.
 - Expose `UsageEventPresentmentService.present_usage_event(tenant_reference, usage_event_id)`.
-- Project stored fields only: `usage_event_id`, `tenant_reference`, `source_event_key`, `event_payload_hash`, `occurred_at`, `recorded_at`, measurement `meter_code` / `quantity` / `unit_code` / `quality_code`, and `next_operator_action` (`rate_window`).
+- Project stored fields only: `usage_event_id`, `tenant_reference`, `source_event_key`, `event_payload_hash`, event and producer contract versions, `product_code`, optional operation, attribution references, allowlisted dimensions, availability and correction lineage, `occurred_at`, `recorded_at`, measurement `meter_code` / `meter_version` / `quantity` / `unit_code` / `quality_code`, and `next_operator_action` (`rate_window`). Credentials and internal account identifiers remain absent.
 - Expose `GET /v1/usage-events/{usage_event_id}` as presentment.  Same-tenant hit is HTTP 200.  Cross-tenant or unknown is HTTP 404 with no leak.
 - Expose `GET /v1/usage-events` as `{usage_events, next_cursor}` ordered by `recorded_at` then `usage_event_id`.  Never `items` or `cursor`.  `page_limit` defaults to 50 and maxes at 100.
 - Do not add a presentment table, new ingest identity, journal, or scheduler.

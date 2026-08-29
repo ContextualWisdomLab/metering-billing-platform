@@ -65,6 +65,9 @@ class ProducerDeliveryResult:
     source_event_key: str
     outcome: str
     reason_code: str | None = None
+    tenant_reference: str | None = None
+    event_contract_version: int | None = None
+    source_payload_hash: str | None = None
 
     def __post_init__(self) -> None:
         """Keep transport receipts closed and actionable."""
@@ -348,7 +351,8 @@ class ProducerOutbox:
 
         counts = [0, 0, 0, 0, 0]
         ordered_results = tuple(
-            result_by_key[row["source_event_key"]] for row in rows
+            _bind_delivery_result(row, result_by_key[row["source_event_key"]])
+            for row in rows
         )
         with self._lock:
             self._begin_write()
@@ -557,6 +561,24 @@ def _index_results(
                 source_event_key, "retryable", "missing_transport_receipt"
             )
     return indexed
+
+
+def _bind_delivery_result(
+    row: Mapping[str, Any], result: ProducerDeliveryResult
+) -> ProducerDeliveryResult:
+    """Keep terminal acknowledgements bound to the leased event bytes."""
+    if result.outcome not in {"accepted", "duplicate_replay", "rejected"}:
+        return result
+    event = json.loads(row["event_json"])
+    if (
+        result.tenant_reference == event.get("tenant_reference")
+        and result.event_contract_version == event.get("event_contract_version")
+        and result.source_payload_hash == event.get("source_payload_hash")
+    ):
+        return result
+    return ProducerDeliveryResult(
+        result.source_event_key, "retryable", "invalid_delivery_receipt"
+    )
 
 
 def _format_instant(value: datetime) -> str:

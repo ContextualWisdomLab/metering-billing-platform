@@ -163,7 +163,7 @@ Credit-adjustment presentment does not add a table.  `GET /v1/credit-adjustments
 
 Rate-card presentment does not add a table.  `GET /v1/rate-cards/{rate_card_id}` projects stored `rate_card` and latest `rate_card_version` rows.  `unit_amount` values are the exact stored prices.  Next operator action is `rate_window`.
 
-Usage-event presentment does not add a table.  `GET /v1/usage-events/{usage_event_id}` projects stored `usage_event` rows.  Measurement quantities are the exact stored amounts.  Next operator action is `rate_window`.
+Usage-event presentment does not add a table.  `GET /v1/usage-events/{usage_event_id}` projects stored `usage_event` rows, including contract versions, product/operation, persisted attribution references, allowlisted dimensions, availability, correction lineage, and measurement meter versions.  Measurement quantities are the exact stored amounts.  Credentials and internal account identifiers remain absent.  Next operator action is `rate_window`.
 
 Rating-run presentment does not add a table.  `GET /v1/rating-runs/{rating_run_id}` projects stored `rating_run` rows.  `rated_total_amount` and line amounts are the exact stored amounts.  Next operator action is `draft_invoice`.
 

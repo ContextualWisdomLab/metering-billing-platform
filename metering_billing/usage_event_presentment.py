@@ -41,6 +41,7 @@ class UsageEventMeasurementPresentment:
     """One stored measurement projected for operator presentment."""
 
     meter_code: str
+    meter_version: int
     quantity: Decimal
     unit_code: str
     quality_code: str
@@ -49,6 +50,7 @@ class UsageEventMeasurementPresentment:
         """Return the closed JSON object for one measurement."""
         return {
             "meter_code": self.meter_code,
+            "meter_version": self.meter_version,
             "quantity": format_exact_decimal(self.quantity),
             "unit_code": self.unit_code,
             "quality_code": self.quality_code,
@@ -63,24 +65,59 @@ class UsageEventPresentmentResult:
     tenant_reference: str
     source_event_key: str
     event_payload_hash: str
+    event_contract_version: int
+    producer_contract_version: int
+    product_code: str
     occurred_at: datetime
     recorded_at: datetime
     next_operator_action: str
     measurements: tuple[UsageEventMeasurementPresentment, ...]
+    operation_code: str | None = None
+    cost_center_reference: str | None = None
+    project_reference: str | None = None
+    repository_reference: str | None = None
+    trace_reference: str | None = None
+    correlation_reference: str | None = None
+    causation_reference: str | None = None
+    available_at: datetime | None = None
+    dimensions: tuple[tuple[str, str], ...] = ()
+    correction_lineage: tuple[tuple[str, str], ...] = ()
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the closed JSON object published in the presentment schema."""
-        return {
+        payload: dict[str, object] = {
             "usage_event_presentment_contract_version": USAGE_EVENT_PRESENTMENT_CONTRACT_VERSION,
             "usage_event_id": str(self.usage_event_id),
             "tenant_reference": self.tenant_reference,
             "source_event_key": self.source_event_key,
             "event_payload_hash": self.event_payload_hash,
+            "event_contract_version": self.event_contract_version,
+            "producer_contract_version": self.producer_contract_version,
+            "product_code": self.product_code,
             "occurred_at": _format_recorded_at(self.occurred_at),
             "recorded_at": _format_recorded_at(self.recorded_at),
             "next_operator_action": self.next_operator_action,
             "measurements": [item.as_contract_dict() for item in self.measurements],
         }
+        for field_name in (
+            "operation_code",
+            "cost_center_reference",
+            "project_reference",
+            "repository_reference",
+            "trace_reference",
+            "correlation_reference",
+            "causation_reference",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                payload[field_name] = value
+        if self.available_at is not None:
+            payload["available_at"] = _format_recorded_at(self.available_at)
+        if self.dimensions:
+            payload["dimensions"] = dict(self.dimensions)
+        if self.correction_lineage:
+            payload["correction_lineage"] = dict(self.correction_lineage)
+        return payload
 
     def as_summary_dict(self) -> dict[str, object]:
         """Return the list-item envelope used by ``GET /v1/usage-events``."""
@@ -179,18 +216,32 @@ class UsageEventPresentmentService:
             tenant_reference=tenant_reference,
             source_event_key=event.source_event_key,
             event_payload_hash=event.event_payload_hash,
+            event_contract_version=event.event_contract_version,
+            producer_contract_version=event.producer_contract_version,
+            product_code=event.product_code,
             occurred_at=event.occurred_at,
             recorded_at=event.recorded_at,
             next_operator_action=next_operator_action(),
             measurements=tuple(
                 UsageEventMeasurementPresentment(
                     meter_code=item.meter_code,
+                    meter_version=item.meter_version,
                     quantity=item.measured_quantity,
                     unit_code=item.unit_code,
                     quality_code=item.quality_code,
                 )
                 for item in event.measurements
             ),
+            operation_code=event.operation_code,
+            cost_center_reference=event.cost_center_reference,
+            project_reference=event.project_reference,
+            repository_reference=event.repository_reference,
+            trace_reference=event.trace_reference,
+            correlation_reference=event.correlation_reference,
+            causation_reference=event.causation_reference,
+            available_at=event.available_at,
+            dimensions=event.dimensions,
+            correction_lineage=event.correction_lineage,
         )
 
 

@@ -161,6 +161,55 @@ class UsageEventPresentmentTests(unittest.TestCase):
         self.assertEqual(empty_body["usage_events"], [])
         self.assertIsNone(empty_body["next_cursor"])
 
+    def test_item_presentment_projects_stored_contract_metadata(self) -> None:
+        """The item read keeps persisted attribution and meter metadata visible."""
+        ledger = seed_ledger()
+        event = make_event(
+            source_event_key="workflow_381:metadata:attempt_01",
+            producer_contract_version=2,
+            operation_code="complete_step",
+            cost_center_reference="urn:cwl:tenant_001:cost_center:platform",
+            project_reference="urn:cwl:tenant_001:project:metering",
+            repository_reference="urn:cwl:repository:producer",
+            trace_reference="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            correlation_reference="urn:cwl:correlation:workflow_381",
+            causation_reference="urn:cwl:causation:step_03",
+            available_at="2026-08-16T10:27:43.482Z",
+            dimensions={
+                "model_code": "gpt-4o-mini",
+                "provider_code": "openai",
+                "workflow_code": "verified_workflow",
+            },
+            correction_lineage={
+                "prior_event_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf61b",
+                "relationship_code": "corrects",
+                "reason_code": "late_provider_reconciliation",
+            },
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "meter_version": 1,
+                    "quantity": "1810",
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+        receipt = UsageIngestionService(ledger).ingest_usage_event(event)
+        payload = UsageEventPresentmentService(ledger).present_usage_event(
+            TENANT_ONE, receipt.usage_event_id
+        ).as_contract_dict()
+
+        self.assertEqual(payload["event_contract_version"], 1)
+        self.assertEqual(payload["producer_contract_version"], 2)
+        self.assertEqual(payload["product_code"], "contextual_orchestrator")
+        self.assertEqual(payload["operation_code"], "complete_step")
+        self.assertEqual(payload["dimensions"]["provider_code"], "openai")
+        self.assertEqual(payload["correction_lineage"]["relationship_code"], "corrects")
+        self.assertEqual(payload["available_at"], "2026-08-16T10:27:43.482000Z")
+        self.assertEqual(payload["measurements"][0]["meter_version"], 1)
+        self.assertEqual(validate_usage_event_presentment(payload), ())
+
     def test_http_post_stays_the_existing_ingest_and_refuses_card_data(self) -> None:
         """POST stays the #5 ingest; PAN and secrets are refused."""
         ledger = seed_ledger()
