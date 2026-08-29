@@ -9,20 +9,20 @@
 ## Current working snapshot (2026-08-29)
 
 The current #87 work is stacked from exact head
-`4ab415bd0654f0fa951700b32b4abef6183595da` of PR [#169](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/169)
-into the follow-up branch `feat/late-adjustment-20260829`. PR #169 is still
-open, mergeable but blocked, has zero qualifying approvals, and its normal
-checks pass while `opencode-review`, `strix`, and `noema-review` are provider
-failures. That state is not merge evidence.
+`2aebb354e3401bccc2ce48283fa0b5044f936c1f` of PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172)
+into the follow-up branch `feat/late-adjustment-rerate-20260829`. PR #172 is
+open and has no qualifying approval; its repository contract check is complete
+while Devin review is pending. That state is not merge evidence.
 
-This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`, the
-`LateAdjustment` and application contracts, tenant-scoped presentment reads,
-and a durable application acknowledgement for late usage, correction, and
-reversal facts. The source period must be at least `soft_closed`; the target
-must be `open` and start no earlier than the source end. Targeted real-
-PostgreSQL and repository contract tests pass on this branch. Re-rating the
-fact, provider settlement ingestion, FOCUS 1.4 export, and statutory
-accounting remain open gaps.
+This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`/`0051`/`0052`, the
+`LateAdjustment`, application, and rating-consumption contracts,
+tenant-scoped presentment reads, and durable application/rating facts for late
+usage, correction, and reversal evidence. The source period must be at least
+`soft_closed`; the target must be `open` and start no earlier than the source
+end. Targeted real-PostgreSQL and repository contract tests pass on this
+branch. Recalculation from source usage and rate-card versions, invoice-
+adjustment composition, provider settlement ingestion, FOCUS 1.4 export, and
+statutory accounting remain open gaps.
 
 ## Executive decision
 

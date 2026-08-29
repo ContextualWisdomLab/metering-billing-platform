@@ -161,6 +161,25 @@ class LateAdjustmentApplicationRejectionReasonCode(StrEnum):
 
     TENANT_NOT_FOUND = "tenant_not_found"
     LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
+    TARGET_PERIOD_NOT_OPEN = "late_adjustment_target_period_not_open"
+    ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
+    AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
+
+
+class LateAdjustmentRatingOutcomeCode(StrEnum):
+    """Terminal result of rating one applied late adjustment."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class LateAdjustmentRatingRejectionReasonCode(StrEnum):
+    """Why a late-adjustment rating was refused without writing a fact."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
+    LATE_ADJUSTMENT_APPLICATION_NOT_FOUND = "late_adjustment_application_not_found"
     ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
     AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
 

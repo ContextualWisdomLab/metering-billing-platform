@@ -18,6 +18,7 @@ from metering_billing.errors import (
     LateAdjustmentApplicationRejectionReasonCode,
     require_resolved,
 )
+from metering_billing.period_close import BillingPeriodStatus
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredLateAdjustmentApplication,
@@ -153,6 +154,13 @@ class LateAdjustmentApplicationService:
                 existing,
                 tenant.tenant_reference,
                 LateAdjustmentApplicationOutcomeCode.DUPLICATE_REPLAY,
+            )
+        target_period = self.ledger.get_billing_period(
+            tenant.tenant_reference, adjustment.target_period_id
+        )
+        if target_period is None or target_period.status != BillingPeriodStatus.OPEN:
+            return _rejected(
+                LateAdjustmentApplicationRejectionReasonCode.TARGET_PERIOD_NOT_OPEN
             )
         candidate = StoredLateAdjustmentApplication(
             late_adjustment_application_id=generate_record_id(),

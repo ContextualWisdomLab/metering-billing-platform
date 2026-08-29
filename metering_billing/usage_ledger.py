@@ -26,7 +26,7 @@ from metering_billing.exact_decimal import (
     parse_exact_decimal,
     require_postable_journal_line_amounts,
 )
-from metering_billing.period_close import LateAdjustment
+from metering_billing.period_close import BillingPeriod, LateAdjustment
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
 TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
@@ -484,6 +484,24 @@ class StoredLateAdjustmentApplication:
     applied_at: datetime
     late_adjustment_application_contract_version: int
     late_adjustment_application_status: str
+
+
+@dataclass(frozen=True)
+class StoredLateAdjustmentRating:
+    """Append-only rating consumption fact for one applied late adjustment."""
+
+    late_adjustment_rating_id: UUID
+    tenant_account_id: UUID
+    late_adjustment_application_id: UUID
+    late_adjustment_id: UUID
+    target_period_id: UUID
+    adjustment_amount: Decimal
+    currency_code: str
+    rated_by: str
+    authorization_reference: str
+    rated_at: datetime
+    late_adjustment_rating_contract_version: int
+    late_adjustment_rating_status: str
 
 
 @dataclass(frozen=True)
@@ -1003,6 +1021,7 @@ class MemoryUsageLedger:
     credit_adjustment_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
         default_factory=dict
     )
+    billing_periods: dict[UUID, BillingPeriod] = field(default_factory=dict)
     late_adjustments: dict[UUID, LateAdjustment] = field(default_factory=dict)
     late_adjustment_tenant_index: dict[UUID, UUID] = field(default_factory=dict)
     late_adjustment_source_index: dict[tuple[UUID, str], UUID] = field(
@@ -1012,6 +1031,12 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     late_adjustment_application_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    late_adjustment_ratings: dict[UUID, StoredLateAdjustmentRating] = field(
+        default_factory=dict
+    )
+    late_adjustment_rating_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
     spend_budgets: dict[UUID, StoredSpendBudget] = field(default_factory=dict)
@@ -2944,6 +2969,39 @@ class MemoryUsageLedger:
         ] = adjustment.late_adjustment_id
         return adjustment
 
+    def get_billing_period(
+        self, tenant_reference: str, period_id: UUID
+    ) -> BillingPeriod | None:
+        """Return one tenant-scoped period aggregate, if present."""
+        tenant, tenant_error = self.resolve_tenant(tenant_reference)
+        if tenant_error is not None or tenant is None:
+            return None
+        period = self.billing_periods.get(period_id)
+        if period is None or period.tenant_reference != tenant.tenant_reference:
+            return None
+        return period
+
+    def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
+        """Store one period snapshot while preserving its transition prefix."""
+        self.require_tenant(period.tenant_reference)
+        existing = self.billing_periods.get(period.period_id)
+        if existing is None:
+            self.billing_periods[period.period_id] = period
+            return period
+        if (
+            existing.tenant_reference != period.tenant_reference
+            or existing.period_start != period.period_start
+            or existing.period_end != period.period_end
+            or existing.opened_at != period.opened_at
+            or existing.opened_by != period.opened_by
+            or existing.period_contract_version != period.period_contract_version
+        ):
+            raise ValueError("billing period identity cannot change after persistence")
+        if existing.transitions != period.transitions[: len(existing.transitions)]:
+            raise ValueError("billing period transition history cannot be rewritten")
+        self.billing_periods[period.period_id] = period
+        return period
+
     def find_late_adjustment_application(
         self, tenant_account_id: UUID, late_adjustment_id: UUID
     ) -> StoredLateAdjustmentApplication | None:
@@ -2997,12 +3055,82 @@ class MemoryUsageLedger:
         identity_key = (application.tenant_account_id, application.late_adjustment_id)
         existing = self.find_late_adjustment_application(*identity_key)
         if existing is not None:
-            if replace(existing, late_adjustment_application_id=application.late_adjustment_application_id) != application:
+            if (
+                replace(
+                    existing,
+                    late_adjustment_application_id=application.late_adjustment_application_id,
+                    applied_at=application.applied_at,
+                )
+                != application
+            ):
                 raise ValueError("late adjustment application identity cannot change")
             return existing
         self.late_adjustment_applications[application.late_adjustment_application_id] = application
         self.late_adjustment_application_index[identity_key] = application.late_adjustment_application_id
         return application
+
+    def find_late_adjustment_rating(
+        self, tenant_account_id: UUID, late_adjustment_id: UUID
+    ) -> StoredLateAdjustmentRating | None:
+        """Return one tenant-scoped rating consumption fact, if present."""
+        rating_id = self.late_adjustment_rating_index.get(
+            (tenant_account_id, late_adjustment_id)
+        )
+        if rating_id is None:
+            return None
+        return self.late_adjustment_ratings[rating_id]
+
+    def get_late_adjustment_rating(
+        self, late_adjustment_rating_id: UUID
+    ) -> StoredLateAdjustmentRating | None:
+        """Return one late-adjustment rating consumption fact by identifier."""
+        return self.late_adjustment_ratings.get(late_adjustment_rating_id)
+
+    def insert_late_adjustment_rating(
+        self, rating: StoredLateAdjustmentRating
+    ) -> StoredLateAdjustmentRating:
+        """Store one immutable rating consumption fact or return its replay."""
+        if rating.late_adjustment_rating_status != "rated":
+            raise ValueError("late_adjustment_rating_status must be rated")
+        if CURRENCY_CODE_PATTERN.fullmatch(rating.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(rating.adjustment_amount, Decimal)
+            or rating.adjustment_amount.is_nan()
+            or rating.adjustment_amount.is_infinite()
+            or rating.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        amount_text = format(rating.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        for value, field_name in (
+            (rating.rated_by, "rated_by"),
+            (rating.authorization_reference, "authorization_reference"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-empty")
+        if rating.late_adjustment_rating_id in self.late_adjustment_ratings:
+            raise ValueError("late_adjustment_rating_id already stored")
+        identity_key = (rating.tenant_account_id, rating.late_adjustment_id)
+        existing = self.find_late_adjustment_rating(*identity_key)
+        if existing is not None:
+            if (
+                replace(
+                    existing,
+                    late_adjustment_rating_id=rating.late_adjustment_rating_id,
+                    rated_at=rating.rated_at,
+                )
+                != rating
+            ):
+                raise ValueError("late adjustment rating identity cannot change")
+            return existing
+        self.late_adjustment_ratings[rating.late_adjustment_rating_id] = rating
+        self.late_adjustment_rating_index[identity_key] = rating.late_adjustment_rating_id
+        return rating
 
     def insert_credit_adjustment(
         self, credit: StoredCreditAdjustment

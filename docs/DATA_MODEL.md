@@ -253,7 +253,18 @@ including the equal target period, signed exact amount, currency, actor,
 authorization reference, and application instant. Presentment exposes
 `apply_late_adjustment` before that row exists and `rate_late_adjustment`
 afterward. The application row has composite source/target foreign keys and
-immutable update/delete triggers; it does not mutate the late adjustment.
+immutable update/delete triggers; migration `0052` also rechecks target
+openness for a first application while preserving already-stored replays; it
+does not mutate the late adjustment.
+
+`LateAdjustmentRatingService` consumes that application and stores one
+append-only `late_adjustment_rating` per tenant and late-adjustment ID. It
+copies the application target, signed amount, and currency and adds the rating
+actor, authorization reference, and instant. Migrations `0051` and `0052` protect the
+application/source/target links, exact-value equality, replay identity, and
+update/delete immutability. This is a rating-consumption fact, not a synthetic
+`rating_run`; ordinary usage re-rating and invoice-adjustment composition remain
+separate downstream work.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

@@ -50,7 +50,9 @@ contextual-orchestrator usage
   and period transitions are never rewritten.
 - PostgreSQL migrations `0048`/`0049` enforce tenant-scoped foreign keys,
   lifecycle ordering, target openness, replay conflict handling, and
-  update/delete immutability. Application,
+  update/delete immutability. Migrations `0050`/`0052` also require the target
+  to still be open when first applying the fact while preserving replays.
+  Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
   posting remain separate workflows.
 
@@ -73,7 +75,8 @@ contextual-orchestrator usage
 ## Late-adjustment-application acceptance
 
 - `POST /v1/late-adjustments/{late_adjustment_id}/applications` requires
-  non-empty `applied_by` and `authorization_reference` audit references.
+  a currently open target period, plus non-empty `applied_by` and
+  `authorization_reference` audit references.
 - The application is an append-only, tenant-scoped fact whose target period,
   signed exact amount, and currency must equal the stored late adjustment.
   Identity is `(tenant_account_id, late_adjustment_id)`; replay returns the
@@ -85,6 +88,21 @@ contextual-orchestrator usage
 - This slice does not re-rate, mutate a period or usage fact, create a tax or
   journal document, settle a provider, export FOCUS, or emit a webhook. Those
   remain explicit downstream workflows.
+
+## Late-adjustment-rating acceptance
+
+- `POST /v1/late-adjustments/{late_adjustment_id}/ratings` requires the
+  tenant's durable application and non-empty `rated_by` and
+  `authorization_reference` audit references.
+- Rating appends one immutable tenant-scoped fact that copies the application's
+  target period, signed exact amount, and currency. A replay returns the same
+  rating fact without a second row or mutation of the original usage rating.
+- The command does not invent a usage snapshot or rate-card version. It records
+  consumption of the already-authoritative commercial delta; invoice-adjustment
+  composition, tax, provider settlement, FOCUS export, and statutory posting
+  remain explicit downstream workflows.
+- Until application, the command returns `apply_late_adjustment`; after rating,
+  presentment reports `record_invoice_adjustment`.
 
 ## Tax-assessment acceptance
 

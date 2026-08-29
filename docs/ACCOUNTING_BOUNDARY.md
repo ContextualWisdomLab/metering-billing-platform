@@ -44,7 +44,9 @@ evidence; it does not create a journal, mutate a period, or claim statutory
 accounting authority. Late-adjustment application is an append-only commercial
 acknowledgement carrying actor and authorization references; it preserves the
 signed source amount and does not create a journal, tax document, provider
-settlement, or statutory accounting entry. Re-rating remains a later command.
+settlement, or statutory accounting entry. The rating command records that
+consumption as a separate immutable commercial fact and leaves invoice-
+adjustment composition, tax treatment, and posting to later authorities.
 
 The billing platform emits `accounting_journal_proposal` with:
 

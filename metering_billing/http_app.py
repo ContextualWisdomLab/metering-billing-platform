@@ -298,6 +298,7 @@ from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.late_adjustment_application import (
     LateAdjustmentApplicationService,
 )
+from metering_billing.late_adjustment_rating import LateAdjustmentRatingService
 from metering_billing.late_adjustment_presentment import LateAdjustmentPresentmentService
 from metering_billing.errors import (
     AccountStatementPresentmentQueryError,
@@ -550,6 +551,9 @@ LATE_ADJUSTMENT_ITEM_PATH = re.compile(
 )
 LATE_ADJUSTMENT_APPLICATION_NESTED_PATH = re.compile(
     r"^/v1/late-adjustments/([0-9a-fA-F-]{36})/applications$"
+)
+LATE_ADJUSTMENT_RATING_NESTED_PATH = re.compile(
+    r"^/v1/late-adjustments/([0-9a-fA-F-]{36})/ratings$"
 )
 RATING_RUN_COLLECTION_PATH = "/v1/rating-runs"
 RATING_RUN_ITEM_PATH = re.compile(r"^/v1/rating-runs/([0-9a-fA-F-]{36})$")
@@ -834,6 +838,7 @@ def create_http_app(
     late_adjustment_applications = LateAdjustmentApplicationService(
         shared_ledger, clock=clock
     )
+    late_adjustment_ratings = LateAdjustmentRatingService(shared_ledger, clock=clock)
     rating_presentments = RatingRunPresentmentService(shared_ledger)
     tax_assessment_presentments = TaxAssessmentPresentmentService(shared_ledger)
     observation_presentments = PostingReceiptObservationPresentmentService(shared_ledger)
@@ -1352,6 +1357,39 @@ def create_http_app(
                         path_values["late_adjustment_id"], "late_adjustment_id"
                     ),
                     applied_by=payload.get("applied_by"),
+                    authorization_reference=payload.get("authorization_reference"),
+                )
+                reason = (
+                    result.rejection_reason_code.value
+                    if result.rejection_reason_code is not None
+                    else None
+                )
+                status_code = (
+                    404
+                    if reason in {"tenant_not_found", "late_adjustment_not_found"}
+                    else _status_for_result(result)
+                )
+                return _send_json(start_response, status_code, result.as_contract_dict())
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "late_adjustment_ratings":
+            try:
+                payload = _read_json_object(environ)
+                if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
+                    raise HttpRequestError("request_invalid")
+                tenant_reference = _authorized_tenant(environ, payload)
+                result = late_adjustment_ratings.rate_late_adjustment(
+                    tenant_reference,
+                    _parse_uuid(
+                        path_values["late_adjustment_id"], "late_adjustment_id"
+                    ),
+                    rated_by=payload.get("rated_by"),
                     authorization_reference=payload.get("authorization_reference"),
                 )
                 reason = (
@@ -3368,6 +3406,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
         if method == "POST":
             return "late_adjustment_applications", {
                 "late_adjustment_id": late_adjustment_application_match.group(1)
+            }
+        return "method_not_allowed", {}
+    late_adjustment_rating_match = LATE_ADJUSTMENT_RATING_NESTED_PATH.fullmatch(path)
+    if late_adjustment_rating_match is not None:
+        if method == "POST":
+            return "late_adjustment_ratings", {
+                "late_adjustment_id": late_adjustment_rating_match.group(1)
             }
         return "method_not_allowed", {}
     late_adjustment_match = LATE_ADJUSTMENT_ITEM_PATH.fullmatch(path)

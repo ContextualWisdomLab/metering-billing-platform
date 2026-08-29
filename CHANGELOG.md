@@ -33,6 +33,11 @@
   preserves the signed source amount/target/currency, and advances presentment
   to `rate_late_adjustment`; full re-rating remains a separate workflow (ADR
   0134).
+- Issue #87 now records the consumption of an applied late adjustment as a
+  separate immutable rating fact in migration `0051`; migration `0052` also
+  guards application against a target period that closed after recording. It preserves the
+  original usage `rating_run`, replays safely, and leaves invoice-adjustment
+  composition as the next explicit action (ADR 0135).
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

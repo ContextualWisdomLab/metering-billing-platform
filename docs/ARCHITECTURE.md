@@ -70,6 +70,11 @@ item/list reads and reports `apply_late_adjustment` until
 requires actor and authorization references, enforces source equality and
 tenant scope, and then reports `rate_late_adjustment`. It never rewrites the
 late fact, period, usage, rating, tax, journal, provider state, or webhook.
+`LateAdjustmentRatingService` consumes the acknowledgement through the nested
+`/ratings` command and appends `late_adjustment_rating`. The exact signed delta
+is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
+Presentment then reports `record_invoice_adjustment` for the still-separate
+invoice-adjustment workflow.
 
 ## Usage ingestion
 
