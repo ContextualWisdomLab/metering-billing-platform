@@ -18,14 +18,17 @@ rating lineage.
 `late_adjustment_application` and appends one tenant-scoped
 `late_adjustment_rating` fact. The fact copies the target, signed exact amount,
 and currency from the application, records the rating actor and authorization,
-and is replay-safe on the tenant/source identity. PostgreSQL protects the
+and is replay-safe on the tenant/source identity. A first rating requires an
+open target period; migration `0053` serializes that check with period
+transitions while preserving replays after closure. PostgreSQL protects the
 application, source, target, amount, currency, and update/delete immutability
-with migration `0051`.
+with migrations `0051` and `0053`.
 
 The HTTP command is
 `POST /v1/late-adjustments/{late_adjustment_id}/ratings`. It returns
 `late_adjustment_application_not_found` until the application command has
-completed. A successful rating reports `record_invoice_adjustment` as the next
+completed, or `late_adjustment_target_period_not_open` when its target has
+closed. A successful rating reports `record_invoice_adjustment` as the next
 action because a late adjustment is not silently converted into an ordinary
 usage rating run or statutory invoice.
 

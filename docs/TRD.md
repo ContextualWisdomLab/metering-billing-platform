@@ -78,8 +78,9 @@ is `rate_late_adjustment`. The application requires actor and authorization
 references, preserves the source target/exact signed amount/currency, and is
 replay-safe and rejects a first application after its target period closes.
 `POST /v1/late-adjustments/{late_adjustment_id}/ratings` then
-consumes the application into one immutable rating fact, preserving the
-original usage `rating_run` and exact signed delta. Because the adjustment has
+consumes the application into one immutable rating fact only while its target
+period is open; a first rating after closure is rejected while a stored rating
+replays. This preserves the original usage `rating_run` and exact signed delta. Because the adjustment has
 no usage snapshot or rate-card input, this command does not synthesize one;
 invoice-adjustment composition is reported as the next action. Neither command
 mutates a period, posts a journal, calls a provider, or creates a tax document.

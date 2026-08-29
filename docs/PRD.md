@@ -92,11 +92,15 @@ contextual-orchestrator usage
 ## Late-adjustment-rating acceptance
 
 - `POST /v1/late-adjustments/{late_adjustment_id}/ratings` requires the
-  tenant's durable application and non-empty `rated_by` and
+  tenant's durable application, a currently open target period, and non-empty `rated_by` and
   `authorization_reference` audit references.
 - Rating appends one immutable tenant-scoped fact that copies the application's
   target period, signed exact amount, and currency. A replay returns the same
-  rating fact without a second row or mutation of the original usage rating.
+  rating fact without a second row or mutation of the original usage rating,
+  including when the target has since closed.
+- A first rating after the target closes is rejected with
+  `late_adjustment_target_period_not_open`; the target lock serializes this
+  decision with period transitions.
 - The command does not invent a usage snapshot or rate-card version. It records
   consumption of the already-authoritative commercial delta; invoice-adjustment
   composition, tax, provider settlement, FOCUS export, and statutory posting

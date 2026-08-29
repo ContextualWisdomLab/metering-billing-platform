@@ -340,6 +340,52 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         )
         self.assertEqual(ledger.late_adjustment_applications, {})
 
+    def test_rating_rejects_first_fact_after_target_closes(self) -> None:
+        """A closed target accepts neither a first application rating nor a new fact."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "1.25",
+            "USD",
+            "provider:rating-closed-target",
+            "sha256:" + "f" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        _store_open_target_period(ledger, adjustment.target_period_id)
+        LateAdjustmentApplicationService(ledger).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:alice",
+            authorization_reference="change:closed-rating",
+        )
+        target = ledger.get_billing_period(TENANT_ONE, adjustment.target_period_id)
+        assert target is not None
+        ledger.insert_billing_period(
+            target.advance(
+                "soft_closed",
+                actor_reference="operator:period",
+                authorization_reference="change:closed-rating",
+                reason="close target before rating",
+                transitioned_at=datetime(2026, 8, 18, tzinfo=UTC),
+            )
+        )
+        result = LateAdjustmentRatingService(ledger).rate_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            rated_by="operator:alice",
+            authorization_reference="change:closed-rating-fact",
+        )
+        self.assertEqual(result.late_adjustment_rating_outcome_code, "rejected")
+        self.assertEqual(
+            result.rejection_reason_code, "late_adjustment_target_period_not_open"
+        )
+        self.assertEqual(validate_late_adjustment_rating(result.as_contract_dict()), ())
+        self.assertEqual(ledger.late_adjustment_ratings, {})
+
     def test_rating_consumes_application_without_rewriting_original_rating_run(self) -> None:
         """Rating records the signed delta separately and is replay-safe."""
         ledger = seed_ledger()
@@ -542,6 +588,23 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             ),
             stored,
         )
+        target = ledger.get_billing_period(TENANT_ONE, adjustment.target_period_id)
+        assert target is not None
+        ledger.insert_billing_period(
+            target.advance(
+                "soft_closed",
+                actor_reference="operator:period",
+                authorization_reference="change:close-after-rating",
+                reason="close target after rating",
+                transitioned_at=datetime(2026, 8, 30, tzinfo=UTC),
+            )
+        )
+        self.assertEqual(
+            ledger.insert_late_adjustment_rating(
+                replace(stored, late_adjustment_rating_id=uuid4())
+            ),
+            stored,
+        )
         self.assertTrue(validate_late_adjustment_rating(None))
         self.assertTrue(
             validate_late_adjustment_rating(
@@ -613,6 +676,7 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         )
         self.assertEqual(status, 422)
         self.assertEqual(body["rejection_reason_code"], "request_invalid")
+
         status, replay = invoke_http(app, "POST", path, payload)
         self.assertEqual(status, 200)
         self.assertEqual(replay["late_adjustment_rating_outcome_code"], "duplicate_replay")
@@ -626,6 +690,57 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             status, body = invoke_http(app, "POST", path, payload)
         self.assertEqual(status, 422)
         self.assertEqual(body["rejection_reason_code"], "request_invalid")
+
+    def test_http_rating_rejects_first_fact_after_target_closes(self) -> None:
+        """The HTTP command exposes the closed-target rating rejection."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "3.25",
+            "USD",
+            "provider:http-rating-closed-target",
+            "sha256:" + "a" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        _store_open_target_period(ledger, adjustment.target_period_id)
+        application = LateAdjustmentApplicationService(ledger).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:alice",
+            authorization_reference="change:http-closed-rating",
+        )
+        self.assertEqual(application.late_adjustment_application_outcome_code, "accepted")
+        target = ledger.get_billing_period(TENANT_ONE, adjustment.target_period_id)
+        assert target is not None
+        ledger.insert_billing_period(
+            target.advance(
+                "soft_closed",
+                actor_reference="operator:period",
+                authorization_reference="change:http-closed-rating",
+                reason="close target before rating",
+                transitioned_at=datetime(2026, 8, 18, tzinfo=UTC),
+            )
+        )
+        path = f"/v1/late-adjustments/{adjustment.late_adjustment_id}/ratings"
+        status, body = invoke_http(
+            create_http_app(ledger),
+            "POST",
+            path,
+            {
+                "tenant_reference": TENANT_ONE,
+                "rated_by": "operator:alice",
+                "authorization_reference": "change:http-closed-rating-fact",
+            },
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(
+            body["rejection_reason_code"], "late_adjustment_target_period_not_open"
+        )
+        self.assertEqual(validate_late_adjustment_rating(body), ())
 
 
 if __name__ == "__main__":

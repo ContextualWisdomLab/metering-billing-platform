@@ -261,8 +261,9 @@ does not mutate the late adjustment.
 append-only `late_adjustment_rating` per tenant and late-adjustment ID. It
 copies the application target, signed amount, and currency and adds the rating
 actor, authorization reference, and instant. Migrations `0051` and `0052` protect the
-application/source/target links, exact-value equality, replay identity, and
-update/delete immutability. This is a rating-consumption fact, not a synthetic
+application/source/target links, exact-value equality, replay identity, current
+target openness for first ratings, and update/delete immutability. Migration
+`0053` preserves already-stored rating replays after target closure. This is a rating-consumption fact, not a synthetic
 `rating_run`; ordinary usage re-rating and invoice-adjustment composition remain
 separate downstream work.
 

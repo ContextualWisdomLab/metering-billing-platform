@@ -17,6 +17,7 @@ from uuid import UUID
 from metering_billing.errors import (
     LateAdjustmentRatingOutcomeCode,
     LateAdjustmentRatingRejectionReasonCode,
+    LateAdjustmentRatingTargetPeriodNotOpen,
     require_resolved,
 )
 from metering_billing.usage_ledger import (
@@ -190,7 +191,13 @@ class LateAdjustmentRatingService:
             ),
             late_adjustment_rating_status=LATE_ADJUSTMENT_RATING_STATUS,
         )
-        stored = self.ledger.insert_late_adjustment_rating(candidate)
+        try:
+            stored = self.ledger.insert_late_adjustment_rating(candidate)
+        except LateAdjustmentRatingTargetPeriodNotOpen:
+            return _rejected(
+                LateAdjustmentRatingRejectionReasonCode.TARGET_PERIOD_NOT_OPEN,
+                OPERATOR_ACTION_WAIT,
+            )
         outcome = (
             LateAdjustmentRatingOutcomeCode.ACCEPTED
             if stored.late_adjustment_rating_id == candidate.late_adjustment_rating_id

@@ -184,8 +184,13 @@ class LateAdjustmentRatingRejectionReasonCode(StrEnum):
     TENANT_NOT_FOUND = "tenant_not_found"
     LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
     LATE_ADJUSTMENT_APPLICATION_NOT_FOUND = "late_adjustment_application_not_found"
+    TARGET_PERIOD_NOT_OPEN = "late_adjustment_target_period_not_open"
     ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
     AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
+
+
+class LateAdjustmentRatingTargetPeriodNotOpen(ValueError):
+    """Raised when a new rating targets a period that is not open."""
 
 
 class TaxRateOutcomeCode(StrEnum):

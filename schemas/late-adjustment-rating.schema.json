@@ -83,6 +83,7 @@
             "tenant_not_found",
             "late_adjustment_not_found",
             "late_adjustment_application_not_found",
+            "late_adjustment_target_period_not_open",
             "actor_reference_invalid",
             "authorization_reference_invalid"
           ]

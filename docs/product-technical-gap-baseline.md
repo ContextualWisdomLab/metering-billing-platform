@@ -15,7 +15,7 @@ open, mergeable but unstable, has zero qualifying approvals, and its repository
 contract check plus provider reviews are pending. That state is not merge
 evidence.
 
-This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`/`0051`/`0052`, the
+This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`/`0051`/`0052`/`0053`, the
 `LateAdjustment`, application, and rating-consumption contracts,
 tenant-scoped presentment reads, and durable application/rating facts for late
 usage, correction, and reversal evidence. The source period must be at least

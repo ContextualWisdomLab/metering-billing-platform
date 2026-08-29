@@ -22,6 +22,7 @@ from uuid import UUID
 
 from metering_billing.errors import (
     LateAdjustmentApplicationTargetPeriodNotOpen,
+    LateAdjustmentRatingTargetPeriodNotOpen,
     RejectionReasonCode,
 )
 from metering_billing.exact_decimal import (
@@ -3152,6 +3153,23 @@ class MemoryUsageLedger:
             ):
                 raise ValueError("late adjustment rating identity cannot change")
             return existing
+        tenant_reference = next(
+            (
+                tenant.tenant_reference
+                for tenant in self.tenant_accounts.values()
+                if tenant.tenant_account_id == rating.tenant_account_id
+            ),
+            None,
+        )
+        target_period = (
+            self.get_billing_period(tenant_reference, rating.target_period_id)
+            if tenant_reference is not None
+            else None
+        )
+        if target_period is None or target_period.status.value != "open":
+            raise LateAdjustmentRatingTargetPeriodNotOpen(
+                "late adjustment rating target period must be open"
+            )
         adjustment = self.late_adjustments.get(rating.late_adjustment_id)
         if (
             adjustment is None
