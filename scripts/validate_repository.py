@@ -364,6 +364,7 @@ RUNBOOK_REQUIRED_HEADINGS = (
     "Validation receipt",
     "Exit and RCA",
 )
+RUNBOOK_INDEX_LINK_PATTERN = re.compile(r"\]\(([^)#\s]+\.md)\)")
 TABLE_NAME_PATTERN = re.compile(
     r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
     r"(?:(?:[a-zA-Z_][a-zA-Z0-9_]*)\.)?([a-zA-Z_][a-zA-Z0-9_]*)",
@@ -505,12 +506,43 @@ def validate_runbooks(root: Path) -> tuple[str, ...]:
     if not runbook_paths:
         return ("runbook directory must contain Markdown runbooks",)
     errors: list[str] = []
+    index_path = root / "docs/operations/runbooks.md"
+    if not index_path.is_file():
+        errors.append("missing runbook index: docs/operations/runbooks.md")
+        indexed_paths: tuple[Path, ...] = ()
+    else:
+        index_text = index_path.read_text(encoding="utf-8")
+        indexed_paths = tuple(
+            (index_path.parent / relative_target).resolve()
+            for relative_target in RUNBOOK_INDEX_LINK_PATTERN.findall(index_text)
+        )
+        if not indexed_paths:
+            errors.append("runbook index must link Markdown runbooks")
+        for relative_target in RUNBOOK_INDEX_LINK_PATTERN.findall(index_text):
+            target_path = (index_path.parent / relative_target).resolve()
+            if not target_path.is_relative_to(directory.resolve()):
+                errors.append(f"runbook index target escapes runbook directory: {relative_target}")
+            elif not target_path.is_file():
+                errors.append(f"runbook index target does not exist: {relative_target}")
+
+    indexed_path_set = set(indexed_paths)
+    for runbook_path in runbook_paths:
+        if runbook_path.resolve() not in indexed_path_set:
+            relative_path = runbook_path.relative_to(root).as_posix()
+            errors.append(f"runbook is not indexed: {relative_path}")
     for runbook_path in runbook_paths:
         text = runbook_path.read_text(encoding="utf-8")
         relative_path = runbook_path.relative_to(root).as_posix()
         for heading in RUNBOOK_REQUIRED_HEADINGS:
-            if f"## {heading}\n" not in text:
+            heading_match = re.search(
+                rf"^## {re.escape(heading)}$\n(.*?)(?=^## |\Z)",
+                text,
+                re.MULTILINE | re.DOTALL,
+            )
+            if heading_match is None:
                 errors.append(f"{relative_path}: missing required runbook section: {heading}")
+            elif not heading_match.group(1).strip():
+                errors.append(f"{relative_path}: empty required runbook section: {heading}")
     return tuple(errors)
 
 
