@@ -165,12 +165,17 @@ class TenantApiCredentialService:
         self._pepper = credential_pepper
 
     def issue_credential(
-        self, tenant_reference: str, credential_label: object | None = None
+        self,
+        tenant_reference: str,
+        credential_label: object | None = None,
+        *,
+        bootstrap_only: bool = False,
     ) -> TenantApiCredentialResult:
         """Mint one active credential and return the secret once.
 
         A second issue of the same tenant, label, and contract version always
         mints a new secret.  The persisted row stores only the keyed hash.
+        ``bootstrap_only`` atomically rejects a concurrent or prior issue.
         """
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -181,19 +186,23 @@ class TenantApiCredentialService:
         except TenantApiCredentialQueryError:
             return _rejected(TenantApiCredentialRejectionReasonCode.CREDENTIAL_LABEL_INVALID)
         prefix, secret = mint_api_credential_secret()
-        stored = self.ledger.insert_tenant_api_credential(
-            StoredTenantApiCredential(
-                tenant_api_credential_id=generate_record_id(),
-                tenant_account_id=tenant.tenant_account_id,
-                tenant_api_credential_contract_version=TENANT_API_CREDENTIAL_CONTRACT_VERSION,
-                credential_label=label,
-                credential_prefix=prefix,
-                credential_secret_hash=hash_api_credential_secret(secret, self._pepper),
-                credential_status="active",
-                issued_at=self._clock(),
-                revoked_at=None,
+        try:
+            stored = self.ledger.insert_tenant_api_credential(
+                StoredTenantApiCredential(
+                    tenant_api_credential_id=generate_record_id(),
+                    tenant_account_id=tenant.tenant_account_id,
+                    tenant_api_credential_contract_version=TENANT_API_CREDENTIAL_CONTRACT_VERSION,
+                    credential_label=label,
+                    credential_prefix=prefix,
+                    credential_secret_hash=hash_api_credential_secret(secret, self._pepper),
+                    credential_status="active",
+                    issued_at=self._clock(),
+                    revoked_at=None,
+                ),
+                require_empty_history=bootstrap_only,
             )
-        )
+        except TenantApiCredentialQueryError:
+            return _rejected(TenantApiCredentialRejectionReasonCode.API_CREDENTIAL_MISSING)
         return _from_stored(stored, tenant.tenant_reference, secret, TenantApiCredentialOutcomeCode.ACCEPTED)
 
     def list_credentials(self, tenant_reference: str) -> TenantApiCredentialPage:

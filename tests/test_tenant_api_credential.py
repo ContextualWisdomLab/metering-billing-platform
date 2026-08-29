@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Barrier
 from unittest import mock
 from uuid import uuid4
 
@@ -44,6 +46,17 @@ class TenantApiCredentialTests(unittest.TestCase):
         self.assertIsNotNone(second.api_credential_secret)
         self.assertNotEqual(first.api_credential_secret, second.api_credential_secret)
         self.assertNotEqual(first.tenant_api_credential_id, second.tenant_api_credential_id)
+        bootstrap_rejected = service.issue_credential(
+            TENANT_ONE, "bootstrap_key", bootstrap_only=True
+        )
+        self.assertEqual(
+            bootstrap_rejected.tenant_api_credential_outcome_code,
+            TenantApiCredentialOutcomeCode.REJECTED,
+        )
+        self.assertEqual(
+            bootstrap_rejected.rejection_reason_code,
+            TenantApiCredentialRejectionReasonCode.API_CREDENTIAL_MISSING,
+        )
         self.assertTrue(first.api_credential_secret.startswith(first.credential_prefix))
         stored = ledger.get_tenant_api_credential(first.tenant_api_credential_id)
         assert stored is not None
@@ -155,6 +168,31 @@ class TenantApiCredentialTests(unittest.TestCase):
         )
         self.assertEqual(second_issue_status, 200)
         self.assertNotEqual(second_issue_body["api_credential_secret"], secret)
+
+    def test_concurrent_first_http_issue_is_single_use(self) -> None:
+        """Concurrent tenant-pin issues yield one credential and one rejection."""
+        ledger = seed_rated_ledger()
+        app = create_http_app(ledger)
+        barrier = Barrier(2)
+
+        def issue() -> tuple[int, dict[str, object]]:
+            barrier.wait()
+            return invoke_http(
+                app,
+                "POST",
+                "/v1/tenant-api-credentials",
+                {"tenant_reference": TENANT_ONE, "credential_label": "operator_key"},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = tuple(executor.map(lambda _worker: issue(), range(2)))
+        self.assertEqual(sorted(status for status, _body in results), [200, 422])
+        self.assertEqual(
+            sum(body.get("rejection_reason_code") == "api_credential_missing" for _, body in results),
+            1,
+        )
+        tenant = ledger.require_tenant(TENANT_ONE)
+        self.assertEqual(len(ledger.list_tenant_api_credentials(tenant.tenant_account_id)), 1)
 
     def test_revoked_and_cross_tenant_keys_fail_closed(self) -> None:
         """Revoked keys and tenant-A keys cannot read tenant B."""

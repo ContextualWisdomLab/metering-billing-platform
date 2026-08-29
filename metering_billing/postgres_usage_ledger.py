@@ -23,6 +23,7 @@ from uuid import UUID
 
 from metering_billing.errors import (
     RejectionReasonCode,
+    TenantApiCredentialQueryError,
     UsageEventConflict,
 )
 from metering_billing.exact_decimal import (
@@ -4981,7 +4982,10 @@ class PostgresUsageLedger:
             )
 
     def insert_tenant_api_credential(
-        self, credential: StoredTenantApiCredential
+        self,
+        credential: StoredTenantApiCredential,
+        *,
+        require_empty_history: bool = False,
     ) -> StoredTenantApiCredential:
         """Persist one API credential.  Secrets are never replayed or stored."""
         if credential.credential_status not in {"active", "revoked"}:
@@ -4989,6 +4993,28 @@ class PostgresUsageLedger:
         if not credential.credential_secret_hash.startswith("hmac-sha256:"):
             raise ValueError("credential_secret_hash must be a keyed HMAC")
         with self._cursor() as cursor:
+            if require_empty_history:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM billing_core.tenant_account
+                    WHERE tenant_account_id = %s
+                    FOR UPDATE
+                    """,
+                    (credential.tenant_account_id,),
+                )
+                cursor.fetchone()
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM billing_core.tenant_api_credential
+                    WHERE tenant_account_id = %s
+                    LIMIT 1
+                    """,
+                    (credential.tenant_account_id,),
+                )
+                if cursor.fetchone() is not None:
+                    raise TenantApiCredentialQueryError("api_credential_missing")
             cursor.execute(
                 """
                 SELECT 1

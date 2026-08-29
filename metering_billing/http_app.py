@@ -917,9 +917,12 @@ def create_http_app(
                 if FORBIDDEN_PAYMENT_INTENT_KEYS.intersection(payload):
                     raise HttpRequestError("request_invalid")
                 if route_name == "tenant_api_credentials":
+                    bootstrap_only = _extract_api_key(environ) is None
                     tenant_reference = _authorized_tenant(environ, payload)
                     result = credentials.issue_credential(
-                        tenant_reference, payload.get("credential_label")
+                        tenant_reference,
+                        payload.get("credential_label"),
+                        bootstrap_only=bootstrap_only,
                     )
                     return _send_json(
                         start_response, _status_for_result(result), result.as_contract_dict()

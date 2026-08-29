@@ -109,7 +109,6 @@ from metering_billing.usage_ledger import (
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
     StoredTenantApiCredential,
-    StoredUnappliedCash,
     StoredUnappliedCashApplication,
     StoredUnappliedCashRefund,
     StoredSpendBudget,
@@ -570,6 +569,37 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.list_tenant_api_credentials(tenant_id), (direct, revoked)
         )
         self.assertEqual(self.ledger.list_active_tenant_api_credentials(tenant_id), (direct,))
+
+    def test_concurrent_first_credential_issue_is_single_use(self) -> None:
+        """Separate PostgreSQL sessions serialize the one-time bootstrap guard."""
+        tenant_reference = f"urn:cwl:concurrent_bootstrap_{uuid4().hex}"
+        self.ledger.register_tenant(tenant_reference)
+        barrier = Barrier(2)
+
+        def issue() -> object:
+            ledger = PostgresUsageLedger.connect(POSTGRES_DSN)
+            try:
+                barrier.wait()
+                return TenantApiCredentialService(ledger).issue_credential(
+                    tenant_reference,
+                    "operator_key",
+                    bootstrap_only=True,
+                )
+            finally:
+                ledger.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = tuple(executor.map(lambda _worker: issue(), range(2)))
+        self.assertEqual(
+            sorted(result.tenant_api_credential_outcome_code.value for result in results),
+            ["accepted", "rejected"],
+        )
+        rejected = next(
+            result
+            for result in results
+            if result.tenant_api_credential_outcome_code.value == "rejected"
+        )
+        self.assertEqual(rejected.rejection_reason_code.value, "api_credential_missing")
 
     def test_threaded_requests_serialize_on_one_connection_safely(self) -> None:
         """Concurrent web-tier workers never interleave one connection's transactions."""
@@ -4106,7 +4136,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         second_case_amount = Decimal("20.00")
         leftover_apply_remaining = Decimal("19.999")
         exclusive_amount = Decimal("100.00")
-        tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
         credit_exclusive = Decimal("10.00")
         credit_tax = Decimal("1.00")
@@ -4809,8 +4838,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         exclusive_amount = Decimal("100.00")
         tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
-        credit_exclusive = Decimal("10.00")
-        credit_tax = Decimal("1.00")
         credit_voided_amount = Decimal("11.00")
         UsageIngestionService(self.ledger).ingest_usage_event(make_event())
         RateCardService(self.ledger).publish_rate_card(
