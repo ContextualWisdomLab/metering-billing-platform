@@ -8,8 +8,8 @@
 
 ## Current working snapshot (2026-08-30)
 
-The #87 work is stacked from local integration commit
-`3c7c276da10366d124295937391e9de23e0cc9b3` on branch
+The #87 work is stacked from implementation head
+`c4bac13` on branch
 `feat/late-adjustment-invoice-intent-20260830`; it incorporates the current
 #173 application/rating guarantees while PR #173 remains the base review.
 PR #173 remains open with no qualifying independent approval; mergeability and
@@ -23,7 +23,8 @@ composition slice; its initial implementation commit is
 `837db28`, and
 `bd06e17`, and
 `dd1f18f759668f572fcda4849855ac2c82c07cf3`, followed by integration commit
-`3c7c276da10366d124295937391e9de23e0cc9b3`.
+`3c7c276da10366d124295937391e9de23e0cc9b3` and the import-cleanup fix
+`c4bac13`.
 
 The implemented #87 path now covers PostgreSQL migrations
 `0048`/`0049`/`0050`/`0051`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062`, the `LateAdjustment`,
