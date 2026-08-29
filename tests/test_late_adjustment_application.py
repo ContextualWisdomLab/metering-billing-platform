@@ -142,12 +142,23 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 ledger.insert_late_adjustment_application(invalid)
-        with self.assertRaises(ValueError):
+        self.assertEqual(
             ledger.insert_late_adjustment_application(
                 replace(
                     stored,
                     late_adjustment_application_id=uuid4(),
                     applied_by="operator:other",
+                    authorization_reference="change:other",
+                )
+            ),
+            stored,
+        )
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_application(
+                replace(
+                    stored,
+                    late_adjustment_application_id=uuid4(),
+                    adjustment_amount=Decimal("1.0"),
                 )
             )
         self.assertEqual(
@@ -345,7 +356,7 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         )
         ledger.insert_late_adjustment(TENANT_ONE, adjustment)
         _store_open_target_period(ledger, adjustment.target_period_id)
-        LateAdjustmentApplicationService(
+        application_result = LateAdjustmentApplicationService(
             ledger,
             clock=lambda: datetime(2026, 8, 29, 1, 2, 3, tzinfo=UTC),
         ).apply_late_adjustment(
@@ -354,6 +365,10 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             applied_by="operator:alice",
             authorization_reference="change:123",
         )
+        application = ledger.get_late_adjustment_application(
+            application_result.late_adjustment_application_id
+        )
+        assert application is not None
         service = LateAdjustmentRatingService(
             ledger,
             clock=lambda: datetime(2026, 8, 29, 1, 3, 3, tzinfo=UTC),
@@ -411,6 +426,19 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         assert stored is not None
         with self.assertRaises(ValueError):
             ledger.insert_late_adjustment_rating(stored)
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_rating(
+                replace(
+                    stored,
+                    late_adjustment_rating_id=uuid4(),
+                    late_adjustment_id=uuid4(),
+                    late_adjustment_application_id=uuid4(),
+                )
+            )
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_rating(
+                replace(stored, late_adjustment_rating_id=uuid4(), late_adjustment_application_id=uuid4())
+            )
         for invalid in (
             replace(stored, late_adjustment_rating_status="pending"),
             replace(stored, currency_code="usd"),
@@ -435,6 +463,78 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ledger.insert_late_adjustment_rating(
                 replace(stored, late_adjustment_rating_id=uuid4(), target_period_id=uuid4())
+            )
+        missing_application_adjustment = replace(
+            adjustment,
+            late_adjustment_id=uuid4(),
+            source_reference="provider:rating-missing-application",
+            source_payload_hash="sha256:" + "d" * 64,
+        )
+        ledger.insert_late_adjustment(TENANT_ONE, missing_application_adjustment)
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_rating(
+                replace(
+                    stored,
+                    late_adjustment_rating_id=uuid4(),
+                    late_adjustment_id=missing_application_adjustment.late_adjustment_id,
+                    late_adjustment_application_id=uuid4(),
+                )
+            )
+        application_mismatch_adjustment = replace(
+            adjustment,
+            late_adjustment_id=uuid4(),
+            source_reference="provider:rating-application-mismatch",
+            source_payload_hash="sha256:" + "e" * 64,
+        )
+        ledger.insert_late_adjustment(TENANT_ONE, application_mismatch_adjustment)
+        mismatch_application_result = LateAdjustmentApplicationService(
+            ledger
+        ).apply_late_adjustment(
+            TENANT_ONE,
+            application_mismatch_adjustment.late_adjustment_id,
+            applied_by="operator:alice",
+            authorization_reference="change:application-mismatch",
+        )
+        mismatch_application = ledger.get_late_adjustment_application(
+            mismatch_application_result.late_adjustment_application_id
+        )
+        assert mismatch_application is not None
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_rating(
+                replace(
+                    stored,
+                    late_adjustment_rating_id=uuid4(),
+                    late_adjustment_application_id=(
+                        mismatch_application.late_adjustment_application_id
+                    ),
+                    late_adjustment_id=application_mismatch_adjustment.late_adjustment_id,
+                    adjustment_amount=Decimal("1.0"),
+                )
+            )
+        source_mismatch_adjustment = replace(
+            adjustment,
+            late_adjustment_id=uuid4(),
+            adjustment_amount=Decimal("6.0"),
+            source_reference="provider:rating-source-mismatch",
+            source_payload_hash="sha256:" + "f" * 64,
+        )
+        ledger.insert_late_adjustment(TENANT_ONE, source_mismatch_adjustment)
+        source_mismatch_application = replace(
+            application,
+            late_adjustment_application_id=uuid4(),
+            late_adjustment_id=source_mismatch_adjustment.late_adjustment_id,
+        )
+        ledger.insert_late_adjustment_application(source_mismatch_application)
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_rating(
+                replace(
+                    stored,
+                    late_adjustment_rating_id=uuid4(),
+                    late_adjustment_application_id=(
+                        source_mismatch_application.late_adjustment_application_id
+                    ),
+                    late_adjustment_id=source_mismatch_adjustment.late_adjustment_id,
+                )
             )
         self.assertEqual(
             ledger.insert_late_adjustment_rating(

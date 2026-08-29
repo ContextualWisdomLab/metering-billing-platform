@@ -121,8 +121,6 @@ def _same_late_adjustment_application(
         and format(stored.adjustment_amount, "f")
         == format(incoming.adjustment_amount, "f")
         and stored.currency_code == incoming.currency_code
-        and stored.applied_by == incoming.applied_by
-        and stored.authorization_reference == incoming.authorization_reference
         and stored.late_adjustment_application_contract_version
         == incoming.late_adjustment_application_contract_version
         and stored.late_adjustment_application_status
@@ -460,7 +458,9 @@ class PostgresUsageLedger:
                     cursor, UUID(str(existing_row[0])), application.tenant_account_id
                 )
                 if stored is None:  # pragma: no cover - row is locked by this transaction
-                    raise RuntimeError("late adjustment application did not return a row")
+                    raise RuntimeError(  # pragma: no cover - row is locked by this transaction
+                        "late adjustment application did not return a row"
+                    )
                 if not _same_late_adjustment_application(stored, application):
                     raise ValueError("late adjustment application identity cannot change")
                 return stored

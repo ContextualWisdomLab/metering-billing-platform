@@ -3063,6 +3063,8 @@ class MemoryUsageLedger:
                     existing,
                     late_adjustment_application_id=application.late_adjustment_application_id,
                     applied_at=application.applied_at,
+                    applied_by=application.applied_by,
+                    authorization_reference=application.authorization_reference,
                 )
                 != application
             ):
@@ -3150,6 +3152,36 @@ class MemoryUsageLedger:
             ):
                 raise ValueError("late adjustment rating identity cannot change")
             return existing
+        adjustment = self.late_adjustments.get(rating.late_adjustment_id)
+        if (
+            adjustment is None
+            or self.late_adjustment_tenant_index.get(rating.late_adjustment_id)
+            != rating.tenant_account_id
+        ):
+            raise ValueError("late adjustment rating source is missing")
+        application = self.find_late_adjustment_application(
+            rating.tenant_account_id, rating.late_adjustment_id
+        )
+        if (
+            application is None
+            or application.late_adjustment_application_id
+            != rating.late_adjustment_application_id
+        ):
+            raise ValueError("late adjustment rating application is missing")
+        if (
+            application.late_adjustment_application_status != "applied"
+            or application.late_adjustment_id != adjustment.late_adjustment_id
+            or application.target_period_id != rating.target_period_id
+            or application.adjustment_amount != rating.adjustment_amount
+            or application.currency_code != rating.currency_code
+        ):
+            raise ValueError("late adjustment rating does not match application")
+        if (
+            adjustment.target_period_id != rating.target_period_id
+            or adjustment.adjustment_amount != rating.adjustment_amount
+            or adjustment.currency_code != rating.currency_code
+        ):
+            raise ValueError("late adjustment rating does not match source")
         self.late_adjustment_ratings[rating.late_adjustment_rating_id] = rating
         self.late_adjustment_rating_index[identity_key] = rating.late_adjustment_rating_id
         return rating

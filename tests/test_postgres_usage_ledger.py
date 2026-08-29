@@ -1418,12 +1418,23 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             .next_operator_action,
             "rate_late_adjustment",
         )
-        with self.assertRaises(ValueError):
+        self.assertEqual(
             self.ledger.insert_late_adjustment_application(
                 replace(
                     stored,
                     late_adjustment_application_id=uuid4(),
                     applied_by="operator:rewriter",
+                    authorization_reference="approval:rewriter",
+                )
+            ),
+            stored,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_application(
+                replace(
+                    stored,
+                    late_adjustment_application_id=uuid4(),
+                    adjustment_amount=Decimal("1.0"),
                 )
             )
         for invalid in (
@@ -1687,8 +1698,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 ).apply_late_adjustment(
                     TENANT_ONE,
                     adjustment.late_adjustment_id,
-                    applied_by="operator:finance_034",
-                    authorization_reference="approval:application_023",
+                    applied_by=f"operator:finance_034_{index}",
+                    authorization_reference=f"approval:application_023_{index}",
                 )
 
         with ThreadPoolExecutor(max_workers=2) as pool:
