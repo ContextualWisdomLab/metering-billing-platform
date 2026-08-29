@@ -349,6 +349,22 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "target period is missing"):
             ledger.insert_late_adjustment_application(candidate)
+        with self.assertRaisesRegex(ValueError, "source is missing"):
+            ledger.insert_late_adjustment_application(
+                replace(
+                    candidate,
+                    late_adjustment_application_id=uuid4(),
+                    late_adjustment_id=uuid4(),
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "source does not match"):
+            ledger.insert_late_adjustment_application(
+                replace(
+                    candidate,
+                    late_adjustment_application_id=uuid4(),
+                    adjustment_amount=Decimal("4.01"),
+                )
+            )
         missing = LateAdjustmentApplicationService(ledger).apply_late_adjustment(
             TENANT_ONE,
             adjustment.late_adjustment_id,
