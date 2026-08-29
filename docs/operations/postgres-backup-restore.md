@@ -53,6 +53,9 @@ The command refuses a missing disposable-target acknowledgement, a changed
 dump, a malformed manifest, a non-zero PostgreSQL command, or row-count drift.
 If publication or manifest writing fails, the invocation removes only its own
 backup hard link so a retry cannot inherit an orphaned evidence artifact.
+Once both files are published, a temporary-file cleanup failure does not turn
+completed evidence into a failed run; the published pair remains available for
+verification and the hidden temporary file requires operator cleanup.
 Record the command output, exact repository commit, database version, machine
 context, elapsed time, and operator in the incident/finance evidence store.
 

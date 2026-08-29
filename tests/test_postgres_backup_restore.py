@@ -222,6 +222,11 @@ class PostgresBackupRestoreTests(unittest.TestCase):
         with patch.object(backup.subprocess, "run", return_value=self.completed(returncode=1)):
             with self.assertRaisesRegex(backup.BackupRestoreError, "exit 1"):
                 backup.create_backup("dbname=source", backup_path)
+        with patch.object(backup.subprocess, "run", return_value=self.completed(returncode=1)), patch.object(
+            backup.os, "unlink", side_effect=PermissionError
+        ):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "clean temporary"):
+                backup.create_backup("dbname=source", backup_path)
         with patch.object(backup.subprocess, "run", side_effect=self.fake_runner), patch.object(
             backup.os, "link", side_effect=FileExistsError
         ):
@@ -247,8 +252,18 @@ class PostgresBackupRestoreTests(unittest.TestCase):
         with patch.object(backup.subprocess, "run", side_effect=self.fake_runner), patch.object(
             backup.os, "unlink", side_effect=PermissionError
         ):
-            with self.assertRaisesRegex(backup.BackupRestoreError, "clean temporary"):
+            result = backup.create_backup("dbname=source", self.root / "unclean.dump")
+        self.assertEqual(self.counts, result["row_counts"])
+        self.assertTrue((self.root / "unclean.dump").is_file())
+        self.assertTrue((self.root / "unclean.dump.manifest.json").is_file())
+        with patch.object(backup.subprocess, "run", side_effect=self.fake_runner):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "artifact already exists"):
                 backup.create_backup("dbname=source", self.root / "unclean.dump")
+            backup.restore_and_verify(
+                "dbname=target",
+                self.root / "unclean.dump",
+                target_is_disposable=True,
+            )
 
     def test_manifest_validation_and_write_failures(self) -> None:
         """Manifest files are closed, digest-checked, and exclusive."""

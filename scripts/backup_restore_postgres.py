@@ -309,6 +309,7 @@ def create_backup(
     snapshot_process, snapshot, row_counts = _open_snapshot_session(source_dsn)
     temporary_name: str | None = None
     published = False
+    completed = False
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{backup_path.name}.", suffix=".tmp", dir=backup_path.parent
@@ -334,6 +335,7 @@ def create_backup(
         digest = _sha256(backup_path)
         payload = _manifest(backup_path, digest, row_counts)
         _write_manifest(manifest, payload)
+        completed = True
         return payload
     except BackupRestoreError:
         if published and temporary_name is not None:
@@ -349,7 +351,8 @@ def create_backup(
             except FileNotFoundError:
                 pass
             except OSError as error:
-                raise BackupRestoreError("cannot clean temporary backup artifact") from error
+                if not completed:
+                    raise BackupRestoreError("cannot clean temporary backup artifact") from error
 
 
 def restore_and_verify(

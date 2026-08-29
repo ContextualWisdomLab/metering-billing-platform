@@ -18,6 +18,8 @@ contains the same commercial records.
   those counts and the dump SHA-256 in a closed, secret-free manifest.
 - Publish the dump by a non-replacing hard link and remove only that owned link
   if manifest publication fails; never replace a pre-existing artifact.
+- Treat the dump and manifest as the completed result once both are published;
+  a later temporary-file cleanup failure does not invalidate that pair.
 - Restore only when the operator explicitly marks the target disposable. The
   script uses `--clean` and `--if-exists` only on that acknowledged target.
 - Re-query the restored target through `psql` and fail closed on any digest,
