@@ -23,6 +23,8 @@ own a session lifecycle.
   leased; it never opens an unbounded number of sessions.
 - An outer `transaction()` or `ingestion_transaction()` holds one lease in
   thread-local state so nested repository calls share the same transaction.
+  Unwrapped operations do not promise session affinity; callers requiring
+  transaction-local state must use one of these contexts.
   The historical `PostgresUsageLedger(connection)` form remains a one-session
   pool and does not close the injected connection unless explicitly owned.
 - `close()` stops new leases and closes idle sessions created by the ledger.

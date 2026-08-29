@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import queue
-from threading import Barrier
+from threading import Barrier, Event, Thread
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -229,6 +229,15 @@ class ConnectionPoolTests(unittest.TestCase):
         owned_ledger.close()
         self.assertEqual(owned_session.close_calls, 1)
 
+        injected_session = self.Session()
+        injected_ledger = PostgresUsageLedger(injected_session)
+        self.assertIs(injected_ledger._pool._factory(), injected_session)
+        leased = injected_ledger._pool.checkout()
+        injected_ledger._pool.close()
+        injected_ledger._pool.checkin(leased)
+        self.assertEqual(injected_session.close_calls, 0)
+        self.assertEqual(injected_ledger._pool.open_count, 0)
+
     def test_pool_retires_unhealthy_sessions_and_waits_for_capacity(self) -> None:
         """Discard unhealthy sessions, replace them, and handle a waiting lease."""
         created: list[ConnectionPoolTests.Session] = []
@@ -293,6 +302,44 @@ class ConnectionPoolTests(unittest.TestCase):
 
         _ConnectionPool._close_quietly(FailingSession())
 
+    def test_pool_close_serializes_with_checkin(self) -> None:
+        """Drain a session returned while shutdown is waiting for the pool gate."""
+        class BlockingQueue(queue.Queue):
+            """Pause check-in so close ordering is deterministic."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.put_started = Event()
+                self.release_put = Event()
+
+            def put(self, item, block=True, timeout=None):
+                self.put_started.set()
+                self.release_put.wait(timeout=1)
+                return super().put(item, block, timeout)
+
+        session = self.Session()
+        pool = _ConnectionPool(1, lambda: session, owns_sessions=True)
+        pool._idle = BlockingQueue()
+        leased = pool.checkout()
+        checkin = Thread(target=pool.checkin, args=(leased,))
+        checkin.start()
+        self.assertTrue(pool._idle.put_started.wait(timeout=1))
+
+        closed = Event()
+        shutdown = Thread(target=lambda: (pool.close(), closed.set()))
+        shutdown.start()
+        self.assertFalse(closed.wait(timeout=0.05))
+
+        pool._idle.release_put.set()
+        checkin.join(timeout=1)
+        shutdown.join(timeout=1)
+        self.assertFalse(checkin.is_alive())
+        self.assertFalse(shutdown.is_alive())
+        self.assertTrue(closed.is_set())
+        self.assertEqual(session.close_calls, 1)
+        self.assertEqual(pool.open_count, 0)
+        self.assertTrue(pool._idle.empty())
+
     def test_ledger_leases_replace_operational_failures_and_close(self) -> None:
         """Pool-backed leases return normally and retire operational failures."""
         sessions: list[ConnectionPoolTests.Session] = []
@@ -318,15 +365,25 @@ class ConnectionPoolTests(unittest.TestCase):
         cursor_ledger.close()
         with ledger.lease() as session:
             self.assertIs(session, sessions[0])
+        ledger.close()
+
+        business_ledger = PostgresUsageLedger.connect(
+            "unused", pool_size=1, connection_factory=factory
+        )
         with self.assertRaises(ValueError):
-            with ledger.lease():
+            with business_ledger.lease():
                 raise ValueError("business failure")
+        business_ledger.close()
+
+        failure_ledger = PostgresUsageLedger.connect(
+            "unused", pool_size=1, connection_factory=factory
+        )
         with self.assertRaises(psycopg.OperationalError):
-            with ledger.lease() as session:
+            with failure_ledger.lease() as session:
                 session.broken = True
                 raise psycopg.OperationalError("connection failed")
-        self.assertEqual(ledger._pool.open_count, 0)
-        ledger.close()
+        self.assertEqual(failure_ledger._pool.open_count, 0)
+        failure_ledger.close()
 
 
 class PostgresUsageLedgerTests(unittest.TestCase):

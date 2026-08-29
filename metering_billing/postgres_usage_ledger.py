@@ -195,7 +195,7 @@ class _ConnectionPool:
             try:
                 candidate = self._idle.get_nowait()
             except queue.Empty:
-                pass
+                candidate = None
             if candidate is not None:
                 if _session_is_usable(candidate):
                     return candidate
@@ -228,10 +228,15 @@ class _ConnectionPool:
 
     def checkin(self, connection: Any) -> None:
         """Return one leased session to the pool or retire it when unhealthy."""
-        if self._closed_state() or not _session_is_usable(connection):
-            self._retire(connection)
-            return
-        self._idle.put(connection)
+        with self._gate:
+            if self._closed or not _session_is_usable(connection):
+                self._open_count -= 1
+                owns_sessions = self._owns_sessions
+            else:
+                self._idle.put(connection)
+                return
+        if owns_sessions:
+            self._close_quietly(connection)
 
     def discard(self, connection: Any) -> None:
         """Retire one poisoned session without returning it to the idle queue."""
@@ -252,11 +257,6 @@ class _ConnectionPool:
             for connection in drained:
                 self._close_quietly(connection)
 
-    def _closed_state(self) -> bool:
-        """Return whether this pool stopped handing out sessions."""
-        with self._gate:
-            return self._closed
-
     @staticmethod
     def _close_quietly(connection: Any) -> None:
         """Close one owned session, swallowing secondary close failures."""
@@ -264,8 +264,8 @@ class _ConnectionPool:
             close = getattr(connection, "close", None)
             if callable(close):
                 close()
-        except Exception:  # noqa: BLE001 - shutdown must not mask the original error
-            pass
+        except Exception:  # noqa: BLE001, S110 - shutdown must not mask the original error
+            return
 
     def _retire(self, connection: Any) -> None:
         """Forget one dead session and close it only when this pool owns it."""
@@ -320,7 +320,10 @@ class PostgresUsageLedger:
                     "an injected connection cannot be combined with pool settings"
                 )
             resolved_size = 1
-            resolved_factory: Callable[[], Any] = lambda: connection
+            def injected_connection_factory() -> Any:
+                return connection
+
+            resolved_factory = injected_connection_factory
             owns_sessions = owns_connection
         else:
             if connection_factory is None:
