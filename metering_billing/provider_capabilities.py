@@ -11,6 +11,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from threading import RLock
 
 
 PROVIDER_ROLES = frozenset(
@@ -289,6 +290,7 @@ class ProviderCapabilityRegistry:
     """Select a healthy, effective provider by explicit capabilities."""
 
     def __init__(self) -> None:
+        self._lock = RLock()
         self._providers: list[_RegisteredProvider] = []
 
     def register(
@@ -301,25 +303,28 @@ class ProviderCapabilityRegistry:
             raise ProviderCapabilityError("manifest_invalid")
         if health_check is not None and not callable(health_check):
             raise ProviderCapabilityError("health_check_invalid")
-        for registered in self._providers:
-            if (
-                registered.manifest.provider_code == manifest.provider_code
-                and _intervals_overlap(
-                    registered.manifest.effective_from,
-                    registered.manifest.effective_to,
-                    manifest.effective_from,
-                    manifest.effective_to,
-                )
-            ):
-                raise ProviderCapabilityError("manifest_interval_conflict")
-        self._providers.append(_RegisteredProvider(manifest, health_check))
+        with self._lock:
+            for registered in self._providers:
+                if (
+                    registered.manifest.provider_code == manifest.provider_code
+                    and _intervals_overlap(
+                        registered.manifest.effective_from,
+                        registered.manifest.effective_to,
+                        manifest.effective_from,
+                        manifest.effective_to,
+                    )
+                ):
+                    raise ProviderCapabilityError("manifest_interval_conflict")
+            self._providers.append(_RegisteredProvider(manifest, health_check))
 
     def select(self, request: ProviderRouteRequest) -> ProviderCapabilityManifest:
         """Return the deterministic first healthy manifest or fail closed."""
         if not isinstance(request, ProviderRouteRequest):
             raise ProviderRoutingError("route_request_invalid")
         candidates: list[ProviderCapabilityManifest] = []
-        for registered in self._providers:
+        with self._lock:
+            providers = tuple(self._providers)
+        for registered in providers:
             if not registered.manifest.matches(request):
                 continue
             if registered.health_check is not None:
@@ -337,9 +342,11 @@ class ProviderCapabilityRegistry:
     def active_manifests(self, at: datetime) -> tuple[ProviderCapabilityManifest, ...]:
         """Return active manifests in stable provider/effective order."""
         instant = _aware_utc(at, "routing_time_invalid")
+        with self._lock:
+            providers = tuple(self._providers)
         active = [
             registered.manifest
-            for registered in self._providers
+            for registered in providers
             if registered.manifest.effective_from <= instant
             and (registered.manifest.effective_to is None or instant < registered.manifest.effective_to)
         ]

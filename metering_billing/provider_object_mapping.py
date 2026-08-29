@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import re
-from threading import RLock
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import re
+from threading import RLock
 
 
 PROVIDER_OBJECT_MAPPING_CONTRACT_VERSION = 1
@@ -143,7 +143,12 @@ class ProviderObjectMappingRegistry:
         with self._lock:
             for stored in self._mappings:
                 current = stored.mapping
-                if self._same_internal(current, mapping):
+                if self._same_internal(current, mapping) and _overlap(
+                    current.valid_from,
+                    current.valid_to,
+                    mapping.valid_from,
+                    mapping.valid_to,
+                ):
                     raise ProviderObjectMappingError("internal_mapping_conflict")
                 if self._same_external(current, mapping) and _overlap(
                     current.valid_from, current.valid_to, mapping.valid_from, mapping.valid_to

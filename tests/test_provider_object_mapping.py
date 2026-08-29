@@ -154,6 +154,37 @@ class ProviderObjectMappingTests(unittest.TestCase):
         self.assertEqual(old_external.valid_to, effective_from)
         self.assertEqual(tuple(item.valid_to for item in registry.all_mappings()), (effective_from, None))
 
+    def test_disjoint_history_and_provider_accounts_do_not_collide(self) -> None:
+        """Separate effective intervals and provider accounts remain independent."""
+        registry = ProviderObjectMappingRegistry()
+        historical = mapping(
+            valid_from=NOW - timedelta(days=1),
+            valid_to=NOW,
+        )
+        current = mapping()
+        other_account = mapping(provider_account_reference="provider_account_002")
+        registry.record(historical)
+        registry.record(current)
+        registry.record(other_account)
+        self.assertIs(
+            registry.resolve_internal(
+                "provider_account_001",
+                "payment_intent",
+                "payment_intent_001",
+                at=NOW - timedelta(hours=1),
+            ),
+            historical,
+        )
+        self.assertIs(
+            registry.resolve_internal(
+                "provider_account_002",
+                "payment_intent",
+                "payment_intent_001",
+                at=NOW,
+            ),
+            other_account,
+        )
+
     def test_replacement_rejects_unsafe_requests_and_rolls_back(self) -> None:
         """Failed replacements leave the prior open mapping unchanged."""
         registry = ProviderObjectMappingRegistry()

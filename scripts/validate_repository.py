@@ -161,6 +161,7 @@ REQUIRED_FILES = (
     "schemas/provider-object-mapping.schema.json",
     "metering_billing/provider_capabilities.py",
     "metering_billing/lemon_squeezy_webhook.py",
+    "metering_billing/provider_object_mapping.py",
     "schemas/accounting-journal-proposal.schema.json",
     "schemas/usage-ingestion-receipt.schema.json",
     "schemas/rating-run.schema.json",

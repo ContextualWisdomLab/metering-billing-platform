@@ -7,6 +7,7 @@ import hmac
 import json
 import unittest
 from datetime import UTC, datetime, timedelta
+from threading import Barrier, Thread
 
 from metering_billing import (
     LEMON_SQUEEZY_MANIFEST,
@@ -229,6 +230,46 @@ class ProviderCapabilityTests(unittest.TestCase):
         with self.assertRaises(ProviderCapabilityError) as error:
             unhealthy.active_manifests(datetime(2026, 8, 29, 12))
         self.assertEqual(error.exception.reason_code, "routing_time_invalid")
+
+    def test_registry_reads_are_safe_during_runtime_registration(self) -> None:
+        """Concurrent readers see stable provider snapshots while registration mutates."""
+        registry = ProviderCapabilityRegistry()
+        request = ProviderRouteRequest(("hosted_checkout",), at=NOW)
+        ready = Barrier(2)
+        errors: list[BaseException] = []
+
+        def register() -> None:
+            try:
+                ready.wait(timeout=1)
+                for index in range(20):
+                    registry.register(
+                        manifest(provider_code=f"provider_{index}")
+                    )
+            except BaseException as error:  # pragma: no cover - failure is asserted below
+                errors.append(error)
+
+        def read() -> None:
+            try:
+                ready.wait(timeout=1)
+                for _ in range(100):
+                    try:
+                        registry.select(request)
+                    except ProviderRoutingError:
+                        pass
+                    registry.active_manifests(NOW)
+            except BaseException as error:  # pragma: no cover - failure is asserted below
+                errors.append(error)
+
+        registration = Thread(target=register)
+        reader = Thread(target=read)
+        registration.start()
+        reader.start()
+        registration.join(timeout=2)
+        reader.join(timeout=2)
+        self.assertFalse(registration.is_alive())
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(registry.active_manifests(NOW)), 20)
 
 
 class LemonSqueezyWebhookTests(unittest.TestCase):
