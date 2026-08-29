@@ -62,6 +62,9 @@
 - Accepted, duplicate-replay, and rejected SDK receipts now require the full
   tenant/source-hash/contract-version binding; transports require HTTPS and a
   bounded timeout, and file outboxes sync the parent directory after rename.
+- Usage-event presentment now projects persisted contract, attribution,
+  allowlisted-dimension, availability, correction-lineage, and meter-version
+  metadata without exposing credentials or internal account identifiers.
 - Producer contract migrations stage new checks as `NOT VALID` and validate
   them in a following append-only migration, avoiding an unbounded lock during
   rollout.
