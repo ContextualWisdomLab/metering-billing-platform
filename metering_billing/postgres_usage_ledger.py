@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
+from decimal import Decimal
+import re
 from threading import RLock
 from typing import Any, Iterator
 from uuid import UUID
@@ -65,6 +67,7 @@ from metering_billing.usage_ledger import (
     StoredInvoiceDraftLine,
     StoredIngestionReceipt,
     StoredCreditNoteApplication,
+    StoredLateAdjustmentApplication,
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoice,
@@ -102,6 +105,28 @@ from metering_billing.usage_ledger import (
 
 MIGRATION_HISTORY_TABLE = "public.metering_billing_schema_migration"
 """Migration-history table mirrored from ``scripts/migrate_postgres.py``."""
+
+
+def _same_late_adjustment_application(
+    stored: StoredLateAdjustmentApplication,
+    incoming: StoredLateAdjustmentApplication,
+) -> bool:
+    """Compare every immutable application field except its generated id."""
+    return (
+        stored.tenant_account_id == incoming.tenant_account_id
+        and stored.late_adjustment_id == incoming.late_adjustment_id
+        and stored.target_period_id == incoming.target_period_id
+        and format(stored.adjustment_amount, "f")
+        == format(incoming.adjustment_amount, "f")
+        and stored.currency_code == incoming.currency_code
+        and stored.applied_by == incoming.applied_by
+        and stored.authorization_reference == incoming.authorization_reference
+        and stored.applied_at == incoming.applied_at
+        and stored.late_adjustment_application_contract_version
+        == incoming.late_adjustment_application_contract_version
+        and stored.late_adjustment_application_status
+        == incoming.late_adjustment_application_status
+    )
 
 
 class PostgresUsageLedger:
@@ -311,6 +336,119 @@ class PostgresUsageLedger:
             adjustment_contract.pop("late_adjustment_id")
             if stored_contract != adjustment_contract:
                 raise ValueError("late adjustment identity cannot change")
+            return stored
+
+    def find_late_adjustment_application(
+        self, tenant_account_id: UUID, late_adjustment_id: UUID
+    ) -> StoredLateAdjustmentApplication | None:
+        """Return one tenant-scoped late-adjustment application, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT late_adjustment_application_id
+                FROM billing_core.late_adjustment_application
+                WHERE tenant_account_id = %s AND late_adjustment_id = %s
+                """,
+                (tenant_account_id, late_adjustment_id),
+            )
+            row = cursor.fetchone()
+            return (
+                None
+                if row is None
+                else self._fetch_late_adjustment_application(
+                    cursor, UUID(str(row[0])), tenant_account_id
+                )
+            )
+
+    def get_late_adjustment_application(
+        self, late_adjustment_application_id: UUID
+    ) -> StoredLateAdjustmentApplication | None:
+        """Return one late-adjustment application by opaque identifier."""
+        with self._cursor() as cursor:
+            return self._fetch_late_adjustment_application(
+                cursor, late_adjustment_application_id
+            )
+
+    def insert_late_adjustment_application(
+        self, application: StoredLateAdjustmentApplication
+    ) -> StoredLateAdjustmentApplication:
+        """Persist one application or return the tenant-scoped replay."""
+        if CURRENCY_CODE_PATTERN.fullmatch(application.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(application.adjustment_amount, Decimal)
+            or application.adjustment_amount.is_nan()
+            or application.adjustment_amount.is_infinite()
+            or application.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        amount_text = format(application.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        if application.late_adjustment_application_status != "applied":
+            raise ValueError("late_adjustment_application_status must be applied")
+        if (
+            not isinstance(application.applied_by, str)
+            or not application.applied_by.strip()
+        ):
+            raise ValueError("applied_by must be non-empty")
+        if (
+            not isinstance(application.authorization_reference, str)
+            or not application.authorization_reference.strip()
+        ):
+            raise ValueError("authorization_reference must be non-empty")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.late_adjustment_application
+                    (late_adjustment_application_id, tenant_account_id,
+                     late_adjustment_id, target_period_id, adjustment_amount,
+                     currency_code, applied_by, authorization_reference, applied_at,
+                     late_adjustment_application_contract_version,
+                     late_adjustment_application_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING late_adjustment_application_id
+                """,
+                (
+                    application.late_adjustment_application_id,
+                    application.tenant_account_id,
+                    application.late_adjustment_id,
+                    application.target_period_id,
+                    application.adjustment_amount,
+                    application.currency_code,
+                    application.applied_by,
+                    application.authorization_reference,
+                    application.applied_at,
+                    application.late_adjustment_application_contract_version,
+                    application.late_adjustment_application_status,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT late_adjustment_application_id
+                    FROM billing_core.late_adjustment_application
+                    WHERE tenant_account_id = %s AND late_adjustment_id = %s
+                    """,
+                    (application.tenant_account_id, application.late_adjustment_id),
+                )
+                row = cursor.fetchone()
+                if row is None:  # pragma: no cover - immutable conflict row cannot disappear
+                    raise ValueError(
+                        "late adjustment application identity conflicts with an existing row"
+                    )
+            stored = self._fetch_late_adjustment_application(
+                cursor, UUID(str(row[0])), application.tenant_account_id
+            )
+            if stored is None:  # pragma: no cover - insert or conflict exposes a row
+                raise RuntimeError("late adjustment application did not return a row")
+            if not _same_late_adjustment_application(stored, application):
+                raise ValueError("late adjustment application identity cannot change")
             return stored
 
     def list_late_adjustments(
@@ -7207,6 +7345,57 @@ class PostgresUsageLedger:
             source_payload_hash=row[7],
             recorded_at=row[8],
             late_adjustment_contract_version=row[9],
+        )
+
+    @staticmethod
+    def _fetch_late_adjustment_application(
+        cursor: Any,
+        late_adjustment_application_id: UUID,
+        tenant_account_id: UUID | None = None,
+    ) -> StoredLateAdjustmentApplication | None:
+        """Hydrate one application, optionally enforcing its tenant boundary."""
+        if tenant_account_id is None:
+            cursor.execute(
+                """
+                SELECT late_adjustment_application_id, tenant_account_id,
+                       late_adjustment_id, target_period_id, adjustment_amount,
+                       currency_code, applied_by, authorization_reference, applied_at,
+                       late_adjustment_application_contract_version,
+                       late_adjustment_application_status
+                FROM billing_core.late_adjustment_application
+                WHERE late_adjustment_application_id = %s
+                """,
+                (late_adjustment_application_id,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT late_adjustment_application_id, tenant_account_id,
+                       late_adjustment_id, target_period_id, adjustment_amount,
+                       currency_code, applied_by, authorization_reference, applied_at,
+                       late_adjustment_application_contract_version,
+                       late_adjustment_application_status
+                FROM billing_core.late_adjustment_application
+                WHERE late_adjustment_application_id = %s
+                  AND tenant_account_id = %s
+                """,
+                (late_adjustment_application_id, tenant_account_id),
+            )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return StoredLateAdjustmentApplication(
+            late_adjustment_application_id=UUID(str(row[0])),
+            tenant_account_id=UUID(str(row[1])),
+            late_adjustment_id=UUID(str(row[2])),
+            target_period_id=UUID(str(row[3])),
+            adjustment_amount=row[4],
+            currency_code=row[5],
+            applied_by=row[6],
+            authorization_reference=row[7],
+            applied_at=row[8],
+            late_adjustment_application_contract_version=row[9],
+            late_adjustment_application_status=row[10],
         )
 
     @staticmethod

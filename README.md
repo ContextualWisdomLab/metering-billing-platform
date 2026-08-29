@@ -20,10 +20,10 @@ CWL products
 
 The current milestone contains:
 
-- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, collection-aging presentment, account-statement presentment, rated-spend presentment, spend budgets, spend-budget presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, unapplied cash, unapplied-cash presentment, unapplied cash applications, unapplied-cash-application presentment, credit adjustments, credit-adjustment presentment, issued credit notes, issued-credit-note presentment, issued-credit-note voids, issued-credit-note-void presentment, credit-note applications, credit-note-application presentment, collection-case settlements, collection-case-settlement presentment, rate cards, rate-card presentment, tax rates, tax assessments, tax-assessment presentment, posting-receipt observation presentment, late adjustments, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
-- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, spend-budget, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, webhook-outbox, issued-invoice, issued-credit-note, and late-adjustment migrations with tenant-scoped attribution constraints;
+- closed JSON Schema contracts for usage events, usage-event presentment, provider capabilities, usage-ingestion receipts, rating runs, rating-run presentment, invoice drafts, collection cases, collection-case presentment, collection-aging presentment, account-statement presentment, rated-spend presentment, spend budgets, spend-budget presentment, payment intents, payment-intent presentment, payment receipts, payment-receipt presentment, unapplied cash, unapplied-cash presentment, unapplied cash applications, unapplied-cash-application presentment, credit adjustments, credit-adjustment presentment, issued credit notes, issued-credit-note presentment, issued-credit-note voids, issued-credit-note-void presentment, credit-note applications, credit-note-application presentment, collection-case settlements, collection-case-settlement presentment, rate cards, rate-card presentment, tax rates, tax assessments, tax-assessment presentment, posting-receipt observation presentment, late adjustments, late-adjustment applications, tenant API credentials, webhook subscriptions, webhook deliveries, AIS outbox drains, and semantically validated accounting journal proposals, plus a consumed AIS posting-receipt contract;
+- a normalized PostgreSQL 18 core plus usage-identity, rating-run, invoice-draft, journal-proposal, collection-case, payment-intent, payment-receipt, posting-receipt-observation, credit-adjustment, spend-budget, rate-card-catalog, tax-assessment, credit-tax-unwind, tenant-api-credential, webhook-outbox, issued-invoice, issued-credit-note, late-adjustment, and late-adjustment-application migrations with tenant-scoped attribution constraints;
 - a durable PostgreSQL usage-to-issued-invoice, collection, payment, credit, cash-journal, webhook-delivery, and period-close vertical: rate-card versions, rating runs, invoice drafts, issued-invoice lines, tenant-scoped tax rates and assessments, collection cases and dunning events, payment intents, applied payment receipts with row-locked settlement, collection write-offs with exact-zero outstanding, explicit settle-when-zero facts, credit adjustments with collection reduction, balanced cash and credit journal proposals, tenant-scoped webhook subscriptions, delivery attempts, delivered status, immutable billing-period and reconciliation facts, derived exception aging, gated reconciliation transitions, immutable late-period adjustments, and atomic commercial outbox replay paths;
-- the late-adjustment presentment contract and tenant-scoped read-only item/list routes, with recorded-at/ID keyset pagination and an explicit `apply_late_adjustment` next action;
+- the late-adjustment presentment and application contracts, tenant-scoped item/list reads, the nested application command, recorded-at/ID keyset pagination, and explicit `apply_late_adjustment` then `rate_late_adjustment` actions;
 - an importable `metering_billing` package that ingests immutable usage, publishes versioned rate cards, rates tenant-scoped half-open windows against a persisted version, presents already-rated spend by product, publishes commercial spend budgets, drafts invoice intent, issues commercial invoices, issues commercial credit notes, voids unused issued credit notes, publishes tax rates, assesses tax on a draft, emits proposal-only journals, opens commercial collection cases, presents collection aging, projects provider-neutral payment intents, applies commercial payment receipts, records commercial credits, pulls AIS posting receipts as observations, drains AIS posting-receipt outbox events, issues tenant API credentials, registers webhook callbacks for accepted commercial facts, and accepts those writes over a stdlib HTTP adapter;
 - an importable `operator_console` Storybook that renders the invoice-draft, issued-invoice, issued-credit-note, collection-case, collection-aging, account-statement, rated-spend, spend-budget, budget-status, payment-intent, payment-receipt, credit-adjustment, rate-card, usage-event, rating-run, tax-assessment, and posting-receipt-observation presentment contracts with design tokens and exact-decimal fixtures;
 - explicit billing-versus-accounting boundaries;
@@ -224,8 +224,18 @@ python3 -c "from metering_billing import LateAdjustmentPresentmentService"
 ```
 
 After a `late_adjustment` exists, these reads present the stored signed fact
-and return `apply_late_adjustment` as the next operator action. They do not
-apply or re-rate the adjustment, post a journal, or call a provider.
+and return `apply_late_adjustment` until an application fact exists. Then the
+next action is `rate_late_adjustment`.
+
+```bash
+python3 -c "from metering_billing import LateAdjustmentApplicationService"
+# POST /v1/late-adjustments/{late_adjustment_id}/applications
+```
+
+The POST requires `applied_by` and `authorization_reference`, stores one
+tenant-scoped immutable acknowledgement, and returns `accepted` or
+`duplicate_replay`. It does not re-rate usage, mutate a period, post a journal,
+create tax/provider state, or emit a webhook; those remain later workflows.
 
 ## Accept writes over HTTP
 

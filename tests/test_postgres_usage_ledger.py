@@ -34,6 +34,7 @@ from metering_billing import (
     IssuedInvoiceService,
     IssuedInvoiceVoidPresentmentService,
     IssuedInvoiceVoidService,
+    LateAdjustmentApplicationService,
     LateAdjustmentPresentmentService,
     PaymentIntentService,
     PostgresUsageLedger,
@@ -205,8 +206,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 49:
-            raise AssertionError(f"expected 49 migrations, got {len(applied)}")
+        if len(applied) != 50:
+            raise AssertionError(f"expected 50 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -218,6 +219,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.late_adjustment_application,
                 billing_core.late_adjustment,
                 billing_core.reconciliation_run_line,
                 billing_core.reconciliation_run,
@@ -1284,6 +1286,116 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                         self.connection.execute(statement, parameters)
         with self.assertRaises(KeyError):
             self.ledger.list_reconciliation_lines("urn:cwl:missing_tenant")
+
+    def test_late_adjustment_application_is_durable_replay_safe_and_immutable(
+        self,
+    ) -> None:
+        """The application fact keeps exact source evidence and never rewrites it."""
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 3, 1),
+            date(2026, 4, 1),
+            opened_by="operator:finance_020",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_021",
+            authorization_reference="approval:period_020",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 4, 1),
+            date(2026, 5, 1),
+            opened_by="operator:finance_022",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "-12.50",
+            "USD",
+            "provider:application_durable",
+            "sha256:" + "9" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        service = LateAdjustmentApplicationService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=3),
+        )
+        accepted = service.apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:finance_023",
+            authorization_reference="approval:application_020",
+        )
+        self.assertEqual(accepted.late_adjustment_application_outcome_code, "accepted")
+        stored = self.ledger.get_late_adjustment_application(
+            accepted.late_adjustment_application_id
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.adjustment_amount, Decimal("-12.50"))
+        self.assertEqual(stored.target_period_id, target.period_id)
+        self.assertEqual(
+            service.apply_late_adjustment(
+                TENANT_ONE,
+                adjustment.late_adjustment_id,
+                applied_by="operator:finance_023",
+                authorization_reference="approval:application_020",
+            ).late_adjustment_application_outcome_code,
+            "duplicate_replay",
+        )
+        self.assertIsNone(
+            self.ledger.find_late_adjustment_application(
+                self.ledger.require_tenant(TENANT_TWO).tenant_account_id,
+                adjustment.late_adjustment_id,
+            )
+        )
+        self.assertEqual(
+            LateAdjustmentPresentmentService(self.ledger)
+            .present_late_adjustment(TENANT_ONE, adjustment.late_adjustment_id)
+            .next_operator_action,
+            "rate_late_adjustment",
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_application(
+                replace(
+                    stored,
+                    late_adjustment_application_id=uuid4(),
+                    applied_by="operator:rewriter",
+                )
+            )
+        for invalid in (
+            replace(stored, currency_code="usd"),
+            replace(stored, adjustment_amount=Decimal("NaN")),
+            replace(stored, adjustment_amount=Decimal("1" * 41)),
+            replace(stored, late_adjustment_application_status="pending"),
+            replace(stored, applied_by=" "),
+            replace(stored, authorization_reference=" "),
+        ):
+            with self.assertRaises(ValueError):
+                self.ledger.insert_late_adjustment_application(invalid)
+        self.assertIsNone(self.ledger.get_late_adjustment_application(uuid4()))
+        for statement in (
+            "UPDATE billing_core.late_adjustment_application "
+            "SET applied_by = 'operator:rewrite' WHERE late_adjustment_application_id = %s",
+            "DELETE FROM billing_core.late_adjustment_application "
+            "WHERE late_adjustment_application_id = %s",
+        ):
+            with self.assertRaises(psycopg.errors.RaiseException):
+                with self.connection.transaction():
+                    self.connection.execute(
+                        statement, (accepted.late_adjustment_application_id,)
+                    )
 
     def test_reconcile_period_requires_a_complete_latest_run(self) -> None:
         """Advance a soft-closed period only when every latest-run exception is resolved."""

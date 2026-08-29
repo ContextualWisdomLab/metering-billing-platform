@@ -71,8 +71,13 @@ posting is inferred here.
 snapshot table. `GET /v1/late-adjustments/{late_adjustment_id}` and
 `GET /v1/late-adjustments` are tenant-scoped read-only routes returning the
 closed presentment contract and recorded-at/ID keyset pagination. The next
-operator action is `apply_late_adjustment`; the read does not apply, re-rate,
-post, call a provider, or create a tax document.
+operator action is `apply_late_adjustment` until
+`LateAdjustmentApplicationService` records one immutable application through
+`POST /v1/late-adjustments/{late_adjustment_id}/applications`; thereafter it
+is `rate_late_adjustment`. The application requires actor and authorization
+references, preserves the source target/exact signed amount/currency, and is
+replay-safe. Neither command applies a rating, mutates a period, posts a
+journal, calls a provider, or creates a tax document.
 
 ## Provider plane
 

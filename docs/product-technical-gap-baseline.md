@@ -15,13 +15,14 @@ open, mergeable but blocked, has zero qualifying approvals, and its normal
 checks pass while `opencode-review`, `strix`, and `noema-review` are provider
 failures. That state is not merge evidence.
 
-This follow-up adds PostgreSQL migrations `0048`/`0049`, the `LateAdjustment`
-contract, and tenant-scoped presentment reads for durable late usage, correction,
-and reversal facts. The source period must be at least `soft_closed`; the target
-must be `open` and start no earlier than the source end. Targeted real-PostgreSQL
-and repository contract tests pass on this branch. Applying or re-rating the
-fact, provider settlement ingestion, FOCUS 1.4 export, and statutory accounting
-remain open gaps.
+This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`, the
+`LateAdjustment` and application contracts, tenant-scoped presentment reads,
+and a durable application acknowledgement for late usage, correction, and
+reversal facts. The source period must be at least `soft_closed`; the target
+must be `open` and start no earlier than the source end. Targeted real-
+PostgreSQL and repository contract tests pass on this branch. Re-rating the
+fact, provider settlement ingestion, FOCUS 1.4 export, and statutory
+accounting remain open gaps.
 
 ## Executive decision
 

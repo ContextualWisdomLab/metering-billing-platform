@@ -28,6 +28,11 @@
   item/list reads with exact signed amounts, keyset pagination, and the closed
   `apply_late_adjustment` next action. Presentment does not apply, re-rate, or
   post the fact (ADR 0133).
+- Issue #87 now records a tenant-scoped immutable late-adjustment application
+  acknowledgement in migration `0050`. The nested command is replay-safe,
+  preserves the signed source amount/target/currency, and advances presentment
+  to `rate_late_adjustment`; full re-rating remains a separate workflow (ADR
+  0134).
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

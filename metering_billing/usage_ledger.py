@@ -470,6 +470,23 @@ class StoredCreditNoteApplication:
 
 
 @dataclass(frozen=True)
+class StoredLateAdjustmentApplication:
+    """Append-only application fact for one recorded late adjustment."""
+
+    late_adjustment_application_id: UUID
+    tenant_account_id: UUID
+    late_adjustment_id: UUID
+    target_period_id: UUID
+    adjustment_amount: Decimal
+    currency_code: str
+    applied_by: str
+    authorization_reference: str
+    applied_at: datetime
+    late_adjustment_application_contract_version: int
+    late_adjustment_application_status: str
+
+
+@dataclass(frozen=True)
 class StoredCollectionCaseSettlement:
     """Append-only settle-when-zero fact for one collection case.
 
@@ -989,6 +1006,12 @@ class MemoryUsageLedger:
     late_adjustments: dict[UUID, LateAdjustment] = field(default_factory=dict)
     late_adjustment_tenant_index: dict[UUID, UUID] = field(default_factory=dict)
     late_adjustment_source_index: dict[tuple[UUID, str], UUID] = field(
+        default_factory=dict
+    )
+    late_adjustment_applications: dict[UUID, StoredLateAdjustmentApplication] = field(
+        default_factory=dict
+    )
+    late_adjustment_application_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
     spend_budgets: dict[UUID, StoredSpendBudget] = field(default_factory=dict)
@@ -2920,6 +2943,66 @@ class MemoryUsageLedger:
             (tenant.tenant_account_id, adjustment.source_reference)
         ] = adjustment.late_adjustment_id
         return adjustment
+
+    def find_late_adjustment_application(
+        self, tenant_account_id: UUID, late_adjustment_id: UUID
+    ) -> StoredLateAdjustmentApplication | None:
+        """Return one tenant-scoped late-adjustment application, if present."""
+        application_id = self.late_adjustment_application_index.get(
+            (tenant_account_id, late_adjustment_id)
+        )
+        if application_id is None:
+            return None
+        return self.late_adjustment_applications[application_id]
+
+    def get_late_adjustment_application(
+        self, late_adjustment_application_id: UUID
+    ) -> StoredLateAdjustmentApplication | None:
+        """Return one late-adjustment application by opaque identifier."""
+        return self.late_adjustment_applications.get(late_adjustment_application_id)
+
+    def insert_late_adjustment_application(
+        self, application: StoredLateAdjustmentApplication
+    ) -> StoredLateAdjustmentApplication:
+        """Store one immutable application or return its identity replay."""
+        if application.late_adjustment_application_status != "applied":
+            raise ValueError("late_adjustment_application_status must be applied")
+        if CURRENCY_CODE_PATTERN.fullmatch(application.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(application.adjustment_amount, Decimal)
+            or application.adjustment_amount.is_nan()
+            or application.adjustment_amount.is_infinite()
+            or application.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        amount_text = format(application.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        if (
+            not isinstance(application.applied_by, str)
+            or not application.applied_by.strip()
+        ):
+            raise ValueError("applied_by must be non-empty")
+        if (
+            not isinstance(application.authorization_reference, str)
+            or not application.authorization_reference.strip()
+        ):
+            raise ValueError("authorization_reference must be non-empty")
+        if application.late_adjustment_application_id in self.late_adjustment_applications:
+            raise ValueError("late_adjustment_application_id already stored")
+        identity_key = (application.tenant_account_id, application.late_adjustment_id)
+        existing = self.find_late_adjustment_application(*identity_key)
+        if existing is not None:
+            if replace(existing, late_adjustment_application_id=application.late_adjustment_application_id) != application:
+                raise ValueError("late adjustment application identity cannot change")
+            return existing
+        self.late_adjustment_applications[application.late_adjustment_application_id] = application
+        self.late_adjustment_application_index[identity_key] = application.late_adjustment_application_id
+        return application
 
     def insert_credit_adjustment(
         self, credit: StoredCreditAdjustment

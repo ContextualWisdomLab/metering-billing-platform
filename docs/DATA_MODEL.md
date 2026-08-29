@@ -247,9 +247,13 @@ or source period history and does not itself create a journal, tax document, or
 FOCUS export.
 
 `LateAdjustmentPresentmentService` projects that fact as a tenant-scoped item
-or recorded-at/ID keyset page. Presentment exposes `apply_late_adjustment` as
-the next operator action; it stores no application snapshot and does not mutate
-the late adjustment.
+or recorded-at/ID keyset page. `LateAdjustmentApplicationService` stores one
+append-only `late_adjustment_application` per tenant and late-adjustment ID,
+including the equal target period, signed exact amount, currency, actor,
+authorization reference, and application instant. Presentment exposes
+`apply_late_adjustment` before that row exists and `rate_late_adjustment`
+afterward. The application row has composite source/target foreign keys and
+immutable update/delete triggers; it does not mutate the late adjustment.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

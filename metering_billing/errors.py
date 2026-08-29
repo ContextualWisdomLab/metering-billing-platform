@@ -148,6 +148,23 @@ class LateAdjustmentPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class LateAdjustmentApplicationOutcomeCode(StrEnum):
+    """Terminal result of applying one recorded late adjustment."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class LateAdjustmentApplicationRejectionReasonCode(StrEnum):
+    """Why a late-adjustment application was refused without writing a fact."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
+    ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
+    AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
+
+
 class TaxRateOutcomeCode(StrEnum):
     """Terminal result of publishing one tenant-scoped tax-rate version."""
 

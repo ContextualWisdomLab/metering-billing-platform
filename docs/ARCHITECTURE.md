@@ -64,7 +64,12 @@ at or after the source end, and PostgreSQL rejects update/delete. Replays are
 idempotent within a tenant; application, re-rating, provider settlement,
 FOCUS export, and statutory accounting remain downstream capabilities.
 `LateAdjustmentPresentmentService` exposes the fact through tenant-scoped
-item/list reads and reports `apply_late_adjustment` without applying it.
+item/list reads and reports `apply_late_adjustment` until
+`LateAdjustmentApplicationService` records the append-only
+`late_adjustment_application` acknowledgement. The nested application route
+requires actor and authorization references, enforces source equality and
+tenant scope, and then reports `rate_late_adjustment`. It never rewrites the
+late fact, period, usage, rating, tax, journal, provider state, or webhook.
 
 ## Usage ingestion
 

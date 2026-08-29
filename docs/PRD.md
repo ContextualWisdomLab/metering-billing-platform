@@ -70,6 +70,22 @@ contextual-orchestrator usage
   workflow. The read does not apply or re-rate usage, rewrite periods, emit a
   journal or webhook, call a provider, or create a tax/statutory document.
 
+## Late-adjustment-application acceptance
+
+- `POST /v1/late-adjustments/{late_adjustment_id}/applications` requires
+  non-empty `applied_by` and `authorization_reference` audit references.
+- The application is an append-only, tenant-scoped fact whose target period,
+  signed exact amount, and currency must equal the stored late adjustment.
+  Identity is `(tenant_account_id, late_adjustment_id)`; replay returns the
+  same application as `duplicate_replay` without a second row.
+- After application, late-adjustment item/list presentment reports
+  `rate_late_adjustment`; before application it reports
+  `apply_late_adjustment`. Unknown or cross-tenant facts return 404 and invalid
+  audit references return 422.
+- This slice does not re-rate, mutate a period or usage fact, create a tax or
+  journal document, settle a provider, export FOCUS, or emit a webhook. Those
+  remain explicit downstream workflows.
+
 ## Tax-assessment acceptance
 
 - A known tenant publishes one `tax_rate_schedule` and one immutable `tax_rate_version` whose `tax_rate` is an exact decimal in `[0, 1]`.
