@@ -117,7 +117,7 @@ class RepositoryContractTests(unittest.TestCase):
             sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
             (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
             (root / "docs/operations/runbooks.md").write_text(
-                "[incident](runbooks/incident.md)\n[deleted](runbooks/deleted.md)\n",
+                "## Runbook index\n[incident](runbooks/incident.md)\n[deleted](runbooks/deleted.md)\n",
                 encoding="utf-8",
             )
             errors = validate_runbooks(root)
@@ -136,7 +136,9 @@ class RepositoryContractTests(unittest.TestCase):
                     f"# Incident\n\n{sections}\n", encoding="utf-8"
                 )
             index_links = "\n".join(f"[scenario](runbooks/{filename})" for filename in present_files)
-            (root / "docs/operations/runbooks.md").write_text(index_links, encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                f"## Runbook index\n{index_links}", encoding="utf-8"
+            )
             errors = validate_runbooks(root)
         self.assertIn(
             f"missing required runbook file: {EXPECTED_RUNBOOK_FILES[0]}", errors
@@ -152,7 +154,7 @@ class RepositoryContractTests(unittest.TestCase):
             (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
             (directory / "orphan.md").write_text(f"# Orphan\n\n{sections}\n", encoding="utf-8")
             (root / "docs/operations/runbooks.md").write_text(
-                "[incident](runbooks/incident.md)\n", encoding="utf-8"
+                "## Runbook index\n[incident](runbooks/incident.md)\n", encoding="utf-8"
             )
             errors = validate_runbooks(root)
         self.assertIn("runbook is not indexed: docs/operations/runbooks/orphan.md", errors)
@@ -169,7 +171,7 @@ class RepositoryContractTests(unittest.TestCase):
             )
             (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
             (root / "docs/operations/runbooks.md").write_text(
-                "[incident](runbooks/incident.md)\n", encoding="utf-8"
+                "## Runbook index\n[incident](runbooks/incident.md)\n", encoding="utf-8"
             )
             errors = validate_runbooks(root)
         self.assertIn(
@@ -184,7 +186,7 @@ class RepositoryContractTests(unittest.TestCase):
             directory = root / "docs/operations/runbooks"
             directory.mkdir(parents=True)
             (root / "docs/operations/runbooks.md").write_text(
-                "[incident](runbooks/incident.md)\n", encoding="utf-8"
+                "## Runbook index\n[incident](runbooks/incident.md)\n", encoding="utf-8"
             )
             for missing_heading in RUNBOOK_REQUIRED_HEADINGS:
                 sections = "\n".join(
@@ -242,12 +244,47 @@ class RepositoryContractTests(unittest.TestCase):
             sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
             (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
             (root / "docs/operations/runbooks.md").write_text(
-                "[incident](runbooks/incident.md)\n[escape](runbooks/../outside.md)\n",
+                "## Runbook index\n[incident](runbooks/incident.md)\n[escape](runbooks/../outside.md)\n",
                 encoding="utf-8",
             )
             errors = validate_runbooks(root)
         self.assertIn(
             "runbook index target escapes runbook directory: runbooks/../outside.md", errors
+        )
+
+    def test_runbook_index_direct_escape_is_reported(self) -> None:
+        """A direct relative link cannot bypass the runbook boundary check."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n[escape](../outside.md)\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            "runbook index target escapes runbook directory: ../outside.md", errors
+        )
+
+    def test_runbook_index_ignores_unrelated_links_outside_procedure_section(self) -> None:
+        """Deployment references outside the index are not treated as procedures."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n"
+                "\n## Deployment-owned references\n[escape](../outside.md)\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertNotIn(
+            "runbook index target escapes runbook directory: ../outside.md", errors
         )
 
     def test_boolean_json_schema_nodes_are_supported(self) -> None:

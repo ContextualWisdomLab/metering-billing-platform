@@ -376,7 +376,10 @@ EXPECTED_RUNBOOK_FILES = (
     "tenant-export-offboarding.md",
     "vulnerability-dependency-emergency.md",
 )
-RUNBOOK_INDEX_LINK_PATTERN = re.compile(r"\]\((runbooks/[^)#\s]+\.md)\)")
+RUNBOOK_INDEX_SECTION_PATTERN = re.compile(
+    r"(?ms)^## Runbook index$\n(.*?)(?=^## |\Z)"
+)
+RUNBOOK_INDEX_LINK_PATTERN = re.compile(r"\]\(([^)#\s]+\.md)\)")
 TABLE_NAME_PATTERN = re.compile(
     r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
     r"(?:(?:[a-zA-Z_][a-zA-Z0-9_]*)\.)?([a-zA-Z_][a-zA-Z0-9_]*)",
@@ -528,13 +531,16 @@ def validate_runbooks(root: Path) -> tuple[str, ...]:
         indexed_paths: tuple[Path, ...] = ()
     else:
         index_text = index_path.read_text(encoding="utf-8")
+        index_section_match = RUNBOOK_INDEX_SECTION_PATTERN.search(index_text)
+        index_section = index_section_match.group(1) if index_section_match else ""
+        relative_targets = RUNBOOK_INDEX_LINK_PATTERN.findall(index_section)
         indexed_paths = tuple(
             (index_path.parent / relative_target).resolve()
-            for relative_target in RUNBOOK_INDEX_LINK_PATTERN.findall(index_text)
+            for relative_target in relative_targets
         )
         if not indexed_paths:
             errors.append("runbook index must link Markdown runbooks")
-        for relative_target in RUNBOOK_INDEX_LINK_PATTERN.findall(index_text):
+        for relative_target in relative_targets:
             target_path = (index_path.parent / relative_target).resolve()
             if not target_path.is_relative_to(directory.resolve()):
                 errors.append(f"runbook index target escapes runbook directory: {relative_target}")
