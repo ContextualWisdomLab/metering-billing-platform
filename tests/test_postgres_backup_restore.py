@@ -16,6 +16,42 @@ from scripts import backup_restore_postgres as backup
 class PostgresBackupRestoreTests(unittest.TestCase):
     """Exercise safe artifact, command, manifest, and verification branches."""
 
+    class SnapshotStream:
+        """Small text stream double for the interactive psql snapshot."""
+
+        def __init__(self, output: str = "") -> None:
+            self.output = output
+            self.writes: list[str] = []
+            self.closed = False
+
+        def write(self, value: str) -> int:
+            self.writes.append(value)
+            return len(value)
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+        def readline(self) -> str:
+            return self.output
+
+    class SnapshotProcess:
+        """Small process double that keeps the snapshot transaction open."""
+
+        def __init__(self, output: str, poll_result: int | None = None) -> None:
+            self.stdin = PostgresBackupRestoreTests.SnapshotStream()
+            self.stdout = PostgresBackupRestoreTests.SnapshotStream(output)
+            self.poll_result = poll_result
+            self.wait_result = 0
+
+        def poll(self) -> int | None:
+            return self.poll_result
+
+        def wait(self) -> int:
+            return self.wait_result
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name).resolve()
@@ -24,6 +60,12 @@ class PostgresBackupRestoreTests(unittest.TestCase):
             "tenant_account_count": 2,
             "usage_event_count": 9,
         }
+        self.popen_commands: list[tuple[str, ...]] = []
+        self.snapshot_processes: list[PostgresBackupRestoreTests.SnapshotProcess] = []
+        self.run_commands: list[tuple[str, ...]] = []
+        self.popen_patcher = patch.object(backup.subprocess, "Popen", side_effect=self.fake_popen)
+        self.popen_patcher.start()
+        self.addCleanup(self.popen_patcher.stop)
 
     def tearDown(self) -> None:
         self.directory.cleanup()
@@ -34,12 +76,20 @@ class PostgresBackupRestoreTests(unittest.TestCase):
 
     def fake_runner(self, command: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
         """Emulate psql, pg_dump, and pg_restore without a live database."""
+        self.run_commands.append(command)
         if command[0] == "psql":
             return self.completed(json.dumps(self.counts))
         if command[0] == "pg_dump":
             output = next(item.removeprefix("--file=") for item in command if item.startswith("--file="))
             Path(output).write_bytes(b"custom-format-backup")
         return self.completed()
+
+    def fake_popen(self, command: tuple[str, ...], **_: object) -> SnapshotProcess:
+        """Emulate the long-lived psql snapshot transaction."""
+        self.popen_commands.append(command)
+        process = self.SnapshotProcess(f"snapshot-token\t{json.dumps(self.counts)}\n")
+        self.snapshot_processes.append(process)
+        return process
 
     def create_artifact(self, stem: str = "billing") -> tuple[Path, Path]:
         """Create a valid test artifact and return its paths."""
@@ -59,6 +109,10 @@ class PostgresBackupRestoreTests(unittest.TestCase):
             backup._dsn_from_environment("DB_NAME", {"DB_NAME": "dbname=x password=secret"})
         with self.assertRaisesRegex(backup.BackupRestoreError, "inline passwords"):
             backup._dsn_from_environment("DB_NAME", {"DB_NAME": "postgresql://u:p@host/db"})
+        with self.assertRaisesRegex(backup.BackupRestoreError, "inline passwords"):
+            backup._dsn_from_environment("DB_NAME", {"DB_NAME": "postgresql://u@host/db?password=secret"})
+        with self.assertRaisesRegex(backup.BackupRestoreError, "malformed"):
+            backup._validated_dsn("postgresql://u@[broken/db")
         self.assertEqual("dbname=x", backup._dsn_from_environment("DB_NAME", {"DB_NAME": " dbname=x "}))
         with self.assertRaisesRegex(backup.BackupRestoreError, "non-empty"):
             backup._validated_dsn("")
@@ -103,10 +157,57 @@ class PostgresBackupRestoreTests(unittest.TestCase):
         with patch.object(backup.subprocess, "run", return_value=self.completed(json.dumps(self.counts))):
             self.assertEqual(self.counts, backup._read_row_counts("dbname=test"))
 
+    def test_snapshot_session_failures_close_without_leaking_output(self) -> None:
+        """Snapshot startup and cleanup failures are reported without command output."""
+        with patch.object(backup.subprocess, "Popen", side_effect=OSError("secret")):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "unavailable"):
+                backup._open_snapshot_session("dbname=test")
+        with patch.object(backup.subprocess, "Popen", side_effect=backup.BackupRestoreError("bad")):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "bad"):
+                backup._open_snapshot_session("dbname=test")
+
+        missing_stdin = self.SnapshotProcess("snapshot-token\t{}\n")
+        missing_stdin.stdin = None
+        with patch.object(backup.subprocess, "Popen", return_value=missing_stdin):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "streams"):
+                backup._open_snapshot_session("dbname=test")
+
+        invalid_counts = {**self.counts, "usage_event_count": True}
+        for output, message in (("not-snapshot", "invalid"), (f"snapshot-token\t{json.dumps(invalid_counts)}\n", "invalid count")):
+            process = self.SnapshotProcess(output)
+            with patch.object(backup.subprocess, "Popen", return_value=process):
+                with self.assertRaisesRegex(backup.BackupRestoreError, message):
+                    backup._open_snapshot_session("dbname=test")
+
+        broken_stream = self.SnapshotProcess("")
+        broken_stream.stdin.write = lambda _: (_ for _ in ()).throw(OSError("write"))
+        with patch.object(backup.subprocess, "Popen", return_value=broken_stream):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "unavailable"):
+                backup._open_snapshot_session("dbname=test")
+
+        exited = self.SnapshotProcess("snapshot-token\t{}\n", poll_result=1)
+        with patch.object(backup.subprocess, "Popen", return_value=exited):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "exited"):
+                backup._open_snapshot_session("dbname=test")
+
+        process = self.SnapshotProcess("")
+        process.stdin.write = lambda _: (_ for _ in ()).throw(OSError("write"))
+        process.wait = lambda: (_ for _ in ()).throw(OSError("wait"))
+        backup._close_snapshot_session(process)
+
+        process = self.SnapshotProcess("")
+        process.stdin = None
+        backup._close_snapshot_session(process)
+
     def test_create_success_and_existing_targets(self) -> None:
         """Create records counts and never replaces an existing artifact."""
         backup_path, manifest_path = self.create_artifact("first")
         self.assertTrue(backup_path.is_file())
+        self.assertIn("--snapshot=snapshot-token", self.run_commands[-1])
+        self.assertIn(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;",
+            self.snapshot_processes[-1].stdin.writes[0],
+        )
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(self.counts, payload["row_counts"])
         with patch.object(backup.subprocess, "run", side_effect=self.fake_runner):
@@ -136,6 +237,9 @@ class PostgresBackupRestoreTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(backup.BackupRestoreError, "manifest failure"):
                 backup.create_backup("dbname=source", backup_path)
+        self.assertFalse(backup_path.exists())
+        with patch.object(backup.subprocess, "run", side_effect=self.fake_runner):
+            backup.create_backup("dbname=source", backup_path)
         with patch.object(backup.subprocess, "run", side_effect=self.fake_runner), patch.object(
             backup.os, "unlink", side_effect=FileNotFoundError
         ):
@@ -173,8 +277,50 @@ class PostgresBackupRestoreTests(unittest.TestCase):
         with patch.object(backup.Path, "open", side_effect=PermissionError):
             with self.assertRaisesRegex(backup.BackupRestoreError, "cannot write"):
                 backup._write_manifest(self.root / "new.json", valid)
+        with patch.object(backup.json, "dump", side_effect=TypeError("not serializable")):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "cannot write"):
+                backup._write_manifest(self.root / "partial.json", valid)
+        self.assertFalse((self.root / "partial.json").exists())
+        with patch.object(backup.json, "dump", side_effect=TypeError("not serializable")), patch.object(
+            backup.Path, "unlink", side_effect=PermissionError
+        ):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "cannot clean"):
+                backup._write_manifest(self.root / "unclean.json", valid)
+        with patch.object(backup.json, "dump", side_effect=TypeError("not serializable")), patch.object(
+            backup.Path, "unlink", side_effect=FileNotFoundError
+        ):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "cannot write"):
+                backup._write_manifest(self.root / "missing.json", valid)
         with self.assertRaisesRegex(backup.BackupRestoreError, "cannot read"):
             backup._sha256(self.root / "missing.dump")
+
+    def test_owned_backup_rollback_is_inode_scoped(self) -> None:
+        """Rollback removes only the hard link created by this invocation."""
+        temporary = self.root / "temporary.dump"
+        owned = self.root / "owned.dump"
+        other = self.root / "other.dump"
+        temporary.write_bytes(b"backup")
+        os.link(temporary, owned)
+        other.write_bytes(b"different")
+        backup._remove_owned_backup(owned, str(temporary))
+        self.assertFalse(owned.exists())
+        backup._remove_owned_backup(owned, str(temporary))
+        backup._remove_owned_backup(other, str(temporary))
+        self.assertTrue(other.exists())
+
+        link = self.root / "link.dump"
+        link.symlink_to(temporary)
+        backup._remove_owned_backup(link, str(temporary))
+        self.assertTrue(link.is_symlink())
+        with patch.object(backup.os, "stat", side_effect=PermissionError):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "inspect"):
+                backup._remove_owned_backup(other, str(temporary))
+        os.link(temporary, owned)
+        with patch.object(backup.os, "unlink", side_effect=FileNotFoundError):
+            backup._remove_owned_backup(owned, str(temporary))
+        with patch.object(backup.os, "unlink", side_effect=PermissionError):
+            with self.assertRaisesRegex(backup.BackupRestoreError, "roll back"):
+                backup._remove_owned_backup(owned, str(temporary))
 
     def test_restore_requires_manifest_digest_and_matching_counts(self) -> None:
         """Restore is explicit, verifies bytes first, and compares stable counts."""

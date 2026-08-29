@@ -7,10 +7,12 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import parse_qsl, urlsplit
 
 
 MANIFEST_VERSION = 1
@@ -59,6 +61,14 @@ def _validated_dsn(dsn: str) -> str:
         raise BackupRestoreError(
             "DSNs must not contain inline passwords; use libpq secret configuration"
         )
+    try:
+        query_keys = {key.casefold() for key, _ in parse_qsl(urlsplit(dsn).query, keep_blank_values=True)}
+    except ValueError as error:
+        raise BackupRestoreError("PostgreSQL DSN is malformed") from error
+    if query_keys.intersection({"password", "sslpassword"}):
+        raise BackupRestoreError(
+            "DSNs must not contain inline passwords; use libpq secret configuration"
+        )
     return dsn.strip()
 
 
@@ -99,8 +109,13 @@ def _read_row_counts(dsn: str) -> dict[str, int]:
             f"--dbname={dsn}",
         )
     )
+    return _parse_row_counts(result.stdout)
+
+
+def _parse_row_counts(output: str) -> dict[str, int]:
+    """Parse and validate the fixed row-count evidence shape."""
     try:
-        decoded = json.loads(result.stdout.strip())
+        decoded = json.loads(output.strip())
     except json.JSONDecodeError as error:
         raise BackupRestoreError("psql row-count output is not valid JSON") from error
     if not isinstance(decoded, dict) or set(decoded) != set(_ROW_COUNT_KEYS):
@@ -112,6 +127,69 @@ def _read_row_counts(dsn: str) -> dict[str, int]:
             raise BackupRestoreError("psql row-count output contains an invalid count")
         counts[key] = value
     return counts
+
+
+def _close_snapshot_session(process: subprocess.Popen[str]) -> None:
+    """Roll back and close the read-only snapshot session without leaking output."""
+    if process.stdin is not None:
+        try:
+            process.stdin.write("ROLLBACK;\n\\q\n")
+            process.stdin.flush()
+            process.stdin.close()
+        except (OSError, ValueError):
+            pass
+    try:
+        process.wait()
+    except OSError:
+        pass
+
+
+def _open_snapshot_session(
+    dsn: str,
+) -> tuple[subprocess.Popen[str], str, dict[str, int]]:
+    """Open a repeatable-read snapshot shared by counts and pg_dump."""
+    try:
+        process = subprocess.Popen(
+            (
+                "psql",
+                "--no-psqlrc",
+                "--tuples-only",
+                "--no-align",
+                "--quiet",
+                "--set=ON_ERROR_STOP=1",
+                f"--dbname={dsn}",
+            ),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        if process.stdin is None or process.stdout is None:
+            raise BackupRestoreError("psql snapshot streams are unavailable")
+        process.stdin.write(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;\n"
+            "SELECT pg_export_snapshot() || E'\\t' || json_build_object("
+            "'migration_history_count', (SELECT count(*) FROM public.metering_billing_schema_migration),"
+            "'tenant_account_count', (SELECT count(*) FROM billing_core.tenant_account),"
+            "'usage_event_count', (SELECT count(*) FROM billing_core.usage_event)"
+            ")::text;\n"
+        )
+        process.stdin.flush()
+        output = process.stdout.readline().strip()
+        snapshot, separator, counts_output = output.partition("\t")
+        if not separator or not snapshot or not counts_output:
+            raise BackupRestoreError("psql snapshot output is invalid")
+        if process.poll() is not None:
+            raise BackupRestoreError("psql snapshot session exited unexpectedly")
+        return process, snapshot, _parse_row_counts(counts_output)
+    except BackupRestoreError:
+        if "process" in locals():
+            _close_snapshot_session(process)
+        raise
+    except OSError as error:
+        if "process" in locals():
+            _close_snapshot_session(process)
+        raise BackupRestoreError("required PostgreSQL snapshot command is unavailable") from error
 
 
 def _sha256(path: Path) -> str:
@@ -144,13 +222,23 @@ def _manifest(backup_path: Path, digest: str, row_counts: dict[str, int]) -> dic
 
 def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
     """Write one manifest without replacing an existing evidence file."""
+    created = False
     try:
-        with path.open("x", encoding="utf-8") as stream:
+        stream = path.open("x", encoding="utf-8")
+        created = True
+        with stream:
             json.dump(payload, stream, indent=2, sort_keys=True)
             stream.write("\n")
     except FileExistsError as error:
         raise BackupRestoreError(f"manifest already exists: {path}") from error
-    except OSError as error:
+    except (OSError, TypeError, ValueError) as error:
+        if created:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_error:
+                raise BackupRestoreError(f"cannot clean backup manifest: {path}") from cleanup_error
         raise BackupRestoreError(f"cannot write backup manifest: {path}") from error
 
 
@@ -180,6 +268,28 @@ def _load_manifest(path: Path, backup_path: Path) -> dict[str, Any]:
     return payload
 
 
+def _remove_owned_backup(backup_path: Path, temporary_name: str) -> None:
+    """Remove only the final hard link still owned by this invocation."""
+    try:
+        temporary_stat = os.stat(temporary_name, follow_symlinks=False)
+        backup_stat = os.lstat(backup_path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise BackupRestoreError(f"cannot inspect backup rollback target: {backup_path}") from error
+    if not stat.S_ISREG(backup_stat.st_mode) or (
+        temporary_stat.st_dev,
+        temporary_stat.st_ino,
+    ) != (backup_stat.st_dev, backup_stat.st_ino):
+        return
+    try:
+        os.unlink(backup_path)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise BackupRestoreError(f"cannot roll back backup artifact: {backup_path}") from error
+
+
 def create_backup(
     source_dsn: str,
     backup_path: Path,
@@ -194,8 +304,9 @@ def create_backup(
         raise BackupRestoreError(f"backup artifact already exists: {backup_path}")
     if manifest.exists():
         raise BackupRestoreError(f"manifest already exists: {manifest}")
-    row_counts = _read_row_counts(source_dsn)
+    snapshot_process, snapshot, row_counts = _open_snapshot_session(source_dsn)
     temporary_name: str | None = None
+    published = False
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{backup_path.name}.", suffix=".tmp", dir=backup_path.parent
@@ -207,6 +318,7 @@ def create_backup(
                 "--format=custom",
                 "--no-owner",
                 "--no-privileges",
+                f"--snapshot={snapshot}",
                 f"--file={temporary_name}",
                 f"--dbname={source_dsn}",
             )
@@ -215,13 +327,19 @@ def create_backup(
             os.link(temporary_name, backup_path)
         except FileExistsError as error:
             raise BackupRestoreError(f"backup artifact already exists: {backup_path}") from error
+        published = True
         digest = _sha256(backup_path)
         payload = _manifest(backup_path, digest, row_counts)
         _write_manifest(manifest, payload)
         return payload
+    except BackupRestoreError:
+        if published and temporary_name is not None:
+            _remove_owned_backup(backup_path, temporary_name)
+        raise
     except OSError as error:
         raise BackupRestoreError(f"cannot finalize backup artifact: {backup_path}") from error
     finally:
+        _close_snapshot_session(snapshot_process)
         if temporary_name is not None:
             try:
                 os.unlink(temporary_name)

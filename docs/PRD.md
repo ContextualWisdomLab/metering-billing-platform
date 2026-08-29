@@ -29,6 +29,9 @@ Organizations can attribute AI-platform and CWL-product usage to a billing accou
 - Restore verification requires an explicit disposable-target acknowledgement,
   validates the manifest and backup digest before restore, and compares the
   restored counts through PostgreSQL after a successful `pg_restore`.
+- The source counts and custom-format dump come from one exported PostgreSQL
+  repeatable-read snapshot, so concurrent committed writes cannot split the
+  evidence pair.
 - Inline DSN passwords, existing-artifact replacement, malformed manifests,
   failed commands, and count drift fail closed.
 - The rehearsal is logical backup evidence only. PITR, WAL archiving,

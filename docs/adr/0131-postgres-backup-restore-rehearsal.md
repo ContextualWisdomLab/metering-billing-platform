@@ -13,9 +13,11 @@ contains the same commercial records.
 ## Decision
 
 - Use PostgreSQL's standard `pg_dump --format=custom` and `pg_restore` tools.
-- Capture counts for migration history, tenant accounts, and usage events
-  before the dump. Store those counts and the dump SHA-256 in a closed,
-  secret-free manifest.
+- Open one read-only repeatable-read transaction, export its PostgreSQL
+  snapshot, and capture counts and `pg_dump` from that same snapshot. Store
+  those counts and the dump SHA-256 in a closed, secret-free manifest.
+- Publish the dump by a non-replacing hard link and remove only that owned link
+  if manifest publication fails; never replace a pre-existing artifact.
 - Restore only when the operator explicitly marks the target disposable. The
   script uses `--clean` and `--if-exists` only on that acknowledged target.
 - Re-query the restored target through `psql` and fail closed on any digest,
@@ -26,10 +28,11 @@ contains the same commercial records.
 ## Consequences
 
 The rehearsal is executable and safe to repeat with a disposable target. It
-proves a small, stable domain-count comparison and artifact-integrity check,
-but it does not claim PITR, disaster recovery, managed backups, encryption,
-tenant offboarding, or an RPO/RTO. Those require separate operational
-evidence and remain open under #84.
+proves a small, stable domain-count comparison and artifact-integrity check
+without mixing concurrent committed writes between the counts and dump, but it
+does not claim PITR, disaster recovery, managed backups, encryption, tenant
+offboarding, or an RPO/RTO. Those require separate operational evidence and
+remain open under #84.
 
 ## References
 

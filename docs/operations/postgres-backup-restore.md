@@ -16,6 +16,8 @@ provider SLA.
   provider) and keep that configuration outside the repository and logs.
 - The source schema is migrated and the target is disposable. The restore
   command uses `--clean` only after the explicit disposable-target flag.
+- Counts and `pg_dump` share one exported PostgreSQL repeatable-read snapshot,
+  so concurrent committed writes are not mixed into the evidence pair.
 
 ## Create evidence
 
@@ -47,6 +49,8 @@ METERING_BILLING_RESTORE_DSN='dbname=metering_billing_restore' \
 
 The command refuses a missing disposable-target acknowledgement, a changed
 dump, a malformed manifest, a non-zero PostgreSQL command, or row-count drift.
+If publication or manifest writing fails, the invocation removes only its own
+backup hard link so a retry cannot inherit an orphaned evidence artifact.
 Record the command output, exact repository commit, database version, machine
 context, elapsed time, and operator in the incident/finance evidence store.
 

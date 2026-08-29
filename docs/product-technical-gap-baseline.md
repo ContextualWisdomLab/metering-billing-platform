@@ -26,8 +26,9 @@ Completion is blocked by nine product-level gaps:
 
 **Status update (2026-08-29):** a bounded PostgreSQL custom-format
 backup/restore rehearsal was added in the open development slice. It records a
-secret-free dump digest and migration/tenant/usage row counts, restores only to
-an explicitly disposable target, and fails closed on drift. This is one logical
+secret-free dump digest and migration/tenant/usage row counts from one exported
+repeatable-read snapshot, restores only to an explicitly disposable target, and
+fails closed on drift. This is one logical
 backup rehearsal; it does not close #84's PITR, failover, disaster-recovery,
 tenant-export, encryption, or RPO/RTO requirements.
 
