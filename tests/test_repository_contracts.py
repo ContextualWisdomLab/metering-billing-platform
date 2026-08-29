@@ -223,6 +223,28 @@ class RepositoryContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_hidden_runbook_headings_are_not_sections(self) -> None:
+        """Tilde fences and HTML comments cannot hide missing operator guidance."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            hidden_headings = "\n".join(f"## {heading}" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(
+                f"# Incident\n\n~~~markdown\n{hidden_headings}\n~~~\n"
+                f"<!-- {hidden_headings} -->\n",
+                encoding="utf-8",
+            )
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            "docs/operations/runbooks/incident.md: missing required runbook section: Owner",
+            errors,
+        )
+
     def test_runbook_index_without_links_is_reported(self) -> None:
         """An index without scenario links cannot define the support set."""
         with tempfile.TemporaryDirectory() as temporary_directory:

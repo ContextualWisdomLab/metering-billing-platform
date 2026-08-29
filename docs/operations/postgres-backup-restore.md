@@ -25,9 +25,10 @@ separate incident record.
 ```sh
 umask 077
 mkdir -p "$BACKUP_DIR"
+BACKUP_ARCHIVE="$BACKUP_DIR/metering-billing-$(date -u +%Y%m%dT%H%M%SZ).dump"
 uv run python scripts/postgres_backup.py backup \
   --dsn "$DATABASE_URL" \
-  --output "$BACKUP_DIR/metering-billing-$(date -u +%Y%m%dT%H%M%SZ).dump"
+  --output "$BACKUP_ARCHIVE"
 uv run python scripts/postgres_backup.py verify \
   --archive "$BACKUP_ARCHIVE"
 ```

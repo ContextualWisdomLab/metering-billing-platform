@@ -378,9 +378,7 @@ EXPECTED_RUNBOOK_FILES = (
     "tenant-export-offboarding.md",
     "vulnerability-dependency-emergency.md",
 )
-RUNBOOK_INDEX_SECTION_PATTERN = re.compile(
-    r"(?ms)^## Runbook index$\n(.*?)(?=^## |\Z)"
-)
+RUNBOOK_INDEX_SECTION_PATTERN = re.compile(r"(?ms)^## Runbook index$\n(.*?)(?=^## |\Z)")
 RUNBOOK_INDEX_LINK_PATTERN = re.compile(r"\]\(([^)#\s]+\.md)\)")
 TABLE_NAME_PATTERN = re.compile(
     r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
@@ -558,12 +556,13 @@ def validate_runbooks(root: Path) -> tuple[str, ...]:
         text = runbook_path.read_text(encoding="utf-8")
         relative_path = runbook_path.relative_to(root).as_posix()
         text_without_fenced_code = re.sub(
-            r"(?ms)^```[^\n]*\n.*?^```\s*$\n?", "", text
+            r"(?ms)^(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^(?P=fence)\s*$\n?", "", text
         )
+        visible_text = re.sub(r"(?s)<!--.*?-->", "", text_without_fenced_code)
         for heading in RUNBOOK_REQUIRED_HEADINGS:
             heading_match = re.search(
                 rf"^## {re.escape(heading)}$\n(.*?)(?=^## |\Z)",
-                text_without_fenced_code,
+                visible_text,
                 re.MULTILINE | re.DOTALL,
             )
             if heading_match is None:

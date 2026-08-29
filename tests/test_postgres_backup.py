@@ -85,6 +85,28 @@ class PostgresBackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(PostgresBackupError, "empty archive"):
                     create_backup("dsn", output)
 
+            def create_race(command: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+                archive = Path(command[command.index("--file") + 1])
+                archive.write_bytes(b"new archive")
+                output.write_bytes(b"existing archive")
+                return self._result()
+
+            with mock.patch("scripts.postgres_backup.subprocess.run", side_effect=create_race):
+                with self.assertRaisesRegex(PostgresBackupError, "became occupied"):
+                    create_backup("dsn", output)
+            self.assertEqual(output.read_bytes(), b"existing archive")
+
+            with mock.patch(
+                "scripts.postgres_backup.subprocess.run",
+                side_effect=lambda command, **_: (
+                    Path(command[command.index("--file") + 1]).write_bytes(b"archive"),
+                    self._result(),
+                )[1],
+            ), mock.patch("scripts.postgres_backup.os.link", side_effect=OSError):
+                output.unlink()
+                with self.assertRaisesRegex(PostgresBackupError, "publication failed"):
+                    create_backup("dsn", output)
+
     def test_archive_validation_rejects_missing_invalid_and_unavailable_clients(self) -> None:
         """Archive checks fail closed without returning subprocess output."""
         with TemporaryDirectory() as temporary_directory:

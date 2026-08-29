@@ -30,7 +30,7 @@ def _require_binary(binary: str, operation: str) -> None:
 def _require_archive(archive: Path) -> None:
     """Require a regular archive file before read or restore operations."""
     if not archive.is_file():
-        raise PostgresBackupError(f"backup archive does not exist: {archive}")
+        raise PostgresBackupError("backup archive does not exist")
 
 
 def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -39,8 +39,8 @@ def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             tuple(command),
             check=False,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     except OSError as error:
         raise PostgresBackupError(f"PostgreSQL client is unavailable: {command[0]}") from error
@@ -65,7 +65,7 @@ def create_backup(
     _require_binary(pg_dump_binary, "pg_dump")
     destination = Path(output_path)
     if destination.exists():
-        raise PostgresBackupError(f"backup destination already exists: {destination}")
+        raise PostgresBackupError("backup destination already exists")
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent
@@ -86,10 +86,18 @@ def create_backup(
         _require_success(result, "pg_dump")
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise PostgresBackupError("pg_dump produced an empty archive")
-        os.replace(temporary, destination)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as error:
+            raise PostgresBackupError(
+                "backup destination became occupied during publication"
+            ) from error
+        except OSError as error:
+            raise PostgresBackupError("backup archive publication failed") from error
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+    temporary.unlink(missing_ok=True)
     return destination
 
 
@@ -160,11 +168,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
     options = parser.parse_args(arguments)
     try:
         if options.operation == "backup":
-            archive = create_backup(options.dsn, options.output, pg_dump_binary=options.pg_dump)
+            create_backup(options.dsn, options.output, pg_dump_binary=options.pg_dump)
         elif options.operation == "verify":
-            archive = verify_backup(options.archive, pg_restore_binary=options.pg_restore)
+            verify_backup(options.archive, pg_restore_binary=options.pg_restore)
         else:
-            archive = restore_backup(
+            restore_backup(
                 options.dsn,
                 options.archive,
                 pg_restore_binary=options.pg_restore,
@@ -174,7 +182,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except PostgresBackupError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    print(f"{options.operation} complete: {archive}")
+    print(f"{options.operation} complete")
     return 0
 
 
