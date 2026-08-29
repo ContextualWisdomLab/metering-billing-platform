@@ -204,8 +204,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 48:
-            raise AssertionError(f"expected 48 migrations, got {len(applied)}")
+        if len(applied) != 49:
+            raise AssertionError(f"expected 49 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -653,6 +653,21 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                             1,
                         ),
                     )
+
+        closed_target_period = target_period.advance(
+            "soft_closed",
+            actor_reference="operator:finance_016",
+            authorization_reference="approval:period_010",
+            reason="close adjustment target",
+            transitioned_at=CATALOG_START + timedelta(hours=9),
+        )
+        self.ledger.insert_billing_period(closed_target_period)
+        self.assertEqual(
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE, replace(adjustment, late_adjustment_id=uuid4())
+            ),
+            adjustment,
+        )
 
         open_source = create_billing_period(
             TENANT_ONE,

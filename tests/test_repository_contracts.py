@@ -4753,6 +4753,16 @@ class RepositoryContractTests(unittest.TestCase):
             "CREATE TRIGGER late_adjustment_immutable",
         ):
             self.assertIn(expected_fragment, sql)
+        replay_sql = (
+            ROOT / "database/migrations/0049_late_adjustment_replay.sql"
+        ).read_text(encoding="utf-8")
+        for expected_fragment in (
+            "CREATE OR REPLACE FUNCTION billing_core.validate_late_adjustment_periods()",
+            "duplicate replay must reach ON CONFLICT handling",
+            "existing.source_reference = NEW.source_reference",
+            "existing.source_payload_hash = NEW.source_payload_hash",
+        ):
+            self.assertIn(expected_fragment, replay_sql)
 
     def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
         """The offline validator covers required, type, reference, and one-of rules."""

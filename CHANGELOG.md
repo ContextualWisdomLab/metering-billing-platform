@@ -21,6 +21,9 @@
   rewritten; target-period ordering, tenant identity, exact signed amounts,
   stable source-reference replay, replay conflicts, and update/delete
   immutability are enforced (ADR 0132).
+- Migration `0049` keeps duplicate late-adjustment replays idempotent after a
+  target period closes, allowing PostgreSQL conflict handling to return the
+  stored immutable fact without weakening validation for new facts.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

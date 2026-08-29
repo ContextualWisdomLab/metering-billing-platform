@@ -48,8 +48,9 @@ contextual-orchestrator usage
   stored fact. A changed amount, source reference, hash, or other identity
   field fails closed; the source period, rating facts, reconciliation facts,
   and period transitions are never rewritten.
-- PostgreSQL migration `0048` enforces tenant-scoped foreign keys, lifecycle
-  ordering, target openness, and update/delete immutability. Application,
+- PostgreSQL migrations `0048`/`0049` enforce tenant-scoped foreign keys,
+  lifecycle ordering, target openness, replay conflict handling, and
+  update/delete immutability. Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
   posting remain separate workflows.
 

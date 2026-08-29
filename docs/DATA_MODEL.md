@@ -240,7 +240,7 @@ amount, currency, source reference, source payload hash, and contract version.
 Its tenant-scoped source reference is the stable replay key; the source/target,
 kind, hash, and contract version also have a unique payload identity. Identical
 retries remain durable even when an opaque ID is regenerated, while changed
-payloads fail closed. Composite foreign keys and migration `0048` triggers
+payloads fail closed. Composite foreign keys and migrations `0048`/`0049` triggers
 require an adequately closed source, an open target beginning no earlier than
 the source end, and immutable rows. The fact does not rewrite usage, rating,
 or source period history and does not itself create a journal, tax document, or

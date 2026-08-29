@@ -56,7 +56,8 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 ## Period-close adjustment boundary
 
 `LateAdjustment` is the separate correction path for facts arriving after a
-source period closes. Migration `0048` stores a signed exact-decimal amount,
+source period closes. Migrations `0048`/`0049` store and protect a signed
+exact-decimal amount,
 closed adjustment kind, source payload hash, and source/target period links.
 The source must be at least `soft_closed`, the target must be `open` and start
 at or after the source end, and PostgreSQL rejects update/delete. Replays are
