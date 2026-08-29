@@ -17,9 +17,10 @@ provider observation into a second commercial effect.
 - `run_forever()` repeats at a positive configured interval and waits on a
   cooperative `threading.Event`; setting that event wakes the worker without
   waiting for the full interval.
-- The scheduler returns one-cycle `(tenant_reference, drain_result)` pairs for
-  operator metrics and receipts. It does not log payloads, credentials, or
-  provider response bodies.
+- `run_once()` returns one-cycle `(tenant_reference, drain_result)` pairs, and
+  `run_forever()` forwards them to an optional `on_cycle` observer for operator
+  metrics or receipts. It does not log payloads, credentials, or provider
+  response bodies.
 - Network, tenant, envelope, and provider failure semantics remain the drain
   service's existing fail-closed result codes. Unexpected programming errors
   are allowed to stop the worker so the deployment supervisor can restart it.

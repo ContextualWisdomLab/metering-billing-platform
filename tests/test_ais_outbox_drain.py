@@ -236,8 +236,21 @@ class AisOutboxDrainTests(unittest.TestCase):
         default_scheduler._stop_event.set()
         default_scheduler.run_forever()
 
+        no_observer_stop = threading.Event()
+        no_observer_service = mock.Mock()
+        no_observer_service.drain_ais_outbox.side_effect = (
+            lambda tenant: no_observer_stop.set() or tenant
+        )
+        AisOutboxScheduler(
+            no_observer_service,
+            lambda: (TENANT_ONE,),
+            interval_seconds=0.001,
+            stop_event=no_observer_stop,
+        ).run_forever()
+
         stop_event = threading.Event()
         one_cycle_service = mock.Mock()
+        cycle_results = []
 
         def stop_after_drain(tenant: str) -> str:
             stop_event.set()
@@ -249,8 +262,10 @@ class AisOutboxDrainTests(unittest.TestCase):
             lambda: (TENANT_ONE,),
             interval_seconds=0.001,
             stop_event=stop_event,
+            on_cycle=cycle_results.append,
         ).run_forever()
         one_cycle_service.drain_ais_outbox.assert_called_once_with(TENANT_ONE)
+        self.assertEqual(cycle_results, [((TENANT_ONE, TENANT_ONE),)])
 
     def test_pinned_urns_are_constructed_from_proposal_id(self) -> None:
         """AIS Draft #2 pins payload and aggregate URNs to Billing proposal_id."""

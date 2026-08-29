@@ -240,8 +240,9 @@ class AisOutboxScheduler:
         *,
         interval_seconds: int | float = 60,
         stop_event: Event | None = None,
+        on_cycle: Callable[[tuple[tuple[str, AisOutboxDrainResult], ...]], None] | None = None,
     ) -> None:
-        """Bind a dynamic tenant source and a bounded, wakeable interval."""
+        """Bind a dynamic tenant source, interval, and optional result observer."""
         if type(interval_seconds) not in (int, float):
             raise ValueError("interval_seconds must be a positive number")
         try:
@@ -254,6 +255,7 @@ class AisOutboxScheduler:
         self._tenant_references = tenant_references
         self._interval_seconds = normalized_interval
         self._stop_event = stop_event if stop_event is not None else Event()
+        self._on_cycle = on_cycle
 
     def run_once(self) -> tuple[tuple[str, AisOutboxDrainResult], ...]:
         """Drain each tenant currently returned by the configured tenant source."""
@@ -265,7 +267,9 @@ class AisOutboxScheduler:
     def run_forever(self) -> None:
         """Run drains until ``stop_event`` is set, waking promptly for shutdown."""
         while not self._stop_event.is_set():
-            self.run_once()
+            cycle_results = self.run_once()
+            if self._on_cycle is not None:
+                self._on_cycle(cycle_results)
             self._stop_event.wait(self._interval_seconds)
 
 
