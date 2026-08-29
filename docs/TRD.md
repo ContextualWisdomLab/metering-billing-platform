@@ -70,7 +70,10 @@ verification authenticates the exact raw body with HMAC-SHA256 before parsing
 and emits only a bounded event/resource reference contract. Checkout,
 subscription, usage export, invoice export, collection, refund, dispute, tax
 document, settlement, and webhook verification remain separate future adapter
-ports. Provider mappings remain sticky once an external object is recorded.
+ports. `ProviderObjectMappingRegistry` keeps internal and external object
+references provider-sticky, rejects overlap, and permits change only through
+an explicit effective-dated replacement. Provider mappings remain separate
+from credentials and raw provider payloads.
 
 ## Accounting plane
 

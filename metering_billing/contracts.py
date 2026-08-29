@@ -59,6 +59,7 @@ __all__ = (
     "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "PROVIDER_OBJECT_MAPPING_SCHEMA_NAME",
     "RATED_SPEND_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
@@ -129,6 +130,7 @@ __all__ = (
     "validate_payment_receipt_presentment",
     "validate_posting_receipt_observation_presentment",
     "validate_provider_capability",
+    "validate_provider_object_mapping",
     "validate_rate_card",
     "validate_rate_card_presentment",
     "validate_rated_spend_presentment",
@@ -266,6 +268,7 @@ TAX_RATE_SCHEMA_NAME = "tax-rate.schema.json"
 TAX_ASSESSMENT_SCHEMA_NAME = "tax-assessment.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
+PROVIDER_OBJECT_MAPPING_SCHEMA_NAME = "provider-object-mapping.schema.json"
 LEMON_SQUEEZY_WEBHOOK_SCHEMA_NAME = "lemon-squeezy-webhook.schema.json"
 ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
 
@@ -326,6 +329,32 @@ def validate_provider_capability(
         return tuple(errors)
     if effective_to <= effective_from:
         errors.append("$: effective_to must be after effective_from")
+    return tuple(errors)
+
+
+def validate_provider_object_mapping(
+    mapping: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate a provider object mapping against its schema and invariants."""
+    schema = load_json_schema(PROVIDER_OBJECT_MAPPING_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, mapping))
+    if errors or not isinstance(mapping, Mapping):
+        return tuple(errors)
+    for field_name in (
+        "provider_account_reference",
+        "internal_object_reference",
+        "provider_object_reference",
+    ):
+        value = mapping.get(field_name)
+        if isinstance(value, str) and any(character in "\x00\r\n" for character in value):
+            errors.append(f"$: {field_name} must not contain control characters")
+    valid_from = mapping.get("valid_from")
+    valid_to = mapping.get("valid_to")
+    if isinstance(valid_from, str) and isinstance(valid_to, str):
+        parsed_from = parse_iso8601_datetime(valid_from)
+        parsed_to = parse_iso8601_datetime(valid_to)
+        if parsed_to <= parsed_from:
+            errors.append("$: valid_to must be after valid_from")
     return tuple(errors)
 
 

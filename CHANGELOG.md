@@ -6,6 +6,9 @@
   HMAC verification emits a PII-free normalized reference. This slice makes no
   provider call and leaves adapter commands, KMS secrets, raw-artifact storage,
   manual maker-checker settlement, and live sandbox evidence in issue #86.
+- Added provider-sticky object mapping contracts and an in-process registry.
+  Overlapping internal or external mappings fail closed; only an explicit
+  effective-dated replacement can close a prior mapping, with history retained.
 
 - Extended the real PostgreSQL runtime slice through tenant-scoped rate-card
   publish, rating, invoice drafting, issued-invoice snapshots, tax-rate
