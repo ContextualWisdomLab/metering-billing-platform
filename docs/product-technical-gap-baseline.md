@@ -177,7 +177,7 @@ not merge evidence:
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
 | #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `5da010aab3def1b8a05f2599a1866e0d2bd3522c`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `a8ea5d13c7a68d9b78a77e49dd0ec627cb2ff93b`; open, blocked, current OpenCode check failed and Strix is in progress after the latest push; review decision pending; zero qualifying approvals |
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required; implementation, security, coverage, Noema, and OpenCode checks passed; zero qualifying approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
@@ -188,7 +188,7 @@ not merge evidence:
 | #155 | Stoppable AIS outbox scheduler and drain-cycle reporting for #91 | `develop` | `47b8f2ef6a01ae2b95f911a6abf39e08a03a007e`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
 | #156 | Usage-event schema compatibility and fail-closed versioning for #90 | `develop` | `b5c8c966b9cf49528814cc1d41701d5d537519bc`; open, blocked, review required; current OpenCode check is provider-failed; zero qualifying approvals |
 | #157 | Validated incident runbooks for #91 | `develop` | `38c8e46a8a4721cf123b6f075af61d42731094a0`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
-| #158 | Exact-head release evidence manifest for #91 | `develop` | `439f15afba335c8ead435e0743a7cd1ae58de78d`; open, blocked, no formal review decision; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #158 | Exact-head release evidence manifest for #91 | `develop` | `c55a1925c9063da727fc25dd42d1cf2810e6c587`; open, blocked, no formal review decision; Repository contracts passed and remaining hosted checks are re-running after the latest push; zero qualifying approvals |
 | #159 | PostgreSQL backup and restore rehearsal for #84 | `develop` | `35a1e467b6b6dd77ab5594d3adcbc2293dc9af67`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
 | #160 | Provider capability routing foundation for #86 | `develop` | `a7cf09cc754ae15333c21c694347f371732e37cd`; open, blocked, review required; implementation/security/coverage/Noema/Devin checks passed, but OpenCode failed and Strix is provider-failed; zero qualifying approvals |
 | #161 | Provider-sticky object mappings for #86 | `feat/provider-capability-foundation-20260829` (stacked on #160) | `04e13d9b71a60db51f5e03b69bc34d644f3646a4`; open, clean only as a stacked PR; Repository contracts and Devin passed; no formal review decision or qualifying approval |
