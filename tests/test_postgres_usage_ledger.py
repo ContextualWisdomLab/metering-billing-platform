@@ -203,8 +203,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 46:
-            raise AssertionError(f"expected 46 migrations, got {len(applied)}")
+        if len(applied) != 47:
+            raise AssertionError(f"expected 47 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -544,6 +544,32 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.insert_fx_conversion(conversion), conversion)
         self.assertIsNone(self.ledger.get_fx_conversion(uuid4()))
         self.assertEqual(self.ledger.get_fx_conversion(conversion.fx_conversion_id), conversion)
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.fx_conversion
+                        (fx_conversion_id, fx_rate_id, source_amount, source_currency,
+                         quote_amount, quote_currency, quote_minor_units, fx_rate_value,
+                         rate_precision, rounding_mode, converted_at,
+                         fx_conversion_contract_version)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        rate.fx_rate_id,
+                        conversion.source_amount,
+                        conversion.source_currency,
+                        conversion.quote_amount,
+                        conversion.quote_currency,
+                        conversion.quote_minor_units,
+                        rate.rate + Decimal("1"),
+                        conversion.rate_precision,
+                        "ROUND_HALF_UP",
+                        conversion.converted_at,
+                        conversion.fx_conversion_contract_version,
+                    ),
+                )
         with self.assertRaises(KeyError):
             self.ledger.insert_fx_conversion(replace(conversion, fx_rate_id=uuid4()))
         with self.assertRaises(ValueError):

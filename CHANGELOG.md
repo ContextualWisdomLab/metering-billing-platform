@@ -16,6 +16,9 @@
 
 ### Added
 
+- Issue #87 now enforces the immutable FX conversion snapshot contract in
+  PostgreSQL itself: every conversion insert must match the referenced rate's
+  exact value, precision, and base/quote currencies (ADR 0125).
 - Issue #87 now gates the PostgreSQL `soft_closed` to `reconciled` transition
   on the latest completed run's exact period-line membership, exception count,
   and resolved-or-waived exception facts. Direct persistence cannot bypass the

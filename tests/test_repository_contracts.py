@@ -4476,6 +4476,22 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_fx_conversion_migration_pins_the_referenced_rate_snapshot(self) -> None:
+        """Database inserts must retain the exact referenced FX rate evidence."""
+        sql = (ROOT / "database/migrations/0047_fx_conversion_rate_integrity.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE OR REPLACE FUNCTION billing_core.validate_fx_conversion_snapshot()",
+            "NEW.source_currency IS DISTINCT FROM referenced_rate.base_currency",
+            "NEW.quote_currency IS DISTINCT FROM referenced_rate.quote_currency",
+            "NEW.fx_rate_value IS DISTINCT FROM referenced_rate.fx_rate_value",
+            "NEW.rate_precision IS DISTINCT FROM referenced_rate.rate_precision",
+            "CREATE TRIGGER fx_conversion_rate_snapshot_validate",
+            "BEFORE INSERT ON billing_core.fx_conversion",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
         """The offline validator covers required, type, reference, and one-of rules."""
         schema = self._schema("accounting-journal-proposal.schema.json")

@@ -16,7 +16,9 @@ PostgreSQL/provider services can persist atomically:
 2. `FxRate` records source, rate type, base/quote currencies, exact rate,
    precision, effective time, and recorded time. `FxConversion` copies the
    exact rate and rate identity into the result, then rounds only at the
-   explicitly supplied target minor-unit scale with `ROUND_HALF_UP`.
+   explicitly supplied target minor-unit scale with `ROUND_HALF_UP`. PostgreSQL
+   also rejects conversion inserts whose copied rate, precision, or currencies
+   do not match the referenced immutable `FxRate`.
 3. `ReconciliationLine` keeps internal expected, provider actual, cash actual,
    provider fee, withholding, and reserve as separate exact amounts. The
    deterministic comparison reports currency, price, fee, or settlement
