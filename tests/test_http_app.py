@@ -7,6 +7,8 @@ import json
 import os
 import runpy
 import signal
+import socket
+import threading
 import unittest
 from decimal import Decimal
 from typing import Any, Mapping
@@ -35,8 +37,10 @@ from metering_billing.http_app import (
     _status_for_result,
     create_http_app,
     main,
+    RequestTimeoutWSGIRequestHandler,
     ThreadingWSGIServer,
 )
+from wsgiref.simple_server import make_server as stdlib_make_server
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -603,6 +607,9 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         self.assertEqual(port, 8000)
         self.assertIs(maker.call_args.kwargs["server_class"], ThreadingWSGIServer)
         self.assertTrue(callable(app))
+        self.assertIs(
+            maker.call_args.kwargs["handler_class"], RequestTimeoutWSGIRequestHandler
+        )
         fake_server.serve_forever.assert_called_once()
         fake_server.server_close.assert_called_once()
 
@@ -657,6 +664,54 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
                     runpy.run_module("metering_billing.http_app", run_name="__main__")
         self.assertEqual(exited.exception.code, 0)
         fake_server_three.serve_forever.assert_called_once()
+
+    def test_sigterm_with_partial_body_finishes_server_close(self) -> None:
+        """SIGTERM must not wait forever for a client that withholds its body."""
+        body_read_started = threading.Event()
+        body_read_timed_out = threading.Event()
+
+        def application(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+            body_read_started.set()
+            try:
+                environ["wsgi.input"].read(int(environ["CONTENT_LENGTH"]))
+            except TimeoutError:
+                body_read_timed_out.set()
+                start_response("408 Request Timeout", [("Content-Type", "application/json")])
+                return [b"{}"]
+            start_response("200 OK", [("Content-Type", "application/json")])
+            return [b"{}"]
+
+        with mock.patch.object(RequestTimeoutWSGIRequestHandler, "timeout", 0.05):
+            httpd = stdlib_make_server(
+                "127.0.0.1",
+                0,
+                application,
+                server_class=ThreadingWSGIServer,
+                handler_class=RequestTimeoutWSGIRequestHandler,
+            )
+            client = socket.create_connection(("127.0.0.1", httpd.server_address[1]))
+            self.addCleanup(client.close)
+            client.sendall(
+                b"POST / HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Length: 100\r\n"
+                b"Connection: close\r\n\r\n"
+                b"{"
+            )
+
+            signal_thread = threading.Thread(
+                target=lambda: (
+                    body_read_started.wait(1.0),
+                    os.kill(os.getpid(), signal.SIGTERM),
+                )
+            )
+            signal_thread.start()
+            with mock.patch("metering_billing.http_app.make_server", return_value=httpd):
+                self.assertEqual(main(()), 0)
+            signal_thread.join(1.0)
+            self.assertTrue(body_read_started.is_set())
+            self.assertTrue(body_read_timed_out.is_set())
+            self.assertFalse(signal_thread.is_alive())
 
 
 if __name__ == "__main__":

@@ -169,8 +169,8 @@ Work can be stacked when public contracts are stable, but each PR must remain in
 
 ## Current pull-request inventory
 
-GitHub reports **thirteen open pull requests** on 2026-08-29. The latest merged
-change is PR #141; the following open PR heads are current snapshots and are
+GitHub reports **thirteen open pull requests** on 2026-08-29. The latest merge to
+`develop` is PR #141; the following open PR heads are current snapshots and are
 not merge evidence:
 
 | PR | Scope | Base | Current-head gate evidence |

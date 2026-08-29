@@ -290,7 +290,7 @@ import threading
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qs, unquote
 from uuid import UUID
-from wsgiref.simple_server import WSGIServer, make_server
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
 from metering_billing.ais_outbox_drain import AisOutboxDrainService
@@ -448,6 +448,15 @@ from metering_billing.usage_rating import UsageRatingService
 
 
 WSGIApp = Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]
+
+
+REQUEST_READ_TIMEOUT_SECONDS = 10.0
+
+
+class RequestTimeoutWSGIRequestHandler(WSGIRequestHandler):
+    """Bound socket reads so graceful shutdown has a finite drain ceiling."""
+
+    timeout = REQUEST_READ_TIMEOUT_SECONDS
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -2840,6 +2849,7 @@ def main(arguments: tuple[str, ...] | None = None) -> int:
         port,
         create_http_app(create_default_ledger(), ais_base_url=ais_base_url),
         server_class=ThreadingWSGIServer,
+        handler_class=RequestTimeoutWSGIRequestHandler,
     )
     shutdown_requested = False
 

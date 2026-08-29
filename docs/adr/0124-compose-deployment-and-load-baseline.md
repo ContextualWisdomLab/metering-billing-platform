@@ -33,8 +33,12 @@ deployment surface, never invented.
   `ThreadingWSGIServer` (`ThreadingMixIn` over the stdlib `WSGIServer`) with
   non-daemon request threads and `block_on_close=True`, so concurrent tenant
   requests are handled in parallel and active work drains when the listener
-  closes.  `SIGTERM` and `SIGINT` stop the accept loop through a separate
-  shutdown thread, restore the prior process handlers, and close the server.
+  closes.  `RequestTimeoutWSGIRequestHandler` applies a 10-second socket read
+  timeout so a stalled partial request cannot hold that drain indefinitely.
+  `server_close()` first closes the listener through the superclass and then
+  joins active request threads.  `SIGTERM` and `SIGINT` stop the accept loop
+  through a separate shutdown thread, restore the prior process handlers, and
+  close the server.
   Everything else about the entrypoint stays identical, including `PORT`
   handling with the 8000 default.
 - Add `compose/docker-compose.yml` with fixed project name
