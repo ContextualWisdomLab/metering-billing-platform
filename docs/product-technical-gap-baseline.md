@@ -10,7 +10,8 @@
 
 The current #87 work is stacked through PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173),
 with application parent PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172).
-The exact local implementation snapshot is the current head of
+The exact local implementation snapshot is
+`9f94bc960401c765ce105632e49afb659f4696ed` on
 `feat/late-adjustment-rerate-20260829`; PRs #172 and #173 remain open pending
 hosted checks and a qualifying independent approval. Local pass status is not
 merge evidence.
