@@ -6,23 +6,24 @@
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
 
-## Current working snapshot (2026-08-29)
+## Current working snapshot (2026-08-30)
 
-The current #87 work is stacked from exact head
-`4ab415bd0654f0fa951700b32b4abef6183595da` of PR [#169](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/169)
-into the follow-up branch `feat/late-adjustment-20260829`. PR #169 is still
-open, mergeable but blocked, has zero qualifying approvals, and its normal
-checks pass while `opencode-review`, `strix`, and `noema-review` are provider
-failures. That state is not merge evidence.
+The current #87 work is stacked through PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172),
+whose exact head is `0ae0233ebb54ccf14f10f00303511ebf0262e0f7` on
+`feat/late-adjustment-apply-20260829`. PR #172 remains open pending hosted
+checks and a qualifying independent approval; local pass status is not merge
+evidence.
 
 This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`, the
 `LateAdjustment` and application contracts, tenant-scoped presentment reads,
 and a durable application acknowledgement for late usage, correction, and
 reversal facts. The source period must be at least `soft_closed`; the target
-must be `open` and start no earlier than the source end. Targeted real-
-PostgreSQL and repository contract tests pass on this branch. Re-rating the
-fact, provider settlement ingestion, FOCUS 1.4 export, and statutory
-accounting remain open gaps.
+must be `open` and start no earlier than the source end. A new application
+rechecks and locks the target's latest append-only status, while a stored
+application remains replayable after target close and preserves its first
+writer audit data. Targeted real-PostgreSQL and repository contract tests pass
+on this branch. Re-rating the fact, provider settlement ingestion, FOCUS 1.4
+export, and statutory accounting remain open gaps.
 
 ## Executive decision
 
