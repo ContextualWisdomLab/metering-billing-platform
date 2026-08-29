@@ -25,6 +25,7 @@ RECONCILIATION_LINE_CONTRACT_VERSION = 1
 RECONCILIATION_RESOLUTION_CONTRACT_VERSION = 1
 RECONCILIATION_EVIDENCE_CONTRACT_VERSION = 1
 RECONCILIATION_RUN_CONTRACT_VERSION = 1
+RECONCILIATION_EXCEPTION_AGING_CONTRACT_VERSION = 1
 ROUNDING_MODE = "ROUND_HALF_UP"
 
 _CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
@@ -82,6 +83,16 @@ class ReconciliationExceptionCode(StrEnum):
     PROVIDER_FEE_MISMATCH = "provider_fee_mismatch"
     CASH_TIMING_DIFFERENCE = "cash_timing_difference"
     UNMAPPED_PROVIDER_OBJECT = "unmapped_provider_object"
+
+
+class ReconciliationExceptionAgingBucket(StrEnum):
+    """UTC calendar-day bucket for one unresolved reconciliation exception."""
+
+    CURRENT = "current"
+    DAYS_1_30 = "days_1_30"
+    DAYS_31_60 = "days_31_60"
+    DAYS_61_90 = "days_61_90"
+    DAYS_90_PLUS = "days_90_plus"
 
 
 _NEXT_ACTIONS = {
@@ -628,6 +639,129 @@ class ReconciliationException:
             "exception_code": self.exception_code.value,
             "next_action": self.next_action,
         }
+
+
+@dataclass(frozen=True)
+class ReconciliationExceptionAging:
+    """Immutable age projection derived from a line's assessment timestamp."""
+
+    reconciliation_line_id: UUID
+    period_id: UUID
+    exception_code: ReconciliationExceptionCode
+    next_action: str
+    assessed_at: datetime
+    as_of: datetime
+    age_days: int
+    aging_bucket: ReconciliationExceptionAgingBucket
+    reconciliation_exception_aging_contract_version: int = (
+        RECONCILIATION_EXCEPTION_AGING_CONTRACT_VERSION
+    )
+
+    def __post_init__(self) -> None:
+        """Require a non-negative, UTC-calendar age consistent with the source line."""
+        _contract_version(
+            self.reconciliation_exception_aging_contract_version,
+            "reconciliation_exception_aging_contract_version",
+        )
+        if not isinstance(self.reconciliation_line_id, UUID) or not isinstance(
+            self.period_id, UUID
+        ):
+            raise PeriodCloseValidationError("aging identifiers must be UUIDs")
+        try:
+            exception_code = ReconciliationExceptionCode(self.exception_code)
+            aging_bucket = ReconciliationExceptionAgingBucket(self.aging_bucket)
+        except ValueError as error:
+            raise PeriodCloseValidationError(
+                "reconciliation exception aging code or bucket is unsupported"
+            ) from error
+        object.__setattr__(self, "exception_code", exception_code)
+        object.__setattr__(self, "aging_bucket", aging_bucket)
+        _reference(self.next_action, "next_action")
+        assessed_at = _aware_datetime(self.assessed_at, "assessed_at")
+        as_of = _aware_datetime(self.as_of, "as_of")
+        if as_of < assessed_at:
+            raise PeriodCloseValidationError("as_of must not precede assessed_at")
+        if (
+            isinstance(self.age_days, bool)
+            or not isinstance(self.age_days, int)
+            or self.age_days < 0
+        ):
+            raise PeriodCloseValidationError("age_days must be a non-negative integer")
+        expected_age_days = _calendar_age_days(assessed_at, as_of)
+        if self.age_days != expected_age_days:
+            raise PeriodCloseValidationError("age_days must match assessed_at and as_of")
+        if self.aging_bucket != _exception_aging_bucket(self.age_days):
+            raise PeriodCloseValidationError("aging_bucket must match age_days")
+        ReconciliationException(exception_code, self.next_action)
+
+    def as_contract_dict(self) -> dict[str, object]:
+        """Return the deterministic exception-aging projection contract."""
+        return {
+            "reconciliation_exception_aging_contract_version": (
+                self.reconciliation_exception_aging_contract_version
+            ),
+            "reconciliation_line_id": str(self.reconciliation_line_id),
+            "period_id": str(self.period_id),
+            "exception_code": self.exception_code.value,
+            "next_action": self.next_action,
+            "assessed_at": _format_datetime(self.assessed_at),
+            "as_of": _format_datetime(self.as_of),
+            "age_days": self.age_days,
+            "aging_bucket": self.aging_bucket.value,
+        }
+
+
+def age_reconciliation_exception(
+    line: ReconciliationLine,
+    exception_code: ReconciliationExceptionCode | str,
+    as_of: datetime,
+) -> ReconciliationExceptionAging:
+    """Project one persisted line exception into a deterministic age bucket."""
+    if not isinstance(line, ReconciliationLine):
+        raise PeriodCloseValidationError("line must be a ReconciliationLine")
+    try:
+        code = ReconciliationExceptionCode(exception_code)
+    except ValueError as error:
+        raise PeriodCloseValidationError("reconciliation exception code is unsupported") from error
+    exception = next(
+        (item for item in line.exceptions if item.exception_code == code),
+        None,
+    )
+    if exception is None:
+        raise PeriodCloseValidationError("exception code is not present on the reconciliation line")
+    assessed_at = _aware_datetime(line.assessed_at, "assessed_at")
+    observed_as_of = _aware_datetime(as_of, "as_of")
+    if observed_as_of < assessed_at:
+        raise PeriodCloseValidationError("as_of must not precede assessed_at")
+    age_days = _calendar_age_days(assessed_at, observed_as_of)
+    return ReconciliationExceptionAging(
+        reconciliation_line_id=line.reconciliation_line_id,
+        period_id=line.period_id,
+        exception_code=exception.exception_code,
+        next_action=exception.next_action,
+        assessed_at=assessed_at,
+        as_of=observed_as_of,
+        age_days=age_days,
+        aging_bucket=_exception_aging_bucket(age_days),
+    )
+
+
+def _calendar_age_days(assessed_at: datetime, as_of: datetime) -> int:
+    """Return elapsed UTC calendar days, matching finance aging conventions."""
+    return (as_of.astimezone(UTC).date() - assessed_at.astimezone(UTC).date()).days
+
+
+def _exception_aging_bucket(age_days: int) -> ReconciliationExceptionAgingBucket:
+    """Map a non-negative age to the published exception-aging bucket."""
+    if age_days <= 0:
+        return ReconciliationExceptionAgingBucket.CURRENT
+    if age_days <= 30:
+        return ReconciliationExceptionAgingBucket.DAYS_1_30
+    if age_days <= 60:
+        return ReconciliationExceptionAgingBucket.DAYS_31_60
+    if age_days <= 90:
+        return ReconciliationExceptionAgingBucket.DAYS_61_90
+    return ReconciliationExceptionAgingBucket.DAYS_90_PLUS
 
 
 @dataclass(frozen=True)

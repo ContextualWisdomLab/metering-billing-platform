@@ -18,6 +18,7 @@ from metering_billing import (
     FxRateType,
     PeriodCloseValidationError,
     ReconciliationException,
+    ReconciliationExceptionAgingBucket,
     ReconciliationExceptionCode,
     ReconciliationEvidence,
     ReconciliationLine,
@@ -26,6 +27,7 @@ from metering_billing import (
     ReconciliationResolution,
     ReconciliationResolutionStatus,
     assess_reconciliation_line,
+    age_reconciliation_exception,
     convert_currency_amount,
     create_billing_period,
     create_fx_rate,
@@ -34,6 +36,7 @@ from metering_billing import (
     validate_fx_rate,
     validate_reconciliation_line,
     validate_reconciliation_evidence,
+    validate_reconciliation_exception_aging,
     validate_reconciliation_run,
     validate_reconciliation_resolution,
 )
@@ -537,6 +540,97 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(settlement.exceptions[0].exception_code, ReconciliationExceptionCode.SETTLEMENT_MISMATCH)
         self.assertEqual(validate_reconciliation_line(price.as_contract_dict()), ())
+
+    def test_exception_aging_is_reproducible_from_line_assessment(self) -> None:
+        """A supplied UTC instant deterministically selects every aging bucket."""
+        line = assess_reconciliation_line(
+            PERIOD_ID,
+            "provider_account:001",
+            "USD",
+            "100",
+            "99",
+            "100",
+            assessed_at=OPENED_AT,
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        expected_buckets = (
+            (0, ReconciliationExceptionAgingBucket.CURRENT),
+            (1, ReconciliationExceptionAgingBucket.DAYS_1_30),
+            (30, ReconciliationExceptionAgingBucket.DAYS_1_30),
+            (31, ReconciliationExceptionAgingBucket.DAYS_31_60),
+            (60, ReconciliationExceptionAgingBucket.DAYS_31_60),
+            (61, ReconciliationExceptionAgingBucket.DAYS_61_90),
+            (90, ReconciliationExceptionAgingBucket.DAYS_61_90),
+            (91, ReconciliationExceptionAgingBucket.DAYS_90_PLUS),
+        )
+        for age_days, bucket in expected_buckets:
+            with self.subTest(age_days=age_days):
+                aging = age_reconciliation_exception(
+                    line,
+                    ReconciliationExceptionCode.PRICE_MISMATCH,
+                    OPENED_AT + timedelta(days=age_days, minutes=1),
+                )
+                self.assertEqual(aging.age_days, age_days)
+                self.assertEqual(aging.aging_bucket, bucket)
+                self.assertEqual(
+                    validate_reconciliation_exception_aging(aging.as_contract_dict()), ()
+                )
+
+        aging = age_reconciliation_exception(
+            line,
+            ReconciliationExceptionCode.PRICE_MISMATCH,
+            OPENED_AT + timedelta(days=31),
+        )
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(aging, age_days=30)
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(aging, reconciliation_line_id="not-a-uuid")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(aging, exception_code="unsupported")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(aging, age_days=-1)
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(aging, aging_bucket=ReconciliationExceptionAgingBucket.DAYS_1_30)
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(aging, next_action="rewrite")
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(aging, as_of=OPENED_AT - timedelta(days=1))
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(aging, reconciliation_exception_aging_contract_version=0)
+        self.assertTrue(validate_reconciliation_exception_aging(None))
+        with self.assertRaises(PeriodCloseValidationError):
+            age_reconciliation_exception(object(), ReconciliationExceptionCode.PRICE_MISMATCH, OPENED_AT)  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            age_reconciliation_exception(line, "unsupported", OPENED_AT)
+        with self.assertRaises(PeriodCloseValidationError):
+            age_reconciliation_exception(
+                assess_reconciliation_line(
+                    PERIOD_ID,
+                    "provider_account:002",
+                    "USD",
+                    "100",
+                    "100",
+                    "100",
+                    assessed_at=OPENED_AT,
+                    internal_currency_code="USD",
+                    provider_currency_code="USD",
+                    cash_currency_code="USD",
+                ),
+                ReconciliationExceptionCode.PRICE_MISMATCH,
+                OPENED_AT,
+            )
+        with self.assertRaises(PeriodCloseValidationError):
+            age_reconciliation_exception(
+                line,
+                ReconciliationExceptionCode.PRICE_MISMATCH,
+                OPENED_AT - timedelta(days=1),
+            )
+        with self.assertRaises(PeriodCloseValidationError):
+            age_reconciliation_exception(
+                line, ReconciliationExceptionCode.PRICE_MISMATCH, datetime(2026, 8, 2)
+            )
 
     def test_exception_vocabulary_covers_the_required_provider_cases(self) -> None:
         """Every minimum issue code remains constructible and serializable."""

@@ -54,6 +54,7 @@ from metering_billing import (
     WebhookDeliveryService,
     WebhookSubscriptionService,
     format_exact_decimal,
+    ReconciliationExceptionAgingBucket,
     validate_reconciliation_evidence,
     validate_reconciliation_run,
     validate_reconciliation_resolution,
@@ -711,6 +712,22 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 TENANT_ONE, period_id=period.period_id
             ),
             (matched, exception, expanded_exception),
+        )
+        exception_aging = self.ledger.list_reconciliation_exception_aging(
+            TENANT_ONE,
+            CATALOG_START + timedelta(days=31),
+            period_id=period.period_id,
+        )
+        self.assertEqual(len(exception_aging), 3)
+        self.assertEqual(
+            tuple(item.aging_bucket for item in exception_aging),
+            (ReconciliationExceptionAgingBucket.DAYS_31_60,) * 3,
+        )
+        self.assertEqual(
+            self.ledger.list_reconciliation_exception_aging(
+                TENANT_TWO, CATALOG_START + timedelta(days=31)
+            ),
+            (),
         )
         self.assertEqual(
             {

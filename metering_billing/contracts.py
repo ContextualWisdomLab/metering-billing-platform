@@ -68,6 +68,7 @@ __all__ = (
     "RATING_RUN_PRESENTMENT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
     "RECONCILIATION_EVIDENCE_SCHEMA_NAME",
+    "RECONCILIATION_EXCEPTION_AGING_SCHEMA_NAME",
     "RECONCILIATION_LINE_SCHEMA_NAME",
     "RECONCILIATION_RESOLUTION_SCHEMA_NAME",
     "RECONCILIATION_RUN_SCHEMA_NAME",
@@ -143,6 +144,7 @@ __all__ = (
     "validate_rating_run",
     "validate_rating_run_presentment",
     "validate_reconciliation_evidence",
+    "validate_reconciliation_exception_aging",
     "validate_reconciliation_line",
     "validate_reconciliation_resolution",
     "validate_reconciliation_run",
@@ -285,6 +287,7 @@ FX_CONVERSION_SCHEMA_NAME = "fx-conversion.schema.json"
 RECONCILIATION_LINE_SCHEMA_NAME = "reconciliation-line.schema.json"
 RECONCILIATION_RESOLUTION_SCHEMA_NAME = "reconciliation-resolution.schema.json"
 RECONCILIATION_EVIDENCE_SCHEMA_NAME = "reconciliation-evidence.schema.json"
+RECONCILIATION_EXCEPTION_AGING_SCHEMA_NAME = "reconciliation-exception-aging.schema.json"
 RECONCILIATION_RUN_SCHEMA_NAME = "reconciliation-run.schema.json"
 
 
@@ -386,6 +389,18 @@ def validate_reconciliation_evidence(
     if errors or not isinstance(evidence, Mapping):
         return tuple(errors)
     errors.extend(_reconciliation_evidence_semantic_errors(evidence))
+    return tuple(errors)
+
+
+def validate_reconciliation_exception_aging(
+    aging: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one derived reconciliation-exception aging projection."""
+    schema = load_json_schema(RECONCILIATION_EXCEPTION_AGING_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, aging))
+    if errors or not isinstance(aging, Mapping):
+        return tuple(errors)
+    errors.extend(_reconciliation_exception_aging_semantic_errors(aging))
     return tuple(errors)
 
 
@@ -615,6 +630,29 @@ def _reconciliation_run_semantic_errors(
             blocking_exception_count=run["blocking_exception_count"],
             reconciliation_run_contract_version=run[
                 "reconciliation_run_contract_version"
+            ],
+        )
+    )
+
+
+def _reconciliation_exception_aging_semantic_errors(
+    aging: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Apply timestamp, bucket, and next-action invariants after schema validation."""
+    from metering_billing.period_close import ReconciliationExceptionAging
+
+    return _semantic_error(
+        lambda: ReconciliationExceptionAging(
+            reconciliation_line_id=_contract_uuid(aging["reconciliation_line_id"]),
+            period_id=_contract_uuid(aging["period_id"]),
+            exception_code=aging["exception_code"],
+            next_action=aging["next_action"],
+            assessed_at=_contract_datetime(aging["assessed_at"]),
+            as_of=_contract_datetime(aging["as_of"]),
+            age_days=aging["age_days"],
+            aging_bucket=aging["aging_bucket"],
+            reconciliation_exception_aging_contract_version=aging[
+                "reconciliation_exception_aging_contract_version"
             ],
         )
     )

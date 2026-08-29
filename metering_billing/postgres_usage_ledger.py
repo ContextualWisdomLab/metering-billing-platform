@@ -37,10 +37,12 @@ from metering_billing.period_close import (
     FxConversion,
     FxRate,
     ReconciliationException,
+    ReconciliationExceptionAging,
     ReconciliationEvidence,
     ReconciliationLine,
     ReconciliationRun,
     ReconciliationResolution,
+    age_reconciliation_exception,
 )
 from metering_billing.usage_ledger import (
     CURRENCY_CODE_PATTERN,
@@ -574,6 +576,19 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
         return tuple(line for line in lines if line is not None)
+
+    def list_reconciliation_exception_aging(
+        self,
+        tenant_reference: str,
+        as_of: datetime,
+        period_id: UUID | None = None,
+    ) -> tuple[ReconciliationExceptionAging, ...]:
+        """Return tenant-scoped exception aging derived from immutable lines."""
+        return tuple(
+            age_reconciliation_exception(line, exception.exception_code, as_of)
+            for line in self.list_reconciliation_lines(tenant_reference, period_id)
+            for exception in line.exceptions
+        )
 
     def get_reconciliation_evidence(
         self, tenant_reference: str, evidence_id: UUID

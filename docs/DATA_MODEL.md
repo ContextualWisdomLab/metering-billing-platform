@@ -228,6 +228,12 @@ membership and PostgreSQL requires every member to belong to the same tenant
 and period. The stored exception count is a run summary; this slice does not
 calculate it, resolve exceptions, or advance the period status.
 
+`reconciliation-exception-aging` is a read-only projection of each persisted
+line exception. It uses the immutable line `assessed_at` as the source instant,
+an explicit `as_of` instant, UTC calendar days, and fixed current / 1-30 / 31-60
+/ 61-90 / 90+ buckets. PostgreSQL returns it through the existing tenant- and
+period-scoped line reads; age is never stored or used to mutate the exception.
+
 ## Tenant-API-credential identity
 
 A stored tenant API credential is identified by `tenant_api_credential_id` and is unique on `credential_secret_hash`.  Internal primary key is `tenant_api_credential_id`.  The hash is `hmac-sha256:` plus HMAC-SHA256(pepper, secret).  The plaintext secret is never stored.  `credential_label` is two-or-more-word `snake_case`.  Status is `active` or `revoked`.  A second issue of the same tenant, label, and contract version inserts a new row with a new secret.  Revocation updates `credential_status` and `revoked_at` on the same row and does not delete history.

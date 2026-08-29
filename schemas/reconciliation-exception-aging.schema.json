@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/reconciliation-exception-aging/v1",
+  "title": "Reconciliation Exception Aging",
+  "description": "Immutable UTC-calendar aging projection derived from a reconciliation line assessment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reconciliation_exception_aging_contract_version",
+    "reconciliation_line_id",
+    "period_id",
+    "exception_code",
+    "next_action",
+    "assessed_at",
+    "as_of",
+    "age_days",
+    "aging_bucket"
+  ],
+  "properties": {
+    "reconciliation_exception_aging_contract_version": {"type": "integer", "minimum": 1},
+    "reconciliation_line_id": {"type": "string", "format": "uuid"},
+    "period_id": {"type": "string", "format": "uuid"},
+    "exception_code": {
+      "type": "string",
+      "enum": [
+        "quantity_mismatch",
+        "price_mismatch",
+        "tax_mismatch",
+        "currency_mismatch",
+        "payment_missing",
+        "duplicate_charge",
+        "refund_mismatch",
+        "dispute_mismatch",
+        "settlement_mismatch",
+        "provider_fee_mismatch",
+        "cash_timing_difference",
+        "unmapped_provider_object"
+      ]
+    },
+    "next_action": {"type": "string", "minLength": 1},
+    "assessed_at": {"type": "string", "format": "date-time"},
+    "as_of": {"type": "string", "format": "date-time"},
+    "age_days": {"type": "integer", "minimum": 0},
+    "aging_bucket": {
+      "type": "string",
+      "enum": ["current", "days_1_30", "days_31_60", "days_61_90", "days_90_plus"]
+    }
+  }
+}

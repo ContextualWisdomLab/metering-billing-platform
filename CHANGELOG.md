@@ -16,6 +16,10 @@
 
 ### Added
 
+- Issue #87 now exposes tenant-scoped reconciliation-exception aging derived
+  from immutable line assessment timestamps. Explicit UTC calendar-day buckets
+  preserve `current`, 1-30, 31-60, 61-90, and 90+ boundaries without adding a
+  mutable age column (ADR 0130).
 - Issue #87 now persists completed reconciliation runs with ordered,
   tenant-and-period-safe line membership and a blocking-exception summary.
   Runs are replay-safe immutable envelopes; calculation, resolution gates, and
