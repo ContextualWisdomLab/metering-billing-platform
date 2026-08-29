@@ -114,7 +114,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_reusable_workflow_action_refs_are_pinned(self) -> None:
         """Reusable workflow paths must obey the same immutable-ref policy."""
-        mutable = "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@main"
+        mutable = (
+            "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@main"
+        )
         pinned = (
             "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@"
             + "a" * 40
@@ -322,7 +324,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_accounting_journal_proposal(schema, invalid),
         )
 
-    def test_accounting_domain_validation_rejects_imbalance_and_duplicate_lines(self) -> None:
+    def test_accounting_domain_validation_rejects_imbalance_and_duplicate_lines(
+        self,
+    ) -> None:
         """Semantic accounting validation rejects totals or line identities that drift."""
         schema = self._schema("accounting-journal-proposal.schema.json")
         base = {
@@ -386,7 +390,9 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
-    def test_persistence_integrity_migration_protects_references_and_intervals(self) -> None:
+    def test_persistence_integrity_migration_protects_references_and_intervals(
+        self,
+    ) -> None:
         """Database constraints preserve proposal identity and half-open assignments."""
         sql = (
             ROOT / "database/migrations/0036_persistence_integrity_constraints.sql"
@@ -402,9 +408,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_catalog_reference_migration_preserves_resolver_identity(self) -> None:
         """Catalog rows must retain the URNs used by the in-memory resolver."""
-        sql = (ROOT / "database/migrations/0037_catalog_reference_identity.sql").read_text(
-            encoding="utf-8"
-        )
+        sql = (
+            ROOT / "database/migrations/0037_catalog_reference_identity.sql"
+        ).read_text(encoding="utf-8")
         for expected_fragment in (
             "ADD COLUMN tenant_reference text",
             "SET tenant_reference = 'urn:cwl:' || tenant_account_code",
@@ -527,7 +533,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(schema, issued),
         )
 
-    def test_invoice_presentment_accepts_statement_totals_and_rejects_posted(self) -> None:
+    def test_invoice_presentment_accepts_statement_totals_and_rejects_posted(
+        self,
+    ) -> None:
         """A presentment contract records exact due amounts and cannot claim posting."""
         from metering_billing.contracts import validate_invoice_presentment
 
@@ -578,13 +586,21 @@ class RepositoryContractTests(unittest.TestCase):
         non_string_tax = dict(instance)
         non_string_tax["tax_exclusive_amount"] = 100
         self.assertEqual(
-            [error for error in validate_invoice_presentment(non_string_tax) if "exclusive plus tax" in error],
+            [
+                error
+                for error in validate_invoice_presentment(non_string_tax)
+                if "exclusive plus tax" in error
+            ],
             [],
         )
         non_string_due = dict(instance)
         non_string_due["credited_amount"] = 11
         self.assertEqual(
-            [error for error in validate_invoice_presentment(non_string_due) if "inclusive minus credits" in error],
+            [
+                error
+                for error in validate_invoice_presentment(non_string_due)
+                if "inclusive minus credits" in error
+            ],
             [],
         )
         scientific = dict(instance)
@@ -592,16 +608,24 @@ class RepositoryContractTests(unittest.TestCase):
         scientific["tax_amount"] = "1e1"
         scientific["tax_inclusive_amount"] = "not-decimal"
         self.assertTrue(
-            any("exact decimals" in error for error in validate_invoice_presentment(scientific))
+            any(
+                "exact decimals" in error
+                for error in validate_invoice_presentment(scientific)
+            )
         )
         due_scientific = dict(instance)
         due_scientific["credited_amount"] = "1e1"
         due_scientific["amount_due"] = "not-decimal"
         self.assertTrue(
-            any("presentment amounts" in error for error in validate_invoice_presentment(due_scientific))
+            any(
+                "presentment amounts" in error
+                for error in validate_invoice_presentment(due_scientific)
+            )
         )
 
-    def test_collection_case_presentment_accepts_outstanding_and_rejects_posted(self) -> None:
+    def test_collection_case_presentment_accepts_outstanding_and_rejects_posted(
+        self,
+    ) -> None:
         """A collection statement records exact outstanding and cannot claim posting."""
         schema = self._schema("collection-case-presentment.schema.json")
         instance = {
@@ -669,7 +693,9 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
 
-    def test_collection_aging_presentment_accepts_totals_and_rejects_posted(self) -> None:
+    def test_collection_aging_presentment_accepts_totals_and_rejects_posted(
+        self,
+    ) -> None:
         """Aging totals stay exact, unique by currency, and cannot claim posting."""
         schema = self._schema("collection-aging-presentment.schema.json")
         instance = {
@@ -747,7 +773,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_collection_aging_presentment(duplicate),
         )
         self.assertNotEqual(validate_collection_aging_presentment([]), ())
-        self.assertNotEqual(validate_collection_aging_presentment({"currencies": "USD"}), ())
+        self.assertNotEqual(
+            validate_collection_aging_presentment({"currencies": "USD"}), ()
+        )
         mixed_rows = {
             "collection_aging_presentment_contract_version": 1,
             "tenant_reference": "urn:cwl:tenant_001",
@@ -758,7 +786,10 @@ class RepositoryContractTests(unittest.TestCase):
                     "currency_code": 1,
                     "current": "current",
                     "days_1_30": {"case_count": 0, "outstanding_amount": 1},
-                    "days_31_60": {"case_count": 0, "outstanding_amount": "not-decimal"},
+                    "days_31_60": {
+                        "case_count": 0,
+                        "outstanding_amount": "not-decimal",
+                    },
                     "days_61_90": {"case_count": 0, "outstanding_amount": "0"},
                     "days_90_plus": {"case_count": 0, "outstanding_amount": "0"},
                 },
@@ -771,7 +802,9 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
 
-    def test_account_statement_presentment_accepts_totals_and_rejects_posted(self) -> None:
+    def test_account_statement_presentment_accepts_totals_and_rejects_posted(
+        self,
+    ) -> None:
         """Statement totals stay exact, unique by currency, and cannot claim posting."""
         schema = self._schema("account-statement-presentment.schema.json")
         instance = {
@@ -839,7 +872,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_account_statement_presentment(negative),
         )
         self.assertNotEqual(validate_account_statement_presentment([]), ())
-        self.assertNotEqual(validate_account_statement_presentment({"currencies": "USD"}), ())
+        self.assertNotEqual(
+            validate_account_statement_presentment({"currencies": "USD"}), ()
+        )
         mixed_rows = {
             "account_statement_presentment_contract_version": 1,
             "tenant_reference": "urn:cwl:tenant_001",
@@ -868,7 +903,9 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
 
-    def test_rated_spend_presentment_accepts_product_totals_and_rejects_rerate(self) -> None:
+    def test_rated_spend_presentment_accepts_product_totals_and_rejects_rerate(
+        self,
+    ) -> None:
         """Rated spend stays exact, unique by currency and product, and cannot claim a re-rate."""
         schema = self._schema("rated-spend-presentment.schema.json")
         instance = {
@@ -1111,7 +1148,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_rated_spend_presentment(duplicate_cost_center),
         )
 
-    def test_payment_intent_presentment_accepts_amount_and_rejects_captured(self) -> None:
+    def test_payment_intent_presentment_accepts_amount_and_rejects_captured(
+        self,
+    ) -> None:
         """A payment-intent statement records exact amount and cannot claim capture."""
         schema = self._schema("payment-intent-presentment.schema.json")
         instance = {
@@ -1182,10 +1221,15 @@ class RepositoryContractTests(unittest.TestCase):
         scientific = dict(instance)
         scientific["payment_amount"] = "not-decimal"
         self.assertTrue(
-            any("exact decimal" in error for error in validate_payment_intent_presentment(scientific))
+            any(
+                "exact decimal" in error
+                for error in validate_payment_intent_presentment(scientific)
+            )
         )
 
-    def test_payment_receipt_presentment_accepts_amount_and_rejects_posted(self) -> None:
+    def test_payment_receipt_presentment_accepts_amount_and_rejects_posted(
+        self,
+    ) -> None:
         """A payment-receipt statement records exact amounts and cannot claim posting."""
         schema = self._schema("payment-receipt-presentment.schema.json")
         instance = {
@@ -1275,7 +1319,9 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
 
-    def test_credit_adjustment_presentment_accepts_split_and_rejects_posted(self) -> None:
+    def test_credit_adjustment_presentment_accepts_split_and_rejects_posted(
+        self,
+    ) -> None:
         """A credit statement records exact amounts and cannot claim posting."""
         schema = self._schema("credit-adjustment-presentment.schema.json")
         instance = {
@@ -1424,7 +1470,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(schema, earnings),
         )
         zeroed = dict(instance, budget_amount="0")
-        self.assertIn("$: budget_amount must be greater than zero", validate_spend_budget(zeroed))
+        self.assertIn(
+            "$: budget_amount must be greater than zero", validate_spend_budget(zeroed)
+        )
         bad_amount = dict(instance, budget_amount="not-decimal")
         self.assertTrue(
             any(
@@ -1433,7 +1481,9 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
         waiting = dict(instance, next_operator_action="collect")
-        self.assertIn("$: published spend budgets must wait", validate_spend_budget(waiting))
+        self.assertIn(
+            "$: published spend budgets must wait", validate_spend_budget(waiting)
+        )
         rejected = {
             "spend_budget_contract_version": 1,
             "spend_budget_outcome_code": "rejected",
@@ -1450,7 +1500,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_spend_budget(missing_id),
         )
         pan = dict(instance, card_pan="4111111111111111")
-        self.assertIn("$: spend budget must not include card_pan", validate_spend_budget(pan))
+        self.assertIn(
+            "$: spend budget must not include card_pan", validate_spend_budget(pan)
+        )
         earnings_semantic = dict(instance, retained_earnings="1")
         self.assertIn(
             "$: spend budget must not include retained_earnings",
@@ -1552,7 +1604,10 @@ class RepositoryContractTests(unittest.TestCase):
         at_row = dict(instance, utilization_status="at", over_amount="0")
         self.assertEqual(validate_spend_budget_over_signal(at_row), ())
         waiting = dict(instance, next_operator_action="collect")
-        self.assertIn("$: published spend budgets must wait", validate_spend_budget_over_signal(waiting))
+        self.assertIn(
+            "$: published spend budgets must wait",
+            validate_spend_budget_over_signal(waiting),
+        )
         rejected = {
             "spend_budget_over_signal_contract_version": 1,
             "spend_budget_over_signal_outcome_code": "rejected",
@@ -1588,7 +1643,9 @@ class RepositoryContractTests(unittest.TestCase):
             "$: spend budget over signal must not include retained_earnings",
             validate_spend_budget_over_signal(earnings),
         )
-        replayed = dict(instance, spend_budget_over_signal_outcome_code="duplicate_replay")
+        replayed = dict(
+            instance, spend_budget_over_signal_outcome_code="duplicate_replay"
+        )
         self.assertEqual(validate_spend_budget_over_signal(replayed), ())
         rejected_known = {
             "spend_budget_over_signal_contract_version": 1,
@@ -1673,7 +1730,9 @@ class RepositoryContractTests(unittest.TestCase):
         )
         over_row = dict(instance, utilization_status="over", remaining_amount="0")
         self.assertEqual(validate_spend_budget_approaching_signal(over_row), ())
-        over_with_remaining = dict(instance, utilization_status="over", remaining_amount="1")
+        over_with_remaining = dict(
+            instance, utilization_status="over", remaining_amount="1"
+        )
         self.assertIn(
             "$: over observations must have zero remaining_amount",
             validate_spend_budget_approaching_signal(over_with_remaining),
@@ -1718,7 +1777,9 @@ class RepositoryContractTests(unittest.TestCase):
             "$: spend budget approaching signal must not include retained_earnings",
             validate_spend_budget_approaching_signal(earnings),
         )
-        replayed = dict(instance, spend_budget_approaching_signal_outcome_code="duplicate_replay")
+        replayed = dict(
+            instance, spend_budget_approaching_signal_outcome_code="duplicate_replay"
+        )
         self.assertEqual(validate_spend_budget_approaching_signal(replayed), ())
         rejected_known = {
             "spend_budget_approaching_signal_contract_version": 1,
@@ -1737,9 +1798,13 @@ class RepositoryContractTests(unittest.TestCase):
             "spend_budget_approaching_signal_contract_version": 1,
             "spend_budget_approaching_signal_outcome_code": "posted",
         }
-        self.assertNotEqual(validate_spend_budget_approaching_signal(posted_outcome), ())
+        self.assertNotEqual(
+            validate_spend_budget_approaching_signal(posted_outcome), ()
+        )
 
-    def test_spend_budget_approaching_signal_presentment_reuses_existing_envelopes(self) -> None:
+    def test_spend_budget_approaching_signal_presentment_reuses_existing_envelopes(
+        self,
+    ) -> None:
         """GET presentment nests the existing approaching-signal and outbox envelopes."""
         schema = self._schema("spend-budget-approaching-signal-presentment.schema.json")
         approaching_signal = {
@@ -1778,16 +1843,24 @@ class RepositoryContractTests(unittest.TestCase):
             "webhook_outbox_events": [outbox],
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
-        self.assertEqual(validate_spend_budget_approaching_signal_presentment(instance), ())
+        self.assertEqual(
+            validate_spend_budget_approaching_signal_presentment(instance), ()
+        )
         under = {
             "spend_budget_approaching_signal_presentment_contract_version": 1,
             "approaching_signal": dict(
-                approaching_signal, utilization_status="under", remaining_amount="99.996295"
+                approaching_signal,
+                utilization_status="under",
+                remaining_amount="99.996295",
             ),
             "webhook_outbox_events": [],
         }
-        self.assertEqual(validate_spend_budget_approaching_signal_presentment(under), ())
-        self.assertNotEqual(validate_spend_budget_approaching_signal_presentment([]), ())
+        self.assertEqual(
+            validate_spend_budget_approaching_signal_presentment(under), ()
+        )
+        self.assertNotEqual(
+            validate_spend_budget_approaching_signal_presentment([]), ()
+        )
         over_amount = dict(instance, over_amount="0")
         self.assertIn(
             "$: approaching-signal presentment must not include over_amount",
@@ -1808,7 +1881,9 @@ class RepositoryContractTests(unittest.TestCase):
             "$: approaching-signal presentment must not include payload_json",
             validate_spend_budget_approaching_signal_presentment(leaked),
         )
-        zeroed = dict(instance, approaching_signal=dict(approaching_signal, budget_amount="0"))
+        zeroed = dict(
+            instance, approaching_signal=dict(approaching_signal, budget_amount="0")
+        )
         self.assertIn(
             "$: budget_amount must be greater than zero",
             validate_spend_budget_approaching_signal_presentment(zeroed),
@@ -1819,13 +1894,17 @@ class RepositoryContractTests(unittest.TestCase):
             validate_spend_budget_approaching_signal_presentment(two_rows),
         )
         hollow_row = dict(instance, webhook_outbox_events=["pending"])
-        self.assertNotEqual(validate_spend_budget_approaching_signal_presentment(hollow_row), ())
+        self.assertNotEqual(
+            validate_spend_budget_approaching_signal_presentment(hollow_row), ()
+        )
         published = dict(outbox, event_type_code="spend_budget.published")
         wrong_type = dict(instance, webhook_outbox_events=[published])
         self.assertTrue(
             any(
                 "event_type_code must be spend_budget.approaching" in error
-                for error in validate_spend_budget_approaching_signal_presentment(wrong_type)
+                for error in validate_spend_budget_approaching_signal_presentment(
+                    wrong_type
+                )
             )
         )
         mismatched = dict(outbox, source_id="019d7b92-1aa0-7a7f-b61c-962c0f4bf699")
@@ -1833,7 +1912,9 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertTrue(
             any(
                 "source_id must match approaching_signal.spend_budget_id" in error
-                for error in validate_spend_budget_approaching_signal_presentment(crossed)
+                for error in validate_spend_budget_approaching_signal_presentment(
+                    crossed
+                )
             )
         )
         self.assertNotEqual(
@@ -1851,7 +1932,10 @@ class RepositoryContractTests(unittest.TestCase):
             },
             "webhook_outbox_events": [outbox],
         }
-        self.assertEqual(validate_spend_budget_approaching_signal_presentment(rejected_presentment), ())
+        self.assertEqual(
+            validate_spend_budget_approaching_signal_presentment(rejected_presentment),
+            (),
+        )
         missing_type = dict(outbox)
         missing_type.pop("event_type_code")
         self.assertNotEqual(
@@ -1867,7 +1951,9 @@ class RepositoryContractTests(unittest.TestCase):
             (),
         )
 
-    def test_spend_budget_over_signal_presentment_reuses_existing_envelopes(self) -> None:
+    def test_spend_budget_over_signal_presentment_reuses_existing_envelopes(
+        self,
+    ) -> None:
         """GET presentment nests the existing over-signal and outbox envelopes."""
         schema = self._schema("spend-budget-over-signal-presentment.schema.json")
         over_signal = {
@@ -1909,7 +1995,9 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(validate_spend_budget_over_signal_presentment(instance), ())
         under = {
             "spend_budget_over_signal_presentment_contract_version": 1,
-            "over_signal": dict(over_signal, utilization_status="under", over_amount="0"),
+            "over_signal": dict(
+                over_signal, utilization_status="under", over_amount="0"
+            ),
             "webhook_outbox_events": [],
         }
         self.assertEqual(validate_spend_budget_over_signal_presentment(under), ())
@@ -1945,7 +2033,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_spend_budget_over_signal_presentment(two_rows),
         )
         hollow_row = dict(instance, webhook_outbox_events=["pending"])
-        self.assertNotEqual(validate_spend_budget_over_signal_presentment(hollow_row), ())
+        self.assertNotEqual(
+            validate_spend_budget_over_signal_presentment(hollow_row), ()
+        )
         published = dict(outbox, event_type_code="spend_budget.published")
         wrong_type = dict(instance, webhook_outbox_events=[published])
         self.assertTrue(
@@ -1963,7 +2053,9 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
         self.assertNotEqual(
-            validate_spend_budget_over_signal_presentment(dict(instance, over_signal="x")),
+            validate_spend_budget_over_signal_presentment(
+                dict(instance, over_signal="x")
+            ),
             (),
         )
         rejected_presentment = {
@@ -1975,7 +2067,9 @@ class RepositoryContractTests(unittest.TestCase):
             },
             "webhook_outbox_events": [outbox],
         }
-        self.assertEqual(validate_spend_budget_over_signal_presentment(rejected_presentment), ())
+        self.assertEqual(
+            validate_spend_budget_over_signal_presentment(rejected_presentment), ()
+        )
         missing_type = dict(outbox)
         missing_type.pop("event_type_code")
         self.assertNotEqual(
@@ -1991,7 +2085,9 @@ class RepositoryContractTests(unittest.TestCase):
             (),
         )
 
-    def test_spend_budget_presentment_accepts_published_row_and_rejects_posted(self) -> None:
+    def test_spend_budget_presentment_accepts_published_row_and_rejects_posted(
+        self,
+    ) -> None:
         """A spend-budget statement records exact amounts and cannot claim posting."""
         schema = self._schema("spend-budget-presentment.schema.json")
         instance = {
@@ -2058,9 +2154,13 @@ class RepositoryContractTests(unittest.TestCase):
             validate_spend_budget_presentment(pan_presentment),
         )
         non_string_presentment = dict(instance, budget_amount=100)
-        self.assertNotEqual(validate_spend_budget_presentment(non_string_presentment), ())
+        self.assertNotEqual(
+            validate_spend_budget_presentment(non_string_presentment), ()
+        )
 
-    def test_spend_budget_evaluation_accepts_under_at_over_and_rejects_posted(self) -> None:
+    def test_spend_budget_evaluation_accepts_under_at_over_and_rejects_posted(
+        self,
+    ) -> None:
         """An evaluation statement records exact remaining/over and cannot claim posting."""
         schema = self._schema("spend-budget-evaluation-presentment.schema.json")
         instance = {
@@ -2081,10 +2181,14 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
         self.assertEqual(validate_spend_budget_evaluation_presentment(instance), ())
-        at_budget = dict(instance, rated_amount="100.00", remaining_amount="0", over_amount="0")
+        at_budget = dict(
+            instance, rated_amount="100.00", remaining_amount="0", over_amount="0"
+        )
         at_budget["utilization_status"] = "at"
         self.assertEqual(validate_spend_budget_evaluation_presentment(at_budget), ())
-        over_budget = dict(instance, rated_amount="125.00", remaining_amount="0", over_amount="25.00")
+        over_budget = dict(
+            instance, rated_amount="125.00", remaining_amount="0", over_amount="25.00"
+        )
         over_budget["utilization_status"] = "over"
         self.assertEqual(validate_spend_budget_evaluation_presentment(over_budget), ())
         posted = dict(instance, proposal_status="posted")
@@ -2144,11 +2248,15 @@ class RepositoryContractTests(unittest.TestCase):
             validate_spend_budget_evaluation_presentment(earnings),
         )
         self.assertNotEqual(
-            validate_spend_budget_evaluation_presentment(dict(instance, budget_amount=100)),
+            validate_spend_budget_evaluation_presentment(
+                dict(instance, budget_amount=100)
+            ),
             (),
         )
 
-    def test_billing_account_budget_status_accepts_under_at_over_and_rejects_totals(self) -> None:
+    def test_billing_account_budget_status_accepts_under_at_over_and_rejects_totals(
+        self,
+    ) -> None:
         """An account-level page keeps per-row exact math and never mixes currency."""
         schema = self._schema("billing-account-budget-status-presentment.schema.json")
         row = {
@@ -2166,16 +2274,23 @@ class RepositoryContractTests(unittest.TestCase):
         }
         instance = {"budget_statuses": [row], "next_cursor": None}
         self.assertEqual(validate_schema_instance(schema, instance), ())
-        self.assertEqual(validate_billing_account_budget_status_presentment(instance), ())
+        self.assertEqual(
+            validate_billing_account_budget_status_presentment(instance), ()
+        )
         at_row = dict(row, rated_amount="100.00", remaining_amount="0", over_amount="0")
         at_row["utilization_status"] = "at"
         self.assertEqual(
             validate_billing_account_budget_status_presentment(
-                {"budget_statuses": [at_row], "next_cursor": "2026-08-18T15:00:00Z|019d7b92-1aa0-7a7f-b61c-962c0f4bf680"}
+                {
+                    "budget_statuses": [at_row],
+                    "next_cursor": "2026-08-18T15:00:00Z|019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+                }
             ),
             (),
         )
-        over_row = dict(row, rated_amount="125.00", remaining_amount="0", over_amount="25.00")
+        over_row = dict(
+            row, rated_amount="125.00", remaining_amount="0", over_amount="25.00"
+        )
         over_row["utilization_status"] = "over"
         self.assertEqual(
             validate_billing_account_budget_status_presentment(
@@ -2193,35 +2308,57 @@ class RepositoryContractTests(unittest.TestCase):
             "$: budget status page must not mix currencies into one rated_amount",
             validate_billing_account_budget_status_presentment(mixed),
         )
-        zeroed = {"budget_statuses": [dict(row, budget_amount="0")], "next_cursor": None}
+        zeroed = {
+            "budget_statuses": [dict(row, budget_amount="0")],
+            "next_cursor": None,
+        }
         self.assertTrue(
             any(
                 "budget_amount must be greater than zero" in error
                 for error in validate_billing_account_budget_status_presentment(zeroed)
             )
         )
-        negative = {"budget_statuses": [dict(row, remaining_amount="-1")], "next_cursor": None}
+        negative = {
+            "budget_statuses": [dict(row, remaining_amount="-1")],
+            "next_cursor": None,
+        }
         self.assertTrue(
             any(
                 "remaining_amount must be a non-negative exact decimal" in error
-                for error in validate_billing_account_budget_status_presentment(negative)
+                for error in validate_billing_account_budget_status_presentment(
+                    negative
+                )
             )
         )
-        mismatched = {"budget_statuses": [dict(row, remaining_amount="10.00")], "next_cursor": None}
+        mismatched = {
+            "budget_statuses": [dict(row, remaining_amount="10.00")],
+            "next_cursor": None,
+        }
         self.assertTrue(
             any(
-                "remaining_amount and over_amount must match budget minus rated" in error
-                for error in validate_billing_account_budget_status_presentment(mismatched)
+                "remaining_amount and over_amount must match budget minus rated"
+                in error
+                for error in validate_billing_account_budget_status_presentment(
+                    mismatched
+                )
             )
         )
-        wrong_status = {"budget_statuses": [dict(row, utilization_status="over")], "next_cursor": None}
+        wrong_status = {
+            "budget_statuses": [dict(row, utilization_status="over")],
+            "next_cursor": None,
+        }
         self.assertTrue(
             any(
                 "utilization_status must match remaining and over" in error
-                for error in validate_billing_account_budget_status_presentment(wrong_status)
+                for error in validate_billing_account_budget_status_presentment(
+                    wrong_status
+                )
             )
         )
-        waiting = {"budget_statuses": [dict(row, next_operator_action="collect")], "next_cursor": None}
+        waiting = {
+            "budget_statuses": [dict(row, next_operator_action="collect")],
+            "next_cursor": None,
+        }
         self.assertTrue(
             any(
                 "published spend budget statuses must wait" in error
@@ -2229,11 +2366,16 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
         self.assertNotEqual(validate_billing_account_budget_status_presentment([]), ())
-        bad_amount = {"budget_statuses": [dict(row, rated_amount="not-decimal")], "next_cursor": None}
+        bad_amount = {
+            "budget_statuses": [dict(row, rated_amount="not-decimal")],
+            "next_cursor": None,
+        }
         self.assertTrue(
             any(
                 "rated_amount must be an exact decimal" in error
-                for error in validate_billing_account_budget_status_presentment(bad_amount)
+                for error in validate_billing_account_budget_status_presentment(
+                    bad_amount
+                )
             )
         )
         pan = dict(instance, card_pan="4111111111111111")
@@ -2246,7 +2388,10 @@ class RepositoryContractTests(unittest.TestCase):
             "$: spend budget status must not include retained_earnings",
             validate_billing_account_budget_status_presentment(earnings),
         )
-        row_pan = {"budget_statuses": [dict(row, card_pan="4111111111111111")], "next_cursor": None}
+        row_pan = {
+            "budget_statuses": [dict(row, card_pan="4111111111111111")],
+            "next_cursor": None,
+        }
         self.assertTrue(
             any(
                 "spend budget status must not include card_pan" in error
@@ -2260,11 +2405,15 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertTrue(
             any(
                 "spend budget status must not include retained_earnings" in error
-                for error in validate_billing_account_budget_status_presentment(row_earnings)
+                for error in validate_billing_account_budget_status_presentment(
+                    row_earnings
+                )
             )
         )
         skipped_row = {"budget_statuses": [row, "skip"], "next_cursor": None}
-        self.assertNotEqual(validate_billing_account_budget_status_presentment(skipped_row), ())
+        self.assertNotEqual(
+            validate_billing_account_budget_status_presentment(skipped_row), ()
+        )
         self.assertNotEqual(
             validate_billing_account_budget_status_presentment(
                 {"budget_statuses": [dict(row, budget_amount=100)], "next_cursor": None}
@@ -2280,7 +2429,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_spend_budget_migration_is_tenant_scoped_and_append_only(self) -> None:
         """Spend-budget rows stay tenant-scoped and append-only."""
-        sql = (ROOT / "database/migrations/0035_spend_budget.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0035_spend_budget.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.spend_budget",
             "UNIQUE (",
@@ -2297,9 +2448,9 @@ class RepositoryContractTests(unittest.TestCase):
             "CHECK (window_ended_at > window_started_at)",
         ):
             self.assertIn(expected_fragment, sql)
-        status_sql = (ROOT / "database/migrations/0039_spend_budget_status.sql").read_text(
-            encoding="utf-8"
-        )
+        status_sql = (
+            ROOT / "database/migrations/0039_spend_budget_status.sql"
+        ).read_text(encoding="utf-8")
         for expected_fragment in (
             "ALTER TABLE billing_core.spend_budget",
             "ADD COLUMN spend_budget_status",
@@ -2686,7 +2837,9 @@ class RepositoryContractTests(unittest.TestCase):
             [],
         )
 
-    def test_tax_assessment_presentment_accepts_amounts_and_rejects_outcome(self) -> None:
+    def test_tax_assessment_presentment_accepts_amounts_and_rejects_outcome(
+        self,
+    ) -> None:
         """A tax-assessment statement records exact amounts and cannot claim a write outcome."""
         schema = self._schema("tax-assessment-presentment.schema.json")
         instance = {
@@ -2886,13 +3039,17 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(
             [
                 error
-                for error in validate_posting_receipt_observation_presentment(numeric_status)
+                for error in validate_posting_receipt_observation_presentment(
+                    numeric_status
+                )
                 if "AIS-owned" in error
             ],
             [],
         )
 
-    def test_webhook_delivery_presentment_accepts_outcome_and_rejects_secret(self) -> None:
+    def test_webhook_delivery_presentment_accepts_outcome_and_rejects_secret(
+        self,
+    ) -> None:
         """A delivery statement records stored outcome and cannot leak a secret."""
         schema = self._schema("webhook-delivery-presentment.schema.json")
         instance = {
@@ -3273,10 +3430,14 @@ class RepositoryContractTests(unittest.TestCase):
         )
         pan = dict(instance)
         pan["card_pan"] = "4111111111111111"
-        self.assertIn("$: issued invoice must not include card_pan", validate_issued_invoice(pan))
+        self.assertIn(
+            "$: issued invoice must not include card_pan", validate_issued_invoice(pan)
+        )
         wait_action = dict(instance)
         wait_action["next_operator_action"] = "wait"
-        self.assertIn("$: issued invoice must collect", validate_issued_invoice(wait_action))
+        self.assertIn(
+            "$: issued invoice must collect", validate_issued_invoice(wait_action)
+        )
         unbalanced = dict(instance)
         unbalanced["tax_inclusive_amount"] = "1.00"
         self.assertIn(
@@ -3292,12 +3453,18 @@ class RepositoryContractTests(unittest.TestCase):
         bad_decimal = dict(instance)
         bad_decimal["tax_amount"] = "not-decimal"
         self.assertTrue(
-            any("must be an exact decimal" in error for error in validate_issued_invoice(bad_decimal))
+            any(
+                "must be an exact decimal" in error
+                for error in validate_issued_invoice(bad_decimal)
+            )
         )
         numeric = dict(instance)
         numeric["tax_amount"] = 0
         self.assertTrue(
-            any("must be an exact decimal" in error for error in validate_issued_invoice(numeric))
+            any(
+                "must be an exact decimal" in error
+                for error in validate_issued_invoice(numeric)
+            )
         )
         rejected = {
             "issued_invoice_contract_version": 1,
@@ -3327,7 +3494,9 @@ class RepositoryContractTests(unittest.TestCase):
             (),
         )
 
-    def test_issued_invoice_presentment_accepts_snapshot_and_rejects_numbering(self) -> None:
+    def test_issued_invoice_presentment_accepts_snapshot_and_rejects_numbering(
+        self,
+    ) -> None:
         """An issued-invoice statement records frozen totals and cannot claim a write outcome."""
         schema = self._schema("issued-invoice-presentment.schema.json")
         instance = {
@@ -3450,7 +3619,10 @@ class RepositoryContractTests(unittest.TestCase):
         )
         collect_action = dict(instance)
         collect_action["next_operator_action"] = "collect"
-        self.assertIn("$: issued credit note must wait", validate_issued_credit_note(collect_action))
+        self.assertIn(
+            "$: issued credit note must wait",
+            validate_issued_credit_note(collect_action),
+        )
         unbalanced = dict(instance)
         unbalanced["tax_inclusive_amount"] = "1.00"
         self.assertIn(
@@ -3474,7 +3646,10 @@ class RepositoryContractTests(unittest.TestCase):
         numeric = dict(instance)
         numeric["tax_amount"] = 0
         self.assertTrue(
-            any("must be an exact decimal" in error for error in validate_issued_credit_note(numeric))
+            any(
+                "must be an exact decimal" in error
+                for error in validate_issued_credit_note(numeric)
+            )
         )
         rejected = {
             "issued_credit_note_contract_version": 1,
@@ -3504,7 +3679,9 @@ class RepositoryContractTests(unittest.TestCase):
             (),
         )
 
-    def test_issued_credit_note_presentment_accepts_snapshot_and_rejects_numbering(self) -> None:
+    def test_issued_credit_note_presentment_accepts_snapshot_and_rejects_numbering(
+        self,
+    ) -> None:
         """An issued-credit-note statement records frozen totals and cannot claim a write outcome."""
         schema = self._schema("issued-credit-note-presentment.schema.json")
         instance = {
@@ -3621,7 +3798,10 @@ class RepositoryContractTests(unittest.TestCase):
             "tenant_api_credential_outcome_code": "accepted",
         }
         self.assertTrue(
-            any("must include" in error for error in validate_tenant_api_credential(accepted_missing))
+            any(
+                "must include" in error
+                for error in validate_tenant_api_credential(accepted_missing)
+            )
         )
         unknown_outcome = {
             "tenant_api_credential_contract_version": 1,
@@ -3633,7 +3813,9 @@ class RepositoryContractTests(unittest.TestCase):
         del replay["api_credential_secret"]
         self.assertEqual(validate_tenant_api_credential(replay), ())
 
-    def test_webhook_subscription_accepts_register_secret_and_rejects_hash(self) -> None:
+    def test_webhook_subscription_accepts_register_secret_and_rejects_hash(
+        self,
+    ) -> None:
         """Register may return the secret once; hashes and rejected secrets are forbidden."""
         schema = self._schema("webhook-subscription.schema.json")
         instance = {
@@ -3686,7 +3868,10 @@ class RepositoryContractTests(unittest.TestCase):
             "webhook_subscription_outcome_code": "accepted",
         }
         self.assertTrue(
-            any("must include" in error for error in validate_webhook_subscription(accepted_missing))
+            any(
+                "must include" in error
+                for error in validate_webhook_subscription(accepted_missing)
+            )
         )
         replay = dict(instance)
         replay["webhook_subscription_outcome_code"] = "duplicate_replay"
@@ -3710,7 +3895,10 @@ class RepositoryContractTests(unittest.TestCase):
             "webhook_delivery_outcome_code": "accepted",
         }
         self.assertTrue(
-            any("must include" in error for error in validate_webhook_delivery(missing_counts))
+            any(
+                "must include" in error
+                for error in validate_webhook_delivery(missing_counts)
+            )
         )
         rejected_delivery = {
             "webhook_delivery_contract_version": 1,
@@ -3753,7 +3941,10 @@ class RepositoryContractTests(unittest.TestCase):
             "ais_outbox_drain_outcome_code": "accepted",
         }
         self.assertTrue(
-            any("must include" in error for error in validate_ais_outbox_drain(missing_drain_counts))
+            any(
+                "must include" in error
+                for error in validate_ais_outbox_drain(missing_drain_counts)
+            )
         )
         rejected_drain = {
             "ais_outbox_drain_contract_version": 1,
@@ -3777,7 +3968,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_webhook_outbox_migration_stores_keyed_hash(self) -> None:
         """Webhook tables persist a keyed HMAC and append-only delivery attempts."""
-        sql = (ROOT / "database/migrations/0016_webhook_outbox.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0016_webhook_outbox.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.webhook_subscription",
             "CREATE TABLE billing_core.webhook_outbox_event",
@@ -3806,7 +3999,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_issued_invoice_migration_persists_append_only_snapshots(self) -> None:
         """The issued-invoice migration must stay tenant-scoped and number-free."""
-        sql = (ROOT / "database/migrations/0017_issued_invoice.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0017_issued_invoice.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.issued_invoice",
             "CREATE TABLE billing_core.issued_invoice_line",
@@ -3822,7 +4017,9 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("invoice_number", sql)
         self.assertNotIn("legal_invoice_number", sql)
 
-    def test_issued_invoice_void_accepts_recorded_void_and_rejects_numbering(self) -> None:
+    def test_issued_invoice_void_accepts_recorded_void_and_rejects_numbering(
+        self,
+    ) -> None:
         """A void contract records exact amount and cannot invent a legal number."""
         schema = self._schema("issued-invoice-void.schema.json")
         instance = {
@@ -3884,7 +4081,9 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertIn(expected_fragment, sql)
         self.assertNotIn("legal_invoice_number", sql)
 
-    def test_issued_credit_note_void_accepts_recorded_void_and_rejects_numbering(self) -> None:
+    def test_issued_credit_note_void_accepts_recorded_void_and_rejects_numbering(
+        self,
+    ) -> None:
         """A credit-note void contract records exact amount and cannot invent a legal number."""
         schema = self._schema("issued-credit-note-void.schema.json")
         instance = {
@@ -3942,7 +4141,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_invoice_draft_migration_persists_append_only_drafts(self) -> None:
         """The invoice-draft migration must keep identity tenant-scoped and draft-only."""
-        sql = (ROOT / "database/migrations/0004_invoice_draft.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0004_invoice_draft.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.invoice_draft",
             "CREATE TABLE billing_core.invoice_draft_line",
@@ -3955,9 +4156,13 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
-    def test_journal_proposal_migration_persists_append_only_balanced_lines(self) -> None:
+    def test_journal_proposal_migration_persists_append_only_balanced_lines(
+        self,
+    ) -> None:
         """The journal-proposal migration must stay tenant-scoped and proposal-only."""
-        sql = (ROOT / "database/migrations/0005_journal_proposal.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0005_journal_proposal.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.journal_proposal",
             "CREATE TABLE billing_core.journal_proposal_line",
@@ -3997,16 +4202,22 @@ class RepositoryContractTests(unittest.TestCase):
             "$.collection_case_status: value is not in the allowed enumeration",
             validate_schema_instance(schema, paid),
         )
-        settled = dict(instance, collection_case_status="settled", outstanding_amount="0")
+        settled = dict(
+            instance, collection_case_status="settled", outstanding_amount="0"
+        )
         self.assertEqual(validate_schema_instance(schema, settled), ())
         voided = dict(instance, collection_case_status="voided", outstanding_amount="0")
         self.assertEqual(validate_schema_instance(schema, voided), ())
         disputed = dict(instance, collection_case_status="disputed")
         self.assertEqual(validate_schema_instance(schema, disputed), ())
 
-    def test_collection_case_migration_persists_append_only_cases_and_notices(self) -> None:
+    def test_collection_case_migration_persists_append_only_cases_and_notices(
+        self,
+    ) -> None:
         """The collection-case migration must stay tenant-scoped and commercial-only."""
-        sql = (ROOT / "database/migrations/0006_collection_case.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0006_collection_case.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.collection_case",
             "CREATE TABLE billing_core.collection_dunning_event",
@@ -4042,9 +4253,13 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(schema, captured),
         )
 
-    def test_payment_intent_migration_persists_append_only_projected_intents(self) -> None:
+    def test_payment_intent_migration_persists_append_only_projected_intents(
+        self,
+    ) -> None:
         """The payment-intent migration must stay tenant-scoped and capture-free."""
-        sql = (ROOT / "database/migrations/0007_payment_intent.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0007_payment_intent.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.payment_intent",
             "UNIQUE (tenant_account_id, collection_case_id, source_payload_hash, payment_intent_contract_version)",
@@ -4081,9 +4296,13 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(schema, captured),
         )
 
-    def test_payment_receipt_migration_persists_append_only_applied_receipts(self) -> None:
+    def test_payment_receipt_migration_persists_append_only_applied_receipts(
+        self,
+    ) -> None:
         """The payment-receipt migration must stay tenant-scoped and capture-free."""
-        sql = (ROOT / "database/migrations/0008_payment_receipt.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0008_payment_receipt.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.payment_receipt",
             "UNIQUE (tenant_account_id, payment_intent_id, source_payload_hash, settlement_contract_version)",
@@ -4180,9 +4399,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_collection_dispute_release_migration_allows_released_status(self) -> None:
         """The release migration adds released status without a second hold row."""
-        sql = (ROOT / "database/migrations/0032_collection_dispute_release.sql").read_text(
-            encoding="utf-8"
-        )
+        sql = (
+            ROOT / "database/migrations/0032_collection_dispute_release.sql"
+        ).read_text(encoding="utf-8")
         for expected_fragment in (
             "collection_dispute_status IN ('held', 'released')",
             "ADD COLUMN released_at timestamptz",
@@ -4218,11 +4437,13 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
-    def test_write_off_journal_migration_reuses_journal_proposal_for_write_offs(self) -> None:
+    def test_write_off_journal_migration_reuses_journal_proposal_for_write_offs(
+        self,
+    ) -> None:
         """Write-off proposals reuse journal_proposal and add a write-off-scoped identity."""
-        sql = (ROOT / "database/migrations/0022_write_off_journal_proposal.sql").read_text(
-            encoding="utf-8"
-        )
+        sql = (
+            ROOT / "database/migrations/0022_write_off_journal_proposal.sql"
+        ).read_text(encoding="utf-8")
         for expected_fragment in (
             "ADD COLUMN collection_write_off_id uuid",
             "FOREIGN KEY (tenant_account_id, collection_write_off_id)",
@@ -4272,7 +4493,9 @@ class RepositoryContractTests(unittest.TestCase):
             validate_schema_instance(schema, unknown_reason),
         )
 
-    def test_credit_adjustment_migration_reuses_journal_proposal_for_credits(self) -> None:
+    def test_credit_adjustment_migration_reuses_journal_proposal_for_credits(
+        self,
+    ) -> None:
         """Credit rows stay tenant-scoped and reuse journal_proposal identity."""
         sql = (ROOT / "database/migrations/0011_credit_adjustment.sql").read_text(
             encoding="utf-8"
@@ -4290,7 +4513,9 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
-    def test_credit_tax_unwind_migration_stores_split_on_credit_adjustment(self) -> None:
+    def test_credit_tax_unwind_migration_stores_split_on_credit_adjustment(
+        self,
+    ) -> None:
         """Tax unwind columns stay on credit_adjustment and must sum to the credit."""
         sql = (ROOT / "database/migrations/0014_credit_tax_unwind.sql").read_text(
             encoding="utf-8"
@@ -4408,7 +4633,16 @@ class RepositoryContractTests(unittest.TestCase):
             ],
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
-        floated = dict(instance, lines=[{"metric_code": "gen_ai_output_token", "unit_amount": 0.000002, "currency_code": "USD"}])
+        floated = dict(
+            instance,
+            lines=[
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": 0.000002,
+                    "currency_code": "USD",
+                }
+            ],
+        )
         self.assertTrue(validate_schema_instance(schema, floated))
         unknown_reason = {
             "rate_card_contract_version": 1,
@@ -4440,11 +4674,13 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
-    def test_posting_receipt_observation_migration_is_tenant_scoped_and_append_only(self) -> None:
+    def test_posting_receipt_observation_migration_is_tenant_scoped_and_append_only(
+        self,
+    ) -> None:
         """The observation table must not use AIS receipt_id as the primary key."""
-        sql = (ROOT / "database/migrations/0010_posting_receipt_observation.sql").read_text(
-            encoding="utf-8"
-        )
+        sql = (
+            ROOT / "database/migrations/0010_posting_receipt_observation.sql"
+        ).read_text(encoding="utf-8")
         for expected_fragment in (
             "CREATE TABLE billing_core.posting_receipt_observation",
             "posting_receipt_observation_id uuid PRIMARY KEY",
@@ -4460,7 +4696,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_rating_migration_persists_append_only_runs_and_lines(self) -> None:
         """The rating migration must keep run identity tenant-scoped and append-only."""
-        sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(encoding="utf-8")
+        sql = (ROOT / "database/migrations/0003_rating_run.sql").read_text(
+            encoding="utf-8"
+        )
         for expected_fragment in (
             "CREATE TABLE billing_core.rate_card",
             "CREATE TABLE billing_core.rate_card_price",
@@ -4478,9 +4716,9 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_fx_conversion_migration_pins_the_referenced_rate_snapshot(self) -> None:
         """Database inserts must retain the exact referenced FX rate evidence."""
-        sql = (ROOT / "database/migrations/0047_fx_conversion_rate_integrity.sql").read_text(
-            encoding="utf-8"
-        )
+        sql = (
+            ROOT / "database/migrations/0047_fx_conversion_rate_integrity.sql"
+        ).read_text(encoding="utf-8")
         for expected_fragment in (
             "CREATE OR REPLACE FUNCTION billing_core.validate_fx_conversion_snapshot()",
             "NEW.source_currency IS DISTINCT FROM referenced_rate.base_currency",
@@ -4489,6 +4727,26 @@ class RepositoryContractTests(unittest.TestCase):
             "NEW.rate_precision IS DISTINCT FROM referenced_rate.rate_precision",
             "CREATE TRIGGER fx_conversion_rate_snapshot_validate",
             "BEFORE INSERT ON billing_core.fx_conversion",
+        ):
+            self.assertIn(expected_fragment, sql)
+
+    def test_late_adjustment_migration_keeps_later_periods_open_and_immutable(
+        self,
+    ) -> None:
+        """The correction table binds both periods and rejects source rewrites."""
+        sql = (ROOT / "database/migrations/0048_late_adjustment.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE TABLE billing_core.late_adjustment",
+            "UNIQUE (\n        tenant_account_id,\n        source_period_id,",
+            "FOREIGN KEY (tenant_account_id, source_period_id)",
+            "FOREIGN KEY (tenant_account_id, target_period_id)",
+            "CREATE OR REPLACE FUNCTION billing_core.validate_late_adjustment_periods()",
+            "late adjustment source period must be closed",
+            "late adjustment target period must be open",
+            "late adjustment target period must follow source period",
+            "CREATE TRIGGER late_adjustment_immutable",
         ):
             self.assertIn(expected_fragment, sql)
 
@@ -4528,12 +4786,16 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("$.proposal_id: expected string", errors)
         self.assertIn("$.lines[0]: expected exactly one oneOf branch to match", errors)
 
-    def test_repository_reports_integrated_supply_chain_and_sql_violations(self) -> None:
+    def test_repository_reports_integrated_supply_chain_and_sql_violations(
+        self,
+    ) -> None:
         """The aggregate validator reports provider IDs, placeholders, and mutable actions."""
         with tempfile.TemporaryDirectory() as temporary_directory:
             copied_root = Path(temporary_directory) / "repository"
             shutil.copytree(ROOT, copied_root)
-            migration = copied_root / "database/migrations/0001_initial_billing_core.sql"
+            migration = (
+                copied_root / "database/migrations/0001_initial_billing_core.sql"
+            )
             migration.write_text(
                 migration.read_text(encoding="utf-8")
                 + "\n-- provider_customer_id must not be placed in the core.\n",
@@ -4554,7 +4816,9 @@ class RepositoryContractTests(unittest.TestCase):
                 + "\n# invalid fixture\n# uses: actions/checkout@v4\n",
                 encoding="utf-8",
             )
-            second_migration = copied_root / "database/migrations/0002_usage_event_idempotency.sql"
+            second_migration = (
+                copied_root / "database/migrations/0002_usage_event_idempotency.sql"
+            )
             second_migration.write_text(
                 second_migration.read_text(encoding="utf-8")
                 + "\n-- stripe_customer_id must not be placed in the core.\n",
@@ -4603,7 +4867,9 @@ class RepositoryContractTests(unittest.TestCase):
                 (schemas / name).write_text(json.dumps(valid), encoding="utf-8")
             errors = validate_repository(root)
         self.assertIn("invalid JSON in 00-invalid.schema.json", "\n".join(errors))
-        self.assertIn("schema must declare Draft 2020-12: 01-malformed.schema.json", errors)
+        self.assertIn(
+            "schema must declare Draft 2020-12: 01-malformed.schema.json", errors
+        )
         self.assertIn("schema must have an HTTPS $id: 01-malformed.schema.json", errors)
         self.assertIn("schema root must be an object: 01-malformed.schema.json", errors)
         self.assertIn(
@@ -4614,7 +4880,9 @@ class RepositoryContractTests(unittest.TestCase):
             "duplicate schema $id: https://schemas.example.test/duplicate", errors
         )
 
-    def test_offline_schema_validator_covers_scalar_array_and_object_constraints(self) -> None:
+    def test_offline_schema_validator_covers_scalar_array_and_object_constraints(
+        self,
+    ) -> None:
         """Every supported keyword emits stable diagnostics for invalid values."""
         string_schema = {
             "type": "string",
@@ -4657,9 +4925,7 @@ class RepositoryContractTests(unittest.TestCase):
             "prefixItems": [{"type": "string"}],
             "items": {"type": "integer"},
         }
-        self.assertEqual(
-            validate_schema_instance(prefix_items_schema, ["ok", 1]), ()
-        )
+        self.assertEqual(validate_schema_instance(prefix_items_schema, ["ok", 1]), ())
         self.assertEqual(
             validate_schema_instance(prefix_items_schema, ["ok", "bad"]),
             ("$[1]: expected integer",),
@@ -4701,9 +4967,7 @@ class RepositoryContractTests(unittest.TestCase):
             "$ref": "#/$defs/a~1b~0c",
             "$defs": {"a/b~c": {"type": "string", "const": "ok"}},
         }
-        self.assertEqual(
-            validate_schema_instance(escaped_reference_schema, "ok"), ()
-        )
+        self.assertEqual(validate_schema_instance(escaped_reference_schema, "ok"), ())
         self.assertIn(
             "$: value does not equal the required constant",
             validate_schema_instance(escaped_reference_schema, "not-ok"),
@@ -4765,7 +5029,9 @@ class RepositoryContractTests(unittest.TestCase):
     def test_alter_table_add_column_is_checked_for_two_word_names(self) -> None:
         """ADD COLUMN identifiers must use two-or-more-word snake_case names."""
         self.assertEqual(
-            validate_sql_object_names("ALTER TABLE usage_event ADD COLUMN status text;\n"),
+            validate_sql_object_names(
+                "ALTER TABLE usage_event ADD COLUMN status text;\n"
+            ),
             ("column name must contain at least two snake_case words: status",),
         )
 

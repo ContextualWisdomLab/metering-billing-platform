@@ -53,6 +53,16 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 | posted journal and trial balance | Accounting Information Platform |
 | bank transaction | bank or treasury provider; accounting projection in Accounting Information Platform |
 
+## Period-close adjustment boundary
+
+`LateAdjustment` is the separate correction path for facts arriving after a
+source period closes. Migration `0048` stores a signed exact-decimal amount,
+closed adjustment kind, source payload hash, and source/target period links.
+The source must be at least `soft_closed`, the target must be `open` and start
+at or after the source end, and PostgreSQL rejects update/delete. Replays are
+idempotent within a tenant; application, re-rating, provider settlement,
+FOCUS export, and statutory accounting remain downstream capabilities.
+
 ## Usage ingestion
 
 `metering_billing.UsageIngestionService` is the write path for canonical usage events.  It validates the published schema, verifies the source-payload hash for the declared contract version, resolves tenant-scoped attribution, stores exact decimal measurements, and returns a receipt.  It accepts either the in-memory reference ledger or `PostgresUsageLedger`; the latter writes the event, normalized measurements, and receipt in one PostgreSQL transaction and lets tenant-scoped unique constraints arbitrate concurrent retries.  Optional batch bounds and usage queries use half-open ISO 8601 windows.  `POST /v1/usage-events` stays that ingest and refuses PAN and provider secrets.  `UsageEventPresentmentService` projects a stored event as a statement.  `GET /v1/usage-events/{usage_event_id}` is HTTP 200 for the same tenant and HTTP 404 across tenants.  `GET /v1/usage-events` lists `{usage_events, next_cursor}` ordered by `recorded_at` then `usage_event_id`.  Ingestion never writes a posted journal and never calls a payment provider.  The durable PostgreSQL path continues through rate-card publish, rating, invoice drafting, issued-invoice snapshot, tenant-scoped tax-rate publish, tax assessment, atomic `invoice.issued` outbox enqueue, tenant-scoped webhook subscription metadata, delivery attempts, and delivered status; the one-time webhook secret remains process-local.  Collection, payment, provider, recovery, and telemetry controls are not implied to be durable by this slice.

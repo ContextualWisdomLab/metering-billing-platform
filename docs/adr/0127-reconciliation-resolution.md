@@ -16,6 +16,8 @@ the original fact; changing it fails closed.
 This slice records authorization evidence but does not rewrite the original
 reconciliation line or declare a period reconciled. A later reconciliation-run
 command will evaluate all blocking exceptions and their resolutions together.
+Late-adjustment recording is a separate immutable fact in migration `0048`
+(ADR 0132); applying it is outside this resolution contract.
 
 ## Consequences
 

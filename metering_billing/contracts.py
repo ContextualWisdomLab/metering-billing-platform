@@ -49,6 +49,7 @@ __all__ = (
     "FX_RATE_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
+    "LATE_ADJUSTMENT_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_VOID_PRESENTMENT_SCHEMA_NAME",
@@ -124,6 +125,7 @@ __all__ = (
     "validate_fx_rate",
     "validate_invoice_draft",
     "validate_invoice_presentment",
+    "validate_late_adjustment",
     "validate_issued_credit_note",
     "validate_issued_credit_note_presentment",
     "validate_issued_credit_note_void",
@@ -182,6 +184,7 @@ USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
 INVOICE_PRESENTMENT_SCHEMA_NAME = "invoice-draft-presentment.schema.json"
+LATE_ADJUSTMENT_SCHEMA_NAME = "late-adjustment.schema.json"
 COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
 COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME = "collection-aging-presentment.schema.json"
 ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME = "account-statement-presentment.schema.json"
@@ -194,7 +197,9 @@ SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME = "spend-budget-over-signal.schema.json"
 SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME = (
     "spend-budget-over-signal-presentment.schema.json"
 )
-SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME = "spend-budget-approaching-signal.schema.json"
+SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME = (
+    "spend-budget-approaching-signal.schema.json"
+)
 SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME = (
     "spend-budget-approaching-signal-presentment.schema.json"
 )
@@ -287,7 +292,9 @@ FX_CONVERSION_SCHEMA_NAME = "fx-conversion.schema.json"
 RECONCILIATION_LINE_SCHEMA_NAME = "reconciliation-line.schema.json"
 RECONCILIATION_RESOLUTION_SCHEMA_NAME = "reconciliation-resolution.schema.json"
 RECONCILIATION_EVIDENCE_SCHEMA_NAME = "reconciliation-evidence.schema.json"
-RECONCILIATION_EXCEPTION_AGING_SCHEMA_NAME = "reconciliation-exception-aging.schema.json"
+RECONCILIATION_EXCEPTION_AGING_SCHEMA_NAME = (
+    "reconciliation-exception-aging.schema.json"
+)
 RECONCILIATION_RUN_SCHEMA_NAME = "reconciliation-run.schema.json"
 
 
@@ -322,7 +329,9 @@ def load_json_schema(
     schema_file_name: str, schemas_directory: Path | None = None
 ) -> dict[str, Any]:
     """Load one Draft 2020-12 schema from the published contract directory."""
-    directory = default_schemas_directory() if schemas_directory is None else schemas_directory
+    directory = (
+        default_schemas_directory() if schemas_directory is None else schemas_directory
+    )
     schema_path = directory / schema_file_name
     if not schema_path.is_file():
         raise FileNotFoundError(f"schema contract is not available: {schema_file_name}")
@@ -353,6 +362,18 @@ def validate_fx_rate(
     if errors or not isinstance(rate, Mapping):
         return tuple(errors)
     errors.extend(_fx_rate_semantic_errors(rate))
+    return tuple(errors)
+
+
+def validate_late_adjustment(
+    adjustment: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one signed correction fact and its immutable source evidence."""
+    schema = load_json_schema(LATE_ADJUSTMENT_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, adjustment))
+    if errors or not isinstance(adjustment, Mapping):
+        return tuple(errors)
+    errors.extend(_late_adjustment_semantic_errors(adjustment))
     return tuple(errors)
 
 
@@ -396,7 +417,9 @@ def validate_reconciliation_exception_aging(
     aging: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate one derived reconciliation-exception aging projection."""
-    schema = load_json_schema(RECONCILIATION_EXCEPTION_AGING_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        RECONCILIATION_EXCEPTION_AGING_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, aging))
     if errors or not isinstance(aging, Mapping):
         return tuple(errors)
@@ -504,6 +527,30 @@ def _fx_rate_semantic_errors(rate: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
+def _late_adjustment_semantic_errors(
+    adjustment: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Apply signed amount, kind, identity, and timestamp invariants."""
+    from metering_billing.period_close import LateAdjustment
+
+    return _semantic_error(
+        lambda: LateAdjustment(
+            late_adjustment_id=_contract_uuid(adjustment["late_adjustment_id"]),
+            source_period_id=_contract_uuid(adjustment["source_period_id"]),
+            target_period_id=_contract_uuid(adjustment["target_period_id"]),
+            adjustment_kind=adjustment["adjustment_kind"],
+            adjustment_amount=Decimal(adjustment["adjustment_amount"]),
+            currency_code=adjustment["currency_code"],
+            source_reference=adjustment["source_reference"],
+            source_payload_hash=adjustment["source_payload_hash"],
+            recorded_at=_contract_datetime(adjustment["recorded_at"]),
+            late_adjustment_contract_version=adjustment[
+                "late_adjustment_contract_version"
+            ],
+        )
+    )
+
+
 def _fx_conversion_semantic_errors(conversion: Mapping[str, Any]) -> tuple[str, ...]:
     """Apply target-scale and exact-product invariants after schema validation."""
     from metering_billing.period_close import FxConversion
@@ -558,7 +605,9 @@ def _reconciliation_line_semantic_errors(line: Mapping[str, Any]) -> tuple[str, 
             internal_currency_code=line["internal_currency_code"],
             provider_currency_code=line["provider_currency_code"],
             cash_currency_code=line["cash_currency_code"],
-            reconciliation_line_contract_version=line["reconciliation_line_contract_version"],
+            reconciliation_line_contract_version=line[
+                "reconciliation_line_contract_version"
+            ],
         )
 
     return _semantic_error(build)
@@ -687,9 +736,7 @@ def validate_usage_ingestion_receipt(
         outcome = event_receipt.get("ingestion_outcome_code")
         if outcome == "accepted":
             accepted += 1
-            errors.extend(
-                _missing_success_receipt_fields(event_receipt, "accepted")
-            )
+            errors.extend(_missing_success_receipt_fields(event_receipt, "accepted"))
         elif outcome == "duplicate_replay":
             duplicate_replays += 1
             errors.extend(
@@ -787,11 +834,15 @@ def validate_invoice_draft(
         return tuple(errors)
     outcome = invoice_draft.get("invoice_draft_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_invoice_draft_fields(invoice_draft, str(outcome)))
+        errors.extend(
+            _missing_success_invoice_draft_fields(invoice_draft, str(outcome))
+        )
         errors.extend(_invoice_draft_total_errors(invoice_draft))
     elif outcome == "rejected":
         if "rejection_reason_code" not in invoice_draft:
-            errors.append("$: rejected invoice drafts must include rejection_reason_code")
+            errors.append(
+                "$: rejected invoice drafts must include rejection_reason_code"
+            )
     return tuple(errors)
 
 
@@ -817,7 +868,9 @@ def _invoice_draft_total_errors(invoice_draft: Mapping[str, Any]) -> tuple[str, 
     """Return a diagnostic when draft lines do not sum to the drafted total."""
     drafted_total_amount = invoice_draft.get("drafted_total_amount")
     invoice_draft_lines = invoice_draft.get("invoice_draft_lines")
-    if not isinstance(drafted_total_amount, str) or not isinstance(invoice_draft_lines, list):
+    if not isinstance(drafted_total_amount, str) or not isinstance(
+        invoice_draft_lines, list
+    ):
         return ()
     line_total = Decimal("0")
     for invoice_draft_line in invoice_draft_lines:
@@ -836,7 +889,9 @@ def validate_account_statement_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate statement shape plus exact totals and one-currency-per-row."""
-    schema = load_json_schema(ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
         return tuple(errors)
@@ -890,7 +945,9 @@ def validate_rated_spend_presentment(
     products = statement.get("products")
     if not isinstance(products, list):
         return tuple(errors)
-    seen_keys: set[tuple[str, str, str | None, str | None, str | None, str | None]] = set()
+    seen_keys: set[tuple[str, str, str | None, str | None, str | None, str | None]] = (
+        set()
+    )
     for index, row in enumerate(products):
         if not isinstance(row, Mapping):
             continue
@@ -901,7 +958,9 @@ def validate_rated_spend_presentment(
         billing_principal_reference = row.get("billing_principal_reference")
         cost_center_reference = row.get("cost_center_reference")
         if isinstance(currency_code, str) and isinstance(product_code, str):
-            project_key = project_reference if isinstance(project_reference, str) else None
+            project_key = (
+                project_reference if isinstance(project_reference, str) else None
+            )
             credential_key = (
                 credential_reference if isinstance(credential_reference, str) else None
             )
@@ -911,7 +970,9 @@ def validate_rated_spend_presentment(
                 else None
             )
             cost_center_key = (
-                cost_center_reference if isinstance(cost_center_reference, str) else None
+                cost_center_reference
+                if isinstance(cost_center_reference, str)
+                else None
             )
             key = (
                 currency_code,
@@ -971,7 +1032,9 @@ def validate_collection_aging_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate aging shape plus exact totals and one-currency-per-row."""
-    schema = load_json_schema(COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
         return tuple(errors)
@@ -1021,7 +1084,9 @@ def validate_collection_case_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate collection presentment shape plus outstanding and action invariants."""
-    schema = load_json_schema(COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
         return tuple(errors)
@@ -1071,7 +1136,9 @@ def validate_payment_receipt_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate payment-receipt presentment shape plus amount and action invariants."""
-    schema = load_json_schema(PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
         return tuple(errors)
@@ -1103,7 +1170,9 @@ def validate_credit_adjustment_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate credit-adjustment presentment shape plus amount invariants."""
-    schema = load_json_schema(CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
         return tuple(errors)
@@ -1127,8 +1196,13 @@ def validate_credit_adjustment_presentment(
                     parsed_amounts.append(parsed)
             except Exception:
                 errors.append(f"$: {field_name} must be an exact decimal")
-    if len(parsed_amounts) == 3 and parsed_amounts[0] != parsed_amounts[1] + parsed_amounts[2]:
-        errors.append("$: tax_exclusive_amount plus tax_amount must equal credit_amount")
+    if (
+        len(parsed_amounts) == 3
+        and parsed_amounts[0] != parsed_amounts[1] + parsed_amounts[2]
+    ):
+        errors.append(
+            "$: tax_exclusive_amount plus tax_amount must equal credit_amount"
+        )
     if status == "recorded" and action != "wait":
         errors.append("$: recorded credits must wait")
     return tuple(errors)
@@ -1154,9 +1228,13 @@ def validate_rate_card_presentment(
                 try:
                     parsed = Decimal(unit_amount)
                     if parsed <= Decimal("0"):
-                        errors.append(f"$: lines[{index}].unit_amount must be greater than zero")
+                        errors.append(
+                            f"$: lines[{index}].unit_amount must be greater than zero"
+                        )
                 except Exception:
-                    errors.append(f"$: lines[{index}].unit_amount must be an exact decimal")
+                    errors.append(
+                        f"$: lines[{index}].unit_amount must be an exact decimal"
+                    )
     if action is not None and action != "rate_window":
         errors.append("$: published cards must rate a window")
     return tuple(errors)
@@ -1182,9 +1260,13 @@ def validate_usage_event_presentment(
                 try:
                     parsed = Decimal(quantity)
                     if parsed < Decimal("0"):
-                        errors.append(f"$: measurements[{index}].quantity must not be negative")
+                        errors.append(
+                            f"$: measurements[{index}].quantity must not be negative"
+                        )
                 except Exception:
-                    errors.append(f"$: measurements[{index}].quantity must be an exact decimal")
+                    errors.append(
+                        f"$: measurements[{index}].quantity must be an exact decimal"
+                    )
     if action is not None and action != "rate_window":
         errors.append("$: stored usage must rate a window")
     return tuple(errors)
@@ -1213,7 +1295,11 @@ def validate_rating_run_presentment(
             if not isinstance(line, Mapping):
                 errors.append(f"$: rating_lines[{index}] must be an object")
                 continue
-            for field_name in ("rated_quantity", "unit_price_amount", "line_total_amount"):
+            for field_name in (
+                "rated_quantity",
+                "unit_price_amount",
+                "line_total_amount",
+            ):
                 value = line.get(field_name)
                 if isinstance(value, str):
                     try:
@@ -1321,12 +1407,18 @@ def validate_invoice_presentment(
                 errors.append("$: tax_inclusive_amount must equal exclusive plus tax")
         except Exception:
             errors.append("$: tax amounts must be exact decimals")
-    if isinstance(inclusive, str) and isinstance(credited, str) and isinstance(amount_due, str):
+    if (
+        isinstance(inclusive, str)
+        and isinstance(credited, str)
+        and isinstance(amount_due, str)
+    ):
         try:
             remaining = Decimal(inclusive) - Decimal(credited)
             expected = remaining if remaining >= Decimal("0") else Decimal("0")
             if Decimal(amount_due) != expected:
-                errors.append("$: amount_due must equal inclusive minus credits and not go below zero")
+                errors.append(
+                    "$: amount_due must equal inclusive minus credits and not go below zero"
+                )
         except Exception:
             errors.append("$: presentment amounts must be exact decimals")
     return tuple(errors)
@@ -1357,7 +1449,9 @@ def validate_tenant_api_credential(
         if "rejection_reason_code" not in credential:
             errors.append("$: rejected credentials must include rejection_reason_code")
         if "api_credential_secret" in credential:
-            errors.append("$: rejected credentials must not include api_credential_secret")
+            errors.append(
+                "$: rejected credentials must not include api_credential_secret"
+            )
     return tuple(errors)
 
 
@@ -1385,7 +1479,9 @@ def validate_tenant_api_credential_presentment(
         "tenant_api_credential_outcome_code",
     ):
         if forbidden_name in statement:
-            errors.append(f"$: credential presentment must not include {forbidden_name}")
+            errors.append(
+                f"$: credential presentment must not include {forbidden_name}"
+            )
     return tuple(errors)
 
 
@@ -1415,7 +1511,9 @@ def validate_webhook_subscription(
             errors.append("$: replayed subscriptions must not include webhook_secret")
     elif outcome == "rejected":
         if "rejection_reason_code" not in subscription:
-            errors.append("$: rejected subscriptions must include rejection_reason_code")
+            errors.append(
+                "$: rejected subscriptions must include rejection_reason_code"
+            )
         if "webhook_secret" in subscription:
             errors.append("$: rejected subscriptions must not include webhook_secret")
     return tuple(errors)
@@ -1499,7 +1597,9 @@ def validate_webhook_subscription_presentment(
         "webhook_subscription_outcome_code",
     ):
         if forbidden_name in statement:
-            errors.append(f"$: subscription presentment must not include {forbidden_name}")
+            errors.append(
+                f"$: subscription presentment must not include {forbidden_name}"
+            )
     return tuple(errors)
 
 
@@ -1539,7 +1639,9 @@ def validate_webhook_delivery_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate delivery presentment shape plus stored-outcome actions."""
-    schema = load_json_schema(WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        WEBHOOK_DELIVERY_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
         return tuple(errors)
@@ -1548,7 +1650,11 @@ def validate_webhook_delivery_presentment(
         errors.append("$: next_operator_action must be wait or run_deliveries")
     if "delivered_at" in statement and action is not None and action != "wait":
         errors.append("$: delivered attempt must wait")
-    if "delivered_at" not in statement and action is not None and action != "run_deliveries":
+    if (
+        "delivered_at" not in statement
+        and action is not None
+        and action != "run_deliveries"
+    ):
         errors.append("$: failed attempt must run_deliveries")
     for forbidden_name in (
         "webhook_secret",
@@ -1599,10 +1705,14 @@ def validate_collection_case(
         return tuple(errors)
     outcome = collection_case.get("collection_case_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_collection_case_fields(collection_case, str(outcome)))
+        errors.extend(
+            _missing_success_collection_case_fields(collection_case, str(outcome))
+        )
     elif outcome == "rejected":
         if "rejection_reason_code" not in collection_case:
-            errors.append("$: rejected collection cases must include rejection_reason_code")
+            errors.append(
+                "$: rejected collection cases must include rejection_reason_code"
+            )
     return tuple(errors)
 
 
@@ -1634,10 +1744,14 @@ def validate_payment_intent(
         return tuple(errors)
     outcome = payment_intent.get("payment_intent_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_payment_intent_fields(payment_intent, str(outcome)))
+        errors.extend(
+            _missing_success_payment_intent_fields(payment_intent, str(outcome))
+        )
     elif outcome == "rejected":
         if "rejection_reason_code" not in payment_intent:
-            errors.append("$: rejected payment intents must include rejection_reason_code")
+            errors.append(
+                "$: rejected payment intents must include rejection_reason_code"
+            )
     return tuple(errors)
 
 
@@ -1669,10 +1783,14 @@ def validate_payment_receipt(
         return tuple(errors)
     outcome = payment_receipt.get("payment_settlement_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_payment_receipt_fields(payment_receipt, str(outcome)))
+        errors.extend(
+            _missing_success_payment_receipt_fields(payment_receipt, str(outcome))
+        )
     elif outcome == "rejected":
         if "rejection_reason_code" not in payment_receipt:
-            errors.append("$: rejected payment receipts must include rejection_reason_code")
+            errors.append(
+                "$: rejected payment receipts must include rejection_reason_code"
+            )
     return tuple(errors)
 
 
@@ -1737,12 +1855,16 @@ def validate_spend_budget_evaluation_presentment(
             try:
                 parsed = Decimal(raw_value)
                 if parsed < Decimal("0"):
-                    errors.append(f"$: {field_name} must be a non-negative exact decimal")
+                    errors.append(
+                        f"$: {field_name} must be a non-negative exact decimal"
+                    )
                 else:
                     parsed_amounts[field_name] = parsed
             except Exception:
                 errors.append(f"$: {field_name} must be an exact decimal")
-    if "budget_amount" in parsed_amounts and parsed_amounts["budget_amount"] <= Decimal("0"):
+    if "budget_amount" in parsed_amounts and parsed_amounts["budget_amount"] <= Decimal(
+        "0"
+    ):
         errors.append("$: budget_amount must be greater than zero")
     if (
         "budget_amount" in parsed_amounts
@@ -1767,7 +1889,9 @@ def validate_spend_budget_evaluation_presentment(
             expected_over = rated - budget
             expected_status = "over"
         if remaining != expected_remaining or over != expected_over:
-            errors.append("$: remaining_amount and over_amount must match budget minus rated")
+            errors.append(
+                "$: remaining_amount and over_amount must match budget minus rated"
+            )
         if utilization_status != expected_status:
             errors.append("$: utilization_status must match remaining and over")
     if status == "published" and action != "wait":
@@ -1790,7 +1914,9 @@ def validate_billing_account_budget_status_presentment(
     if not isinstance(statement, Mapping):
         return tuple(errors)
     if "rated_amount" in statement:
-        errors.append("$: budget status page must not mix currencies into one rated_amount")
+        errors.append(
+            "$: budget status page must not mix currencies into one rated_amount"
+        )
     if "card_pan" in statement:
         errors.append("$: spend budget status must not include card_pan")
     if "retained_earnings" in statement:
@@ -1827,12 +1953,16 @@ def _budget_status_row_errors(row: Mapping[str, Any], prefix: str) -> tuple[str,
             try:
                 parsed = Decimal(raw_value)
                 if parsed < Decimal("0"):
-                    errors.append(f"{prefix}: {field_name} must be a non-negative exact decimal")
+                    errors.append(
+                        f"{prefix}: {field_name} must be a non-negative exact decimal"
+                    )
                 else:
                     parsed_amounts[field_name] = parsed
             except Exception:
                 errors.append(f"{prefix}: {field_name} must be an exact decimal")
-    if "budget_amount" in parsed_amounts and parsed_amounts["budget_amount"] <= Decimal("0"):
+    if "budget_amount" in parsed_amounts and parsed_amounts["budget_amount"] <= Decimal(
+        "0"
+    ):
         errors.append(f"{prefix}: budget_amount must be greater than zero")
     if (
         "budget_amount" in parsed_amounts
@@ -1867,7 +1997,9 @@ def _budget_status_row_errors(row: Mapping[str, Any], prefix: str) -> tuple[str,
     if "card_pan" in row:
         errors.append(f"{prefix}: spend budget status must not include card_pan")
     if "retained_earnings" in row:
-        errors.append(f"{prefix}: spend budget status must not include retained_earnings")
+        errors.append(
+            f"{prefix}: spend budget status must not include retained_earnings"
+        )
     return tuple(errors)
 
 
@@ -1919,7 +2051,9 @@ def validate_spend_budget(
                 errors.append("$: published spend budgets must wait")
     elif outcome == "rejected":
         if "rejection_reason_code" not in spend_budget:
-            errors.append("$: rejected spend budgets must include rejection_reason_code")
+            errors.append(
+                "$: rejected spend budgets must include rejection_reason_code"
+            )
     if "card_pan" in spend_budget:
         errors.append("$: spend budget must not include card_pan")
     if "retained_earnings" in spend_budget:
@@ -1937,7 +2071,9 @@ def validate_spend_budget_over_signal(
         return tuple(errors)
     outcome = over_signal.get("spend_budget_over_signal_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_spend_budget_over_signal_fields(over_signal, str(outcome)))
+        errors.extend(
+            _missing_success_spend_budget_over_signal_fields(over_signal, str(outcome))
+        )
         budget_amount = over_signal.get("budget_amount")
         over_amount = over_signal.get("over_amount")
         utilization_status = over_signal.get("utilization_status")
@@ -1950,16 +2086,22 @@ def validate_spend_budget_over_signal(
                 try:
                     parsed = Decimal(raw_value)
                     if parsed < Decimal("0"):
-                        errors.append(f"$: {field_name} must be a non-negative exact decimal")
+                        errors.append(
+                            f"$: {field_name} must be a non-negative exact decimal"
+                        )
                     else:
                         parsed_amounts[field_name] = parsed
                 except Exception:
                     errors.append(f"$: {field_name} must be an exact decimal")
-        if "budget_amount" in parsed_amounts and parsed_amounts["budget_amount"] <= Decimal("0"):
+        if "budget_amount" in parsed_amounts and parsed_amounts[
+            "budget_amount"
+        ] <= Decimal("0"):
             errors.append("$: budget_amount must be greater than zero")
         if "over_amount" in parsed_amounts and utilization_status == "over":
             if parsed_amounts["over_amount"] <= Decimal("0"):
-                errors.append("$: over observations must include a positive over_amount")
+                errors.append(
+                    "$: over observations must include a positive over_amount"
+                )
         if "over_amount" in parsed_amounts and utilization_status in {"under", "at"}:
             if parsed_amounts["over_amount"] != Decimal("0"):
                 errors.append("$: under and at observations must have zero over_amount")
@@ -2030,11 +2172,15 @@ def validate_spend_budget_over_signal_presentment(
     rows = statement.get("webhook_outbox_events")
     if isinstance(rows, list):
         if len(rows) > 1:
-            errors.append("$: over-signal presentment has at most one spend_budget.over row")
+            errors.append(
+                "$: over-signal presentment has at most one spend_budget.over row"
+            )
         for index, row in enumerate(rows):
             if not isinstance(row, Mapping):
                 continue
-            errors.extend(validate_webhook_outbox_event_presentment(row, schemas_directory))
+            errors.extend(
+                validate_webhook_outbox_event_presentment(row, schemas_directory)
+            )
             event_type = row.get("event_type_code")
             if event_type is not None and event_type != "spend_budget.over":
                 errors.append(
@@ -2056,7 +2202,9 @@ def validate_spend_budget_approaching_signal(
     approaching_signal: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate approaching-signal shape plus identity, exact remaining, and utilization."""
-    schema = load_json_schema(SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, approaching_signal))
     if not isinstance(approaching_signal, Mapping):
         return tuple(errors)
@@ -2079,19 +2227,25 @@ def validate_spend_budget_approaching_signal(
                 try:
                     parsed = Decimal(raw_value)
                     if parsed < Decimal("0"):
-                        errors.append(f"$: {field_name} must be a non-negative exact decimal")
+                        errors.append(
+                            f"$: {field_name} must be a non-negative exact decimal"
+                        )
                     else:
                         parsed_amounts[field_name] = parsed
                 except Exception:
                     errors.append(f"$: {field_name} must be an exact decimal")
-        if "budget_amount" in parsed_amounts and parsed_amounts["budget_amount"] <= Decimal("0"):
+        if "budget_amount" in parsed_amounts and parsed_amounts[
+            "budget_amount"
+        ] <= Decimal("0"):
             errors.append("$: budget_amount must be greater than zero")
         if "remaining_amount" in parsed_amounts and utilization_status == "at":
             if parsed_amounts["remaining_amount"] != Decimal("0"):
                 errors.append("$: at observations must have zero remaining_amount")
         if "remaining_amount" in parsed_amounts and utilization_status == "under":
             if parsed_amounts["remaining_amount"] <= Decimal("0"):
-                errors.append("$: under observations must include a positive remaining_amount")
+                errors.append(
+                    "$: under observations must include a positive remaining_amount"
+                )
         if "remaining_amount" in parsed_amounts and utilization_status == "over":
             if parsed_amounts["remaining_amount"] != Decimal("0"):
                 errors.append("$: over observations must have zero remaining_amount")
@@ -2100,11 +2254,15 @@ def validate_spend_budget_approaching_signal(
                 errors.append("$: published spend budgets must wait")
     elif outcome == "rejected":
         if "rejection_reason_code" not in approaching_signal:
-            errors.append("$: rejected approaching signals must include rejection_reason_code")
+            errors.append(
+                "$: rejected approaching signals must include rejection_reason_code"
+            )
     if "card_pan" in approaching_signal:
         errors.append("$: spend budget approaching signal must not include card_pan")
     if "retained_earnings" in approaching_signal:
-        errors.append("$: spend budget approaching signal must not include retained_earnings")
+        errors.append(
+            "$: spend budget approaching signal must not include retained_earnings"
+        )
     if "over_amount" in approaching_signal:
         errors.append("$: spend budget approaching signal must not include over_amount")
     return tuple(errors)
@@ -2130,7 +2288,9 @@ def _missing_success_spend_budget_approaching_signal_fields(
         "spend_budget_contract_version",
     ):
         if field_name not in approaching_signal:
-            missing.append(f"$: {outcome} approaching signals must include {field_name}")
+            missing.append(
+                f"$: {outcome} approaching signals must include {field_name}"
+            )
     return tuple(missing)
 
 
@@ -2149,14 +2309,18 @@ def validate_spend_budget_approaching_signal_presentment(
     if "card_pan" in statement:
         errors.append("$: approaching-signal presentment must not include card_pan")
     if "retained_earnings" in statement:
-        errors.append("$: approaching-signal presentment must not include retained_earnings")
+        errors.append(
+            "$: approaching-signal presentment must not include retained_earnings"
+        )
     if "payload_json" in statement:
         errors.append("$: approaching-signal presentment must not include payload_json")
     approaching_signal = statement.get("approaching_signal")
     spend_budget_id = None
     if isinstance(approaching_signal, Mapping):
         errors.extend(
-            validate_spend_budget_approaching_signal(approaching_signal, schemas_directory)
+            validate_spend_budget_approaching_signal(
+                approaching_signal, schemas_directory
+            )
         )
         raw_budget_id = approaching_signal.get("spend_budget_id")
         if isinstance(raw_budget_id, str):
@@ -2170,7 +2334,9 @@ def validate_spend_budget_approaching_signal_presentment(
         for index, row in enumerate(rows):
             if not isinstance(row, Mapping):
                 continue
-            errors.extend(validate_webhook_outbox_event_presentment(row, schemas_directory))
+            errors.extend(
+                validate_webhook_outbox_event_presentment(row, schemas_directory)
+            )
             event_type = row.get("event_type_code")
             if event_type is not None and event_type != "spend_budget.approaching":
                 errors.append(
@@ -2220,7 +2386,9 @@ def validate_credit_adjustment(
         return tuple(errors)
     outcome = credit_adjustment.get("credit_adjustment_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_credit_adjustment_fields(credit_adjustment, str(outcome)))
+        errors.extend(
+            _missing_success_credit_adjustment_fields(credit_adjustment, str(outcome))
+        )
         credit_amount = credit_adjustment.get("credit_amount")
         exclusive = credit_adjustment.get("tax_exclusive_amount")
         tax_amount = credit_adjustment.get("tax_amount")
@@ -2231,12 +2399,16 @@ def validate_credit_adjustment(
         ):
             try:
                 if Decimal(exclusive) + Decimal(tax_amount) != Decimal(credit_amount):
-                    errors.append("$: tax_exclusive_amount plus tax_amount must equal credit_amount")
+                    errors.append(
+                        "$: tax_exclusive_amount plus tax_amount must equal credit_amount"
+                    )
             except Exception:
                 errors.append("$: credit tax amounts must be exact decimals")
     elif outcome == "rejected":
         if "rejection_reason_code" not in credit_adjustment:
-            errors.append("$: rejected credit adjustments must include rejection_reason_code")
+            errors.append(
+                "$: rejected credit adjustments must include rejection_reason_code"
+            )
     return tuple(errors)
 
 
@@ -2341,7 +2513,9 @@ def validate_tax_assessment(
         return tuple(errors)
     outcome = tax_assessment.get("tax_assessment_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_tax_assessment_fields(tax_assessment, str(outcome)))
+        errors.extend(
+            _missing_success_tax_assessment_fields(tax_assessment, str(outcome))
+        )
         exclusive = tax_assessment.get("tax_exclusive_amount")
         tax_amount = tax_assessment.get("tax_amount")
         inclusive = tax_assessment.get("tax_inclusive_amount")
@@ -2352,12 +2526,16 @@ def validate_tax_assessment(
         ):
             try:
                 if Decimal(exclusive) + Decimal(tax_amount) != Decimal(inclusive):
-                    errors.append("$: tax_inclusive_amount must equal exclusive plus tax")
+                    errors.append(
+                        "$: tax_inclusive_amount must equal exclusive plus tax"
+                    )
             except Exception:
                 errors.append("$: tax amounts must be exact decimals")
     elif outcome == "rejected":
         if "rejection_reason_code" not in tax_assessment:
-            errors.append("$: rejected tax assessments must include rejection_reason_code")
+            errors.append(
+                "$: rejected tax assessments must include rejection_reason_code"
+            )
     return tuple(errors)
 
 
@@ -2398,14 +2576,18 @@ def validate_issued_invoice(
     errors.extend(_forbidden_issued_invoice_field_errors(issued_invoice))
     outcome = issued_invoice.get("issued_invoice_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_issued_invoice_fields(issued_invoice, str(outcome)))
+        errors.extend(
+            _missing_success_issued_invoice_fields(issued_invoice, str(outcome))
+        )
         errors.extend(_issued_invoice_total_errors(issued_invoice))
         action = issued_invoice.get("next_operator_action")
         if action is not None and action != "collect":
             errors.append("$: issued invoice must collect")
     elif outcome == "rejected":
         if "rejection_reason_code" not in issued_invoice:
-            errors.append("$: rejected issued invoices must include rejection_reason_code")
+            errors.append(
+                "$: rejected issued invoices must include rejection_reason_code"
+            )
     return tuple(errors)
 
 
@@ -2425,7 +2607,9 @@ def validate_issued_invoice_presentment(
     return tuple(errors)
 
 
-def _forbidden_issued_invoice_field_errors(payload: Mapping[str, Any]) -> tuple[str, ...]:
+def _forbidden_issued_invoice_field_errors(
+    payload: Mapping[str, Any],
+) -> tuple[str, ...]:
     """Return diagnostics when a commercial snapshot invents numbering or PAN."""
     errors: list[str] = []
     for field_name in FORBIDDEN_ISSUED_INVOICE_FIELDS:
@@ -2512,14 +2696,18 @@ def validate_issued_credit_note(
     errors.extend(_forbidden_issued_credit_note_field_errors(issued_credit_note))
     outcome = issued_credit_note.get("issued_credit_note_outcome_code")
     if outcome == "accepted" or outcome == "duplicate_replay":
-        errors.extend(_missing_success_issued_credit_note_fields(issued_credit_note, str(outcome)))
+        errors.extend(
+            _missing_success_issued_credit_note_fields(issued_credit_note, str(outcome))
+        )
         errors.extend(_issued_credit_note_total_errors(issued_credit_note))
         action = issued_credit_note.get("next_operator_action")
         if action is not None and action != "wait":
             errors.append("$: issued credit note must wait")
     elif outcome == "rejected":
         if "rejection_reason_code" not in issued_credit_note:
-            errors.append("$: rejected issued credit notes must include rejection_reason_code")
+            errors.append(
+                "$: rejected issued credit notes must include rejection_reason_code"
+            )
     return tuple(errors)
 
 
@@ -2527,7 +2715,9 @@ def validate_issued_credit_note_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
     """Validate issued-credit-note presentment shape plus exact money invariants."""
-    schema = load_json_schema(ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME, schemas_directory
+    )
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
         return tuple(errors)
@@ -2662,7 +2852,9 @@ def validate_collection_case_settlement(
                 if Decimal(remaining) != Decimal("0"):
                     errors.append("$: remaining_outstanding_amount must be exact zero")
             except Exception:
-                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+                errors.append(
+                    "$: remaining_outstanding_amount must be an exact decimal"
+                )
         elif remaining is not None:
             errors.append("$: remaining_outstanding_amount must be an exact decimal")
         for forbidden_name in (
@@ -2757,14 +2949,18 @@ def validate_collection_write_off(
                 if Decimal(remaining) != Decimal("0"):
                     errors.append("$: remaining_outstanding_amount must be exact zero")
             except Exception:
-                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+                errors.append(
+                    "$: remaining_outstanding_amount must be an exact decimal"
+                )
         elif remaining is not None:
             errors.append("$: remaining_outstanding_amount must be an exact decimal")
         write_off_amount = write_off.get("write_off_amount")
         if isinstance(write_off_amount, str):
             try:
                 if Decimal(write_off_amount) <= Decimal("0"):
-                    errors.append("$: write_off_amount must be a positive exact decimal")
+                    errors.append(
+                        "$: write_off_amount must be a positive exact decimal"
+                    )
             except Exception:
                 errors.append("$: write_off_amount must be an exact decimal")
         elif write_off_amount is not None:
@@ -2867,9 +3063,13 @@ def validate_collection_dispute(
         if isinstance(remaining, str):
             try:
                 if Decimal(remaining) < Decimal("0"):
-                    errors.append("$: remaining_outstanding_amount must be a non-negative exact decimal")
+                    errors.append(
+                        "$: remaining_outstanding_amount must be a non-negative exact decimal"
+                    )
             except Exception:
-                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+                errors.append(
+                    "$: remaining_outstanding_amount must be an exact decimal"
+                )
         elif remaining is not None:
             errors.append("$: remaining_outstanding_amount must be an exact decimal")
         for forbidden_name in (
@@ -2909,7 +3109,9 @@ def validate_collection_dispute_presentment(
     elif isinstance(remaining, str):
         try:
             if Decimal(remaining) < Decimal("0"):
-                errors.append("$: remaining_outstanding_amount must be a non-negative exact decimal")
+                errors.append(
+                    "$: remaining_outstanding_amount must be a non-negative exact decimal"
+                )
             if action != "wait":
                 errors.append("$: dispute presentment must wait")
         except Exception:
@@ -2959,9 +3161,13 @@ def validate_collection_dispute_release(
         if isinstance(remaining, str):
             try:
                 if Decimal(remaining) < Decimal("0"):
-                    errors.append("$: remaining_outstanding_amount must be a non-negative exact decimal")
+                    errors.append(
+                        "$: remaining_outstanding_amount must be a non-negative exact decimal"
+                    )
             except Exception:
-                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+                errors.append(
+                    "$: remaining_outstanding_amount must be an exact decimal"
+                )
         elif remaining is not None:
             errors.append("$: remaining_outstanding_amount must be an exact decimal")
         for forbidden_name in (
@@ -3001,7 +3207,9 @@ def validate_collection_dispute_release_presentment(
     elif isinstance(remaining, str):
         try:
             if Decimal(remaining) < Decimal("0"):
-                errors.append("$: remaining_outstanding_amount must be a non-negative exact decimal")
+                errors.append(
+                    "$: remaining_outstanding_amount must be a non-negative exact decimal"
+                )
             if action != "wait":
                 errors.append("$: dispute release presentment must wait")
         except Exception:
@@ -3052,7 +3260,9 @@ def validate_issued_invoice_void(
                 if Decimal(remaining) != Decimal("0"):
                     errors.append("$: remaining_outstanding_amount must be exact zero")
             except Exception:
-                errors.append("$: remaining_outstanding_amount must be an exact decimal")
+                errors.append(
+                    "$: remaining_outstanding_amount must be an exact decimal"
+                )
         elif remaining is not None:
             errors.append("$: remaining_outstanding_amount must be an exact decimal")
         voided_amount = void_row.get("voided_amount")
@@ -3258,7 +3468,9 @@ def validate_unapplied_cash(
         if isinstance(unapplied_amount, str):
             try:
                 if Decimal(unapplied_amount) <= Decimal("0"):
-                    errors.append("$: unapplied_amount must be a positive exact decimal")
+                    errors.append(
+                        "$: unapplied_amount must be a positive exact decimal"
+                    )
             except Exception:
                 errors.append("$: unapplied_amount must be an exact decimal")
         elif unapplied_amount is not None:
@@ -3272,7 +3484,9 @@ def validate_unapplied_cash(
                 errors.append(f"$: unapplied cash must not include {forbidden_name}")
     elif outcome == "rejected":
         if "rejection_reason_code" not in leftover:
-            errors.append("$: rejected unapplied cash must include rejection_reason_code")
+            errors.append(
+                "$: rejected unapplied cash must include rejection_reason_code"
+            )
         if "legal_invoice_number" in leftover:
             errors.append("$: rejected unapplied cash must not invent legal numbers")
         if "legal_credit_note_number" in leftover:
@@ -3489,11 +3703,8 @@ def validate_unapplied_cash_refund_presentment(
 def validate_unapplied_cash_presentment(
     statement: Any, schemas_directory: Path | None = None
 ) -> tuple[str, ...]:
-
     """Validate leftover presentment plus exact parked-amount invariants."""
-    schema = load_json_schema(
-        UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME, schemas_directory
-    )
+    schema = load_json_schema(UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME, schemas_directory)
     errors = list(validate_schema_instance(schema, statement))
     if not isinstance(statement, Mapping):
         return tuple(errors)
@@ -3526,7 +3737,9 @@ def validate_unapplied_cash_presentment(
     return tuple(errors)
 
 
-def _forbidden_issued_credit_note_field_errors(payload: Mapping[str, Any]) -> tuple[str, ...]:
+def _forbidden_issued_credit_note_field_errors(
+    payload: Mapping[str, Any],
+) -> tuple[str, ...]:
     """Return diagnostics when a commercial snapshot invents numbering or PAN."""
     errors: list[str] = []
     for field_name in FORBIDDEN_ISSUED_CREDIT_NOTE_FIELDS:
@@ -3558,7 +3771,9 @@ def _missing_success_issued_credit_note_fields(
         "next_operator_action",
     ):
         if field_name not in issued_credit_note:
-            missing.append(f"$: {outcome} issued credit notes must include {field_name}")
+            missing.append(
+                f"$: {outcome} issued credit notes must include {field_name}"
+            )
     return tuple(missing)
 
 
@@ -3603,5 +3818,7 @@ def validate_journal_proposal(
     The helper is a consumer of the existing accounting contract.  It does not
     assign statutory account IDs and it continues to reject ``posted``.
     """
-    schema = load_json_schema(ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME, schemas_directory)
+    schema = load_json_schema(
+        ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME, schemas_directory
+    )
     return validate_accounting_journal_proposal(schema, proposal)

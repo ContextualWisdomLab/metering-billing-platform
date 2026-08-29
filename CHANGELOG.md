@@ -16,6 +16,10 @@
 
 ### Added
 
+- Issue #87 now records immutable closed-period late usage, correction, and
+  reversal facts in PostgreSQL migration `0048`. Source periods are not
+  rewritten; target-period ordering, tenant identity, exact signed amounts,
+  replay conflicts, and update/delete immutability are enforced (ADR 0132).
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

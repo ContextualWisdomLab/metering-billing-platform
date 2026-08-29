@@ -16,6 +16,8 @@ from metering_billing import (
     BillingPeriodTransition,
     FxRate,
     FxRateType,
+    LateAdjustment,
+    LateAdjustmentKind,
     PeriodCloseValidationError,
     ReconciliationException,
     ReconciliationExceptionAgingBucket,
@@ -31,9 +33,11 @@ from metering_billing import (
     convert_currency_amount,
     create_billing_period,
     create_fx_rate,
+    create_late_adjustment,
     validate_billing_period,
     validate_fx_conversion,
     validate_fx_rate,
+    validate_late_adjustment,
     validate_reconciliation_line,
     validate_reconciliation_evidence,
     validate_reconciliation_exception_aging,
@@ -96,7 +100,9 @@ class BillingPeriodTests(unittest.TestCase):
                 authorization_reference=f"approval:period_{offset:03d}",
                 reason=f"period transition {offset}",
                 transitioned_at=OPENED_AT + timedelta(hours=offset),
-                transition_id=UUID(f"019d7b92-1aa0-7a7f-b61c-962c0f4bf6{20 + offset:02d}"),
+                transition_id=UUID(
+                    f"019d7b92-1aa0-7a7f-b61c-962c0f4bf6{20 + offset:02d}"
+                ),
             )
         self.assertEqual(original.status, BillingPeriodStatus.OPEN)
         self.assertEqual(period.status, BillingPeriodStatus.HARD_CLOSED)
@@ -339,7 +345,77 @@ class BillingPeriodTests(unittest.TestCase):
             OPENED_AT - timedelta(seconds=1),
         )
         with self.assertRaises(PeriodCloseValidationError):
-            replace(make_period(), status=BillingPeriodStatus.SOFT_CLOSED, transitions=(valid,))
+            replace(
+                make_period(),
+                status=BillingPeriodStatus.SOFT_CLOSED,
+                transitions=(valid,),
+            )
+
+
+class LateAdjustmentTests(unittest.TestCase):
+    """Verify signed corrections preserve the closed-period boundary."""
+
+    def test_adjustment_is_exact_and_schema_valid(self) -> None:
+        """A negative reversal remains exact and carries opaque source evidence."""
+        adjustment = create_late_adjustment(
+            PERIOD_ID,
+            UUID("019d7b92-1aa0-7a7f-b61c-962c0f4bf623"),
+            LateAdjustmentKind.REVERSAL,
+            "-12.3400",
+            "USD",
+            "provider:event_001",
+            "sha256:" + "a" * 64,
+            datetime.now(UTC) - timedelta(minutes=1),
+        )
+        self.assertIsInstance(adjustment, LateAdjustment)
+        self.assertEqual(adjustment.adjustment_kind, LateAdjustmentKind.REVERSAL)
+        self.assertEqual(adjustment.adjustment_amount, Decimal("-12.3400"))
+        self.assertEqual(validate_late_adjustment(adjustment.as_contract_dict()), ())
+        self.assertEqual(adjustment.as_contract_dict()["adjustment_amount"], "-12.3400")
+
+    def test_adjustment_rejects_invalid_fields_and_contract_projection(self) -> None:
+        """Zero, malformed, future, and cross-period-invalid values fail closed."""
+        values = {
+            "late_adjustment_id": uuid4(),
+            "source_period_id": PERIOD_ID,
+            "target_period_id": UUID("019d7b92-1aa0-7a7f-b61c-962c0f4bf623"),
+            "adjustment_kind": LateAdjustmentKind.CORRECTION,
+            "adjustment_amount": "1",
+            "currency_code": "USD",
+            "source_reference": "provider:event_002",
+            "source_payload_hash": "sha256:" + "b" * 64,
+            "recorded_at": datetime.now(UTC) - timedelta(minutes=1),
+        }
+        invalid = (
+            {"source_period_id": values["target_period_id"]},
+            {"adjustment_kind": "unsupported"},
+            {"adjustment_amount": "0"},
+            {"adjustment_amount": 1.2},
+            {"currency_code": "usd"},
+            {"source_reference": ""},
+            {"source_payload_hash": "not-a-hash"},
+            {"recorded_at": datetime.now()},
+            {"late_adjustment_id": "not-a-uuid"},
+            {"late_adjustment_contract_version": 0},
+        )
+        for override in invalid:
+            with (
+                self.subTest(override=override),
+                self.assertRaises(PeriodCloseValidationError),
+            ):
+                LateAdjustment(**(values | override))  # type: ignore[arg-type]
+        self.assertTrue(
+            validate_late_adjustment(values | {"adjustment_kind": "unsupported"})
+        )
+        self.assertTrue(
+            validate_late_adjustment(
+                values
+                | {
+                    "source_period_id": str(values["target_period_id"]),
+                    "target_period_id": str(values["target_period_id"]),
+                }
+            )
+        )
 
 
 class FxContractTests(unittest.TestCase):
@@ -360,9 +436,13 @@ class FxContractTests(unittest.TestCase):
         self.assertEqual(conversion.rate, rate.rate)
         self.assertEqual(conversion.fx_rate_id, rate.fx_rate_id)
         self.assertEqual(validate_fx_conversion(conversion.as_contract_dict()), ())
-        self.assertEqual(conversion.as_contract_dict()["rounding_mode"], "ROUND_HALF_UP")
+        self.assertEqual(
+            conversion.as_contract_dict()["rounding_mode"], "ROUND_HALF_UP"
+        )
 
-    def test_conversion_supports_two_three_four_decimals_and_negative_adjustment(self) -> None:
+    def test_conversion_supports_two_three_four_decimals_and_negative_adjustment(
+        self,
+    ) -> None:
         """Currency scales are explicit and signed adjustments remain exact."""
         rate = create_fx_rate(
             "provider:fx_002",
@@ -374,10 +454,18 @@ class FxContractTests(unittest.TestCase):
             OPENED_AT,
             OPENED_AT,
         )
-        self.assertEqual(convert_currency_amount("1", "USD", 2, rate).quote_amount, Decimal("1.01"))
-        self.assertEqual(convert_currency_amount("1", "USD", 3, rate).quote_amount, Decimal("1.005"))
-        self.assertEqual(convert_currency_amount("1", "USD", 4, rate).quote_amount, Decimal("1.0050"))
-        self.assertEqual(convert_currency_amount("-1", "USD", 2, rate).quote_amount, Decimal("-1.01"))
+        self.assertEqual(
+            convert_currency_amount("1", "USD", 2, rate).quote_amount, Decimal("1.01")
+        )
+        self.assertEqual(
+            convert_currency_amount("1", "USD", 3, rate).quote_amount, Decimal("1.005")
+        )
+        self.assertEqual(
+            convert_currency_amount("1", "USD", 4, rate).quote_amount, Decimal("1.0050")
+        )
+        self.assertEqual(
+            convert_currency_amount("-1", "USD", 2, rate).quote_amount, Decimal("-1.01")
+        )
 
     def test_large_conversion_rounds_only_after_exact_multiplication(self) -> None:
         """Large but schema-valid fixed-point values do not inherit context rounding."""
@@ -394,7 +482,9 @@ class FxContractTests(unittest.TestCase):
         source = Decimal("9999999999")
         with localcontext() as context:
             context.prec = 100
-            expected = (source * rate.rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            expected = (source * rate.rate).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
         conversion = convert_currency_amount(source, "USD", 0, rate)
         self.assertEqual(conversion.quote_amount, expected)
         self.assertEqual(validate_fx_conversion(conversion.as_contract_dict()), ())
@@ -402,23 +492,91 @@ class FxContractTests(unittest.TestCase):
     def test_rate_and_conversion_reject_bad_inputs(self) -> None:
         """No float, invalid currency, zero rate, or under-specified precision crosses the boundary."""
         with self.assertRaises(PeriodCloseValidationError):
-            create_fx_rate("", FxRateType.SPOT, "USD", "EUR", "1", 0, OPENED_AT, OPENED_AT)
+            create_fx_rate(
+                "", FxRateType.SPOT, "USD", "EUR", "1", 0, OPENED_AT, OPENED_AT
+            )
         with self.assertRaises(PeriodCloseValidationError):
-            create_fx_rate("provider:fx", "bad", "USD", "EUR", "1", 0, OPENED_AT, OPENED_AT)  # type: ignore[arg-type]
+            create_fx_rate(
+                "provider:fx", "bad", "USD", "EUR", "1", 0, OPENED_AT, OPENED_AT
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
-            create_fx_rate("provider:fx", FxRateType.SPOT, "usd", "EUR", "1", 0, OPENED_AT, OPENED_AT)
+            create_fx_rate(
+                "provider:fx",
+                FxRateType.SPOT,
+                "usd",
+                "EUR",
+                "1",
+                0,
+                OPENED_AT,
+                OPENED_AT,
+            )
         with self.assertRaises(PeriodCloseValidationError):
-            create_fx_rate("provider:fx", FxRateType.SPOT, "USD", "EUR", "0", 0, OPENED_AT, OPENED_AT)
+            create_fx_rate(
+                "provider:fx",
+                FxRateType.SPOT,
+                "USD",
+                "EUR",
+                "0",
+                0,
+                OPENED_AT,
+                OPENED_AT,
+            )
         with self.assertRaises(PeriodCloseValidationError):
-            create_fx_rate("provider:fx", FxRateType.SPOT, "USD", "EUR", -1, 0, OPENED_AT, OPENED_AT)  # type: ignore[arg-type]
+            create_fx_rate(
+                "provider:fx",
+                FxRateType.SPOT,
+                "USD",
+                "EUR",
+                -1,
+                0,
+                OPENED_AT,
+                OPENED_AT,
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
-            create_fx_rate("provider:fx", FxRateType.SPOT, "USD", "EUR", "1.2345", 3, OPENED_AT, OPENED_AT)
+            create_fx_rate(
+                "provider:fx",
+                FxRateType.SPOT,
+                "USD",
+                "EUR",
+                "1.2345",
+                3,
+                OPENED_AT,
+                OPENED_AT,
+            )
         with self.assertRaises(PeriodCloseValidationError):
-            create_fx_rate("provider:fx", FxRateType.SPOT, "USD", "EUR", "1", True, OPENED_AT, OPENED_AT)  # type: ignore[arg-type]
+            create_fx_rate(
+                "provider:fx",
+                FxRateType.SPOT,
+                "USD",
+                "EUR",
+                "1",
+                True,
+                OPENED_AT,
+                OPENED_AT,
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
-            create_fx_rate("provider:fx", FxRateType.SPOT, "USD", "EUR", "1", 0, datetime(2026, 8, 1), OPENED_AT)
+            create_fx_rate(
+                "provider:fx",
+                FxRateType.SPOT,
+                "USD",
+                "EUR",
+                "1",
+                0,
+                datetime(2026, 8, 1),
+                OPENED_AT,
+            )
         with self.assertRaises(PeriodCloseValidationError):
-            FxRate("not-a-uuid", "provider:fx", FxRateType.SPOT, "USD", "EUR", Decimal("1"), 0, OPENED_AT, OPENED_AT)  # type: ignore[arg-type]
+            FxRate(
+                "not-a-uuid",
+                "provider:fx",
+                FxRateType.SPOT,
+                "USD",
+                "EUR",
+                Decimal("1"),
+                0,
+                OPENED_AT,
+                OPENED_AT,
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
             convert_currency_amount("1", "EUR", 2, make_rate())
         with self.assertRaises(PeriodCloseValidationError):
@@ -509,7 +667,10 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(exception.exception_code for exception in price.exceptions),
-            (ReconciliationExceptionCode.CURRENCY_MISMATCH, ReconciliationExceptionCode.PRICE_MISMATCH),
+            (
+                ReconciliationExceptionCode.CURRENCY_MISMATCH,
+                ReconciliationExceptionCode.PRICE_MISMATCH,
+            ),
         )
         fee = assess_reconciliation_line(
             PERIOD_ID,
@@ -524,7 +685,10 @@ class ReconciliationTests(unittest.TestCase):
             provider_currency_code="USD",
             cash_currency_code="USD",
         )
-        self.assertEqual(fee.exceptions[0].exception_code, ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH)
+        self.assertEqual(
+            fee.exceptions[0].exception_code,
+            ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH,
+        )
         settlement = assess_reconciliation_line(
             PERIOD_ID,
             "provider_account:001",
@@ -538,7 +702,10 @@ class ReconciliationTests(unittest.TestCase):
             provider_currency_code="USD",
             cash_currency_code="USD",
         )
-        self.assertEqual(settlement.exceptions[0].exception_code, ReconciliationExceptionCode.SETTLEMENT_MISMATCH)
+        self.assertEqual(
+            settlement.exceptions[0].exception_code,
+            ReconciliationExceptionCode.SETTLEMENT_MISMATCH,
+        )
         self.assertEqual(validate_reconciliation_line(price.as_contract_dict()), ())
 
     def test_exception_aging_is_reproducible_from_line_assessment(self) -> None:
@@ -575,7 +742,8 @@ class ReconciliationTests(unittest.TestCase):
                 self.assertEqual(aging.age_days, age_days)
                 self.assertEqual(aging.aging_bucket, bucket)
                 self.assertEqual(
-                    validate_reconciliation_exception_aging(aging.as_contract_dict()), ()
+                    validate_reconciliation_exception_aging(aging.as_contract_dict()),
+                    (),
                 )
 
         aging = age_reconciliation_exception(
@@ -601,7 +769,9 @@ class ReconciliationTests(unittest.TestCase):
             replace(aging, reconciliation_exception_aging_contract_version=0)
         self.assertTrue(validate_reconciliation_exception_aging(None))
         with self.assertRaises(PeriodCloseValidationError):
-            age_reconciliation_exception(object(), ReconciliationExceptionCode.PRICE_MISMATCH, OPENED_AT)  # type: ignore[arg-type]
+            age_reconciliation_exception(
+                object(), ReconciliationExceptionCode.PRICE_MISMATCH, OPENED_AT
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
             age_reconciliation_exception(line, "unsupported", OPENED_AT)
         with self.assertRaises(PeriodCloseValidationError):
@@ -654,11 +824,16 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(
-                ReconciliationException(code, period_close_module._NEXT_ACTIONS[code]).as_contract_dict()
+                ReconciliationException(
+                    code, period_close_module._NEXT_ACTIONS[code]
+                ).as_contract_dict()
                 for code in codes
             ),
             tuple(
-                {"exception_code": code.value, "next_action": period_close_module._NEXT_ACTIONS[code]}
+                {
+                    "exception_code": code.value,
+                    "next_action": period_close_module._NEXT_ACTIONS[code],
+                }
                 for code in codes
             ),
         )
@@ -679,11 +854,15 @@ class ReconciliationTests(unittest.TestCase):
             exceptions=(
                 ReconciliationException(
                     ReconciliationExceptionCode.TAX_MISMATCH,
-                    period_close_module._NEXT_ACTIONS[ReconciliationExceptionCode.TAX_MISMATCH],
+                    period_close_module._NEXT_ACTIONS[
+                        ReconciliationExceptionCode.TAX_MISMATCH
+                    ],
                 ),
             ),
         )
-        self.assertEqual(validate_reconciliation_line(expanded_line.as_contract_dict()), ())
+        self.assertEqual(
+            validate_reconciliation_line(expanded_line.as_contract_dict()), ()
+        )
 
     def test_period_close_fact_versions_are_positive_integers(self) -> None:
         """Every published period-close fact rejects schema-invalid versions."""
@@ -754,18 +933,22 @@ class ReconciliationTests(unittest.TestCase):
         period = make_period().as_contract_dict()
         period["period_status"] = "hard_closed"
         self.assertTrue(validate_billing_period(period))
-        reconciled = make_period().advance(
-            BillingPeriodStatus.SOFT_CLOSED,
-            actor_reference="operator:finance_001",
-            authorization_reference="approval:period_001",
-            reason="soft close",
-            transitioned_at=OPENED_AT + timedelta(hours=1),
-        ).advance(
-            BillingPeriodStatus.RECONCILED,
-            actor_reference="operator:finance_002",
-            authorization_reference="approval:period_002",
-            reason="reconcile",
-            transitioned_at=OPENED_AT + timedelta(hours=2),
+        reconciled = (
+            make_period()
+            .advance(
+                BillingPeriodStatus.SOFT_CLOSED,
+                actor_reference="operator:finance_001",
+                authorization_reference="approval:period_001",
+                reason="soft close",
+                transitioned_at=OPENED_AT + timedelta(hours=1),
+            )
+            .advance(
+                BillingPeriodStatus.RECONCILED,
+                actor_reference="operator:finance_002",
+                authorization_reference="approval:period_002",
+                reason="reconcile",
+                transitioned_at=OPENED_AT + timedelta(hours=2),
+            )
         )
         invalid_transition = reconciled.as_contract_dict()
         invalid_transition["transitions"][1]["from_status"] = "open"
@@ -780,7 +963,9 @@ class ReconciliationTests(unittest.TestCase):
         rate["rate"] = "0"
         self.assertTrue(validate_fx_rate(rate))
 
-        conversion = convert_currency_amount("1", "USD", 2, make_rate()).as_contract_dict()
+        conversion = convert_currency_amount(
+            "1", "USD", 2, make_rate()
+        ).as_contract_dict()
         conversion["quote_amount"] = "1.00"
         self.assertTrue(validate_fx_conversion(conversion))
 
@@ -803,21 +988,101 @@ class ReconciliationTests(unittest.TestCase):
         self.assertTrue(validate_fx_conversion({}))
         self.assertTrue(validate_reconciliation_line({}))
 
-    def test_reconciliation_rejects_bad_amounts_and_inconsistent_documents(self) -> None:
+    def test_reconciliation_rejects_bad_amounts_and_inconsistent_documents(
+        self,
+    ) -> None:
         """Provider fees cannot be negative and frozen line invariants are checked."""
         with self.assertRaises(PeriodCloseValidationError):
-            assess_reconciliation_line("not-a-uuid", "provider_account:001", "USD", "1", "1", "1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")  # type: ignore[arg-type]
+            assess_reconciliation_line(
+                "not-a-uuid",
+                "provider_account:001",
+                "USD",
+                "1",
+                "1",
+                "1",
+                assessed_at=OPENED_AT,
+                internal_currency_code="USD",
+                provider_currency_code="USD",
+                cash_currency_code="USD",
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
-            assess_reconciliation_line(PERIOD_ID, "", "USD", "1", "1", "1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
+            assess_reconciliation_line(
+                PERIOD_ID,
+                "",
+                "USD",
+                "1",
+                "1",
+                "1",
+                assessed_at=OPENED_AT,
+                internal_currency_code="USD",
+                provider_currency_code="USD",
+                cash_currency_code="USD",
+            )
         with self.assertRaises(PeriodCloseValidationError):
-            assess_reconciliation_line(PERIOD_ID, "provider_account:001", "usd", "1", "1", "1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
+            assess_reconciliation_line(
+                PERIOD_ID,
+                "provider_account:001",
+                "usd",
+                "1",
+                "1",
+                "1",
+                assessed_at=OPENED_AT,
+                internal_currency_code="USD",
+                provider_currency_code="USD",
+                cash_currency_code="USD",
+            )
         with self.assertRaises(PeriodCloseValidationError):
-            assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", 1.0, "1", "1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")  # type: ignore[arg-type]
+            assess_reconciliation_line(
+                PERIOD_ID,
+                "provider_account:001",
+                "USD",
+                1.0,
+                "1",
+                "1",
+                assessed_at=OPENED_AT,
+                internal_currency_code="USD",
+                provider_currency_code="USD",
+                cash_currency_code="USD",
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
-            assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", provider_fee_amount="-1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
+            assess_reconciliation_line(
+                PERIOD_ID,
+                "provider_account:001",
+                "USD",
+                "1",
+                "1",
+                "1",
+                provider_fee_amount="-1",
+                assessed_at=OPENED_AT,
+                internal_currency_code="USD",
+                provider_currency_code="USD",
+                cash_currency_code="USD",
+            )
         with self.assertRaises(PeriodCloseValidationError):
-            assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", assessed_at=datetime(2026, 8, 1), internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
-        matched = assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
+            assess_reconciliation_line(
+                PERIOD_ID,
+                "provider_account:001",
+                "USD",
+                "1",
+                "1",
+                "1",
+                assessed_at=datetime(2026, 8, 1),
+                internal_currency_code="USD",
+                provider_currency_code="USD",
+                cash_currency_code="USD",
+            )
+        matched = assess_reconciliation_line(
+            PERIOD_ID,
+            "provider_account:001",
+            "USD",
+            "1",
+            "1",
+            "1",
+            assessed_at=OPENED_AT,
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, reconciliation_line_id="not-a-uuid")  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
@@ -827,9 +1092,20 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, status=ReconciliationLineStatus.EXCEPTION)
         with self.assertRaises(PeriodCloseValidationError):
-            replace(matched, exceptions=[ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect")])  # type: ignore[arg-type]
+            replace(
+                matched,
+                exceptions=[
+                    ReconciliationException(
+                        ReconciliationExceptionCode.PRICE_MISMATCH, "inspect"
+                    )
+                ],
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
-            replace(matched, exceptions=(object(),), status=ReconciliationLineStatus.EXCEPTION)  # type: ignore[arg-type]
+            replace(
+                matched,
+                exceptions=(object(),),
+                status=ReconciliationLineStatus.EXCEPTION,
+            )  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, status="bad")  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
@@ -839,11 +1115,15 @@ class ReconciliationTests(unittest.TestCase):
                 exceptions=(
                     ReconciliationException(
                         ReconciliationExceptionCode.PRICE_MISMATCH,
-                        period_close_module._NEXT_ACTIONS[ReconciliationExceptionCode.PRICE_MISMATCH],
+                        period_close_module._NEXT_ACTIONS[
+                            ReconciliationExceptionCode.PRICE_MISMATCH
+                        ],
                     ),
                     ReconciliationException(
                         ReconciliationExceptionCode.PRICE_MISMATCH,
-                        period_close_module._NEXT_ACTIONS[ReconciliationExceptionCode.PRICE_MISMATCH],
+                        period_close_module._NEXT_ACTIONS[
+                            ReconciliationExceptionCode.PRICE_MISMATCH
+                        ],
                     ),
                 ),
             )
@@ -859,7 +1139,9 @@ class ReconciliationTests(unittest.TestCase):
                 exceptions=(
                     ReconciliationException(
                         ReconciliationExceptionCode.PRICE_MISMATCH,
-                        period_close_module._NEXT_ACTIONS[ReconciliationExceptionCode.PRICE_MISMATCH],
+                        period_close_module._NEXT_ACTIONS[
+                            ReconciliationExceptionCode.PRICE_MISMATCH
+                        ],
                     ),
                 ),
                 status=ReconciliationLineStatus.EXCEPTION,
@@ -880,7 +1162,9 @@ class ReconciliationTests(unittest.TestCase):
             checker_reference="operator:finance_002",
             resolved_at=OPENED_AT,
         )
-        self.assertEqual(validate_reconciliation_resolution(resolution.as_contract_dict()), ())
+        self.assertEqual(
+            validate_reconciliation_resolution(resolution.as_contract_dict()), ()
+        )
         with self.assertRaises(PeriodCloseValidationError):
             replace(
                 resolution,
@@ -918,7 +1202,9 @@ class ReconciliationTests(unittest.TestCase):
             captured_by="operator:finance_001",
             captured_at=OPENED_AT,
         )
-        self.assertEqual(validate_reconciliation_evidence(evidence.as_contract_dict()), ())
+        self.assertEqual(
+            validate_reconciliation_evidence(evidence.as_contract_dict()), ()
+        )
         with self.assertRaises(PeriodCloseValidationError):
             replace(evidence, evidence_id="not-a-uuid")  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):

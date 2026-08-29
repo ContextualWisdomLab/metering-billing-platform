@@ -36,6 +36,7 @@ from metering_billing.period_close import (
     BillingPeriodTransition,
     FxConversion,
     FxRate,
+    LateAdjustment,
     ReconciliationException,
     ReconciliationExceptionAging,
     ReconciliationEvidence,
@@ -195,7 +196,9 @@ class PostgresUsageLedger:
         ad-hoc PostgreSQL connection beside the ledger's own session.
         """
         with self._cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) FROM public.metering_billing_schema_migration")
+            cursor.execute(
+                "SELECT COUNT(*) FROM public.metering_billing_schema_migration"
+            )
             row = cursor.fetchone()
         if row is None:  # pragma: no cover - COUNT(*) always returns one row
             raise RuntimeError("migration history count did not return a row")
@@ -206,7 +209,9 @@ class PostgresUsageLedger:
     ) -> BillingPeriod | None:
         """Return one tenant-scoped period aggregate with its transition history."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             return self._fetch_billing_period(
                 cursor, period_id, tenant_account_id=tenant_account_id
             )
@@ -214,6 +219,114 @@ class PostgresUsageLedger:
     def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
         """Persist a period and append only transitions not already stored."""
         return self._insert_billing_period(period, allow_reconciled=False)
+
+    def get_late_adjustment(
+        self, tenant_reference: str, late_adjustment_id: UUID
+    ) -> LateAdjustment | None:
+        """Return one tenant-scoped immutable later-period adjustment."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
+            return self._fetch_late_adjustment(
+                cursor, late_adjustment_id, tenant_account_id
+            )
+
+    def insert_late_adjustment(
+        self, tenant_reference: str, adjustment: LateAdjustment
+    ) -> LateAdjustment:
+        """Persist one correction without rewriting either billing-period snapshot."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
+            cursor.execute(
+                """
+                INSERT INTO billing_core.late_adjustment
+                    (late_adjustment_id, tenant_account_id, source_period_id,
+                     target_period_id, adjustment_kind, adjustment_amount,
+                     currency_code, source_reference, source_payload_hash,
+                     recorded_at, late_adjustment_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING late_adjustment_id
+                """,
+                (
+                    adjustment.late_adjustment_id,
+                    tenant_account_id,
+                    adjustment.source_period_id,
+                    adjustment.target_period_id,
+                    adjustment.adjustment_kind.value,
+                    adjustment.adjustment_amount,
+                    adjustment.currency_code,
+                    adjustment.source_reference,
+                    adjustment.source_payload_hash,
+                    adjustment.recorded_at,
+                    adjustment.late_adjustment_contract_version,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT late_adjustment_id
+                    FROM billing_core.late_adjustment
+                    WHERE tenant_account_id = %s
+                      AND source_period_id = %s
+                      AND target_period_id = %s
+                      AND adjustment_kind = %s
+                      AND source_payload_hash = %s
+                      AND late_adjustment_contract_version = %s
+                    """,
+                    (
+                        tenant_account_id,
+                        adjustment.source_period_id,
+                        adjustment.target_period_id,
+                        adjustment.adjustment_kind.value,
+                        adjustment.source_payload_hash,
+                        adjustment.late_adjustment_contract_version,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        "late adjustment identity conflicts with an existing row"
+                    )
+            stored = self._fetch_late_adjustment(
+                cursor, UUID(str(row[0])), tenant_account_id
+            )
+            if (
+                stored is None
+            ):  # pragma: no cover - the insert or conflict exposes a row
+                raise RuntimeError("late adjustment insert did not return a row")
+            if stored.as_contract_dict() != adjustment.as_contract_dict():
+                raise ValueError("late adjustment identity cannot change")
+            return stored
+
+    def list_late_adjustments(
+        self, tenant_reference: str
+    ) -> tuple[LateAdjustment, ...]:
+        """Return later-period adjustments ordered by their recorded evidence time."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
+            cursor.execute(
+                """
+                SELECT late_adjustment_id
+                FROM billing_core.late_adjustment
+                WHERE tenant_account_id = %s
+                ORDER BY recorded_at, late_adjustment_id
+                """,
+                (tenant_account_id,),
+            )
+            adjustments = tuple(
+                self._fetch_late_adjustment(
+                    cursor, UUID(str(row[0])), tenant_account_id
+                )
+                for row in cursor.fetchall()
+            )
+        return tuple(item for item in adjustments if item is not None)
 
     def _insert_billing_period(
         self, period: BillingPeriod, *, allow_reconciled: bool
@@ -242,7 +355,9 @@ class PostgresUsageLedger:
                 ),
             )
             existing = self._fetch_billing_period(cursor, period.period_id, lock=True)
-            if existing is None:  # pragma: no cover - the insert or conflict must expose a row
+            if (
+                existing is None
+            ):  # pragma: no cover - the insert or conflict must expose a row
                 raise RuntimeError("billing period insert did not return a row")
             if (
                 existing.tenant_reference != period.tenant_reference
@@ -252,10 +367,14 @@ class PostgresUsageLedger:
                 or existing.opened_by != period.opened_by
                 or existing.period_contract_version != period.period_contract_version
             ):
-                raise ValueError("billing period identity cannot change after persistence")
+                raise ValueError(
+                    "billing period identity cannot change after persistence"
+                )
             prefix = period.transitions[: len(existing.transitions)]
             if existing.transitions != prefix:
-                raise ValueError("billing period transition history cannot be rewritten")
+                raise ValueError(
+                    "billing period transition history cannot be rewritten"
+                )
             new_transitions = period.transitions[len(existing.transitions) :]
             if not allow_reconciled and any(
                 transition.to_status == BillingPeriodStatus.RECONCILED
@@ -311,7 +430,9 @@ class PostgresUsageLedger:
                 ):
                     raise ValueError("billing period transition identity cannot change")
             stored = self._fetch_billing_period(cursor, period.period_id)
-            if stored is None:  # pragma: no cover - locked row remains present in this transaction
+            if (
+                stored is None
+            ):  # pragma: no cover - locked row remains present in this transaction
                 raise RuntimeError("billing period disappeared after persistence")
             return stored
 
@@ -385,11 +506,17 @@ class PostgresUsageLedger:
                     period_line_count,
                 ) = map(int, run)
                 if blocking_count != exception_count:
-                    raise ValueError("reconciliation run exception summary is inconsistent")
+                    raise ValueError(
+                        "reconciliation run exception summary is inconsistent"
+                    )
                 if run_line_count != period_line_count:
-                    raise ValueError("reconciliation run does not cover every period line")
+                    raise ValueError(
+                        "reconciliation run does not cover every period line"
+                    )
                 if unresolved_count:
-                    raise ValueError("blocking reconciliation exceptions remain unresolved")
+                    raise ValueError(
+                        "blocking reconciliation exceptions remain unresolved"
+                    )
             reconciled = period.advance(
                 BillingPeriodStatus.RECONCILED,
                 actor_reference=actor_reference,
@@ -403,7 +530,9 @@ class PostgresUsageLedger:
     def list_billing_periods(self, tenant_reference: str) -> tuple[BillingPeriod, ...]:
         """Return period aggregates for one registered tenant only."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             cursor.execute(
                 """
                 SELECT period_id
@@ -450,7 +579,9 @@ class PostgresUsageLedger:
                 ),
             )
             stored = self._fetch_fx_rate(cursor, rate.fx_rate_id)
-            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+            if (
+                stored is None
+            ):  # pragma: no cover - the insert or conflict must expose a row
                 raise RuntimeError("FX rate insert did not return a row")
             if stored.as_contract_dict() != rate.as_contract_dict():
                 raise ValueError("FX rate identity cannot change after persistence")
@@ -500,10 +631,14 @@ class PostgresUsageLedger:
                 ),
             )
             stored = self._fetch_fx_conversion(cursor, conversion.fx_conversion_id)
-            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+            if (
+                stored is None
+            ):  # pragma: no cover - the insert or conflict must expose a row
                 raise RuntimeError("FX conversion insert did not return a row")
             if stored.as_contract_dict() != conversion.as_contract_dict():
-                raise ValueError("FX conversion identity cannot change after persistence")
+                raise ValueError(
+                    "FX conversion identity cannot change after persistence"
+                )
             return stored
 
     def get_reconciliation_line(
@@ -511,7 +646,9 @@ class PostgresUsageLedger:
     ) -> ReconciliationLine | None:
         """Return one tenant-scoped reconciliation line with typed exceptions."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             return self._fetch_reconciliation_line(
                 cursor, reconciliation_line_id, tenant_account_id=tenant_account_id
             )
@@ -521,7 +658,9 @@ class PostgresUsageLedger:
     ) -> ReconciliationLine:
         """Persist one tenant-owned line and its exception children atomically."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             cursor.execute(
                 """
                 SELECT tenant_account_id
@@ -584,8 +723,12 @@ class PostgresUsageLedger:
                 (line.reconciliation_line_id,),
             )
             parent = cursor.fetchone()
-            if parent is None:  # pragma: no cover - the insert or conflict must expose a row
-                raise RuntimeError("reconciliation line insert did not return a parent row")
+            if (
+                parent is None
+            ):  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError(
+                    "reconciliation line insert did not return a parent row"
+                )
             if parent != (
                 tenant_account_id,
                 line.period_id,
@@ -605,9 +748,15 @@ class PostgresUsageLedger:
                 line.assessed_at,
                 line.reconciliation_line_contract_version,
             ):
-                raise ValueError("reconciliation line identity cannot change after persistence")
+                raise ValueError(
+                    "reconciliation line identity cannot change after persistence"
+                )
             expected_exceptions = tuple(
-                (exception_number, exception.exception_code.value, exception.next_action)
+                (
+                    exception_number,
+                    exception.exception_code.value,
+                    exception.next_action,
+                )
                 for exception_number, exception in enumerate(line.exceptions, start=1)
             )
             if not inserted:
@@ -621,7 +770,9 @@ class PostgresUsageLedger:
                     (line.reconciliation_line_id,),
                 )
                 if tuple(cursor.fetchall()) != expected_exceptions:
-                    raise ValueError("reconciliation line exception history cannot change")
+                    raise ValueError(
+                        "reconciliation line exception history cannot change"
+                    )
             else:
                 for exception_number, exception in enumerate(line.exceptions, start=1):
                     cursor.execute(
@@ -637,8 +788,12 @@ class PostgresUsageLedger:
                             exception.next_action,
                         ),
                     )
-            existing = self._fetch_reconciliation_line(cursor, line.reconciliation_line_id)
-            if existing is None:  # pragma: no cover - the insert or conflict must expose a row
+            existing = self._fetch_reconciliation_line(
+                cursor, line.reconciliation_line_id
+            )
+            if (
+                existing is None
+            ):  # pragma: no cover - the insert or conflict must expose a row
                 raise RuntimeError("reconciliation line insert did not return a row")
             return existing
 
@@ -647,7 +802,9 @@ class PostgresUsageLedger:
     ) -> tuple[ReconciliationLine, ...]:
         """Return reconciliation lines for one tenant, optionally one period."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             if period_id is None:
                 cursor.execute(
                     """
@@ -692,7 +849,9 @@ class PostgresUsageLedger:
     ) -> ReconciliationEvidence | None:
         """Return one tenant-scoped hash-backed evidence record."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             return self._fetch_reconciliation_evidence(
                 cursor, evidence_id, tenant_account_id=tenant_account_id
             )
@@ -702,7 +861,9 @@ class PostgresUsageLedger:
     ) -> ReconciliationEvidence:
         """Persist one tenant-owned evidence record for an existing exception."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             cursor.execute(
                 """
                 SELECT 1
@@ -743,8 +904,12 @@ class PostgresUsageLedger:
                 ),
             )
             stored = self._fetch_reconciliation_evidence(cursor, evidence.evidence_id)
-            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
-                raise RuntimeError("reconciliation evidence insert did not return a row")
+            if (
+                stored is None
+            ):  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError(
+                    "reconciliation evidence insert did not return a row"
+                )
             if stored.as_contract_dict() != evidence.as_contract_dict():
                 raise ValueError("reconciliation evidence identity cannot change")
             return stored
@@ -756,7 +921,9 @@ class PostgresUsageLedger:
     ) -> tuple[ReconciliationEvidence, ...]:
         """Return evidence for one tenant, optionally one reconciliation line."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             if reconciliation_line_id is None:
                 cursor.execute(
                     """
@@ -793,7 +960,9 @@ class PostgresUsageLedger:
     ) -> ReconciliationRun | None:
         """Return one tenant-scoped immutable completed reconciliation run."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             return self._fetch_reconciliation_run(
                 cursor, run_id, tenant_account_id=tenant_account_id
             )
@@ -803,7 +972,9 @@ class PostgresUsageLedger:
     ) -> ReconciliationRun:
         """Persist one tenant-owned run and its ordered line membership atomically."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             cursor.execute(
                 """
                 SELECT tenant_account_id
@@ -873,12 +1044,18 @@ class PostgresUsageLedger:
                     (run.run_id, line_number),
                 )
                 row = cursor.fetchone()
-                if row != (tenant_account_id, run.period_id, reconciliation_line_id):  # pragma: no cover - protected by composite identity constraints
+                if row != (
+                    tenant_account_id,
+                    run.period_id,
+                    reconciliation_line_id,
+                ):  # pragma: no cover - protected by composite identity constraints
                     raise ValueError("reconciliation run line identity cannot change")
             stored = self._fetch_reconciliation_run(
                 cursor, run.run_id, tenant_account_id=tenant_account_id
             )
-            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+            if (
+                stored is None
+            ):  # pragma: no cover - the insert or conflict must expose a row
                 raise RuntimeError("reconciliation run insert did not return a row")
             if stored.as_contract_dict() != run.as_contract_dict():
                 raise ValueError("reconciliation run identity cannot change")
@@ -889,7 +1066,9 @@ class PostgresUsageLedger:
     ) -> tuple[ReconciliationRun, ...]:
         """Return completed runs for one tenant, optionally one period."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             if period_id is None:
                 cursor.execute(
                     """
@@ -921,7 +1100,9 @@ class PostgresUsageLedger:
     ) -> ReconciliationResolution | None:
         """Return one tenant-scoped immutable maker-checker resolution."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             return self._fetch_reconciliation_resolution(
                 cursor, resolution_id, tenant_account_id=tenant_account_id
             )
@@ -931,7 +1112,9 @@ class PostgresUsageLedger:
     ) -> ReconciliationResolution:
         """Persist one tenant-owned exception resolution without replacing approvals."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             cursor.execute(
                 """
                 SELECT 1
@@ -974,9 +1157,15 @@ class PostgresUsageLedger:
                     resolution.reconciliation_resolution_contract_version,
                 ),
             )
-            stored = self._fetch_reconciliation_resolution(cursor, resolution.resolution_id)
-            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
-                raise RuntimeError("reconciliation resolution insert did not return a row")
+            stored = self._fetch_reconciliation_resolution(
+                cursor, resolution.resolution_id
+            )
+            if (
+                stored is None
+            ):  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError(
+                    "reconciliation resolution insert did not return a row"
+                )
             if stored.as_contract_dict() != resolution.as_contract_dict():
                 raise ValueError("reconciliation resolution identity cannot change")
             return stored
@@ -988,7 +1177,9 @@ class PostgresUsageLedger:
     ) -> tuple[ReconciliationResolution, ...]:
         """Return resolution history for one tenant, optionally one line."""
         with self._cursor() as cursor:
-            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, tenant_reference
+            )
             if reconciliation_line_id is None:
                 cursor.execute(
                     """
@@ -1045,9 +1236,13 @@ class PostgresUsageLedger:
                     (tenant_code,),
                 )
                 row = cursor.fetchone()
-            if row is None:  # pragma: no cover - a committed unique row cannot disappear here
+            if (
+                row is None
+            ):  # pragma: no cover - a committed unique row cannot disappear here
                 raise RuntimeError("tenant insert did not return a row")
-            if row[1] != tenant_reference:  # pragma: no cover - code derives from this URN
+            if (
+                row[1] != tenant_reference
+            ):  # pragma: no cover - code derives from this URN
                 raise ValueError("tenant reference cannot move across identities")
             return TenantAccount(UUID(str(row[0])), row[1], row[2])
 
@@ -1092,7 +1287,9 @@ class PostgresUsageLedger:
                     (tenant.tenant_account_id, account_code),
                 )
                 row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
+            if (
+                row is None
+            ):  # pragma: no cover - database row is protected by the unique key
                 raise RuntimeError("billing account insert did not return a row")
             return BillingAccount(
                 UUID(str(row[0])),
@@ -1147,7 +1344,9 @@ class PostgresUsageLedger:
                     (tenant.tenant_account_id, billing_principal_reference, valid_from),
                 )
                 row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
+            if (
+                row is None
+            ):  # pragma: no cover - database row is protected by the unique key
                 raise RuntimeError("billing principal insert did not return a row")
             return self._principal_from_row(row)
 
@@ -1193,7 +1392,9 @@ class PostgresUsageLedger:
                     (tenant.tenant_account_id, credential_reference),
                 )
                 row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
+            if (
+                row is None
+            ):  # pragma: no cover - database row is protected by the unique key
                 raise RuntimeError("credential insert did not return a row")
             return self._credential_from_row(row)
 
@@ -1246,7 +1447,9 @@ class PostgresUsageLedger:
                     (credential.credential_record_id, valid_from),
                 )
                 row = cursor.fetchone()
-                if row is None:  # pragma: no cover - exclusion constraint protects the row
+                if (
+                    row is None
+                ):  # pragma: no cover - exclusion constraint protects the row
                     raise ValueError("credential assignment intervals cannot overlap")
             return self._assignment_from_row(row)
 
@@ -1293,7 +1496,9 @@ class PostgresUsageLedger:
                     (meter_code, meter_version),
                 )
                 row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
+            if (
+                row is None
+            ):  # pragma: no cover - database row is protected by the unique key
                 raise RuntimeError("meter definition insert did not return a row")
             return self._meter_from_row(row)
 
@@ -1330,9 +1535,13 @@ class PostgresUsageLedger:
                     (meter_definition_id, quality_code),
                 )
                 row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
+            if (
+                row is None
+            ):  # pragma: no cover - database row is protected by the unique key
                 raise RuntimeError("meter quality rule insert did not return a row")
-            return MeterQualityRule(UUID(str(row[0])), UUID(str(row[1])), row[2], row[3])
+            return MeterQualityRule(
+                UUID(str(row[0])), UUID(str(row[1])), row[2], row[3]
+            )
 
     def find_rate_card(
         self, tenant_account_id: UUID, rate_card_name: str
@@ -1442,12 +1651,23 @@ class PostgresUsageLedger:
                   AND source_payload_hash = %s
                   AND rate_card_contract_version = %s
                 """,
-                (tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version),
+                (
+                    tenant_account_id,
+                    rate_card_id,
+                    source_payload_hash,
+                    rate_card_contract_version,
+                ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._rate_card_version_from_cursor(cursor, row)
+            return (
+                None
+                if row is None
+                else self._rate_card_version_from_cursor(cursor, row)
+            )
 
-    def get_rate_card_version(self, rate_card_version_id: UUID) -> StoredRateCardVersion | None:
+    def get_rate_card_version(
+        self, rate_card_version_id: UUID
+    ) -> StoredRateCardVersion | None:
         """Return one published price-book version by opaque identifier."""
         with self._cursor() as cursor:
             cursor.execute(
@@ -1461,7 +1681,11 @@ class PostgresUsageLedger:
                 (rate_card_version_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._rate_card_version_from_cursor(cursor, row)
+            return (
+                None
+                if row is None
+                else self._rate_card_version_from_cursor(cursor, row)
+            )
 
     def find_rate_card_version(
         self,
@@ -1568,7 +1792,9 @@ class PostgresUsageLedger:
                     ),
                 )
                 row = cursor.fetchone()
-                if row is None:  # pragma: no cover - unique identity protects the version
+                if (
+                    row is None
+                ):  # pragma: no cover - unique identity protects the version
                     raise RuntimeError("rate-card version insert did not return a row")
                 return self._rate_card_version_from_cursor(cursor, row)
             for line in version.rate_card_lines:
@@ -1724,7 +1950,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
             if row is None:
-                raise ValueError("tax-rate schedule identity already belongs to another row")
+                raise ValueError(
+                    "tax-rate schedule identity already belongs to another row"
+                )
         return self._tax_rate_schedule_from_row(row)
 
     def list_tax_rate_schedules(
@@ -1741,7 +1969,9 @@ class PostgresUsageLedger:
                 """,
                 (tenant_account_id,),
             )
-            return tuple(self._tax_rate_schedule_from_row(row) for row in cursor.fetchall())
+            return tuple(
+                self._tax_rate_schedule_from_row(row) for row in cursor.fetchall()
+            )
 
     def find_tax_rate_version_by_identity(
         self,
@@ -1900,7 +2130,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("tax-rate version identity already belongs to another row")
+                    raise ValueError(
+                        "tax-rate version identity already belongs to another row"
+                    )
             return self._tax_rate_version_from_row(row)
 
     def list_tax_rate_versions(
@@ -1932,7 +2164,9 @@ class PostgresUsageLedger:
                     """,
                     (tenant_account_id, tax_rate_schedule_id),
                 )
-            return tuple(self._tax_rate_version_from_row(row) for row in cursor.fetchall())
+            return tuple(
+                self._tax_rate_version_from_row(row) for row in cursor.fetchall()
+            )
 
     def find_tax_assessment(
         self,
@@ -1963,11 +2197,13 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_tax_assessment(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_tax_assessment(cursor, UUID(str(row[0])))
+            )
 
-    def get_tax_assessment(
-        self, tax_assessment_id: UUID
-    ) -> StoredTaxAssessment | None:
+    def get_tax_assessment(self, tax_assessment_id: UUID) -> StoredTaxAssessment | None:
         """Return one tax assessment by opaque identifier."""
         with self._cursor() as cursor:
             cursor.execute(
@@ -1979,7 +2215,11 @@ class PostgresUsageLedger:
                 (tax_assessment_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_tax_assessment(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_tax_assessment(cursor, UUID(str(row[0])))
+            )
 
     def list_tax_assessments(
         self, tenant_account_id: UUID | None = None
@@ -2063,7 +2303,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("tax assessment identity already belongs to another row")
+                    raise ValueError(
+                        "tax assessment identity already belongs to another row"
+                    )
                 return self._fetch_tax_assessment(cursor, UUID(str(row[0])))
             return self._fetch_tax_assessment(cursor, UUID(str(row[0])))
 
@@ -2105,7 +2347,11 @@ class PostgresUsageLedger:
         if row is None:
             return None, RejectionReasonCode.BILLING_ACCOUNT_NOT_FOUND
         account = BillingAccount(
-            UUID(str(row[0])), UUID(str(row[1])), billing_account_reference, row[2], row[3]
+            UUID(str(row[0])),
+            UUID(str(row[1])),
+            billing_account_reference,
+            row[2],
+            row[3],
         )
         if account.account_status_code != "active":
             return None, RejectionReasonCode.BILLING_ACCOUNT_NOT_ACTIVE
@@ -2131,7 +2377,10 @@ class PostgresUsageLedger:
         )
 
     def resolve_billing_principal(
-        self, tenant: TenantAccount, billing_principal_reference: str, occurred_at: datetime
+        self,
+        tenant: TenantAccount,
+        billing_principal_reference: str,
+        occurred_at: datetime,
     ) -> tuple[BillingPrincipal | None, RejectionReasonCode | None]:
         """Resolve an effective principal using PostgreSQL time predicates."""
         if not billing_principal_reference.startswith(f"{tenant.tenant_reference}:"):
@@ -2149,7 +2398,12 @@ class PostgresUsageLedger:
                 ORDER BY valid_from DESC
                 LIMIT 1
                 """,
-                (tenant.tenant_account_id, billing_principal_reference, occurred_at, occurred_at),
+                (
+                    tenant.tenant_account_id,
+                    billing_principal_reference,
+                    occurred_at,
+                    occurred_at,
+                ),
             )
             row = cursor.fetchone()
             if row is None:
@@ -2269,7 +2523,10 @@ class PostgresUsageLedger:
         )
 
     def find_by_payload_hash(
-        self, tenant_account_id: UUID, event_payload_hash: str, event_contract_version: int
+        self,
+        tenant_account_id: UUID,
+        event_payload_hash: str,
+        event_contract_version: int,
     ) -> StoredUsageEvent | None:
         """Find one immutable event by tenant, hash, and contract version."""
         return self._find_event(
@@ -2333,13 +2590,18 @@ class PostgresUsageLedger:
             )
             inserted = cursor.fetchone()
             if inserted is None:
-                existing = self._find_event_with_cursor(cursor, event.tenant_account_id, event)
+                existing = self._find_event_with_cursor(
+                    cursor, event.tenant_account_id, event
+                )
                 if existing is None:
-                    raise ValueError("usage event conflict has no classified existing row")
+                    raise ValueError(
+                        "usage event conflict has no classified existing row"
+                    )
                 if existing.source_event_key == event.source_event_key:
                     if (
                         existing.event_payload_hash == event.event_payload_hash
-                        and existing.event_contract_version == event.event_contract_version
+                        and existing.event_contract_version
+                        == event.event_contract_version
                     ):
                         raise UsageEventConflict(existing, duplicate_replay=True)
                     raise UsageEventConflict(
@@ -2383,7 +2645,9 @@ class PostgresUsageLedger:
                 )
         return event
 
-    def append_ingestion_receipt(self, receipt: StoredIngestionReceipt) -> StoredIngestionReceipt:
+    def append_ingestion_receipt(
+        self, receipt: StoredIngestionReceipt
+    ) -> StoredIngestionReceipt:
         """Append one audit receipt in the current ingest transaction."""
         with self._cursor() as cursor:
             cursor.execute(
@@ -2478,7 +2742,10 @@ class PostgresUsageLedger:
             )
 
     def list_usage_events_in_window(
-        self, tenant_account_id: UUID, window_started_at: datetime, window_ended_at: datetime
+        self,
+        tenant_account_id: UUID,
+        window_started_at: datetime,
+        window_ended_at: datetime,
     ) -> tuple[StoredUsageEvent, ...]:
         """Return tenant events in the half-open occurred-at window."""
         with self._cursor() as cursor:
@@ -2549,7 +2816,11 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_rating_run(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_rating_run(cursor, UUID(str(row[0])))
+            )
 
     def insert_rating_run(
         self,
@@ -2605,8 +2876,12 @@ class PostgresUsageLedger:
                     ),
                 )
                 row = cursor.fetchone()
-                if row is None:  # pragma: no cover - the primary key conflict is not an identity replay
-                    raise ValueError("rating run identity already belongs to another result")
+                if (
+                    row is None
+                ):  # pragma: no cover - the primary key conflict is not an identity replay
+                    raise ValueError(
+                        "rating run identity already belongs to another result"
+                    )
                 return self._fetch_rating_run(cursor, UUID(str(row[0])))
             for line in rating_lines:
                 cursor.execute(
@@ -2648,7 +2923,11 @@ class PostgresUsageLedger:
                 (rating_run_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_rating_run(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_rating_run(cursor, UUID(str(row[0])))
+            )
 
     def list_rating_runs(
         self, tenant_account_id: UUID | None = None
@@ -2692,7 +2971,11 @@ class PostgresUsageLedger:
                 (tenant_account_id, rating_run_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
+            )
 
     def insert_invoice_draft(
         self,
@@ -2733,8 +3016,12 @@ class PostgresUsageLedger:
                     (invoice_draft.tenant_account_id, invoice_draft.rating_run_id),
                 )
                 row = cursor.fetchone()
-                if row is None:  # pragma: no cover - the primary key conflict is not a replay
-                    raise ValueError("invoice draft identity already belongs to another draft")
+                if (
+                    row is None
+                ):  # pragma: no cover - the primary key conflict is not a replay
+                    raise ValueError(
+                        "invoice draft identity already belongs to another draft"
+                    )
                 return self._fetch_invoice_draft(cursor, UUID(str(row[0])))
             for line in invoice_draft_lines:
                 cursor.execute(
@@ -2794,7 +3081,11 @@ class PostgresUsageLedger:
                 (invoice_draft_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
+            )
 
     def find_tax_assessment_for_draft(
         self, tenant_account_id: UUID, invoice_draft_id: UUID
@@ -2836,7 +3127,11 @@ class PostgresUsageLedger:
                 (tenant_account_id, invoice_draft_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_invoice(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_issued_invoice(cursor, UUID(str(row[0])))
+            )
 
     def get_issued_invoice(self, issued_invoice_id: UUID) -> StoredIssuedInvoice | None:
         """Return one issued snapshot by opaque identifier."""
@@ -2850,7 +3145,11 @@ class PostgresUsageLedger:
                 (issued_invoice_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_invoice(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_issued_invoice(cursor, UUID(str(row[0])))
+            )
 
     def list_issued_invoices_for_tenant(
         self, tenant_account_id: UUID
@@ -2919,7 +3218,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("issued invoice identity already belongs to another snapshot")
+                    raise ValueError(
+                        "issued invoice identity already belongs to another snapshot"
+                    )
                 return self._fetch_issued_invoice(cursor, UUID(str(row[0])))
             for line in issued_invoice_lines:
                 cursor.execute(
@@ -2945,7 +3246,9 @@ class PostgresUsageLedger:
                 )
             return self._fetch_issued_invoice(cursor, issued_invoice.issued_invoice_id)
 
-    def get_collection_case(self, collection_case_id: UUID) -> StoredCollectionCase | None:
+    def get_collection_case(
+        self, collection_case_id: UUID
+    ) -> StoredCollectionCase | None:
         """Return one collection case by opaque identifier."""
         with self._cursor() as cursor:
             cursor.execute(
@@ -2957,7 +3260,11 @@ class PostgresUsageLedger:
                 (collection_case_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_case(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_case(cursor, UUID(str(row[0])))
+            )
 
     def find_collection_case(
         self, tenant_account_id: UUID, invoice_draft_id: UUID
@@ -2973,7 +3280,11 @@ class PostgresUsageLedger:
                 (tenant_account_id, invoice_draft_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_case(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_case(cursor, UUID(str(row[0])))
+            )
 
     def insert_collection_case(
         self, collection_case: StoredCollectionCase
@@ -2985,7 +3296,9 @@ class PostgresUsageLedger:
             format_exact_decimal(collection_case.outstanding_amount)
         )
         if outstanding_amount <= 0:
-            raise ValueError("collection case outstanding must be a positive exact decimal")
+            raise ValueError(
+                "collection case outstanding must be a positive exact decimal"
+            )
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -3014,11 +3327,18 @@ class PostgresUsageLedger:
                     FROM billing_core.collection_case
                     WHERE tenant_account_id = %s AND invoice_draft_id = %s
                     """,
-                    (collection_case.tenant_account_id, collection_case.invoice_draft_id),
+                    (
+                        collection_case.tenant_account_id,
+                        collection_case.invoice_draft_id,
+                    ),
                 )
                 row = cursor.fetchone()
-                if row is None:  # pragma: no cover - a valid FK conflict has an identity row
-                    raise ValueError("collection case identity already belongs to another case")
+                if (
+                    row is None
+                ):  # pragma: no cover - a valid FK conflict has an identity row
+                    raise ValueError(
+                        "collection case identity already belongs to another case"
+                    )
             return self._fetch_collection_case(cursor, UUID(str(row[0])))
 
     def list_collection_cases(
@@ -3054,15 +3374,19 @@ class PostgresUsageLedger:
                 (collection_dunning_event_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_dunning_event(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_dunning_event(cursor, UUID(str(row[0])))
             )
 
     def list_collection_dunning_events(
         self, collection_case_id: UUID
     ) -> tuple[StoredCollectionDunningEvent, ...]:
         """Return dunning events for one case in event-number order."""
-        return self._list_collection_dunning_events(collection_case_id=collection_case_id)
+        return self._list_collection_dunning_events(
+            collection_case_id=collection_case_id
+        )
 
     def list_collection_dunning_events_for_tenant(
         self, tenant_account_id: UUID
@@ -3084,8 +3408,10 @@ class PostgresUsageLedger:
                 (collection_case_id, dunning_notice_code),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_dunning_event(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_dunning_event(cursor, UUID(str(row[0])))
             )
 
     def insert_collection_dunning_event(
@@ -3093,7 +3419,9 @@ class PostgresUsageLedger:
     ) -> StoredCollectionDunningEvent:
         """Append one dunning event; an exact notice replay returns its row."""
         if dunning_event.dunning_notice_code not in {"first_notice", "overdue_notice"}:
-            raise ValueError("collection dunning notices must be commercial reminder codes")
+            raise ValueError(
+                "collection dunning notices must be commercial reminder codes"
+            )
         if dunning_event.dunning_event_number < 1:
             raise ValueError("collection dunning event number must be positive")
         with self._cursor() as cursor:
@@ -3126,11 +3454,16 @@ class PostgresUsageLedger:
                     FROM billing_core.collection_dunning_event
                     WHERE collection_case_id = %s AND dunning_notice_code = %s
                     """,
-                    (dunning_event.collection_case_id, dunning_event.dunning_notice_code),
+                    (
+                        dunning_event.collection_case_id,
+                        dunning_event.dunning_notice_code,
+                    ),
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("collection dunning event identity requires a stored case")
+                    raise ValueError(
+                        "collection dunning event identity requires a stored case"
+                    )
             return self._fetch_collection_dunning_event(cursor, UUID(str(row[0])))
 
     def find_collection_dispute(
@@ -3147,8 +3480,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, collection_case_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_dispute(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_dispute(cursor, UUID(str(row[0])))
             )
 
     def get_collection_dispute(
@@ -3165,8 +3500,10 @@ class PostgresUsageLedger:
                 (collection_dispute_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_dispute(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_dispute(cursor, UUID(str(row[0])))
             )
 
     def list_collection_disputes_for_tenant(
@@ -3194,9 +3531,12 @@ class PostgresUsageLedger:
         """Persist one held commercial dispute or return its identity replay."""
         if CURRENCY_CODE_PATTERN.fullmatch(collection_dispute.currency_code) is None:
             raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            collection_dispute.source_payload_hash
-        ) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                collection_dispute.source_payload_hash
+            )
+            is None
+        ):
             raise ValueError("source_payload_hash must be a sha256 digest")
         if collection_dispute.collection_dispute_status != "held":
             raise ValueError("collection_dispute_status must be held")
@@ -3275,7 +3615,9 @@ class PostgresUsageLedger:
             stored = self._collection_dispute_from_row(row)
             if stored.collection_dispute_status == "released":
                 return stored
-            if stored.collection_dispute_status != "held":  # pragma: no cover - held/released only
+            if (
+                stored.collection_dispute_status != "held"
+            ):  # pragma: no cover - held/released only
                 raise ValueError("only held collection disputes can release")
             cursor.execute(
                 """
@@ -3313,7 +3655,9 @@ class PostgresUsageLedger:
             if stored.collection_case_status == "disputed":
                 return stored
             if stored.collection_case_status not in {"open", "dunning"}:
-                raise ValueError("only open or dunning collection cases can hold as disputed")
+                raise ValueError(
+                    "only open or dunning collection cases can hold as disputed"
+                )
             cursor.execute(
                 """
                 UPDATE billing_core.collection_case
@@ -3355,7 +3699,9 @@ class PostgresUsageLedger:
                 raise ValueError("settled collection cases cannot release from dispute")
             if stored.collection_case_status == "voided":
                 raise ValueError("voided collection cases cannot release from dispute")
-            if stored.collection_case_status != "disputed":  # pragma: no cover - closed set
+            if (
+                stored.collection_case_status != "disputed"
+            ):  # pragma: no cover - closed set
                 raise ValueError("only disputed collection cases can release to open")
             cursor.execute(
                 """
@@ -3389,7 +3735,9 @@ class PostgresUsageLedger:
         """Reduce one case balance and settle it when the exact remainder is zero."""
         applied = parse_exact_decimal(format_exact_decimal(applied_amount))
         if applied <= 0:
-            raise ValueError("collection settlement amount must be a positive exact decimal")
+            raise ValueError(
+                "collection settlement amount must be a positive exact decimal"
+            )
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -3403,14 +3751,22 @@ class PostgresUsageLedger:
             )
             row = cursor.fetchone()
             if row is None:
-                raise ValueError("collection settlement requires a stored collection case")
+                raise ValueError(
+                    "collection settlement requires a stored collection case"
+                )
             stored = self._collection_case_from_row(row)
             if stored.collection_case_status == "voided":
-                raise ValueError("voided collection cases cannot accept a settlement apply")
+                raise ValueError(
+                    "voided collection cases cannot accept a settlement apply"
+                )
             if stored.collection_case_status == "disputed":
-                raise ValueError("disputed collection cases cannot accept a settlement apply")
+                raise ValueError(
+                    "disputed collection cases cannot accept a settlement apply"
+                )
             if applied > stored.outstanding_amount:
-                raise ValueError("collection settlement amount cannot exceed outstanding")
+                raise ValueError(
+                    "collection settlement amount cannot exceed outstanding"
+                )
             remaining = stored.outstanding_amount - applied
             status = "settled" if remaining == 0 else stored.collection_case_status
             cursor.execute(
@@ -3424,7 +3780,9 @@ class PostgresUsageLedger:
             )
             row = cursor.fetchone()
             if row is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection settlement requires a stored collection case")
+                raise ValueError(
+                    "collection settlement requires a stored collection case"
+                )
             return self._fetch_collection_case(cursor, UUID(str(row[0])))
 
     def find_collection_write_off(
@@ -3441,8 +3799,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, collection_case_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_write_off(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_write_off(cursor, UUID(str(row[0])))
             )
 
     def get_collection_write_off(
@@ -3459,8 +3819,10 @@ class PostgresUsageLedger:
                 (collection_write_off_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_write_off(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_write_off(cursor, UUID(str(row[0])))
             )
 
     def list_collection_write_offs_for_tenant(
@@ -3488,12 +3850,16 @@ class PostgresUsageLedger:
         """Persist one exact-zero commercial write-off or replay it."""
         if write_off.collection_write_off_status != "recorded":
             raise ValueError("collection_write_off_status must be recorded")
-        write_off_amount = parse_exact_decimal(format_exact_decimal(write_off.write_off_amount))
+        write_off_amount = parse_exact_decimal(
+            format_exact_decimal(write_off.write_off_amount)
+        )
         remaining = parse_exact_decimal(
             format_exact_decimal(write_off.remaining_outstanding_amount)
         )
         if write_off_amount <= 0:
-            raise ValueError("collection write-off amount must be a positive exact decimal")
+            raise ValueError(
+                "collection write-off amount must be a positive exact decimal"
+            )
         if remaining != 0:
             raise ValueError("collection write-off remaining must be exact zero")
         with self._cursor() as cursor:
@@ -3536,7 +3902,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("collection write-off identity conflicts with an existing row")
+                    raise ValueError(
+                        "collection write-off identity conflicts with an existing row"
+                    )
             return self._fetch_collection_write_off(cursor, UUID(str(row[0])))
 
     def apply_collection_write_off(
@@ -3545,7 +3913,9 @@ class PostgresUsageLedger:
         """Zero one open collection case without marking it settled."""
         amount = parse_exact_decimal(format_exact_decimal(write_off_amount))
         if amount <= 0:
-            raise ValueError("collection write-off amount must be a positive exact decimal")
+            raise ValueError(
+                "collection write-off amount must be a positive exact decimal"
+            )
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -3559,12 +3929,16 @@ class PostgresUsageLedger:
             )
             row = cursor.fetchone()
             if row is None:
-                raise ValueError("collection write-off requires a stored collection case")
+                raise ValueError(
+                    "collection write-off requires a stored collection case"
+                )
             stored = self._collection_case_from_row(row)
             if stored.collection_case_status in {"settled", "voided", "disputed"}:
                 raise ValueError("settled collection cases cannot accept a write-off")
             if amount != stored.outstanding_amount:
-                raise ValueError("collection write-off amount must equal remaining outstanding")
+                raise ValueError(
+                    "collection write-off amount must equal remaining outstanding"
+                )
             cursor.execute(
                 """
                 UPDATE billing_core.collection_case
@@ -3576,7 +3950,9 @@ class PostgresUsageLedger:
             )
             updated = cursor.fetchone()
             if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection write-off requires a stored collection case")
+                raise ValueError(
+                    "collection write-off requires a stored collection case"
+                )
             return self._fetch_collection_case(cursor, UUID(str(updated[0])))
 
     def find_collection_case_settlement(
@@ -3593,8 +3969,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, collection_case_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_case_settlement(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_case_settlement(cursor, UUID(str(row[0])))
             )
 
     def get_collection_case_settlement(
@@ -3611,8 +3989,10 @@ class PostgresUsageLedger:
                 (collection_case_settlement_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_case_settlement(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_collection_case_settlement(cursor, UUID(str(row[0])))
             )
 
     def list_collection_case_settlements_for_tenant(
@@ -3684,7 +4064,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("collection settlement identity conflicts with an existing row")
+                    raise ValueError(
+                        "collection settlement identity conflicts with an existing row"
+                    )
             return self._fetch_collection_case_settlement(cursor, UUID(str(row[0])))
 
     def mark_collection_case_settled(
@@ -3704,11 +4086,17 @@ class PostgresUsageLedger:
             )
             row = cursor.fetchone()
             if row is None:
-                raise ValueError("collection settlement requires a stored collection case")
+                raise ValueError(
+                    "collection settlement requires a stored collection case"
+                )
             stored = self._collection_case_from_row(row)
-            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+            remaining = parse_exact_decimal(
+                format_exact_decimal(stored.outstanding_amount)
+            )
             if remaining != 0:
-                raise ValueError("collection case outstanding must be exact zero to settle")
+                raise ValueError(
+                    "collection case outstanding must be exact zero to settle"
+                )
             if stored.collection_case_status == "settled":
                 return stored
             if stored.collection_case_status == "voided":
@@ -3726,7 +4114,9 @@ class PostgresUsageLedger:
             )
             updated = cursor.fetchone()
             if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection settlement requires a stored collection case")
+                raise ValueError(
+                    "collection settlement requires a stored collection case"
+                )
             return self._fetch_collection_case(cursor, UUID(str(updated[0])))
 
     def mark_collection_case_voided(
@@ -3753,9 +4143,13 @@ class PostgresUsageLedger:
                 return stored
             if stored.collection_case_status not in {"open", "dunning"}:
                 raise ValueError("only open or dunning collection cases can void")
-            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+            remaining = parse_exact_decimal(
+                format_exact_decimal(stored.outstanding_amount)
+            )
             if remaining != expected:
-                raise ValueError("collection void remaining must equal the issued amount")
+                raise ValueError(
+                    "collection void remaining must equal the issued amount"
+                )
             cursor.execute(
                 """
                 UPDATE billing_core.collection_case
@@ -3782,8 +4176,10 @@ class PostgresUsageLedger:
                 (payment_intent_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_payment_intent(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_payment_intent(cursor, UUID(str(row[0])))
             )
 
     def find_payment_intent(
@@ -3812,17 +4208,25 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_payment_intent(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_payment_intent(cursor, UUID(str(row[0])))
             )
 
     def insert_payment_intent(
         self, payment_intent: StoredPaymentIntent
     ) -> StoredPaymentIntent:
         """Persist one positive provider-neutral intent or replay it."""
-        if payment_intent.payment_intent_status not in {"projected", "cancelled", "rejected"}:
+        if payment_intent.payment_intent_status not in {
+            "projected",
+            "cancelled",
+            "rejected",
+        }:
             raise ValueError("payment intents cannot be captured, settled, or posted")
-        payment_amount = parse_exact_decimal(format_exact_decimal(payment_intent.payment_amount))
+        payment_amount = parse_exact_decimal(
+            format_exact_decimal(payment_intent.payment_amount)
+        )
         if payment_amount <= 0:
             raise ValueError("payment intent amount must be a positive exact decimal")
         with self._cursor() as cursor:
@@ -3868,8 +4272,12 @@ class PostgresUsageLedger:
                     ),
                 )
                 row = cursor.fetchone()
-                if row is None:  # pragma: no cover - a valid FK conflict has an identity row
-                    raise ValueError("payment intent identity already belongs to another intent")
+                if (
+                    row is None
+                ):  # pragma: no cover - a valid FK conflict has an identity row
+                    raise ValueError(
+                        "payment intent identity already belongs to another intent"
+                    )
             return self._fetch_payment_intent(cursor, UUID(str(row[0])))
 
     def list_payment_intents(
@@ -3918,12 +4326,16 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("payment intent cancellation requires a stored payment intent")
+                    raise ValueError(
+                        "payment intent cancellation requires a stored payment intent"
+                    )
                 if row[1] != "cancelled":
                     raise ValueError("only projected payment intents can be cancelled")
             return self._fetch_payment_intent(cursor, UUID(str(row[0])))
 
-    def get_payment_receipt(self, payment_receipt_id: UUID) -> StoredPaymentReceipt | None:
+    def get_payment_receipt(
+        self, payment_receipt_id: UUID
+    ) -> StoredPaymentReceipt | None:
         """Return one payment receipt by opaque identifier."""
         with self._cursor() as cursor:
             cursor.execute(
@@ -3935,8 +4347,10 @@ class PostgresUsageLedger:
                 (payment_receipt_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_payment_receipt(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_payment_receipt(cursor, UUID(str(row[0])))
             )
 
     def find_payment_receipt(
@@ -3965,8 +4379,10 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_payment_receipt(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_payment_receipt(cursor, UUID(str(row[0])))
             )
 
     def insert_payment_receipt(
@@ -4025,7 +4441,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("payment receipt identity conflicts with an existing row")
+                    raise ValueError(
+                        "payment receipt identity conflicts with an existing row"
+                    )
             return self._fetch_payment_receipt(cursor, UUID(str(row[0])))
 
     def list_payment_receipts(
@@ -4061,8 +4479,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, payment_receipt_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_unapplied_cash(cursor, UUID(str(row[0])))
             )
 
     def get_unapplied_cash(self, unapplied_cash_id: UUID) -> StoredUnappliedCash | None:
@@ -4077,8 +4497,10 @@ class PostgresUsageLedger:
                 (unapplied_cash_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_unapplied_cash(cursor, UUID(str(row[0])))
             )
 
     def list_unapplied_cash_for_tenant(
@@ -4100,25 +4522,38 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
 
-    def insert_unapplied_cash(self, unapplied_cash: StoredUnappliedCash) -> StoredUnappliedCash:
+    def insert_unapplied_cash(
+        self, unapplied_cash: StoredUnappliedCash
+    ) -> StoredUnappliedCash:
         """Persist one parked leftover or return its identity replay."""
         if CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash.currency_code) is None:
             raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(unapplied_cash.source_payload_hash) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(unapplied_cash.source_payload_hash)
+            is None
+        ):
             raise ValueError("source_payload_hash must be a sha256 digest")
         if unapplied_cash.unapplied_cash_status != "parked":
             raise ValueError("unapplied_cash_status must be parked")
-        leftover = parse_exact_decimal(format_exact_decimal(unapplied_cash.unapplied_amount))
+        leftover = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash.unapplied_amount)
+        )
         if leftover <= 0:
             raise ValueError("unapplied cash amount must be a positive exact decimal")
         received_amount = parse_exact_decimal(
             format_exact_decimal(unapplied_cash.received_amount)
         )
-        applied_amount = parse_exact_decimal(format_exact_decimal(unapplied_cash.applied_amount))
+        applied_amount = parse_exact_decimal(
+            format_exact_decimal(unapplied_cash.applied_amount)
+        )
         if received_amount <= 0:
-            raise ValueError("unapplied cash received amount must be a positive exact decimal")
+            raise ValueError(
+                "unapplied cash received amount must be a positive exact decimal"
+            )
         if applied_amount <= 0:
-            raise ValueError("unapplied cash applied amount must be a positive exact decimal")
+            raise ValueError(
+                "unapplied cash applied amount must be a positive exact decimal"
+            )
         if leftover > received_amount:
             raise ValueError("unapplied cash cannot exceed the stored receipt")
         with self._cursor() as cursor:
@@ -4158,7 +4593,10 @@ class PostgresUsageLedger:
                     FROM billing_core.unapplied_cash
                     WHERE tenant_account_id = %s AND payment_receipt_id = %s
                     """,
-                    (unapplied_cash.tenant_account_id, unapplied_cash.payment_receipt_id),
+                    (
+                        unapplied_cash.tenant_account_id,
+                        unapplied_cash.payment_receipt_id,
+                    ),
                 )
                 row = cursor.fetchone()
                 if row is None:
@@ -4181,8 +4619,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, unapplied_cash_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash_application(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_unapplied_cash_application(cursor, UUID(str(row[0])))
             )
 
     def get_unapplied_cash_application(
@@ -4199,8 +4639,10 @@ class PostgresUsageLedger:
                 (unapplied_cash_application_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash_application(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_unapplied_cash_application(cursor, UUID(str(row[0])))
             )
 
     def list_unapplied_cash_applications_for_tenant(
@@ -4226,11 +4668,17 @@ class PostgresUsageLedger:
         self, unapplied_cash_application: StoredUnappliedCashApplication
     ) -> StoredUnappliedCashApplication:
         """Persist one leftover apply or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash_application.currency_code) is None:
+        if (
+            CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash_application.currency_code)
+            is None
+        ):
             raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            unapplied_cash_application.source_payload_hash
-        ) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                unapplied_cash_application.source_payload_hash
+            )
+            is None
+        ):
             raise ValueError("source_payload_hash must be a sha256 digest")
         if unapplied_cash_application.unapplied_cash_application_status != "applied":
             raise ValueError("unapplied_cash_application_status must be applied")
@@ -4303,8 +4751,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, unapplied_cash_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash_refund(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_unapplied_cash_refund(cursor, UUID(str(row[0])))
             )
 
     def get_unapplied_cash_refund(
@@ -4321,8 +4771,10 @@ class PostgresUsageLedger:
                 (unapplied_cash_refund_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash_refund(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_unapplied_cash_refund(cursor, UUID(str(row[0])))
             )
 
     def list_unapplied_cash_refunds_for_tenant(
@@ -4350,9 +4802,12 @@ class PostgresUsageLedger:
         """Persist one leftover refund or return its identity replay."""
         if CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash_refund.currency_code) is None:
             raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            unapplied_cash_refund.source_payload_hash
-        ) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                unapplied_cash_refund.source_payload_hash
+            )
+            is None
+        ):
             raise ValueError("source_payload_hash must be a sha256 digest")
         if unapplied_cash_refund.unapplied_cash_refund_status != "recorded":
             raise ValueError("unapplied_cash_refund_status must be recorded")
@@ -4360,14 +4815,18 @@ class PostgresUsageLedger:
             format_exact_decimal(unapplied_cash_refund.refund_amount)
         )
         if refund_amount <= 0:
-            raise ValueError("unapplied cash refund amount must be a positive exact decimal")
+            raise ValueError(
+                "unapplied cash refund amount must be a positive exact decimal"
+            )
         unapplied_amount = parse_exact_decimal(
             format_exact_decimal(unapplied_cash_refund.unapplied_amount)
         )
         if unapplied_amount <= 0:
             raise ValueError("unapplied cash amount must be a positive exact decimal")
         if refund_amount != unapplied_amount:
-            raise ValueError("unapplied cash refund amount must equal the parked leftover")
+            raise ValueError(
+                "unapplied cash refund amount must equal the parked leftover"
+            )
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -4427,7 +4886,9 @@ class PostgresUsageLedger:
         """
         amount = parse_exact_decimal(format_exact_decimal(applied_amount))
         if amount <= 0:
-            raise ValueError("unapplied cash apply amount must be a positive exact decimal")
+            raise ValueError(
+                "unapplied cash apply amount must be a positive exact decimal"
+            )
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -4441,13 +4902,21 @@ class PostgresUsageLedger:
             )
             row = cursor.fetchone()
             if row is None:
-                raise ValueError("unapplied cash apply requires a stored collection case")
+                raise ValueError(
+                    "unapplied cash apply requires a stored collection case"
+                )
             stored = self._collection_case_from_row(row)
             if stored.collection_case_status in {"settled", "voided", "disputed"}:
-                raise ValueError("settled collection cases cannot accept unapplied cash")
-            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
+                raise ValueError(
+                    "settled collection cases cannot accept unapplied cash"
+                )
+            remaining = parse_exact_decimal(
+                format_exact_decimal(stored.outstanding_amount)
+            )
             if amount > remaining:
-                raise ValueError("unapplied cash apply amount cannot exceed outstanding")
+                raise ValueError(
+                    "unapplied cash apply amount cannot exceed outstanding"
+                )
             cursor.execute(
                 """
                 UPDATE billing_core.collection_case
@@ -4459,7 +4928,9 @@ class PostgresUsageLedger:
             )
             updated = cursor.fetchone()
             if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("unapplied cash apply requires a stored collection case")
+                raise ValueError(
+                    "unapplied cash apply requires a stored collection case"
+                )
             return self._fetch_collection_case(cursor, UUID(str(updated[0])))
 
     def get_credit_adjustment(
@@ -4476,8 +4947,10 @@ class PostgresUsageLedger:
                 (credit_adjustment_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_credit_adjustment(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_credit_adjustment(cursor, UUID(str(row[0])))
             )
 
     def find_credit_adjustment(
@@ -4506,15 +4979,21 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_credit_adjustment(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_credit_adjustment(cursor, UUID(str(row[0])))
             )
 
     def insert_credit_adjustment(
         self, credit: StoredCreditAdjustment
     ) -> StoredCreditAdjustment:
         """Persist one exact credit adjustment or return its identity replay."""
-        if credit.credit_reason_code not in {"rating_correction", "goodwill", "billing_error"}:
+        if credit.credit_reason_code not in {
+            "rating_correction",
+            "goodwill",
+            "billing_error",
+        }:
             raise ValueError("credit_reason_code is not in the closed set")
         credit_amount = parse_exact_decimal(format_exact_decimal(credit.credit_amount))
         tax_exclusive_amount = parse_exact_decimal(
@@ -4571,7 +5050,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("credit adjustment identity conflicts with an existing row")
+                    raise ValueError(
+                        "credit adjustment identity conflicts with an existing row"
+                    )
             return self._fetch_credit_adjustment(cursor, UUID(str(row[0])))
 
     def list_credit_adjustments(
@@ -4607,8 +5088,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, credit_adjustment_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_credit_note(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
             )
 
     def get_issued_credit_note(
@@ -4625,8 +5108,10 @@ class PostgresUsageLedger:
                 (issued_credit_note_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_credit_note(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
             )
 
     def list_issued_credit_notes_for_tenant(
@@ -4654,7 +5139,12 @@ class PostgresUsageLedger:
         """Persist one commercial credit-note snapshot or return its identity replay."""
         if CURRENCY_CODE_PATTERN.fullmatch(issued_credit_note.currency_code) is None:
             raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(issued_credit_note.source_payload_hash) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                issued_credit_note.source_payload_hash
+            )
+            is None
+        ):
             raise ValueError("source_payload_hash must be a sha256 digest")
         if (
             SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
@@ -4662,7 +5152,9 @@ class PostgresUsageLedger:
             )
             is None
         ):
-            raise ValueError("credit_adjustment_source_payload_hash must be a sha256 digest")
+            raise ValueError(
+                "credit_adjustment_source_payload_hash must be a sha256 digest"
+            )
         if issued_credit_note.issued_credit_note_status != "issued":
             raise ValueError("issued_credit_note_status must be issued")
         if issued_credit_note.credit_reason_code not in {
@@ -4674,7 +5166,9 @@ class PostgresUsageLedger:
         exclusive = parse_exact_decimal(
             format_exact_decimal(issued_credit_note.tax_exclusive_amount)
         )
-        tax_amount = parse_exact_decimal(format_exact_decimal(issued_credit_note.tax_amount))
+        tax_amount = parse_exact_decimal(
+            format_exact_decimal(issued_credit_note.tax_amount)
+        )
         inclusive = parse_exact_decimal(
             format_exact_decimal(issued_credit_note.tax_inclusive_amount)
         )
@@ -4729,7 +5223,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("issued credit note identity conflicts with an existing row")
+                    raise ValueError(
+                        "issued credit note identity conflicts with an existing row"
+                    )
             return self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
 
     def find_issued_invoice_void(
@@ -4746,8 +5242,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, issued_invoice_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_invoice_void(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_issued_invoice_void(cursor, UUID(str(row[0])))
             )
 
     def get_issued_invoice_void(
@@ -4764,8 +5262,10 @@ class PostgresUsageLedger:
                 (issued_invoice_void_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_invoice_void(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_issued_invoice_void(cursor, UUID(str(row[0])))
             )
 
     def list_issued_invoice_voids_for_tenant(
@@ -4793,9 +5293,12 @@ class PostgresUsageLedger:
         """Persist one unused issued-invoice void or return its identity replay."""
         if CURRENCY_CODE_PATTERN.fullmatch(issued_invoice_void.currency_code) is None:
             raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            issued_invoice_void.source_payload_hash
-        ) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                issued_invoice_void.source_payload_hash
+            )
+            is None
+        ):
             raise ValueError("source_payload_hash must be a sha256 digest")
         if issued_invoice_void.issued_invoice_void_status != "recorded":
             raise ValueError("issued_invoice_void_status must be recorded")
@@ -4808,7 +5311,9 @@ class PostgresUsageLedger:
             format_exact_decimal(issued_invoice_void.voided_amount)
         )
         if voided_amount <= 0:
-            raise ValueError("issued-invoice void amount must be a positive exact decimal")
+            raise ValueError(
+                "issued-invoice void amount must be a positive exact decimal"
+            )
         with self._cursor() as cursor:
             cursor.execute(
                 """
@@ -4871,8 +5376,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, issued_credit_note_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_credit_note_void(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_issued_credit_note_void(cursor, UUID(str(row[0])))
             )
 
     def get_issued_credit_note_void(
@@ -4889,8 +5396,10 @@ class PostgresUsageLedger:
                 (issued_credit_note_void_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_credit_note_void(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_issued_credit_note_void(cursor, UUID(str(row[0])))
             )
 
     def list_issued_credit_note_voids_for_tenant(
@@ -4916,11 +5425,17 @@ class PostgresUsageLedger:
         self, issued_credit_note_void: StoredIssuedCreditNoteVoid
     ) -> StoredIssuedCreditNoteVoid:
         """Persist one unused issued-credit-note void or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(issued_credit_note_void.currency_code) is None:
+        if (
+            CURRENCY_CODE_PATTERN.fullmatch(issued_credit_note_void.currency_code)
+            is None
+        ):
             raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            issued_credit_note_void.source_payload_hash
-        ) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                issued_credit_note_void.source_payload_hash
+            )
+            is None
+        ):
             raise ValueError("source_payload_hash must be a sha256 digest")
         if issued_credit_note_void.issued_credit_note_void_status != "recorded":
             raise ValueError("issued_credit_note_void_status must be recorded")
@@ -4993,8 +5508,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, issued_credit_note_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_credit_note_application(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_credit_note_application(cursor, UUID(str(row[0])))
             )
 
     def get_credit_note_application(
@@ -5011,8 +5528,10 @@ class PostgresUsageLedger:
                 (credit_note_application_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_credit_note_application(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_credit_note_application(cursor, UUID(str(row[0])))
             )
 
     def list_credit_note_applications_for_tenant(
@@ -5038,15 +5557,24 @@ class PostgresUsageLedger:
         self, credit_note_application: StoredCreditNoteApplication
     ) -> StoredCreditNoteApplication:
         """Persist one applied credit-note application or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(credit_note_application.currency_code) is None:
+        if (
+            CURRENCY_CODE_PATTERN.fullmatch(credit_note_application.currency_code)
+            is None
+        ):
             raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            credit_note_application.source_payload_hash
-        ) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                credit_note_application.source_payload_hash
+            )
+            is None
+        ):
             raise ValueError("source_payload_hash must be a sha256 digest")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            credit_note_application.issued_credit_note_source_payload_hash
-        ) is None:
+        if (
+            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
+                credit_note_application.issued_credit_note_source_payload_hash
+            )
+            is None
+        ):
             raise ValueError(
                 "issued_credit_note_source_payload_hash must be a sha256 digest"
             )
@@ -5145,8 +5673,10 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_spend_budget(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_spend_budget(cursor, UUID(str(row[0])))
             )
 
     def get_spend_budget(self, spend_budget_id: UUID) -> StoredSpendBudget | None:
@@ -5161,8 +5691,10 @@ class PostgresUsageLedger:
                 (spend_budget_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_spend_budget(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_spend_budget(cursor, UUID(str(row[0])))
             )
 
     def insert_spend_budget(self, budget: StoredSpendBudget) -> StoredSpendBudget:
@@ -5228,7 +5760,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("spend budget identity conflicts with an existing row")
+                    raise ValueError(
+                        "spend budget identity conflicts with an existing row"
+                    )
             return self._fetch_spend_budget(cursor, UUID(str(row[0])))
 
     def list_spend_budgets(
@@ -5284,8 +5818,10 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_receipt(
@@ -5314,8 +5850,10 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_credit(
@@ -5344,8 +5882,10 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_credit_adjustment(
@@ -5365,8 +5905,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, credit_adjustment_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_write_off(
@@ -5386,8 +5928,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, collection_write_off_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_refund(
@@ -5407,8 +5951,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, unapplied_cash_refund_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_unapplied_cash(
@@ -5428,8 +5974,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, unapplied_cash_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_unapplied_cash_application(
@@ -5449,8 +5997,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, unapplied_cash_application_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_issued_invoice_void(
@@ -5470,8 +6020,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, issued_invoice_void_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_issued_credit_note_void(
@@ -5491,8 +6043,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, issued_credit_note_void_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def find_journal_proposal_for_invoice_draft(
@@ -5526,8 +6080,10 @@ class PostgresUsageLedger:
                 (tenant_account_id, invoice_draft_id),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def insert_journal_proposal(
@@ -5543,9 +6099,9 @@ class PostgresUsageLedger:
             "rejected",
         }:
             raise ValueError("journal proposals cannot be posted")
-        if not proposal_lines or len({line.line_number for line in proposal_lines}) != len(
-            proposal_lines
-        ):
+        if not proposal_lines or len(
+            {line.line_number for line in proposal_lines}
+        ) != len(proposal_lines):
             raise ValueError("journal proposal line numbers must be unique")
         parsed_lines = tuple(
             (
@@ -5557,7 +6113,9 @@ class PostgresUsageLedger:
         )
         for line, debit_amount, credit_amount in parsed_lines:
             if line.journal_proposal_id != journal_proposal.journal_proposal_id:
-                raise ValueError("journal proposal line has the wrong proposal identity")
+                raise ValueError(
+                    "journal proposal line has the wrong proposal identity"
+                )
             if line.tenant_account_id != journal_proposal.tenant_account_id:
                 raise ValueError("journal proposal line has the wrong tenant identity")
             if (debit_amount > 0) == (credit_amount > 0):
@@ -5751,7 +6309,9 @@ class PostgresUsageLedger:
                     )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("journal proposal identity conflicts with an existing row")
+                    raise ValueError(
+                        "journal proposal identity conflicts with an existing row"
+                    )
                 return self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             for line, debit_amount, credit_amount in parsed_lines:
                 cursor.execute(
@@ -5790,8 +6350,10 @@ class PostgresUsageLedger:
                 (journal_proposal_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
+            return (
+                None
+                if row is None
+                else self._fetch_journal_proposal(cursor, UUID(str(row[0])))
             )
 
     def list_journal_proposals(
@@ -5977,7 +6539,7 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _tenant_api_credential_from_row(
-        row: tuple[Any, ...]
+        row: tuple[Any, ...],
     ) -> StoredTenantApiCredential:
         """Decode one normalized API credential row."""
         return StoredTenantApiCredential(
@@ -6045,7 +6607,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("webhook subscription identity already belongs to another row")
+                    raise ValueError(
+                        "webhook subscription identity already belongs to another row"
+                    )
             return self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
 
     def store_webhook_subscription_secret(
@@ -6056,7 +6620,9 @@ class PostgresUsageLedger:
             raise ValueError("webhook secret must be a non-empty string")
         self.webhook_subscription_secrets[webhook_subscription_id] = webhook_secret
 
-    def get_webhook_subscription_secret(self, webhook_subscription_id: UUID) -> str | None:
+    def get_webhook_subscription_secret(
+        self, webhook_subscription_id: UUID
+    ) -> str | None:
         """Return the process-local secret for one subscription, if present."""
         return self.webhook_subscription_secrets.get(webhook_subscription_id)
 
@@ -6074,7 +6640,11 @@ class PostgresUsageLedger:
                 (webhook_subscription_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+            )
 
     def find_webhook_subscription(
         self,
@@ -6102,7 +6672,11 @@ class PostgresUsageLedger:
                 ),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
+            )
 
     def list_webhook_subscriptions(
         self, tenant_account_id: UUID
@@ -6171,7 +6745,11 @@ class PostgresUsageLedger:
                 (tenant_account_id, event_type_code, source_id, payload_hash),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
+            )
 
     def get_webhook_outbox_event(
         self, outbox_event_id: UUID
@@ -6187,7 +6765,11 @@ class PostgresUsageLedger:
                 (outbox_event_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
+            )
 
     def insert_webhook_outbox_event(
         self, outbox_event: StoredWebhookOutboxEvent
@@ -6236,7 +6818,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("outbox event identity already belongs to another row")
+                    raise ValueError(
+                        "outbox event identity already belongs to another row"
+                    )
             return self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
 
     def list_pending_webhook_outbox_events(
@@ -6330,7 +6914,9 @@ class PostgresUsageLedger:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise ValueError("delivery attempt identity already belongs to another row")
+                    raise ValueError(
+                        "delivery attempt identity already belongs to another row"
+                    )
             return self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
 
     def list_webhook_delivery_attempts(
@@ -6378,7 +6964,11 @@ class PostgresUsageLedger:
                 (delivery_attempt_id,),
             )
             row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
+            return (
+                None
+                if row is None
+                else self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
+            )
 
     def list_webhook_delivery_attempts_for_tenant(
         self, tenant_account_id: UUID
@@ -6402,7 +6992,9 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
 
-    def stored_usage_set(self, tenant_account_id: UUID) -> frozenset[tuple[object, ...]]:
+    def stored_usage_set(
+        self, tenant_account_id: UUID
+    ) -> frozenset[tuple[object, ...]]:
         """Return the same deterministic identity projection as the reference ledger."""
         identities = []
         for event in self.list_usage_events(tenant_account_id):
@@ -6457,7 +7049,9 @@ class PostgresUsageLedger:
             UUID(str(row[0])), UUID(str(row[1])), row[3], row[2], row[4]
         )
 
-    def _require_principal(self, tenant: TenantAccount, reference: str) -> BillingPrincipal:
+    def _require_principal(
+        self, tenant: TenantAccount, reference: str
+    ) -> BillingPrincipal:
         """Resolve a principal for catalog registration without an event time."""
         with self._cursor() as cursor:
             cursor.execute(
@@ -6476,7 +7070,9 @@ class PostgresUsageLedger:
             raise KeyError(reference)
         return self._principal_from_row(row)
 
-    def _require_credential(self, tenant: TenantAccount, reference: str) -> CredentialRecord:
+    def _require_credential(
+        self, tenant: TenantAccount, reference: str
+    ) -> CredentialRecord:
         """Resolve a credential for catalog registration."""
         with self._cursor() as cursor:
             cursor.execute(
@@ -6564,9 +7160,43 @@ class PostgresUsageLedger:
             period_end=row[4],
             opened_at=row[5],
             opened_by=row[6],
-            status=transitions[-1].to_status if transitions else BillingPeriodStatus.OPEN,
+            status=transitions[-1].to_status
+            if transitions
+            else BillingPeriodStatus.OPEN,
             transitions=transitions,
             period_contract_version=row[7],
+        )
+
+    @staticmethod
+    def _fetch_late_adjustment(
+        cursor: Any, late_adjustment_id: UUID, tenant_account_id: UUID
+    ) -> LateAdjustment | None:
+        """Hydrate one later-period adjustment within its tenant boundary."""
+        cursor.execute(
+            """
+            SELECT late_adjustment_id, source_period_id, target_period_id,
+                   adjustment_kind, adjustment_amount, currency_code,
+                   source_reference, source_payload_hash, recorded_at,
+                   late_adjustment_contract_version
+            FROM billing_core.late_adjustment
+            WHERE late_adjustment_id = %s AND tenant_account_id = %s
+            """,
+            (late_adjustment_id, tenant_account_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return LateAdjustment(
+            late_adjustment_id=UUID(str(row[0])),
+            source_period_id=UUID(str(row[1])),
+            target_period_id=UUID(str(row[2])),
+            adjustment_kind=row[3],
+            adjustment_amount=row[4],
+            currency_code=row[5],
+            source_reference=row[6],
+            source_payload_hash=row[7],
+            recorded_at=row[8],
+            late_adjustment_contract_version=row[9],
         )
 
     @staticmethod
@@ -6599,7 +7229,9 @@ class PostgresUsageLedger:
         )
 
     @staticmethod
-    def _fetch_fx_conversion(cursor: Any, fx_conversion_id: UUID) -> FxConversion | None:
+    def _fetch_fx_conversion(
+        cursor: Any, fx_conversion_id: UUID
+    ) -> FxConversion | None:
         """Hydrate one frozen conversion result."""
         cursor.execute(
             """
@@ -6823,7 +7455,9 @@ class PostgresUsageLedger:
             reconciliation_run_contract_version=row[5],
         )
 
-    def _find_event(self, query: str, parameters: tuple[Any, ...]) -> StoredUsageEvent | None:
+    def _find_event(
+        self, query: str, parameters: tuple[Any, ...]
+    ) -> StoredUsageEvent | None:
         """Run one fixed identity query and hydrate its measurements."""
         with self._cursor() as cursor:
             cursor.execute(query, parameters)
@@ -6855,7 +7489,11 @@ class PostgresUsageLedger:
                   AND event_contract_version = %s
                 LIMIT 1
                 """,
-                (tenant_account_id, event.event_payload_hash, event.event_contract_version),
+                (
+                    tenant_account_id,
+                    event.event_payload_hash,
+                    event.event_contract_version,
+                ),
             ),
             (
                 """
@@ -6900,7 +7538,9 @@ class PostgresUsageLedger:
             """,
             (usage_event_id,),
         )
-        measurements = tuple(self._measurement_from_row(measurement) for measurement in cursor.fetchall())
+        measurements = tuple(
+            self._measurement_from_row(measurement) for measurement in cursor.fetchall()
+        )
         return StoredUsageEvent(
             usage_event_id=UUID(str(row[0])),
             producer_event_id=UUID(str(row[1])),
@@ -7081,7 +7721,9 @@ class PostgresUsageLedger:
             lines,
         )
 
-    def _fetch_invoice_draft(self, cursor: Any, invoice_draft_id: UUID) -> StoredInvoiceDraft:
+    def _fetch_invoice_draft(
+        self, cursor: Any, invoice_draft_id: UUID
+    ) -> StoredInvoiceDraft:
         """Hydrate one invoice draft and its immutable copied lines."""
         cursor.execute(
             """
@@ -7253,7 +7895,7 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _collection_dunning_event_from_row(
-        row: tuple[Any, ...]
+        row: tuple[Any, ...],
     ) -> StoredCollectionDunningEvent:
         """Decode one normalized dunning-event row."""
         return StoredCollectionDunningEvent(
@@ -7755,7 +8397,9 @@ class PostgresUsageLedger:
         return self._spend_budget_from_row(row)
 
     @staticmethod
-    def _collection_write_off_from_row(row: tuple[Any, ...]) -> StoredCollectionWriteOff:
+    def _collection_write_off_from_row(
+        row: tuple[Any, ...],
+    ) -> StoredCollectionWriteOff:
         """Decode one normalized collection write-off row."""
         return StoredCollectionWriteOff(
             UUID(str(row[0])),
@@ -7795,7 +8439,7 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _collection_case_settlement_from_row(
-        row: tuple[Any, ...]
+        row: tuple[Any, ...],
     ) -> StoredCollectionCaseSettlement:
         """Decode one normalized collection settlement row."""
         return StoredCollectionCaseSettlement(
@@ -7886,8 +8530,12 @@ class PostgresUsageLedger:
             legal_entity_reference=row[5],
             intended_book_role_code=row[6],
             transaction_currency=row[7],
-            transaction_date=row[8].isoformat() if hasattr(row[8], "isoformat") else row[8],
-            accounting_date=row[9].isoformat() if hasattr(row[9], "isoformat") else row[9],
+            transaction_date=row[8].isoformat()
+            if hasattr(row[8], "isoformat")
+            else row[8],
+            accounting_date=row[9].isoformat()
+            if hasattr(row[9], "isoformat")
+            else row[9],
             source_payload_hash=row[10],
             proposed_at=row[11],
             proposal_status=row[12],
@@ -7898,7 +8546,9 @@ class PostgresUsageLedger:
             collection_write_off_id=None if row[16] is None else UUID(str(row[16])),
             unapplied_cash_refund_id=None if row[17] is None else UUID(str(row[17])),
             unapplied_cash_id=None if row[18] is None else UUID(str(row[18])),
-            unapplied_cash_application_id=None if row[19] is None else UUID(str(row[19])),
+            unapplied_cash_application_id=None
+            if row[19] is None
+            else UUID(str(row[19])),
             issued_invoice_void_id=None if row[20] is None else UUID(str(row[20])),
             issued_credit_note_void_id=None if row[21] is None else UUID(str(row[21])),
         )
@@ -7951,7 +8601,9 @@ class PostgresUsageLedger:
         return self._journal_proposal_from_row(row, lines)
 
     @staticmethod
-    def _webhook_subscription_from_row(row: tuple[Any, ...]) -> StoredWebhookSubscription:
+    def _webhook_subscription_from_row(
+        row: tuple[Any, ...],
+    ) -> StoredWebhookSubscription:
         """Decode one normalized webhook subscription row."""
         return StoredWebhookSubscription(
             UUID(str(row[0])),
@@ -8038,7 +8690,7 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _webhook_delivery_attempt_from_row(
-        row: tuple[Any, ...]
+        row: tuple[Any, ...],
     ) -> StoredWebhookDeliveryAttempt:
         """Decode one normalized webhook delivery attempt row."""
         return StoredWebhookDeliveryAttempt(
@@ -8119,7 +8771,9 @@ class PostgresUsageLedger:
                     """,
                     (tenant_account_id,),
                 )
-            return tuple(self._webhook_outbox_from_row(row) for row in cursor.fetchall())
+            return tuple(
+                self._webhook_outbox_from_row(row) for row in cursor.fetchall()
+            )
 
     @staticmethod
     def _principal_from_row(row: tuple[Any, ...]) -> BillingPrincipal:
@@ -8137,7 +8791,9 @@ class PostgresUsageLedger:
     @staticmethod
     def _credential_from_row(row: tuple[Any, ...]) -> CredentialRecord:
         """Decode a credential query row without exposing any secret."""
-        return CredentialRecord(UUID(str(row[0])), UUID(str(row[1])), row[2], row[3], row[4])
+        return CredentialRecord(
+            UUID(str(row[0])), UUID(str(row[1])), row[2], row[3], row[4]
+        )
 
     @staticmethod
     def _assignment_from_row(row: tuple[Any, ...]) -> CredentialAssignment:

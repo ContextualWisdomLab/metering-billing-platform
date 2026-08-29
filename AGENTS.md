@@ -19,6 +19,10 @@
 - Require production statement and branch coverage of 100%.
 - Document every public API and every accounting or monetary invariant.
 - Update architecture, ADRs, and CHANGELOG when authority or behavior changes.
+- Record late usage, corrections, and reversals through the immutable
+  `LateAdjustment` contract and migration `0048`; source periods are never
+  rewritten, targets must remain open, and application/re-rating stays a
+  separate workflow.
 - Keep usage ingestion append-only.  Deduplicate by tenant-scoped source-event key and by source-payload hash plus contract version.  Present a stored event through `metering_billing.UsageEventPresentmentService.present_usage_event`.  `POST /v1/usage-events` stays the #5 ingest.  `GET /v1/usage-events/{usage_event_id}` is the HTTP read.  `GET /v1/usage-events` lists `{usage_events, next_cursor}`.  Ingest usage, then rate a window against a published card.  Present a stored rating run through `metering_billing.RatingRunPresentmentService.present_rating_run`.  `POST /v1/rating-runs` stays the #7 rate-a-window command.  `GET /v1/rating-runs/{rating_run_id}` is the HTTP read.  `GET /v1/rating-runs` lists `{rating_runs, next_cursor}`.  Rate a window, then draft an invoice.  Present a stored tax assessment through `metering_billing.TaxAssessmentPresentmentService.present_tax_assessment`.  `POST /v1/tax-assessments` stays the #19 assess command.  `GET /v1/tax-assessments/{tax_assessment_id}` stays the existing #19 item read.  `GET /v1/tax-assessments` lists `{tax_assessments, next_cursor}`.  Publish a tax rate, assess the draft, then propose the journal and let AIS pull.
 - Rate stored usage through `metering_billing.UsageRatingService` so a tenant window, rate-card version, and usage snapshot replay the same `rating_run_id` and exact totals.
 - Draft invoice intent through `metering_billing.InvoiceDraftService` so a tenant and `rating_run_id` replay the same `invoice_draft_id` and exact totals.  Drafts are not issued, collected, or posted.

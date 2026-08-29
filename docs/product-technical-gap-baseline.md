@@ -6,6 +6,23 @@
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
 
+## Current working snapshot (2026-08-29)
+
+The current #87 work is stacked from exact head
+`4ab415bd0654f0fa951700b32b4abef6183595da` of PR [#169](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/169)
+into the follow-up branch `feat/late-adjustment-20260829`. PR #169 is still
+open, mergeable but blocked, has zero qualifying approvals, and its normal
+checks pass while `opencode-review`, `strix`, and `noema-review` are provider
+failures. That state is not merge evidence.
+
+This follow-up adds PostgreSQL migration `0048` and the `LateAdjustment`
+contract for durable, tenant-scoped late usage, correction, and reversal facts.
+The source period must be at least `soft_closed`; the target must be `open` and
+start no earlier than the source end. Targeted real-PostgreSQL and repository
+contract tests pass on this branch. Applying or re-rating the fact, provider
+settlement ingestion, FOCUS 1.4 export, and statutory accounting remain open
+gaps.
+
 ## Executive decision
 
 The candidate stack is a substantial **commercial-domain prototype and contract baseline**. It is **not yet a GA product**.
