@@ -107,6 +107,23 @@ class PostgresBackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(PostgresBackupError, "publication failed"):
                     create_backup("dsn", output)
 
+            with unittest.mock.patch(
+                "scripts.postgres_backup.subprocess.run",
+                side_effect=lambda command, **_: (
+                    Path(command[command.index("--file") + 1]).write_bytes(b"archive"),
+                    self._result(),
+                )[1],
+            ), unittest.mock.patch("pathlib.Path.unlink", side_effect=OSError):
+                with self.assertRaisesRegex(PostgresBackupError, "published but"):
+                    create_backup("dsn", output)
+            output.unlink()
+
+            with unittest.mock.patch(
+                "scripts.postgres_backup.subprocess.run", return_value=self._result(7)
+            ), unittest.mock.patch("pathlib.Path.unlink", side_effect=OSError):
+                with self.assertRaisesRegex(PostgresBackupError, "failed and"):
+                    create_backup("dsn", output)
+
     def test_archive_validation_rejects_missing_invalid_and_unavailable_clients(self) -> None:
         """Archive checks fail closed without returning subprocess output."""
         with TemporaryDirectory() as temporary_directory:

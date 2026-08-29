@@ -95,9 +95,19 @@ def create_backup(
         except OSError as error:
             raise PostgresBackupError("backup archive publication failed") from error
     except Exception:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as error:
+            raise PostgresBackupError(
+                "backup failed and temporary cleanup failed"
+            ) from error
         raise
-    temporary.unlink(missing_ok=True)
+    try:
+        temporary.unlink(missing_ok=True)
+    except OSError as error:
+        raise PostgresBackupError(
+            "backup published but temporary cleanup failed"
+        ) from error
     return destination
 
 
