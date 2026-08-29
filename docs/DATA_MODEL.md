@@ -196,10 +196,13 @@ four-decimal currencies without summing unlike currencies or looking up a
 later rate when re-exporting a closed result.
 
 `reconciliation-line` keeps internal expected, provider actual, cash actual,
-provider fee, withholding, and reserve amounts separate.  Its deterministic
+provider fee, withholding, and reserve amounts separate, and requires the
+internal, provider, and cash source currencies as evidence.  Its deterministic
 status reports currency, price, provider-fee, or settlement exceptions with a
-next action.  These contracts are not a FOCUS export, tax engine, statutory
-invoice authority, provider connector, or period-wide reconciliation run.
+next action. Raw contract validation re-applies the domain lifecycle, exact
+arithmetic, and exception/status invariants. These contracts are not a FOCUS
+export, tax engine, statutory invoice authority, provider connector, or
+period-wide reconciliation run.
 
 ## Tenant-API-credential identity
 

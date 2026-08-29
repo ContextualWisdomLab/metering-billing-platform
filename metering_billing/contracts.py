@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import UUID
+
+from metering_billing.errors import PeriodCloseValidationError
 
 from scripts.validate_repository import (
     validate_accounting_journal_proposal,
@@ -321,7 +325,11 @@ def validate_billing_period(
 ) -> tuple[str, ...]:
     """Validate an immutable billing-period snapshot and transition history."""
     schema = load_json_schema(BILLING_PERIOD_SCHEMA_NAME, schemas_directory)
-    return validate_schema_instance(schema, period)
+    errors = list(validate_schema_instance(schema, period))
+    if errors or not isinstance(period, Mapping):
+        return tuple(errors)
+    errors.extend(_billing_period_semantic_errors(period))
+    return tuple(errors)
 
 
 def validate_fx_rate(
@@ -329,7 +337,11 @@ def validate_fx_rate(
 ) -> tuple[str, ...]:
     """Validate one versioned exact FX-rate evidence document."""
     schema = load_json_schema(FX_RATE_SCHEMA_NAME, schemas_directory)
-    return validate_schema_instance(schema, rate)
+    errors = list(validate_schema_instance(schema, rate))
+    if errors or not isinstance(rate, Mapping):
+        return tuple(errors)
+    errors.extend(_fx_rate_semantic_errors(rate))
+    return tuple(errors)
 
 
 def validate_fx_conversion(
@@ -337,7 +349,11 @@ def validate_fx_conversion(
 ) -> tuple[str, ...]:
     """Validate one frozen exact FX conversion result."""
     schema = load_json_schema(FX_CONVERSION_SCHEMA_NAME, schemas_directory)
-    return validate_schema_instance(schema, conversion)
+    errors = list(validate_schema_instance(schema, conversion))
+    if errors or not isinstance(conversion, Mapping):
+        return tuple(errors)
+    errors.extend(_fx_conversion_semantic_errors(conversion))
+    return tuple(errors)
 
 
 def validate_reconciliation_line(
@@ -345,7 +361,147 @@ def validate_reconciliation_line(
 ) -> tuple[str, ...]:
     """Validate one provider/account/period/currency reconciliation line."""
     schema = load_json_schema(RECONCILIATION_LINE_SCHEMA_NAME, schemas_directory)
-    return validate_schema_instance(schema, line)
+    errors = list(validate_schema_instance(schema, line))
+    if errors or not isinstance(line, Mapping):
+        return tuple(errors)
+    errors.extend(_reconciliation_line_semantic_errors(line))
+    return tuple(errors)
+
+
+def _contract_uuid(value: Any) -> UUID:
+    """Parse a schema-valid UUID for a domain-object semantic check."""
+    return UUID(str(value))
+
+
+def _contract_date(value: Any) -> date:
+    """Parse a schema-valid ISO date for a domain-object semantic check."""
+    return date.fromisoformat(str(value))
+
+
+def _contract_datetime(value: Any) -> datetime:
+    """Parse a schema-valid ISO instant for a domain-object semantic check."""
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _semantic_error(builder: Any) -> tuple[str, ...]:
+    """Turn one domain invariant failure into a stable contract diagnostic."""
+    try:
+        builder()
+    except (PeriodCloseValidationError, TypeError, ValueError) as error:
+        return (f"$: {error}",)
+    return ()
+
+
+def _billing_period_semantic_errors(period: Mapping[str, Any]) -> tuple[str, ...]:
+    """Apply the immutable period aggregate invariants after schema validation."""
+    from metering_billing.period_close import BillingPeriod, BillingPeriodTransition
+
+    def build() -> None:
+        transitions = tuple(
+            BillingPeriodTransition(
+                transition_id=_contract_uuid(item["transition_id"]),
+                from_status=item["from_status"],
+                to_status=item["to_status"],
+                actor_reference=item["actor_reference"],
+                authorization_reference=item["authorization_reference"],
+                reason=item["reason"],
+                transitioned_at=_contract_datetime(item["transitioned_at"]),
+            )
+            for item in period["transitions"]
+        )
+        BillingPeriod(
+            period_id=_contract_uuid(period["period_id"]),
+            tenant_reference=period["tenant_reference"],
+            period_start=_contract_date(period["period_start"]),
+            period_end=_contract_date(period["period_end"]),
+            opened_at=_contract_datetime(period["opened_at"]),
+            opened_by=period["opened_by"],
+            status=period["period_status"],
+            transitions=transitions,
+            period_contract_version=period["period_contract_version"],
+        )
+
+    return _semantic_error(build)
+
+
+def _fx_rate_semantic_errors(rate: Mapping[str, Any]) -> tuple[str, ...]:
+    """Apply positive-rate and precision coverage invariants after schema validation."""
+    from metering_billing.period_close import FxRate
+
+    return _semantic_error(
+        lambda: FxRate(
+            fx_rate_id=_contract_uuid(rate["fx_rate_id"]),
+            rate_source=rate["rate_source"],
+            rate_type=rate["rate_type"],
+            base_currency=rate["base_currency"],
+            quote_currency=rate["quote_currency"],
+            rate=Decimal(rate["rate"]),
+            rate_precision=rate["rate_precision"],
+            effective_at=_contract_datetime(rate["effective_at"]),
+            recorded_at=_contract_datetime(rate["recorded_at"]),
+            fx_rate_contract_version=rate["fx_rate_contract_version"],
+        )
+    )
+
+
+def _fx_conversion_semantic_errors(conversion: Mapping[str, Any]) -> tuple[str, ...]:
+    """Apply target-scale and exact-product invariants after schema validation."""
+    from metering_billing.period_close import FxConversion
+
+    return _semantic_error(
+        lambda: FxConversion(
+            fx_conversion_id=_contract_uuid(conversion["fx_conversion_id"]),
+            fx_rate_id=_contract_uuid(conversion["fx_rate_id"]),
+            source_amount=Decimal(conversion["source_amount"]),
+            source_currency=conversion["source_currency"],
+            quote_amount=Decimal(conversion["quote_amount"]),
+            quote_currency=conversion["quote_currency"],
+            quote_minor_units=conversion["quote_minor_units"],
+            rate=Decimal(conversion["rate"]),
+            rate_precision=conversion["rate_precision"],
+            converted_at=_contract_datetime(conversion["converted_at"]),
+            fx_conversion_contract_version=conversion["fx_conversion_contract_version"],
+        )
+    )
+
+
+def _reconciliation_line_semantic_errors(line: Mapping[str, Any]) -> tuple[str, ...]:
+    """Apply arithmetic, currency, and exception/status invariants after schema validation."""
+    from metering_billing.period_close import (
+        ReconciliationException,
+        ReconciliationLine,
+    )
+
+    def build() -> None:
+        exceptions = tuple(
+            ReconciliationException(
+                exception_code=item["exception_code"],
+                next_action=item["next_action"],
+            )
+            for item in line["exceptions"]
+        )
+        ReconciliationLine(
+            reconciliation_line_id=_contract_uuid(line["reconciliation_line_id"]),
+            period_id=_contract_uuid(line["period_id"]),
+            provider_account_reference=line["provider_account_reference"],
+            currency_code=line["currency_code"],
+            internal_expected_amount=Decimal(line["internal_expected_amount"]),
+            provider_actual_amount=Decimal(line["provider_actual_amount"]),
+            cash_actual_amount=Decimal(line["cash_actual_amount"]),
+            provider_fee_amount=Decimal(line["provider_fee_amount"]),
+            withheld_tax_amount=Decimal(line["withheld_tax_amount"]),
+            reserve_amount=Decimal(line["reserve_amount"]),
+            expected_cash_amount=Decimal(line["expected_cash_amount"]),
+            status=line["reconciliation_line_status"],
+            exceptions=exceptions,
+            assessed_at=_contract_datetime(line["assessed_at"]),
+            internal_currency_code=line["internal_currency_code"],
+            provider_currency_code=line["provider_currency_code"],
+            cash_currency_code=line["cash_currency_code"],
+            reconciliation_line_contract_version=line["reconciliation_line_contract_version"],
+        )
+
+    return _semantic_error(build)
 
 
 def validate_usage_event(
