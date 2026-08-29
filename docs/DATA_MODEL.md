@@ -184,9 +184,11 @@ period-close persistence.  `billing-period` represents one tenant period and
 allows only the append-only state sequence `open`, `soft_closed`,
 `reconciled`, `invoiced`, `hard_closed`; every transition carries an actor,
 authorization reference, reason, and monotonic timestamp.  A hard-closed
-snapshot cannot be changed through this contract.  The slice does not yet
-persist periods, authorize maker-checker resolutions, or create late-event
-adjustments.
+snapshot cannot be changed through this contract. PostgreSQL now stores the
+period base row and normalized transition rows; the current status is derived
+from that history, and replaying a later immutable snapshot appends only new
+transitions. Tenant ownership is resolved through `tenant_account_id` and
+composite foreign keys.
 
 `fx-rate` stores the source, rate type, base/quote currencies, exact rate,
 declared precision, effective time, and recorded time.  `fx-conversion` copies
@@ -200,9 +202,11 @@ provider fee, withholding, and reserve amounts separate, and requires the
 internal, provider, and cash source currencies as evidence.  Its deterministic
 status reports currency, price, provider-fee, or settlement exceptions with a
 next action. Raw contract validation re-applies the domain lifecycle, exact
-arithmetic, and exception/status invariants. These contracts are not a FOCUS
-export, tax engine, statutory invoice authority, provider connector, or
-period-wide reconciliation run.
+arithmetic, and exception/status invariants. PostgreSQL stores the line and
+exception children atomically, preserving the pinned FX snapshot and exact
+`numeric` amounts. These contracts are not a FOCUS export, tax engine,
+statutory invoice authority, provider connector, or period-wide reconciliation
+run.
 
 ## Tenant-API-credential identity
 

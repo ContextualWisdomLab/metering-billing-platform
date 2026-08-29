@@ -30,6 +30,15 @@ from metering_billing.exact_decimal import (
     parse_exact_decimal,
     require_postable_journal_line_amounts,
 )
+from metering_billing.period_close import (
+    BillingPeriod,
+    BillingPeriodStatus,
+    BillingPeriodTransition,
+    FxConversion,
+    FxRate,
+    ReconciliationException,
+    ReconciliationLine,
+)
 from metering_billing.usage_ledger import (
     CURRENCY_CODE_PATTERN,
     SOURCE_PAYLOAD_HASH_PATTERN,
@@ -186,6 +195,320 @@ class PostgresUsageLedger:
         if row is None:  # pragma: no cover - COUNT(*) always returns one row
             raise RuntimeError("migration history count did not return a row")
         return int(row[0])
+
+    def get_billing_period(self, period_id: UUID) -> BillingPeriod | None:
+        """Return one immutable period aggregate with its transition history."""
+        with self._cursor() as cursor:
+            return self._fetch_billing_period(cursor, period_id)
+
+    def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
+        """Persist a period and append only transitions not already stored."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, period.tenant_reference
+            )
+            cursor.execute(
+                """
+                INSERT INTO billing_core.billing_period
+                    (period_id, tenant_account_id, period_start, period_end,
+                     opened_at, opened_by, period_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (period_id) DO NOTHING
+                """,
+                (
+                    period.period_id,
+                    tenant_account_id,
+                    period.period_start,
+                    period.period_end,
+                    period.opened_at,
+                    period.opened_by,
+                    period.period_contract_version,
+                ),
+            )
+            existing = self._fetch_billing_period(cursor, period.period_id, lock=True)
+            if existing is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("billing period insert did not return a row")
+            if (
+                existing.tenant_reference != period.tenant_reference
+                or existing.period_start != period.period_start
+                or existing.period_end != period.period_end
+                or existing.opened_at != period.opened_at
+                or existing.opened_by != period.opened_by
+                or existing.period_contract_version != period.period_contract_version
+            ):
+                raise ValueError("billing period identity cannot change after persistence")
+            prefix = period.transitions[: len(existing.transitions)]
+            if existing.transitions != prefix:
+                raise ValueError("billing period transition history cannot be rewritten")
+            for transition_number, transition in enumerate(
+                period.transitions[len(existing.transitions) :],
+                start=len(existing.transitions) + 1,
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO billing_core.billing_period_transition
+                        (transition_id, tenant_account_id, period_id, transition_number, from_status,
+                         to_status, actor_reference, authorization_reference, transition_reason,
+                         transitioned_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (transition_id) DO NOTHING
+                    """,
+                    (
+                        transition.transition_id,
+                        tenant_account_id,
+                        period.period_id,
+                        transition_number,
+                        transition.from_status.value,
+                        transition.to_status.value,
+                        transition.actor_reference,
+                        transition.authorization_reference,
+                        transition.reason,
+                        transition.transitioned_at,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    SELECT transition_number, tenant_account_id, period_id, from_status, to_status,
+                           actor_reference, authorization_reference, transition_reason, transitioned_at
+                    FROM billing_core.billing_period_transition
+                    WHERE transition_id = %s
+                    """,
+                    (transition.transition_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row != (
+                    transition_number,
+                    tenant_account_id,
+                    period.period_id,
+                    transition.from_status.value,
+                    transition.to_status.value,
+                    transition.actor_reference,
+                    transition.authorization_reference,
+                    transition.reason,
+                    transition.transitioned_at,
+                ):
+                    raise ValueError("billing period transition identity cannot change")
+            stored = self._fetch_billing_period(cursor, period.period_id)
+            if stored is None:  # pragma: no cover - locked row remains present in this transaction
+                raise RuntimeError("billing period disappeared after persistence")
+            return stored
+
+    def list_billing_periods(self, tenant_reference: str) -> tuple[BillingPeriod, ...]:
+        """Return period aggregates for one registered tenant only."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            cursor.execute(
+                """
+                SELECT period_id
+                FROM billing_core.billing_period
+                WHERE tenant_account_id = %s
+                ORDER BY period_start, period_id
+                """,
+                (tenant_account_id,),
+            )
+            periods = tuple(
+                self._fetch_billing_period(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(period for period in periods if period is not None)
+
+    def get_fx_rate(self, fx_rate_id: UUID) -> FxRate | None:
+        """Return one immutable exchange-rate evidence row."""
+        with self._cursor() as cursor:
+            return self._fetch_fx_rate(cursor, fx_rate_id)
+
+    def insert_fx_rate(self, rate: FxRate) -> FxRate:
+        """Persist one exact FX rate without replacing an existing snapshot."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.fx_rate
+                    (fx_rate_id, rate_source, rate_type, base_currency, quote_currency,
+                     fx_rate_value, rate_precision, effective_at, recorded_at,
+                     fx_rate_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (fx_rate_id) DO NOTHING
+                """,
+                (
+                    rate.fx_rate_id,
+                    rate.rate_source,
+                    rate.rate_type.value,
+                    rate.base_currency,
+                    rate.quote_currency,
+                    rate.rate,
+                    rate.rate_precision,
+                    rate.effective_at,
+                    rate.recorded_at,
+                    rate.fx_rate_contract_version,
+                ),
+            )
+            stored = self._fetch_fx_rate(cursor, rate.fx_rate_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("FX rate insert did not return a row")
+            if stored.as_contract_dict() != rate.as_contract_dict():
+                raise ValueError("FX rate identity cannot change after persistence")
+            return stored
+
+    def get_fx_conversion(self, fx_conversion_id: UUID) -> FxConversion | None:
+        """Return one frozen conversion result and its pinned rate snapshot."""
+        with self._cursor() as cursor:
+            return self._fetch_fx_conversion(cursor, fx_conversion_id)
+
+    def insert_fx_conversion(self, conversion: FxConversion) -> FxConversion:
+        """Persist a conversion only when its copied rate matches the pinned evidence."""
+        with self._cursor() as cursor:
+            rate = self._fetch_fx_rate(cursor, conversion.fx_rate_id)
+            if rate is None:
+                raise KeyError(conversion.fx_rate_id)
+            if (
+                rate.base_currency != conversion.source_currency
+                or rate.quote_currency != conversion.quote_currency
+                or rate.rate != conversion.rate
+                or rate.rate_precision != conversion.rate_precision
+            ):
+                raise ValueError("FX conversion must match its pinned rate snapshot")
+            cursor.execute(
+                """
+                INSERT INTO billing_core.fx_conversion
+                    (fx_conversion_id, fx_rate_id, source_amount, source_currency,
+                     quote_amount, quote_currency, quote_minor_units, fx_rate_value,
+                     rate_precision, rounding_mode, converted_at,
+                     fx_conversion_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (fx_conversion_id) DO NOTHING
+                """,
+                (
+                    conversion.fx_conversion_id,
+                    conversion.fx_rate_id,
+                    conversion.source_amount,
+                    conversion.source_currency,
+                    conversion.quote_amount,
+                    conversion.quote_currency,
+                    conversion.quote_minor_units,
+                    conversion.rate,
+                    conversion.rate_precision,
+                    "ROUND_HALF_UP",
+                    conversion.converted_at,
+                    conversion.fx_conversion_contract_version,
+                ),
+            )
+            stored = self._fetch_fx_conversion(cursor, conversion.fx_conversion_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("FX conversion insert did not return a row")
+            if stored.as_contract_dict() != conversion.as_contract_dict():
+                raise ValueError("FX conversion identity cannot change after persistence")
+            return stored
+
+    def get_reconciliation_line(
+        self, reconciliation_line_id: UUID
+    ) -> ReconciliationLine | None:
+        """Return one immutable reconciliation line with typed exceptions."""
+        with self._cursor() as cursor:
+            return self._fetch_reconciliation_line(cursor, reconciliation_line_id)
+
+    def insert_reconciliation_line(self, line: ReconciliationLine) -> ReconciliationLine:
+        """Persist one line and its exception children atomically."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tenant_account_id
+                FROM billing_core.billing_period
+                WHERE period_id = %s
+                """,
+                (line.period_id,),
+            )
+            period = cursor.fetchone()
+            if period is None:
+                raise KeyError(line.period_id)
+            tenant_account_id = UUID(str(period[0]))
+            cursor.execute(
+                """
+                INSERT INTO billing_core.reconciliation_line
+                    (reconciliation_line_id, tenant_account_id, period_id,
+                     provider_account_reference, currency_code, internal_currency_code,
+                     provider_currency_code, cash_currency_code, internal_expected_amount,
+                     provider_actual_amount, cash_actual_amount, provider_fee_amount,
+                     withheld_tax_amount, reserve_amount, expected_cash_amount,
+                     reconciliation_line_status, assessed_at,
+                     reconciliation_line_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s)
+                ON CONFLICT (reconciliation_line_id) DO NOTHING
+                """,
+                (
+                    line.reconciliation_line_id,
+                    tenant_account_id,
+                    line.period_id,
+                    line.provider_account_reference,
+                    line.currency_code,
+                    line.internal_currency_code,
+                    line.provider_currency_code,
+                    line.cash_currency_code,
+                    line.internal_expected_amount,
+                    line.provider_actual_amount,
+                    line.cash_actual_amount,
+                    line.provider_fee_amount,
+                    line.withheld_tax_amount,
+                    line.reserve_amount,
+                    line.expected_cash_amount,
+                    line.status.value,
+                    line.assessed_at,
+                    line.reconciliation_line_contract_version,
+                ),
+            )
+            for exception_number, exception in enumerate(line.exceptions, start=1):
+                cursor.execute(
+                    """
+                    INSERT INTO billing_core.reconciliation_exception
+                        (reconciliation_line_id, exception_number, exception_code, next_action)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (reconciliation_line_id, exception_number) DO NOTHING
+                    """,
+                    (
+                        line.reconciliation_line_id,
+                        exception_number,
+                        exception.exception_code.value,
+                        exception.next_action,
+                    ),
+                )
+            existing = self._fetch_reconciliation_line(cursor, line.reconciliation_line_id)
+            if existing is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation line insert did not return a row")
+            if existing.as_contract_dict() != line.as_contract_dict():
+                raise ValueError("reconciliation line identity cannot change after persistence")
+            return existing
+
+    def list_reconciliation_lines(
+        self, tenant_reference: str, period_id: UUID | None = None
+    ) -> tuple[ReconciliationLine, ...]:
+        """Return reconciliation lines for one tenant, optionally one period."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            if period_id is None:
+                cursor.execute(
+                    """
+                    SELECT reconciliation_line_id
+                    FROM billing_core.reconciliation_line
+                    WHERE tenant_account_id = %s
+                    ORDER BY assessed_at, reconciliation_line_id
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT reconciliation_line_id
+                    FROM billing_core.reconciliation_line
+                    WHERE tenant_account_id = %s AND period_id = %s
+                    ORDER BY assessed_at, reconciliation_line_id
+                    """,
+                    (tenant_account_id, period_id),
+                )
+            lines = tuple(
+                self._fetch_reconciliation_line(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(line for line in lines if line is not None)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Insert or return one tenant authority row."""
@@ -5659,6 +5982,191 @@ class PostgresUsageLedger:
         if row is None:
             raise KeyError(reference)
         return self._credential_from_row(row)
+
+    @staticmethod
+    def _tenant_account_id_with_cursor(cursor: Any, tenant_reference: str) -> UUID:
+        """Resolve a tenant inside an existing transaction without opening a cursor."""
+        cursor.execute(
+            """
+            SELECT tenant_account_id
+            FROM billing_core.tenant_account
+            WHERE tenant_reference = %s
+            """,
+            (tenant_reference,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise KeyError(tenant_reference)
+        return UUID(str(row[0]))
+
+    @staticmethod
+    def _fetch_billing_period(
+        cursor: Any, period_id: UUID, *, lock: bool = False
+    ) -> BillingPeriod | None:
+        """Hydrate a period and its append-only transitions on one cursor."""
+        query = """
+            SELECT period_id, tenant_account_id, tenant_reference, period_start,
+                   period_end, opened_at, opened_by, period_contract_version
+            FROM billing_core.billing_period
+            JOIN billing_core.tenant_account USING (tenant_account_id)
+            WHERE period_id = %s
+        """
+        if lock:
+            query += " FOR UPDATE"
+        cursor.execute(query, (period_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        cursor.execute(
+            """
+            SELECT transition_number, transition_id, from_status, to_status, actor_reference,
+                   authorization_reference, transition_reason, transitioned_at
+            FROM billing_core.billing_period_transition
+            WHERE tenant_account_id = %s AND period_id = %s
+            ORDER BY transition_number
+            """,
+            (row[1], period_id),
+        )
+        transitions = tuple(
+            BillingPeriodTransition(
+                transition_id=UUID(str(transition[1])),
+                from_status=transition[2],
+                to_status=transition[3],
+                actor_reference=transition[4],
+                authorization_reference=transition[5],
+                reason=transition[6],
+                transitioned_at=transition[7],
+            )
+            for transition in cursor.fetchall()
+        )
+        return BillingPeriod(
+            period_id=UUID(str(row[0])),
+            tenant_reference=row[2],
+            period_start=row[3],
+            period_end=row[4],
+            opened_at=row[5],
+            opened_by=row[6],
+            status=transitions[-1].to_status if transitions else BillingPeriodStatus.OPEN,
+            transitions=transitions,
+            period_contract_version=row[7],
+        )
+
+    @staticmethod
+    def _fetch_fx_rate(cursor: Any, fx_rate_id: UUID) -> FxRate | None:
+        """Hydrate one exact FX rate snapshot."""
+        cursor.execute(
+            """
+            SELECT fx_rate_id, rate_source, rate_type, base_currency, quote_currency,
+                   fx_rate_value, rate_precision, effective_at, recorded_at,
+                   fx_rate_contract_version
+            FROM billing_core.fx_rate
+            WHERE fx_rate_id = %s
+            """,
+            (fx_rate_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return FxRate(
+            fx_rate_id=UUID(str(row[0])),
+            rate_source=row[1],
+            rate_type=row[2],
+            base_currency=row[3],
+            quote_currency=row[4],
+            rate=row[5],
+            rate_precision=row[6],
+            effective_at=row[7],
+            recorded_at=row[8],
+            fx_rate_contract_version=row[9],
+        )
+
+    @staticmethod
+    def _fetch_fx_conversion(cursor: Any, fx_conversion_id: UUID) -> FxConversion | None:
+        """Hydrate one frozen conversion result."""
+        cursor.execute(
+            """
+            SELECT fx_conversion_id, fx_rate_id, source_amount, source_currency,
+                   quote_amount, quote_currency, quote_minor_units, fx_rate_value,
+                   rate_precision, rounding_mode, converted_at,
+                   fx_conversion_contract_version
+            FROM billing_core.fx_conversion
+            WHERE fx_conversion_id = %s
+            """,
+            (fx_conversion_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        if row[9] != "ROUND_HALF_UP":  # pragma: no cover - protected by the table check
+            raise ValueError("unsupported FX rounding mode")
+        return FxConversion(
+            fx_conversion_id=UUID(str(row[0])),
+            fx_rate_id=UUID(str(row[1])),
+            source_amount=row[2],
+            source_currency=row[3],
+            quote_amount=row[4],
+            quote_currency=row[5],
+            quote_minor_units=row[6],
+            rate=row[7],
+            rate_precision=row[8],
+            converted_at=row[10],
+            fx_conversion_contract_version=row[11],
+        )
+
+    @staticmethod
+    def _fetch_reconciliation_line(
+        cursor: Any, reconciliation_line_id: UUID
+    ) -> ReconciliationLine | None:
+        """Hydrate one reconciliation line and its normalized exception children."""
+        cursor.execute(
+            """
+            SELECT reconciliation_line_id, period_id, provider_account_reference,
+                   currency_code, internal_currency_code, provider_currency_code,
+                   cash_currency_code, internal_expected_amount, provider_actual_amount,
+                   cash_actual_amount, provider_fee_amount, withheld_tax_amount,
+                   reserve_amount, expected_cash_amount, reconciliation_line_status,
+                   assessed_at, reconciliation_line_contract_version
+            FROM billing_core.reconciliation_line
+            WHERE reconciliation_line_id = %s
+            """,
+            (reconciliation_line_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        cursor.execute(
+            """
+            SELECT exception_code, next_action
+            FROM billing_core.reconciliation_exception
+            WHERE reconciliation_line_id = %s
+            ORDER BY exception_number
+            """,
+            (reconciliation_line_id,),
+        )
+        exceptions = tuple(
+            ReconciliationException(exception_code=item[0], next_action=item[1])
+            for item in cursor.fetchall()
+        )
+        return ReconciliationLine(
+            reconciliation_line_id=UUID(str(row[0])),
+            period_id=UUID(str(row[1])),
+            provider_account_reference=row[2],
+            currency_code=row[3],
+            internal_currency_code=row[4],
+            provider_currency_code=row[5],
+            cash_currency_code=row[6],
+            internal_expected_amount=row[7],
+            provider_actual_amount=row[8],
+            cash_actual_amount=row[9],
+            provider_fee_amount=row[10],
+            withheld_tax_amount=row[11],
+            reserve_amount=row[12],
+            expected_cash_amount=row[13],
+            status=row[14],
+            exceptions=exceptions,
+            assessed_at=row[15],
+            reconciliation_line_contract_version=row[16],
+        )
 
     def _find_event(self, query: str, parameters: tuple[Any, ...]) -> StoredUsageEvent | None:
         """Run one fixed identity query and hydrate its measurements."""

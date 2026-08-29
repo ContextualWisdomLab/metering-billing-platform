@@ -16,6 +16,14 @@
 
 ### Added
 
+- Issue #87 now has a durable PostgreSQL period-close slice: normalized
+  billing-period and append-only transition rows, exact FX rate/conversion
+  snapshots, and tenant-scoped reconciliation lines with normalized exception
+  children. Replays are idempotent, changed opaque identities fail closed, and
+  database constraints retain tenant ownership, exact arithmetic, and the
+  explicit `ROUND_HALF_UP` contract. Maker-checker resolution, late
+  adjustments, FOCUS 1.4 export, provider settlement ingestion, and HTTP
+  presentment remain later slices (ADR 0126).
 - Issue #87 gains its first immutable finance contracts: tenant billing periods
   advance only through authorized append-only lifecycle transitions;
   versioned exact FX rates produce frozen conversions at explicit zero-, two-,
