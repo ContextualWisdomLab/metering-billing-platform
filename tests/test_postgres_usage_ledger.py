@@ -1375,6 +1375,37 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).late_adjustment_application_outcome_code,
             "duplicate_replay",
         )
+        conflict_target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 5, 1),
+            date(2026, 6, 1),
+            opened_by="operator:finance_035",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(conflict_target)
+        conflict_adjustment = create_late_adjustment(
+            source.period_id,
+            conflict_target.period_id,
+            "correction",
+            "8.25",
+            "USD",
+            "provider:application-id-conflict",
+            "sha256:" + "c" * 64,
+            CATALOG_START + timedelta(hours=6),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, conflict_adjustment)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_application(
+                replace(
+                    stored,
+                    late_adjustment_id=conflict_adjustment.late_adjustment_id,
+                    target_period_id=conflict_target.period_id,
+                    adjustment_amount=conflict_adjustment.adjustment_amount,
+                    late_adjustment_application_id=stored.late_adjustment_application_id,
+                )
+            )
         self.assertIsNone(
             self.ledger.find_late_adjustment_application(
                 self.ledger.require_tenant(TENANT_TWO).tenant_account_id,
@@ -1454,9 +1485,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 self.ledger.insert_late_adjustment_rating(invalid)
+        self.assertEqual(
+            self.ledger.insert_late_adjustment_rating(
+                replace(
+                    stored_rating,
+                    late_adjustment_rating_id=uuid4(),
+                    rated_by="operator:rewriter",
+                    authorization_reference="approval:rewriter",
+                )
+            ),
+            stored_rating,
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_late_adjustment_rating(
-                replace(stored_rating, rated_by="operator:rewriter")
+                replace(stored_rating, late_adjustment_rating_id=uuid4(), target_period_id=uuid4())
             )
         self.assertEqual(
             self.ledger.insert_late_adjustment_rating(
@@ -1554,8 +1596,38 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             late_adjustment_application_contract_version=1,
             late_adjustment_application_status="applied",
         )
-        with self.assertRaises(psycopg.errors.RaiseException):
+        with self.assertRaises(ValueError):
             self.ledger.insert_late_adjustment_application(candidate)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_application(
+                replace(candidate, target_period_id=uuid4())
+            )
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_application
+                        (late_adjustment_application_id, tenant_account_id,
+                         late_adjustment_id, target_period_id, adjustment_amount,
+                         currency_code, applied_by, authorization_reference,
+                         applied_at, late_adjustment_application_contract_version,
+                         late_adjustment_application_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        candidate.late_adjustment_application_id,
+                        candidate.tenant_account_id,
+                        candidate.late_adjustment_id,
+                        candidate.target_period_id,
+                        candidate.adjustment_amount,
+                        candidate.currency_code,
+                        candidate.applied_by,
+                        candidate.authorization_reference,
+                        candidate.applied_at,
+                        candidate.late_adjustment_application_contract_version,
+                        candidate.late_adjustment_application_status,
+                    ),
+                )
 
     def test_late_adjustment_application_concurrent_replays_are_idempotent(self) -> None:
         """Concurrent first writers return one accept and one replay."""

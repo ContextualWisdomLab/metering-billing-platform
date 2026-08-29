@@ -421,9 +421,20 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 ledger.insert_late_adjustment_rating(invalid)
+        self.assertEqual(
+            ledger.insert_late_adjustment_rating(
+                replace(
+                    stored,
+                    late_adjustment_rating_id=uuid4(),
+                    rated_by="operator:other",
+                    authorization_reference="change:other",
+                )
+            ),
+            stored,
+        )
         with self.assertRaises(ValueError):
             ledger.insert_late_adjustment_rating(
-                replace(stored, late_adjustment_rating_id=uuid4(), rated_by="operator:other")
+                replace(stored, late_adjustment_rating_id=uuid4(), target_period_id=uuid4())
             )
         self.assertEqual(
             ledger.insert_late_adjustment_rating(

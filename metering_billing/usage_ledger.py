@@ -20,7 +20,10 @@ from types import ModuleType
 from typing import Callable
 from uuid import UUID
 
-from metering_billing.errors import RejectionReasonCode
+from metering_billing.errors import (
+    LateAdjustmentApplicationTargetPeriodNotOpen,
+    RejectionReasonCode,
+)
 from metering_billing.exact_decimal import (
     format_exact_decimal,
     parse_exact_decimal,
@@ -3065,6 +3068,23 @@ class MemoryUsageLedger:
             ):
                 raise ValueError("late adjustment application identity cannot change")
             return existing
+        tenant_reference = next(
+            (
+                tenant.tenant_reference
+                for tenant in self.tenant_accounts.values()
+                if tenant.tenant_account_id == application.tenant_account_id
+            ),
+            None,
+        )
+        target_period = (
+            self.get_billing_period(tenant_reference, application.target_period_id)
+            if tenant_reference is not None
+            else None
+        )
+        if target_period is None or target_period.status.value != "open":
+            raise LateAdjustmentApplicationTargetPeriodNotOpen(
+                "late adjustment application target period must be open"
+            )
         self.late_adjustment_applications[application.late_adjustment_application_id] = application
         self.late_adjustment_application_index[identity_key] = application.late_adjustment_application_id
         return application
@@ -3123,6 +3143,8 @@ class MemoryUsageLedger:
                     existing,
                     late_adjustment_rating_id=rating.late_adjustment_rating_id,
                     rated_at=rating.rated_at,
+                    rated_by=rating.rated_by,
+                    authorization_reference=rating.authorization_reference,
                 )
                 != rating
             ):

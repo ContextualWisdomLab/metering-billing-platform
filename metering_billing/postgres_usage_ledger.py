@@ -24,6 +24,7 @@ from typing import Any, Iterator
 from uuid import UUID
 
 from metering_billing.errors import (
+    LateAdjustmentApplicationTargetPeriodNotOpen,
     RejectionReasonCode,
     UsageEventConflict,
 )
@@ -143,8 +144,6 @@ def _same_late_adjustment_rating(
         and format(stored.adjustment_amount, "f")
         == format(incoming.adjustment_amount, "f")
         and stored.currency_code == incoming.currency_code
-        and stored.rated_by == incoming.rated_by
-        and stored.authorization_reference == incoming.authorization_reference
         and stored.late_adjustment_rating_contract_version
         == incoming.late_adjustment_rating_contract_version
         and stored.late_adjustment_rating_status
@@ -426,6 +425,64 @@ class PostgresUsageLedger:
         with self._cursor() as cursor:
             cursor.execute(
                 """
+                SELECT late_adjustment_id
+                FROM billing_core.late_adjustment
+                WHERE late_adjustment_id = %s AND tenant_account_id = %s
+                FOR UPDATE
+                """,
+                (application.late_adjustment_id, application.tenant_account_id),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT period_id
+                FROM billing_core.billing_period
+                WHERE period_id = %s AND tenant_account_id = %s
+                FOR UPDATE
+                """,
+                (application.target_period_id, application.tenant_account_id),
+            )
+            if cursor.fetchone() is None:
+                raise LateAdjustmentApplicationTargetPeriodNotOpen(
+                    "late adjustment application target period must be open"
+                )
+            cursor.execute(
+                """
+                SELECT late_adjustment_application_id
+                FROM billing_core.late_adjustment_application
+                WHERE tenant_account_id = %s AND late_adjustment_id = %s
+                """,
+                (application.tenant_account_id, application.late_adjustment_id),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row is not None:
+                stored = self._fetch_late_adjustment_application(
+                    cursor, UUID(str(existing_row[0])), application.tenant_account_id
+                )
+                if stored is None:  # pragma: no cover - row is locked by this transaction
+                    raise RuntimeError("late adjustment application did not return a row")
+                if not _same_late_adjustment_application(stored, application):
+                    raise ValueError("late adjustment application identity cannot change")
+                return stored
+            cursor.execute(
+                """
+                SELECT COALESCE((
+                    SELECT transition.to_status
+                    FROM billing_core.billing_period_transition AS transition
+                    WHERE transition.tenant_account_id = %s
+                      AND transition.period_id = %s
+                    ORDER BY transition.transition_number DESC
+                    LIMIT 1
+                ), 'open')
+                """,
+                (application.tenant_account_id, application.target_period_id),
+            )
+            if cursor.fetchone()[0] != "open":
+                raise LateAdjustmentApplicationTargetPeriodNotOpen(
+                    "late adjustment application target period must be open"
+                )
+            cursor.execute(
+                """
                 INSERT INTO billing_core.late_adjustment_application
                     (late_adjustment_application_id, tenant_account_id,
                      late_adjustment_id, target_period_id, adjustment_amount,
@@ -452,26 +509,14 @@ class PostgresUsageLedger:
             )
             row = cursor.fetchone()
             if row is None:
-                cursor.execute(
-                    """
-                    SELECT late_adjustment_application_id
-                    FROM billing_core.late_adjustment_application
-                    WHERE tenant_account_id = %s AND late_adjustment_id = %s
-                    """,
-                    (application.tenant_account_id, application.late_adjustment_id),
+                raise ValueError(
+                    "late adjustment application identity conflicts with an existing row"
                 )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - immutable conflict row cannot disappear
-                    raise ValueError(
-                        "late adjustment application identity conflicts with an existing row"
-                    )
             stored = self._fetch_late_adjustment_application(
                 cursor, UUID(str(row[0])), application.tenant_account_id
             )
-            if stored is None:  # pragma: no cover - insert or conflict exposes a row
+            if stored is None:  # pragma: no cover - insert exposes a row
                 raise RuntimeError("late adjustment application did not return a row")
-            if not _same_late_adjustment_application(stored, application):
-                raise ValueError("late adjustment application identity cannot change")
             return stored
 
     def find_late_adjustment_rating(

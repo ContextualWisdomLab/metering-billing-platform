@@ -166,6 +166,10 @@ class LateAdjustmentApplicationRejectionReasonCode(StrEnum):
     AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
 
 
+class LateAdjustmentApplicationTargetPeriodNotOpen(ValueError):
+    """Raised when a new application targets a period that is not open."""
+
+
 class LateAdjustmentRatingOutcomeCode(StrEnum):
     """Terminal result of rating one applied late adjustment."""
 
