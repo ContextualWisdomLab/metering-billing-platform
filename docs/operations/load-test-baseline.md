@@ -73,6 +73,37 @@ checks 100% (17,373 / 17,373), HTTP failures 0%.**
 4. Re-baseline on target production hardware before any capacity commitment;
    these Apple-Silicon-container numbers are not transferable sizing data.
 
+## Candidate measurement 2026-08-29 — bounded pool PR #153
+
+- **Date:** 2026-08-29
+- **Repository state:** PR #153 head `cffa535a19068ebc13f3090684afef324e946e95`
+  (`feat/postgres-connection-pool`), not merged to `develop`
+- **Machine context:** Apple Silicon macOS (arm64); Podman 5.8.2 machine
+  (`applehv`, 4 vCPU / 8 GiB) exposing the Docker-compatible API used by Docker
+  Compose v2; k6 v2.0.0 (darwin/arm64) running from the host; PostgreSQL 18 and
+  the billing API as containers on one project network
+- **Stack:** isolated Compose project `mbp-pr153`, with 39 migrations applied,
+  pool size 4, and `GET /readyz = 200 {"status": "ready", "backend": "postgres"}`
+- **Scenario:** the same 0 → 50 VU / 60 s ramp and 50 VU / 60 s sustain scenario
+  as the first baseline
+
+### Results (measured)
+
+Aggregate: **75,738 HTTP requests, 625.38 req/s, 36,945 iterations,
+305.06 iterations/s, checks 100% (75,738 / 75,738), HTTP failures 0%.**
+
+| Request kind | RPS achieved | p50 (med) | p90 | p95 | max |
+|---|---:|---:|---:|---:|---:|
+| `GET /readyz` | ~305.0/s | 16.91 ms | 62.50 ms | 96.89 ms | 4,560.76 ms |
+| Authenticated tenant read `GET /v1/tenant-api-credentials` | ~305.0/s | 24.32 ms | 74.50 ms | 118.13 ms | 4,566.65 ms |
+| `GET /healthz` (low weight) | ~15.3/s | 3.69 ms | 9.54 ms | 13.60 ms | 3,058.14 ms |
+| All HTTP requests combined | 625.38/s | 20.32 ms | 67.91 ms | 105.86 ms | 4,566.65 ms |
+
+The candidate run materially improves the first single-session baseline on this
+machine, but it is not a release or capacity claim: the branch is not merged,
+the run is one local sample, and the server remains the stdlib threaded WSGI
+tier. Re-run this exact scenario after the pool is integrated into `develop`.
+
 ## Method contract
 
 - Always start from a healthy stack (`--wait`) and seed before issuing load.
