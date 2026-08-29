@@ -14,6 +14,8 @@ provider SLA.
 - DSNs contain no inline password. Use libpq's external secret configuration
   (`PGSERVICE`, `PGPASSFILE`, workload identity, or an equivalent secret
   provider) and keep that configuration outside the repository and logs.
+- The PostgreSQL commands run with `--no-password`; missing external
+  credentials fail closed instead of prompting or accepting interactive input.
 - The source schema is migrated and the target is disposable. The restore
   command uses `--clean` only after the explicit disposable-target flag.
 - Counts and `pg_dump` share one exported PostgreSQL repeatable-read snapshot,

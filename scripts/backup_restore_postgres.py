@@ -102,6 +102,7 @@ def _read_row_counts(dsn: str) -> dict[str, int]:
         (
             "psql",
             "--no-psqlrc",
+            "--no-password",
             "--tuples-only",
             "--no-align",
             "--set=ON_ERROR_STOP=1",
@@ -153,6 +154,7 @@ def _open_snapshot_session(
             (
                 "psql",
                 "--no-psqlrc",
+                "--no-password",
                 "--tuples-only",
                 "--no-align",
                 "--quiet",
@@ -315,6 +317,7 @@ def create_backup(
         _run(
             (
                 "pg_dump",
+                "--no-password",
                 "--format=custom",
                 "--no-owner",
                 "--no-privileges",
@@ -368,6 +371,7 @@ def restore_and_verify(
     _run(
         (
             "pg_restore",
+            "--no-password",
             "--exit-on-error",
             "--single-transaction",
             "--format=custom",
