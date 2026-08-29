@@ -16,15 +16,28 @@
 
 ### Added
 
+- A protected hourly producer smoke workflow now exercises contextual-orchestrator,
+  NewsDOM, and fast-mlsirm count-only adapters through the durable outbox across
+  an injected Billing outage, process reopen, and server duplicate replay. It is
+  pre-release evidence and does not claim real producer deployment or registry
+  publication.
 - A protected release workflow now builds the Python, Rust, and TypeScript
   producer artifacts from a published tag, publishes Python and npm with OIDC
   provenance, and publishes the Rust crate with a scoped registry token. The
   package manifests include repository metadata and exclude repository-only
   tests from published artifacts; actual registry publication remains pending
   release-environment configuration and protected merge evidence.
+- The producer release jobs now run Python, Rust, and TypeScript conformance
+  tests before any artifact can reach a registry.
 - The producer release job now resolves the published tag to one immutable
   commit for every checkout and compares the uploaded Rust crate with a fresh
-  package from that commit before publishing.
+  package from that commit before publishing, keeping the verified package
+  boundary explicit.
+- The producer release job now emits a deterministic SPDX 3.0.1 SBOM and
+  SHA-256 subject manifest for the three published artifacts, creates signed
+  GitHub artifact attestations for SLSA build provenance and that SBOM, and
+  stores both Sigstore bundles as release evidence. Registry publication still
+  requires the protected release environment and the actual attestation run.
 - Usage-event validation now rejects unpublished contract versions until their
   separate schema and compatibility policy are released.
 - The platform now builds an installable Python distribution containing the
@@ -40,6 +53,9 @@
 - All three SDK outboxes now require the receipt tenant to match the queued
   event before acknowledging accepted or duplicate-replayed delivery; missing
   tenant evidence remains retryable rather than removing the fact.
+- Producer outbox re-enqueue now fails closed when a byte-identical fact is
+  supplied with a different persisted delivery context, preventing a silent
+  context mismatch from making the fact undrainable.
 - Producer integration adapters now restrict source identifiers, references,
   model names, and backend codes to bounded capability-port syntax, rejecting
   prompt-like or document-content strings before they reach an event or outbox.
@@ -57,6 +73,10 @@
   document text, and secrets remain rejected. This is contract groundwork for
   the three real producer integrations required by issue #90, not an integration
   claim.
+- The contextual-orchestrator producer adapter now rejects missing,
+  unavailable, or unknown measurement provenance instead of relabeling it as
+  an estimate; only `measured` and `estimated` ledger claims map to canonical
+  usage quality codes.
 - Usage-event contract metadata now includes producer-contract version, meter
   version, repository and trace/correlation/causation references, availability
   time, and correction lineage. The PostgreSQL ledger persists these fields in
@@ -80,8 +100,19 @@
   payload hash, rejects float quantities and arbitrary sensitive fields, and
   wraps validated data in a CloudEvents 1.0 JSON envelope. The checked-in
   conformance vector is the handoff target for future Rust and TypeScript SDKs;
-  outbox buffering, retries, tracing extensions, and real producer onboarding
-  remain follow-up work for issue #90 (ADR 0125).
+  tracing extensions and real producer onboarding remain follow-up work for
+  issue #90 (ADR 0125).
+- A dependency-free SQLite producer outbox now durably buffers validated usage
+  events, keeps bearer credentials out of storage, leases bounded batches,
+  applies partial accepted/duplicate/rejected receipts, retries temporary
+  transport failures with capped exponential backoff, and dead-letters
+  exhausted or explicitly rejected events. `replay_dead_letter` explicitly
+  resets a matching dead-letter event for operator recovery; re-enqueueing does
+  not silently resurrect it. Claims match tenant and delivery context, which
+  producers preserve as a stable delivery-group selector across enqueue and
+  drain. Claims are crash-safe before a result is received, stale late results
+  cannot overwrite a newer lease, and transport I/O does not block local
+  enqueue (ADR 0126).
 - The PostgreSQL readiness probe now uses a static migration-history query.
 - The HTTP accept surface selects its ledger backend from the environment: `create_http_app(ledger=...)` now accepts either the deterministic `MemoryUsageLedger` reference adapter or the durable `PostgresUsageLedger` production system of record through the new `UsageLedger` union, and `metering_billing.http_app.create_default_ledger(environ=None)` builds the selected backend — `METERING_BILLING_LEDGER_BACKEND=postgres` constructs `PostgresUsageLedger` via the existing `PostgresUsageLedger.connect` convention from `METERING_BILLING_POSTGRES_DSN`, a missing or empty DSN raises a startup `ValueError` naming `METERING_BILLING_POSTGRES_DSN`, and every other value including unset keeps returning `MemoryUsageLedger()` so tests stay unchanged. Unauthenticated `GET /readyz` joins `GET /healthz` in the same dispatch style: healthy backends answer `200 {"status": "ready", "backend": "memory" | "postgres"}`, and a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` using one cheap migration-history row count (`public.metering_billing_schema_migration`) executed through the ledger's own connection and transaction conventions with no ad-hoc psycopg connections and no raw exception text. Memory stays the deterministic reference/test adapter; postgres becomes the selectable production system of record as partial progress on issue #84. Service constructor signatures, existing routes, exact-decimal money, journal boundaries, AIS pull behavior, and the #24 outbox stay unchanged. ADR 0123 documents the decision. There is no new third-party dependency, schema change, secret, or provider call on this path.
 - ADR 0123 for environment-driven PostgreSQL ledger backend selection and the `/readyz` backend probe.

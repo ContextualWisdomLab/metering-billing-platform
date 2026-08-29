@@ -74,6 +74,15 @@ jobs:
           version: "0.11.19"
       - name: Build wheel and source distribution
         run: uv build --out-dir dist
+      - name: Install runtime dependencies for SDK conformance
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r requirements-runtime.txt
+      - name: Run Python producer SDK conformance tests
+        run: python -m unittest discover -s tests -p 'test_producer_sdk.py' -v
       - name: Store Python artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -92,6 +101,8 @@ jobs:
         with:
           ref: ${{ needs.resolve-release.outputs.release-sha }}
           persist-credentials: false
+      - name: Run Rust producer SDK conformance tests
+        run: cargo test --locked --manifest-path sdks/rust/Cargo.toml
       - name: Validate publishable crate
         run: cargo package --locked --manifest-path sdks/rust/Cargo.toml
       - name: Store Rust artifact
@@ -120,6 +131,14 @@ jobs:
       - name: Create npm package
         working-directory: sdks/typescript
         run: mkdir -p dist && npm pack --ignore-scripts --pack-destination dist
+      - name: Run TypeScript producer SDK conformance tests
+        run: >-
+          node --experimental-strip-types --test
+          --test-coverage-include=sdks/typescript/src/index.ts
+          --test-coverage-lines=100
+          --test-coverage-branches=100
+          --test-coverage-functions=100
+          sdks/typescript/test/conformance.test.ts
       - name: Store TypeScript artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -140,6 +159,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Check out the released tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -172,6 +193,64 @@ jobs:
         with:
           name: producer-typescript-dist
           path: dist/typescript
+      - name: Generate deterministic SPDX 3.0.1 SBOM
+        env:
+          RELEASE_SHA: ${{ needs.resolve-release.outputs.release-sha }}
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
+          created_at="$(date -u -d "@$source_date_epoch" '+%Y-%m-%dT%H:%M:%SZ')"
+          python scripts/build_spdx_sbom.py \
+            --artifact-root dist \
+            --output dist/evidence/producer-sdks.spdx.json \
+            --release-sha "$RELEASE_SHA" \
+            --created-at "$created_at"
+      - name: Attest SLSA build provenance
+        id: attest-provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            dist/python/*
+            dist/rust/*
+            dist/typescript/*
+      - name: Attest SPDX 3.0.1 SBOM
+        id: attest-sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            dist/python/*
+            dist/rust/*
+            dist/typescript/*
+          predicate-type: https://spdx.dev/Document/v3
+          predicate-path: dist/evidence/producer-sdks.spdx.json
+      - name: Record artifact checksums and attestation bundles
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.attest-provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.attest-sbom.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum python/* rust/* typescript/* > evidence/subjects.sha256)
+          cp "$PROVENANCE_BUNDLE" dist/evidence/producer-sdks.provenance.sigstore.json
+          cp "$SBOM_BUNDLE" dist/evidence/producer-sdks.sbom.sigstore.json
+      - name: Store release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: producer-release-evidence
+          path: dist
+          if-no-files-found: error
+      - name: Verify signed attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for artifact in dist/python/* dist/rust/* dist/typescript/*; do
+            gh attestation verify "$artifact" \
+              --repo ContextualWisdomLab/metering-billing-platform \
+              --predicate-type https://slsa.dev/provenance/v1
+            gh attestation verify "$artifact" \
+              --repo ContextualWisdomLab/metering-billing-platform \
+              --predicate-type https://spdx.dev/Document/v3
+          done
       - name: Publish Python distribution with OIDC provenance
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:

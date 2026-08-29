@@ -1,0 +1,48 @@
+name: Producer smoke and replay
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: producer-smoke-replay
+  cancel-in-progress: false
+
+jobs:
+  smoke-replay:
+    name: Three-producer outage and replay smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact workflow revision
+        uses: actions/checkout@631c942040754b6e095e929c1677c07e10ed4f87
+        with:
+          persist-credentials: false
+      - name: Install pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements-quality.txt
+            requirements-runtime.txt
+      - name: Install hash-locked quality dependency
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r requirements-quality.txt
+      - name: Install hash-locked runtime dependency
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r requirements-runtime.txt
+      - name: Run count-only outage and replay smoke
+        run: python -m unittest discover -s tests -p 'test_producer_smoke_replay.py' -v

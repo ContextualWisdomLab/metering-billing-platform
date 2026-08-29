@@ -58,6 +58,7 @@ class ProducerIntegrationTests(unittest.TestCase):
             "model_name": "gpt-4o-mini",
             "prompt_tokens": 1,
             "completion_tokens": 2,
+            "measurement_status": "estimated",
             "created_at": 1,
         }
         cloud_event = build_contextual_cloud_event(record, **IDENTITY)
@@ -81,6 +82,11 @@ class ProducerIntegrationTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             build_contextual_usage_event(
+                {**record, "workflow_run_id": ""},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
                 {**record, "workflow_run_id": 0},
                 **IDENTITY,
             )
@@ -92,6 +98,20 @@ class ProducerIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_contextual_usage_event(
                 {**record, "model_name": "model response text"},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
+                {**record, "measurement_status": "unavailable"},
+                **IDENTITY,
+            )
+        with self.assertRaises(ValueError):
+            build_contextual_usage_event(
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "measurement_status"
+                },
                 **IDENTITY,
             )
         with self.assertRaises(ValueError):
@@ -117,6 +137,7 @@ class ProducerIntegrationTests(unittest.TestCase):
             page_count=2,
             ocr_page_count=1,
             extracted_block_count=7,
+            cost_center_reference="urn:cwl:tenant_001:cost_center:document",
         )
         self.assertEqual(validate_usage_event(event), ())
         self.assertEqual(
@@ -126,6 +147,10 @@ class ProducerIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {measurement["quality_code"] for measurement in event["measurements"]},
             {"locally_measured"},
+        )
+        self.assertEqual(
+            event["cost_center_reference"],
+            "urn:cwl:tenant_001:cost_center:document",
         )
         self.assertNotIn("doc-01", str(event["measurements"]))
 
@@ -174,12 +199,20 @@ class ProducerIntegrationTests(unittest.TestCase):
             "response_rows": 8,
             "response_items": 4,
             "artifact_bytes": 512,
+            "credential_reference": "urn:cwl:tenant_001:credential:01",
+            "cost_center_reference": "urn:cwl:tenant_001:cost_center:01",
         }
         first = build_fast_mlsirm_usage_event(**arguments)
         second = build_fast_mlsirm_usage_event(**arguments)
         self.assertEqual(validate_usage_event(first), ())
         self.assertEqual(first, second)
         self.assertEqual(first["measurements"][1]["quantity"], "32")
+        self.assertEqual(
+            first["credential_reference"], "urn:cwl:tenant_001:credential:01"
+        )
+        self.assertEqual(
+            first["cost_center_reference"], "urn:cwl:tenant_001:cost_center:01"
+        )
 
     def test_fast_mlsirm_cloud_event_and_dimension_guards(self) -> None:
         """Optional artifacts and invalid response shapes remain explicit."""

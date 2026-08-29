@@ -34,11 +34,12 @@ def build_contextual_usage_event(
         "request" if workflow_run_id is None else workflow_run_id, "workflow_run_id"
     )
     source_event_key = f"contextual-orchestrator:{workflow_run_id}:{usage_record_id}"
-    quality = (
-        "provider_reported"
-        if record.get("measurement_status") == "measured"
-        else "estimated"
-    )
+    measurement_status = record.get("measurement_status")
+    if measurement_status not in {"measured", "estimated"}:
+        raise ValueError(
+            "measurement_status must be measured or estimated for canonical export"
+        )
+    quality = "provider_reported" if measurement_status == "measured" else "estimated"
     provider = _code(record.get("provider_name"), "provider_name")
     route_mode = _code(
         record.get("route_mode") or record.get("request_channel") or "sync",
@@ -112,6 +113,7 @@ def build_newsdom_usage_event(
     shard_reference: str | None = None,
     credential_reference: str | None = None,
     project_reference: str | None = None,
+    cost_center_reference: str | None = None,
 ) -> dict[str, Any]:
     """Map one NewsDOM parse result using counts, never document text."""
     document_id = _identifier(document_id, "document_id")
@@ -167,6 +169,7 @@ def build_newsdom_usage_event(
         ],
         credential_reference=credential_reference,
         project_reference=project_reference,
+        cost_center_reference=cost_center_reference,
         dimensions=dimensions,
     )
 
@@ -194,6 +197,8 @@ def build_fast_mlsirm_usage_event(
     response_items: int,
     artifact_bytes: int | None = None,
     project_reference: str | None = None,
+    credential_reference: str | None = None,
+    cost_center_reference: str | None = None,
 ) -> dict[str, Any]:
     """Map one fast-mlsirm run using dimensions and result sizes only."""
     run_reference = _reference(run_reference, "run_reference")
@@ -243,6 +248,8 @@ def build_fast_mlsirm_usage_event(
         operation_code="fit_model",
         occurred_at=occurred_at,
         measurements=measurements,
+        credential_reference=credential_reference,
+        cost_center_reference=cost_center_reference,
         project_reference=project_reference,
         dimensions={
             "run_reference": run_reference,
