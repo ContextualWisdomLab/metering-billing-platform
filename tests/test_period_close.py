@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from uuid import UUID, uuid4
 
+import metering_billing.contracts as contracts_module
 from metering_billing import (
     BillingPeriod,
     BillingPeriodStatus,
@@ -220,6 +221,33 @@ class BillingPeriodTests(unittest.TestCase):
                 reason="skip states",
                 transitioned_at=OPENED_AT + timedelta(hours=1),
             )
+        first_transition = make_period().advance(
+            BillingPeriodStatus.SOFT_CLOSED,
+            actor_reference="operator:finance_001",
+            authorization_reference="approval:period_001",
+            reason="soft close",
+            transitioned_at=OPENED_AT + timedelta(hours=1),
+            transition_id=UUID("019d7b92-1aa0-7a7f-b61c-962c0f4bf630"),
+        )
+        with self.assertRaises(PeriodCloseValidationError):
+            first_transition.advance(
+                BillingPeriodStatus.RECONCILED,
+                actor_reference="operator:finance_002",
+                authorization_reference="approval:period_002",
+                reason="reconcile",
+                transitioned_at=OPENED_AT + timedelta(hours=2),
+                transition_id=first_transition.transitions[0].transition_id,
+            )
+        duplicate_transition = first_transition.as_contract_dict()
+        duplicate_transition["period_status"] = "reconciled"
+        duplicate_transition["transitions"].append(
+            {
+                **duplicate_transition["transitions"][0],
+                "from_status": "soft_closed",
+                "to_status": "reconciled",
+            }
+        )
+        self.assertTrue(validate_billing_period(duplicate_transition))
         with self.assertRaises(PeriodCloseValidationError):
             make_period().advance(
                 "unsupported",  # type: ignore[arg-type]
@@ -624,6 +652,15 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, status="bad")  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
+            replace(
+                matched,
+                status=ReconciliationLineStatus.EXCEPTION,
+                exceptions=(
+                    ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect"),
+                    ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect again"),
+                ),
+            )
+        with self.assertRaises(PeriodCloseValidationError):
             ReconciliationException("bad", "inspect")  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
             ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "")
@@ -669,11 +706,18 @@ class ReconciliationTests(unittest.TestCase):
             replace(resolution, exception_code="bad")  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
             replace(resolution, resolution_status="bad")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(resolution, resolved_at=datetime.now(UTC) + timedelta(days=1))
         invalid = resolution.as_contract_dict()
         invalid["maker_reference"] = invalid["checker_reference"]
         self.assertTrue(validate_reconciliation_resolution(invalid))
         invalid["resolution_status"] = "bad"
         self.assertTrue(validate_reconciliation_resolution(invalid))
+
+    def test_resolution_contract_exports_are_public(self) -> None:
+        """Resolution schema and validator remain available from the contract module."""
+        self.assertIn("RECONCILIATION_RESOLUTION_SCHEMA_NAME", contracts_module.__all__)
+        self.assertIn("validate_reconciliation_resolution", contracts_module.__all__)
 
     def test_reconciliation_evidence_requires_a_hash_and_source_reference(self) -> None:
         """Evidence keeps a typed exception linked to immutable source content."""
@@ -698,6 +742,8 @@ class ReconciliationTests(unittest.TestCase):
             replace(evidence, evidence_sha256="not-a-hash")
         with self.assertRaises(PeriodCloseValidationError):
             replace(evidence, evidence_sha256=None)  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(evidence, captured_at=datetime.now(UTC) + timedelta(days=1))
         invalid = evidence.as_contract_dict()
         invalid["evidence_sha256"] = "not-a-hash"
         self.assertTrue(validate_reconciliation_evidence(invalid))

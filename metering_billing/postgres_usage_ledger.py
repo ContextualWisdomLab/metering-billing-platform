@@ -199,10 +199,15 @@ class PostgresUsageLedger:
             raise RuntimeError("migration history count did not return a row")
         return int(row[0])
 
-    def get_billing_period(self, period_id: UUID) -> BillingPeriod | None:
-        """Return one immutable period aggregate with its transition history."""
+    def get_billing_period(
+        self, tenant_reference: str, period_id: UUID
+    ) -> BillingPeriod | None:
+        """Return one tenant-scoped period aggregate with its transition history."""
         with self._cursor() as cursor:
-            return self._fetch_billing_period(cursor, period_id)
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_billing_period(
+                cursor, period_id, tenant_account_id=tenant_account_id
+            )
 
     def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
         """Persist a period and append only transitions not already stored."""
@@ -403,15 +408,21 @@ class PostgresUsageLedger:
             return stored
 
     def get_reconciliation_line(
-        self, reconciliation_line_id: UUID
+        self, tenant_reference: str, reconciliation_line_id: UUID
     ) -> ReconciliationLine | None:
-        """Return one immutable reconciliation line with typed exceptions."""
+        """Return one tenant-scoped reconciliation line with typed exceptions."""
         with self._cursor() as cursor:
-            return self._fetch_reconciliation_line(cursor, reconciliation_line_id)
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_reconciliation_line(
+                cursor, reconciliation_line_id, tenant_account_id=tenant_account_id
+            )
 
-    def insert_reconciliation_line(self, line: ReconciliationLine) -> ReconciliationLine:
-        """Persist one line and its exception children atomically."""
+    def insert_reconciliation_line(
+        self, tenant_reference: str, line: ReconciliationLine
+    ) -> ReconciliationLine:
+        """Persist one tenant-owned line and its exception children atomically."""
         with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
             cursor.execute(
                 """
                 SELECT tenant_account_id
@@ -421,9 +432,8 @@ class PostgresUsageLedger:
                 (line.period_id,),
             )
             period = cursor.fetchone()
-            if period is None:
+            if period is None or UUID(str(period[0])) != tenant_account_id:
                 raise KeyError(line.period_id)
-            tenant_account_id = UUID(str(period[0]))
             cursor.execute(
                 """
                 INSERT INTO billing_core.reconciliation_line
@@ -513,10 +523,15 @@ class PostgresUsageLedger:
             )
         return tuple(line for line in lines if line is not None)
 
-    def get_reconciliation_evidence(self, evidence_id: UUID) -> ReconciliationEvidence | None:
-        """Return one immutable hash-backed reconciliation evidence record."""
+    def get_reconciliation_evidence(
+        self, tenant_reference: str, evidence_id: UUID
+    ) -> ReconciliationEvidence | None:
+        """Return one tenant-scoped hash-backed evidence record."""
         with self._cursor() as cursor:
-            return self._fetch_reconciliation_evidence(cursor, evidence_id)
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_reconciliation_evidence(
+                cursor, evidence_id, tenant_account_id=tenant_account_id
+            )
 
     def insert_reconciliation_evidence(
         self, evidence: ReconciliationEvidence
@@ -720,11 +735,14 @@ class PostgresUsageLedger:
         return tuple(item for item in runs if item is not None)
 
     def get_reconciliation_resolution(
-        self, resolution_id: UUID
+        self, tenant_reference: str, resolution_id: UUID
     ) -> ReconciliationResolution | None:
-        """Return one immutable maker-checker resolution."""
+        """Return one tenant-scoped immutable maker-checker resolution."""
         with self._cursor() as cursor:
-            return self._fetch_reconciliation_resolution(cursor, resolution_id)
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_reconciliation_resolution(
+                cursor, resolution_id, tenant_account_id=tenant_account_id
+            )
 
     def insert_reconciliation_resolution(
         self, resolution: ReconciliationResolution
@@ -6302,7 +6320,11 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _fetch_billing_period(
-        cursor: Any, period_id: UUID, *, lock: bool = False
+        cursor: Any,
+        period_id: UUID,
+        *,
+        lock: bool = False,
+        tenant_account_id: UUID | None = None,
     ) -> BillingPeriod | None:
         """Hydrate a period and its append-only transitions on one cursor."""
         query = """
@@ -6312,9 +6334,13 @@ class PostgresUsageLedger:
             JOIN billing_core.tenant_account USING (tenant_account_id)
             WHERE period_id = %s
         """
+        parameters: tuple[Any, ...] = (period_id,)
+        if tenant_account_id is not None:
+            query += " AND billing_period.tenant_account_id = %s"
+            parameters += (tenant_account_id,)
         if lock:
             query += " FOR UPDATE"
-        cursor.execute(query, (period_id,))
+        cursor.execute(query, parameters)
         row = cursor.fetchone()
         if row is None:
             return None
@@ -6416,11 +6442,13 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _fetch_reconciliation_line(
-        cursor: Any, reconciliation_line_id: UUID
+        cursor: Any,
+        reconciliation_line_id: UUID,
+        *,
+        tenant_account_id: UUID | None = None,
     ) -> ReconciliationLine | None:
         """Hydrate one reconciliation line and its normalized exception children."""
-        cursor.execute(
-            """
+        query = """
             SELECT reconciliation_line_id, period_id, provider_account_reference,
                    currency_code, internal_currency_code, provider_currency_code,
                    cash_currency_code, internal_expected_amount, provider_actual_amount,
@@ -6429,9 +6457,12 @@ class PostgresUsageLedger:
                    assessed_at, reconciliation_line_contract_version
             FROM billing_core.reconciliation_line
             WHERE reconciliation_line_id = %s
-            """,
-            (reconciliation_line_id,),
-        )
+        """
+        parameters: tuple[Any, ...] = (reconciliation_line_id,)
+        if tenant_account_id is not None:
+            query += " AND tenant_account_id = %s"
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
         row = cursor.fetchone()
         if row is None:
             return None
@@ -6471,20 +6502,33 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _fetch_reconciliation_resolution(
-        cursor: Any, resolution_id: UUID
+        cursor: Any,
+        resolution_id: UUID,
+        *,
+        tenant_account_id: UUID | None = None,
     ) -> ReconciliationResolution | None:
         """Hydrate one immutable maker-checker resolution."""
-        cursor.execute(
-            """
+        query = """
             SELECT resolution_id, reconciliation_line_id, exception_code,
                    resolution_status, owner_reference, resolution_reason,
                    evidence_reference, maker_reference, checker_reference,
                    resolved_at, reconciliation_resolution_contract_version
             FROM billing_core.reconciliation_resolution
             WHERE resolution_id = %s
-            """,
-            (resolution_id,),
-        )
+        """
+        parameters: tuple[Any, ...] = (resolution_id,)
+        if tenant_account_id is not None:
+            query += """
+                AND EXISTS (
+                    SELECT 1
+                    FROM billing_core.reconciliation_line
+                    WHERE reconciliation_line_id =
+                        reconciliation_resolution.reconciliation_line_id
+                      AND tenant_account_id = %s
+                )
+            """
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
         row = cursor.fetchone()
         if row is None:
             return None
@@ -6504,19 +6548,31 @@ class PostgresUsageLedger:
 
     @staticmethod
     def _fetch_reconciliation_evidence(
-        cursor: Any, evidence_id: UUID
+        cursor: Any,
+        evidence_id: UUID,
+        *,
+        tenant_account_id: UUID | None = None,
     ) -> ReconciliationEvidence | None:
         """Hydrate one immutable hash-backed evidence record."""
-        cursor.execute(
-            """
+        query = """
             SELECT evidence_id, reconciliation_line_id, exception_code, evidence_kind,
                    evidence_reference, evidence_sha256, captured_by, captured_at,
                    reconciliation_evidence_contract_version
             FROM billing_core.reconciliation_evidence
             WHERE evidence_id = %s
-            """,
-            (evidence_id,),
-        )
+        """
+        parameters: tuple[Any, ...] = (evidence_id,)
+        if tenant_account_id is not None:
+            query += """
+                AND EXISTS (
+                    SELECT 1
+                    FROM billing_core.reconciliation_line
+                    WHERE reconciliation_line_id = reconciliation_evidence.reconciliation_line_id
+                      AND tenant_account_id = %s
+                )
+            """
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
         row = cursor.fetchone()
         if row is None:
             return None

@@ -448,8 +448,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             transition_id=uuid4(),
         )
         self.assertEqual(self.ledger.insert_billing_period(hard_closed), hard_closed)
-        self.assertEqual(self.ledger.get_billing_period(period.period_id), hard_closed)
-        self.assertIsNone(self.ledger.get_billing_period(uuid4()))
+        self.assertEqual(self.ledger.get_billing_period(TENANT_ONE, period.period_id), hard_closed)
+        self.assertIsNone(self.ledger.get_billing_period(TENANT_ONE, uuid4()))
+        self.assertIsNone(self.ledger.get_billing_period(TENANT_TWO, period.period_id))
         second_period = create_billing_period(
             TENANT_ONE,
             CATALOG_START.date(),
@@ -547,9 +548,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             provider_currency_code="EUR",
             cash_currency_code="USD",
         )
-        self.assertEqual(self.ledger.insert_reconciliation_line(matched), matched)
-        self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
-        self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_line(TENANT_TWO, matched)
+        self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, matched), matched)
+        self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, exception), exception)
+        self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, exception), exception)
         expanded_exception = ReconciliationLine(
             reconciliation_line_id=uuid4(),
             period_id=period.period_id,
@@ -576,10 +579,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             reconciliation_line_contract_version=1,
         )
         self.assertEqual(
-            self.ledger.insert_reconciliation_line(expanded_exception), expanded_exception
+            self.ledger.insert_reconciliation_line(TENANT_ONE, expanded_exception), expanded_exception
         )
         self.assertEqual(
-            self.ledger.get_reconciliation_line(expanded_exception.reconciliation_line_id),
+            self.ledger.get_reconciliation_line(
+                TENANT_ONE, expanded_exception.reconciliation_line_id
+            ),
             expanded_exception,
         )
         evidence = ReconciliationEvidence(
@@ -595,8 +600,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(validate_reconciliation_evidence(evidence.as_contract_dict()), ())
         self.assertEqual(self.ledger.insert_reconciliation_evidence(evidence), evidence)
         self.assertEqual(self.ledger.insert_reconciliation_evidence(evidence), evidence)
-        self.assertEqual(self.ledger.get_reconciliation_evidence(evidence.evidence_id), evidence)
-        self.assertIsNone(self.ledger.get_reconciliation_evidence(uuid4()))
+        self.assertEqual(
+            self.ledger.get_reconciliation_evidence(TENANT_ONE, evidence.evidence_id),
+            evidence,
+        )
+        self.assertIsNone(self.ledger.get_reconciliation_evidence(TENANT_ONE, uuid4()))
+        self.assertIsNone(
+            self.ledger.get_reconciliation_evidence(TENANT_TWO, evidence.evidence_id)
+        )
         self.assertEqual(
             self.ledger.list_reconciliation_evidence(
                 TENANT_ONE, reconciliation_line_id=expanded_exception.reconciliation_line_id
@@ -650,7 +661,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.insert_reconciliation_run(
                 replace(run, run_id=uuid4(), period_id=uuid4())
             )
-        self.assertIsNone(self.ledger.get_reconciliation_line(uuid4()))
+        self.assertIsNone(self.ledger.get_reconciliation_line(TENANT_ONE, uuid4()))
         self.assertEqual(
             {line.reconciliation_line_id for line in self.ledger.list_reconciliation_lines(TENANT_ONE)},
             {
@@ -666,7 +677,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (matched, exception, expanded_exception),
         )
         self.assertEqual(
-            {item.exception_code for item in self.ledger.get_reconciliation_line(exception.reconciliation_line_id).exceptions},
+            {
+                item.exception_code
+                for item in self.ledger.get_reconciliation_line(
+                    TENANT_ONE, exception.reconciliation_line_id
+                ).exceptions
+            },
             {
                 ReconciliationExceptionCode.CURRENCY_MISMATCH,
                 ReconciliationExceptionCode.PRICE_MISMATCH,
@@ -687,8 +703,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(validate_reconciliation_resolution(resolution.as_contract_dict()), ())
         self.assertEqual(self.ledger.insert_reconciliation_resolution(resolution), resolution)
         self.assertEqual(self.ledger.insert_reconciliation_resolution(resolution), resolution)
-        self.assertEqual(self.ledger.get_reconciliation_resolution(resolution.resolution_id), resolution)
-        self.assertIsNone(self.ledger.get_reconciliation_resolution(uuid4()))
+        self.assertEqual(
+            self.ledger.get_reconciliation_resolution(TENANT_ONE, resolution.resolution_id),
+            resolution,
+        )
+        self.assertIsNone(self.ledger.get_reconciliation_resolution(TENANT_ONE, uuid4()))
+        self.assertIsNone(
+            self.ledger.get_reconciliation_resolution(TENANT_TWO, resolution.resolution_id)
+        )
         self.assertEqual(
             self.ledger.list_reconciliation_resolutions(
                 TENANT_ONE, reconciliation_line_id=exception.reconciliation_line_id
@@ -706,6 +728,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_line(
+                TENANT_ONE,
                 replace(matched, provider_account_reference="provider:other")
             )
         missing_period_line = assess_reconciliation_line(
@@ -722,7 +745,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             cash_currency_code="USD",
         )
         with self.assertRaises(KeyError):
-            self.ledger.insert_reconciliation_line(missing_period_line)
+            self.ledger.insert_reconciliation_line(TENANT_ONE, missing_period_line)
         with self.assertRaises(KeyError):
             self.ledger.list_reconciliation_lines("urn:cwl:missing_tenant")
 

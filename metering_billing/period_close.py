@@ -136,6 +136,13 @@ def _aware_datetime(value: Any, field_name: str) -> datetime:
     return value
 
 
+def _not_future(value: datetime, field_name: str) -> datetime:
+    """Reject audit facts that claim to have been captured in the future."""
+    if value > datetime.now(UTC):
+        raise PeriodCloseValidationError(f"{field_name} must not be in the future")
+    return value
+
+
 def _format_datetime(value: datetime) -> str:
     """Render a timezone-aware instant as a stable UTC ISO-8601 string."""
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -301,6 +308,9 @@ class BillingPeriod:
                 raise PeriodCloseValidationError("period transition timestamps must be monotonic")
             current_status = transition.to_status
             current_time = transition.transitioned_at
+        transition_ids = tuple(transition.transition_id for transition in self.transitions)
+        if len(set(transition_ids)) != len(transition_ids):
+            raise PeriodCloseValidationError("period transition identifiers must be unique")
         if current_status != status:
             raise PeriodCloseValidationError("period status must equal the last transition")
 
@@ -640,7 +650,7 @@ class ReconciliationEvidence:
         ) is None:
             raise PeriodCloseValidationError("evidence_sha256 must be a sha256 digest")
         _reference(self.captured_by, "captured_by")
-        _aware_datetime(self.captured_at, "captured_at")
+        _not_future(_aware_datetime(self.captured_at, "captured_at"), "captured_at")
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the immutable source-evidence contract."""
@@ -746,7 +756,7 @@ class ReconciliationResolution:
             _reference(getattr(self, field_name), field_name)
         if self.maker_reference == self.checker_reference:
             raise PeriodCloseValidationError("maker and checker references must differ")
-        _aware_datetime(self.resolved_at, "resolved_at")
+        _not_future(_aware_datetime(self.resolved_at, "resolved_at"), "resolved_at")
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the complete maker-checker disposition evidence."""
@@ -838,6 +848,9 @@ class ReconciliationLine:
             raise PeriodCloseValidationError("exceptions must contain immutable reconciliation exceptions")
         if (status == ReconciliationLineStatus.MATCHED) != (not self.exceptions):
             raise PeriodCloseValidationError("reconciliation status must match exception presence")
+        exception_codes = tuple(exception.exception_code for exception in self.exceptions)
+        if len(set(exception_codes)) != len(exception_codes):
+            raise PeriodCloseValidationError("reconciliation exception codes must be unique")
         _aware_datetime(self.assessed_at, "assessed_at")
         currency_mismatch = False
         for field_name, value in (
