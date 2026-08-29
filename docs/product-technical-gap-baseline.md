@@ -9,10 +9,11 @@
 ## Current working snapshot (2026-08-29)
 
 The current #87 work is stacked from exact head
-`2aebb354e3401bccc2ce48283fa0b5044f936c1f` of PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172)
-into the follow-up branch `feat/late-adjustment-rerate-20260829`. PR #172 is
-open and has no qualifying approval; its repository contract check is complete
-while Devin review is pending. That state is not merge evidence.
+`907d224e5797a198ac10339987dd03b90a78201c` of PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173)
+into the follow-up branch `feat/late-adjustment-rerate-20260829`. PR #173 is
+open, mergeable but unstable, has zero qualifying approvals, and its repository
+contract check plus provider reviews are pending. That state is not merge
+evidence.
 
 This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`/`0051`/`0052`, the
 `LateAdjustment`, application, and rating-consumption contracts,
