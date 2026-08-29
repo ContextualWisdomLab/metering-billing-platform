@@ -8,10 +8,10 @@
 
 ## Current working snapshot (2026-08-30)
 
-The #87 work is stacked from exact head
-`dd1f18f759668f572fcda4849855ac2c82c07cf3` of PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174)
-on branch `feat/late-adjustment-invoice-intent-20260830`; PR #173 remains the
-base review.
+The #87 work is stacked from local integration commit
+`3c7c276da10366d124295937391e9de23e0cc9b3` on branch
+`feat/late-adjustment-invoice-intent-20260830`; it incorporates the current
+#173 application/rating guarantees while PR #173 remains the base review.
 PR #173 remains open with no qualifying independent approval; mergeability and
 local checks are not merge evidence. PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174)
 is the separate stacked review for the next immutable invoice-intent
@@ -22,10 +22,11 @@ composition slice; its initial implementation commit is
 `0d58ddcbeea2c3c2d3424346df12f6e9afab6325`, and
 `837db28`, and
 `bd06e17`, and
-`dd1f18f759668f572fcda4849855ac2c82c07cf3`.
+`dd1f18f759668f572fcda4849855ac2c82c07cf3`, followed by integration commit
+`3c7c276da10366d124295937391e9de23e0cc9b3`.
 
 The implemented #87 path now covers PostgreSQL migrations
-`0048`/`0049`/`0050`/`0051`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`, the `LateAdjustment`,
+`0048`/`0049`/`0050`/`0051`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062`, the `LateAdjustment`,
 application, rating-consumption, and invoice-adjustment contracts,
 tenant-scoped presentment reads, and durable application/rating/composition
 facts for late usage, correction, and reversal evidence. Composition now
@@ -48,7 +49,7 @@ must be at least `soft_closed`; the target must be `open` and start no earlier
 than the source end; composition requires a rated adjustment and an unissued
 same-tenant, same-currency invoice draft. Targeted real-PostgreSQL, full
 repository contract, and full 100% statement/branch coverage tests pass on the
-working branch. Recalculation from source usage and rate-card versions,
+working branch (782 tests, 19,388 statements, and 6,700 branches). Recalculation from source usage and rate-card versions,
 provider settlement ingestion, FOCUS 1.4 export, tax/legal invoice treatment,
 and statutory accounting remain open gaps.
 
