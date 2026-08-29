@@ -43,20 +43,22 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
-> **Status update (2026-08-29):** GitHub reports ten open pull requests
-> (`#142`–`#147` and `#153`–`#156`). PRs `#142`–`#146`, `#153`–`#156`
+> **Status update (2026-08-29):** GitHub reports fifteen open pull requests
+> (`#142`–`#147` and `#153`–`#161`). PRs `#142`–`#146`, `#153`–`#160`
 > target `develop`; PR `#147` is stacked on the canonical producer SDK branch
-> from PR `#146`. PRs `#148` and `#149` were
+> from PR `#146`, and PR `#161` is stacked on the provider capability branch
+> from PR `#160`. PRs `#148` and `#149` were
 > merged on 2026-08-28 and are no longer open-PR evidence.
 > The current default branch is
 > `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`, merged from PR #141
 > on 2026-08-26. The merged release train and the Compose, threaded API,
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
-> PRs `#142`–`#146`, `#153`–`#156` are `BLOCKED`; PR `#147` is `CLEAN` but
-> stacked on the unmerged PR `#146`. All ten have zero qualifying approvals;
-> current internal review threads are resolved. None is merge evidence for
-> `develop`.
+> PRs `#142`–`#146`, `#153`–`#160` are `BLOCKED`; PRs `#147` and `#161` are
+> `CLEAN` only relative to their stacked bases and remain dependent on
+> unmerged parents. The live inventory has zero qualifying approvals, and
+> current internal review threads observed in this audit are resolved. None
+> is merge evidence for `develop`.
 
 ### Default branch
 
@@ -74,8 +76,8 @@ operational contract.
 As queried from GitHub on 2026-08-29:
 
 - open issues: **8** (`#84`–`#91`);
-- open pull requests: **10** (`#142`–`#147` and `#153`–`#156`); `#142`–`#146`, `#153`–`#156` target `develop`, and `#147` targets the branch of `#146`;
-- producer work: `#146` provides the canonical Python producer reference and `#147` adds the durable producer outbox slice; the Rust reference from `#148` and TypeScript reference from `#149` were merged on 2026-08-28;
+- open pull requests: **15** (`#142`–`#147` and `#153`–`#161`); `#142`–`#146`, `#153`–`#160` target `develop`, `#147` targets the branch of `#146`, and `#161` targets the branch of `#160`;
+- producer work: `#146` provides the canonical Python producer reference and `#147` adds the durable producer outbox slice; the Rust reference from `#148` and TypeScript reference from `#149` were merged on 2026-08-28; provider capability routing and provider-sticky object mappings are open in `#160` and `#161`;
 - latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`;
 - the merged PR #141 rollup included a failed `Semgrep (multi-language SAST)` job alongside successful repository, analysis, dependency, coverage, and other checks; therefore the merge is not a blanket claim that every release/security gate is complete.
 
@@ -168,23 +170,28 @@ Work can be stacked when public contracts are stable, but each PR must remain in
 
 ## Current pull-request inventory
 
-GitHub reports **ten open pull requests** on 2026-08-29. The latest merged
+GitHub reports **fifteen open pull requests** on 2026-08-29. The latest merged
 change is PR #141; the following open PR heads are current snapshots and are
 not merge evidence:
 
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
 | #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | this document update; open, blocked, review required, zero unresolved threads, zero approvals; hosted Checks re-run after the current topology update |
-| #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
-| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `3b4d915cae4a3eee1dcb694db9df83f0126f5490`; open, blocked, review required, zero unresolved threads, zero approvals; OpenCode/Strix current-head evidence is unavailable because their providers failed |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `5da010aab3def1b8a05f2599a1866e0d2bd3522c`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required; implementation, security, coverage, Noema, and OpenCode checks passed; zero qualifying approvals |
+| #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `3b4d915cae4a3eee1dcb694db9df83f0126f5490`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
 | #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `55f5ee2643ac14c90dfb0f2dd283e71e7f175d05`; open, clean, dependent on #146; Repository contracts and Devin passed, zero unresolved threads and zero approvals |
-| #153 | Bounded PostgreSQL connection pool and lifecycle hardening for #84 | `develop` | `cffa535a19068ebc13f3090684afef324e946e95`; open, blocked, review required, hosted Checks re-running; zero unresolved threads and zero approvals |
-| #154 | Opt-in OpenTelemetry HTTP tracing for #91 | `develop` | `f8414fcbcde07d99b50add8b7e698a1a85d99902`; open, blocked, hosted checks re-running; zero unresolved threads and zero approvals |
-| #155 | Stoppable AIS outbox scheduler and drain-cycle reporting for #91 | `develop` | `47b8f2ef6a01ae2b95f911a6abf39e08a03a007e`; open, blocked, review required; implementation, security, coverage, and Devin Checks passed, but OpenCode failed and Strix is pending; zero unresolved threads and zero approvals |
-| #156 | Usage-event schema compatibility and fail-closed versioning for #90 | `develop` | `b5c8c966b9cf49528814cc1d41701d5d537519bc`; open, blocked, review required; implementation, security, coverage, and Devin passed, but OpenCode failed; zero unresolved threads and zero approvals |
+| #153 | Bounded PostgreSQL connection pool and lifecycle hardening for #84 | `develop` | `cffa535a19068ebc13f3090684afef324e946e95`; open, blocked, review required; current OpenCode check is provider-failed; zero qualifying approvals |
+| #154 | Opt-in OpenTelemetry HTTP tracing for #91 | `develop` | `f8414fcbcde07d99b50add8b7e698a1a85d99902`; open, blocked, review required; current OpenCode check is provider-failed; zero qualifying approvals |
+| #155 | Stoppable AIS outbox scheduler and drain-cycle reporting for #91 | `develop` | `47b8f2ef6a01ae2b95f911a6abf39e08a03a007e`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #156 | Usage-event schema compatibility and fail-closed versioning for #90 | `develop` | `b5c8c966b9cf49528814cc1d41701d5d537519bc`; open, blocked, review required; current OpenCode check is provider-failed; zero qualifying approvals |
+| #157 | Validated incident runbooks for #91 | `develop` | `38c8e46a8a4721cf123b6f075af61d42731094a0`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #158 | Exact-head release evidence manifest for #91 | `develop` | `439f15afba335c8ead435e0743a7cd1ae58de78d`; open, blocked, no formal review decision; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #159 | PostgreSQL backup and restore rehearsal for #84 | `develop` | `35a1e467b6b6dd77ab5594d3adcbc2293dc9af67`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #160 | Provider capability routing foundation for #86 | `develop` | `a7cf09cc754ae15333c21c694347f371732e37cd`; open, blocked, review required; implementation/security/coverage/Noema/Devin checks passed, but OpenCode failed and Strix is provider-failed; zero qualifying approvals |
+| #161 | Provider-sticky object mappings for #86 | `feat/provider-capability-foundation-20260829` (stacked on #160) | `04e13d9b71a60db51f5e03b69bc34d644f3646a4`; open, clean only as a stacked PR; Repository contracts and Devin passed; no formal review decision or qualifying approval |
 
 PRs #148 (Rust SDK) and #149 (TypeScript SDK) merged on 2026-08-28. Their
 historical heads are retained in GitHub, but must not be reused as current
