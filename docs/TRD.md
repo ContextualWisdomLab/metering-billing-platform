@@ -56,6 +56,10 @@ the one-time webhook secret remains process-local until a secure secret
 provider is added. The broader commercial repository, production-default,
 readiness, recovery, HA, and telemetry requirements remain tracked by issue
 #84.
+The repository's bounded backup rehearsal uses `pg_dump`/`pg_restore`, stores
+only a dump digest and stable domain row counts in a closed manifest, and
+requires an explicitly disposable restore target. It is not PITR, WAL,
+cross-region, tenant-export, encryption, or RPO/RTO evidence.
 
 ## Provider plane
 

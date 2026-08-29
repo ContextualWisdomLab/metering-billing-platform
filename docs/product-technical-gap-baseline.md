@@ -24,6 +24,13 @@ Completion is blocked by nine product-level gaps:
 8. canonical SDKs and heterogeneous CWL producer integrations are not complete;
 9. GA operability, performance, disaster recovery, release, and support evidence is not complete.
 
+**Status update (2026-08-29):** a bounded PostgreSQL custom-format
+backup/restore rehearsal was added in the open development slice. It records a
+secret-free dump digest and migration/tenant/usage row counts, restores only to
+an explicitly disposable target, and fails closed on drift. This is one logical
+backup rehearsal; it does not close #84's PITR, failover, disaster-recovery,
+tenant-export, encryption, or RPO/RTO requirements.
+
 Until those conditions are satisfied, the accurate product statement is:
 
 > Metering Billing Platform is a provider-neutral commercial-control-plane candidate with extensive immutable contracts and deterministic reference behavior. It is not yet a merged, provider-connected, durable, operated, or certified billing service.
@@ -93,7 +100,7 @@ The cumulative candidate provides meaningful foundations:
 | Accounting boundary | Balanced proposal-only journals and AIS posting-receipt observations | Correctly does not own statutory books; end-to-end released AIS integration still requires operational proof |
 | Webhooks and API | Tenant-scoped HTTP adapter, HMAC webhook outbox, AIS outbox drain, local API credentials, bounded URL controls | Production identity, KMS, egress gateway, durable queue, and provider webhook normalization are incomplete |
 | Presentment | Storybook components for many exact-decimal commercial statements | No production SPA, customer portal, login, workflow queue, or full accessibility evidence |
-| Database design | PostgreSQL 18 migrations and normalized constraints exist; migrations `0036` and `0037` add tenant proposal-reference uniqueness, non-overlapping credential intervals, and durable tenant/credential URN identity; `PostgresUsageLedger` now runs durable catalog, usage, measurement, and receipt writes with atomic replay/conflict handling; CI applies the migration set through an advisory-locking, checksum/drift-detecting runner | The broader commercial services still use the in-memory reference ledger; rollback/recovery tests, raw-payload storage, backup/restore, and hot partitioning remain open |
+| Database design | PostgreSQL 18 migrations and normalized constraints exist; migrations `0036` and `0037` add tenant proposal-reference uniqueness, non-overlapping credential intervals, and durable tenant/credential URN identity; `PostgresUsageLedger` now runs durable catalog, usage, measurement, and receipt writes with atomic replay/conflict handling; CI applies the migration set through an advisory-locking, checksum/drift-detecting runner; a bounded custom-format backup/restore rehearsal records digest and stable domain counts | The broader commercial services still use the in-memory reference ledger; rollback/recovery tests, raw-payload storage, PITR/failover/disaster recovery, tenant export, and hot partitioning remain open |
 | Quality policy | Extensive schemas, ADRs, docs, local 100% coverage claim, commit-pinned Actions | Candidate remains unmerged; exact-head hosted and release-artifact evidence is incomplete |
 | Spend visibility | Rated-spend views by product/project/credential/principal/cost center and an append-only spend budget | Budget publication does not reserve, enforce, deny, or grant entitlement |
 

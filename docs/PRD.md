@@ -21,6 +21,20 @@ Organizations can attribute AI-platform and CWL-product usage to a billing accou
 6. Every invoice line is explainable down to its usage evidence.
 7. Accounting exports are proposals and cannot claim statutory posting.
 
+## PostgreSQL backup and restore acceptance
+
+- Operators can create a custom-format PostgreSQL backup with a secret-free
+  manifest containing its SHA-256 and stable migration, tenant, and usage row
+  counts.
+- Restore verification requires an explicit disposable-target acknowledgement,
+  validates the manifest and backup digest before restore, and compares the
+  restored counts through PostgreSQL after a successful `pg_restore`.
+- Inline DSN passwords, existing-artifact replacement, malformed manifests,
+  failed commands, and count drift fail closed.
+- The rehearsal is logical backup evidence only. PITR, WAL archiving,
+  cross-region recovery, tenant export, and an RPO/RTO commitment require
+  separate operational evidence.
+
 ## First commercial vertical
 
 ```text

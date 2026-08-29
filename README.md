@@ -67,6 +67,12 @@ The migration runner records SHA-256 checksums in
 `public.metering_billing_schema_migration` and takes a transaction-scoped
 advisory lock; changing an applied migration is rejected.
 
+The bounded PostgreSQL backup/restore rehearsal is documented in
+[`docs/operations/postgres-backup-restore.md`](docs/operations/postgres-backup-restore.md).
+It requires external libpq credential configuration and an explicitly
+disposable restore database; it does not claim PITR or disaster-recovery
+coverage.
+
 ## Ingest usage
 
 ```bash
