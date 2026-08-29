@@ -57,8 +57,9 @@ from scripts.validate_repository import (
     find_mutable_action_references,
     find_placeholder_tokens,
     validate_accounting_journal_proposal,
-    validate_repository,
+    EXPECTED_RUNBOOK_FILES,
     RUNBOOK_REQUIRED_HEADINGS,
+    validate_repository,
     validate_runbooks,
     validate_schema_instance,
     validate_sql_object_names,
@@ -122,6 +123,25 @@ class RepositoryContractTests(unittest.TestCase):
             errors = validate_runbooks(root)
         self.assertIn("runbook index target does not exist: runbooks/deleted.md", errors)
 
+    def test_missing_required_runbook_file_is_reported(self) -> None:
+        """The published scenario set cannot shrink with its index."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            present_files = EXPECTED_RUNBOOK_FILES[1:]
+            for filename in present_files:
+                (directory / filename).write_text(
+                    f"# Incident\n\n{sections}\n", encoding="utf-8"
+                )
+            index_links = "\n".join(f"[scenario](runbooks/{filename})" for filename in present_files)
+            (root / "docs/operations/runbooks.md").write_text(index_links, encoding="utf-8")
+            errors = validate_runbooks(root)
+        self.assertIn(
+            f"missing required runbook file: {EXPECTED_RUNBOOK_FILES[0]}", errors
+        )
+
     def test_unindexed_runbook_is_reported(self) -> None:
         """A scenario file must be reachable from the operational index."""
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -157,6 +177,50 @@ class RepositoryContractTests(unittest.TestCase):
             errors,
         )
 
+    def test_each_required_runbook_section_is_checked(self) -> None:
+        """Every required support section has an explicit missing-section check."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            (root / "docs/operations/runbooks.md").write_text(
+                "[incident](runbooks/incident.md)\n", encoding="utf-8"
+            )
+            for missing_heading in RUNBOOK_REQUIRED_HEADINGS:
+                sections = "\n".join(
+                    f"## {heading}\ncovered"
+                    for heading in RUNBOOK_REQUIRED_HEADINGS
+                    if heading != missing_heading
+                )
+                (directory / "incident.md").write_text(
+                    f"# Incident\n\n{sections}\n", encoding="utf-8"
+                )
+                errors = validate_runbooks(root)
+                self.assertIn(
+                    f"docs/operations/runbooks/incident.md: missing required runbook section: {missing_heading}",
+                    errors,
+                )
+
+    def test_fenced_runbook_headings_are_not_sections(self) -> None:
+        """Markdown headings inside a code fence cannot satisfy the contract."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            fenced_headings = "\n".join(f"## {heading}" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(
+                f"# Incident\n\n```markdown\n{fenced_headings}\n```\n",
+                encoding="utf-8",
+            )
+            (root / "docs/operations/runbooks.md").write_text(
+                "[incident](runbooks/incident.md)\n", encoding="utf-8"
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            "docs/operations/runbooks/incident.md: missing required runbook section: Owner",
+            errors,
+        )
+
     def test_runbook_index_without_links_is_reported(self) -> None:
         """An index without scenario links cannot define the support set."""
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -178,10 +242,13 @@ class RepositoryContractTests(unittest.TestCase):
             sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
             (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
             (root / "docs/operations/runbooks.md").write_text(
-                "[incident](runbooks/incident.md)\n[escape](../outside.md)\n", encoding="utf-8"
+                "[incident](runbooks/incident.md)\n[escape](runbooks/../outside.md)\n",
+                encoding="utf-8",
             )
             errors = validate_runbooks(root)
-        self.assertIn("runbook index target escapes runbook directory: ../outside.md", errors)
+        self.assertIn(
+            "runbook index target escapes runbook directory: runbooks/../outside.md", errors
+        )
 
     def test_boolean_json_schema_nodes_are_supported(self) -> None:
         """Draft 2020-12 boolean schemas must accept true and reject false."""

@@ -364,7 +364,19 @@ RUNBOOK_REQUIRED_HEADINGS = (
     "Validation receipt",
     "Exit and RCA",
 )
-RUNBOOK_INDEX_LINK_PATTERN = re.compile(r"\]\(([^)#\s]+\.md)\)")
+EXPECTED_RUNBOOK_FILES = (
+    "usage-rejection-duplicate-spike.md",
+    "rating-price-mismatch.md",
+    "budget-control-failure.md",
+    "provider-outage-throttling.md",
+    "reconciliation-mismatch.md",
+    "database-failover-restore.md",
+    "credential-or-webhook-secret-leak.md",
+    "commercial-correction.md",
+    "tenant-export-offboarding.md",
+    "vulnerability-dependency-emergency.md",
+)
+RUNBOOK_INDEX_LINK_PATTERN = re.compile(r"\]\((runbooks/[^)#\s]+\.md)\)")
 TABLE_NAME_PATTERN = re.compile(
     r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
     r"(?:(?:[a-zA-Z_][a-zA-Z0-9_]*)\.)?([a-zA-Z_][a-zA-Z0-9_]*)",
@@ -506,6 +518,10 @@ def validate_runbooks(root: Path) -> tuple[str, ...]:
     if not runbook_paths:
         return ("runbook directory must contain Markdown runbooks",)
     errors: list[str] = []
+    runbook_names = {runbook_path.name for runbook_path in runbook_paths}
+    for expected_name in EXPECTED_RUNBOOK_FILES:
+        if expected_name not in runbook_names:
+            errors.append(f"missing required runbook file: {expected_name}")
     index_path = root / "docs/operations/runbooks.md"
     if not index_path.is_file():
         errors.append("missing runbook index: docs/operations/runbooks.md")
@@ -533,10 +549,13 @@ def validate_runbooks(root: Path) -> tuple[str, ...]:
     for runbook_path in runbook_paths:
         text = runbook_path.read_text(encoding="utf-8")
         relative_path = runbook_path.relative_to(root).as_posix()
+        text_without_fenced_code = re.sub(
+            r"(?ms)^```[^\n]*\n.*?^```\s*$\n?", "", text
+        )
         for heading in RUNBOOK_REQUIRED_HEADINGS:
             heading_match = re.search(
                 rf"^## {re.escape(heading)}$\n(.*?)(?=^## |\Z)",
-                text,
+                text_without_fenced_code,
                 re.MULTILINE | re.DOTALL,
             )
             if heading_match is None:

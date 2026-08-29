@@ -47,3 +47,15 @@ health endpoints, durable outbox paths, and local contract validation. Live
 provider, object-storage, KMS, backup/restore, and production RPO/RTO evidence
 must be attached by the deployed service owner; these documents do not invent
 that evidence.
+
+## Deployment-owned references
+
+Before executing a procedure, the deployment owner adds the approved links for
+provider status and retry controls, the secret/KMS authority, object storage,
+backup and restore service, tenant export/deletion workflow, and budget
+reservation controller to the incident record. Repository-owned references are
+the [Compose topology](../../compose/docker-compose.yml), [migration runner](../../scripts/migrate_postgres.py),
+[load baseline](load-test-baseline.md), [security boundary](../SECURITY.md),
+and [repository validator](../../scripts/validate_repository.py). An absent
+external link is an evidence gap and must not be replaced with an invented
+production claim.
