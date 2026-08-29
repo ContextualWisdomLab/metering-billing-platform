@@ -24,7 +24,7 @@
     "issued_invoice_lines"
   ],
   "properties": {
-    "issued_invoice_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "issued_invoice_presentment_contract_version": {"const": 2},
     "issued_invoice_id": {"type": "string", "format": "uuid"},
     "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
     "invoice_draft_id": {"type": "string", "format": "uuid"},
@@ -51,7 +51,7 @@
     "due_at": {"type": "string", "format": "date-time"},
     "tax_assessment_id": {"type": "string", "format": "uuid"},
     "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "issued_invoice_contract_version": {"type": "integer", "minimum": 1},
+    "issued_invoice_contract_version": {"const": 2},
     "next_operator_action": {
       "type": "string",
       "enum": ["collect"]

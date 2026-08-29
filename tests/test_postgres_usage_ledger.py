@@ -297,8 +297,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 59:
-            raise AssertionError(f"expected 59 migrations, got {len(applied)}")
+        if len(applied) != 60:
+            raise AssertionError(f"expected 60 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13070,6 +13070,30 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             validate_issued_invoice_presentment(presented.as_contract_dict()), ()
         )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.collection_case
+                        (collection_case_id, tenant_account_id, invoice_draft_id,
+                         currency_code, collection_case_status, outstanding_amount, opened_at)
+                    VALUES (%s, %s, %s, %s, 'open', %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        tenant.tenant_account_id,
+                        draft.invoice_draft_id,
+                        issued.currency_code,
+                        issued.tax_inclusive_amount + Decimal("0.001"),
+                        CATALOG_START,
+                    ),
+                )
+        collection = CollectionCaseService(self.ledger).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
+        self.assertEqual(collection.outstanding_amount, issued.tax_inclusive_amount)
         for statement in (
             "UPDATE billing_core.late_adjustment_invoice_adjustment "
             "SET recorded_by = 'operator:rewrite' "
@@ -13268,6 +13292,167 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             rejected.rejection_reason_code.value,
             "adjustment_amount_not_representable",
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        rating = self.ledger.find_late_adjustment_rating(
+            tenant.tenant_account_id, adjustment.late_adjustment_id
+        )
+        assert stored_draft is not None
+        assert rating is not None
+        line = stored_draft.invoice_draft_lines[0]
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_invoice_adjustment
+                        (late_adjustment_invoice_adjustment_id, tenant_account_id,
+                         late_adjustment_rating_id, late_adjustment_application_id,
+                         late_adjustment_id, invoice_draft_id, target_period_id,
+                         adjustment_amount, currency_code, recorded_by,
+                         authorization_reference, recorded_at, source_payload_hash,
+                         late_adjustment_invoice_adjustment_contract_version,
+                         late_adjustment_invoice_adjustment_status, billing_account_id,
+                         billing_account_reference)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        tenant.tenant_account_id,
+                        rating.late_adjustment_rating_id,
+                        rating.late_adjustment_application_id,
+                        rating.late_adjustment_id,
+                        draft.invoice_draft_id,
+                        rating.target_period_id,
+                        Decimal("0.0000000000001"),
+                        rating.currency_code,
+                        "operator:test",
+                        "approval:test",
+                        CATALOG_START,
+                        "sha256:" + "e" * 64,
+                        2,
+                        "recorded",
+                        line.billing_account_id,
+                        line.billing_account_reference,
+                    ),
+                )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.late_adjustment_invoice_adjustment "
+                "WHERE invoice_draft_id = %s",
+                (draft.invoice_draft_id,),
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_postgres_direct_issued_line_rejects_forged_composition_evidence(self) -> None:
+        """Raw issued lines must match composition draft, amount, and payer exactly."""
+        adjustment_a, draft_a = prepare_postgres_late_adjustment(
+            self.ledger, "-0.002", "provider:line-evidence-a", quantity="1830"
+        )
+        composition_a = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment_a.late_adjustment_id,
+            draft_a.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        adjustment_b, draft_b = prepare_postgres_late_adjustment(
+            self.ledger, "0.002", "provider:line-evidence-b", quantity="1831"
+        )
+        composition_b = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment_b.late_adjustment_id,
+            draft_b.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_a = self.ledger.get_invoice_draft(draft_a.invoice_draft_id)
+        stored_composition_a = self.ledger.get_late_adjustment_invoice_adjustment(
+            composition_a.late_adjustment_invoice_adjustment_id
+        )
+        stored_composition_b = self.ledger.get_late_adjustment_invoice_adjustment(
+            composition_b.late_adjustment_invoice_adjustment_id
+        )
+        assert stored_a is not None
+        assert stored_composition_a is not None
+        assert stored_composition_b is not None
+        line_a = stored_a.invoice_draft_lines[0]
+
+        forged_lines = (
+            (
+                stored_composition_a,
+                line_a.billing_account_reference,
+                stored_composition_a.adjustment_amount + Decimal("0.001"),
+            ),
+            (
+                stored_composition_a,
+                "urn:cwl:forged:billing-account",
+                stored_composition_a.adjustment_amount,
+            ),
+            (
+                stored_composition_b,
+                stored_composition_b.billing_account_reference,
+                stored_composition_b.adjustment_amount,
+            ),
+        )
+        for index, (composition, billing_account_reference, line_total) in enumerate(
+            forged_lines
+        ):
+            with self.subTest(index=index):
+                issued_invoice_id = uuid4()
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    with self.connection.transaction():
+                        self.connection.execute(
+                            """
+                            INSERT INTO billing_core.issued_invoice
+                                (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                                 issued_invoice_contract_version, rating_run_id,
+                                 usage_snapshot_hash, source_payload_hash, currency_code,
+                                 tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                                 issued_invoice_status, issued_at)
+                            VALUES (%s, %s, %s, 2, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                            """,
+                            (
+                                issued_invoice_id,
+                                tenant.tenant_account_id,
+                                draft_a.invoice_draft_id,
+                                stored_a.rating_run_id,
+                                stored_a.usage_snapshot_hash,
+                                "sha256:" + ("def"[index] * 64),
+                                stored_a.currency_code,
+                                stored_a.drafted_total_amount,
+                                stored_a.drafted_total_amount,
+                                CATALOG_START,
+                            ),
+                        )
+                        self.connection.execute(
+                            """
+                            INSERT INTO billing_core.issued_invoice_line
+                                (issued_invoice_line_id, issued_invoice_id, tenant_account_id,
+                                 line_number, billing_account_reference, meter_code, unit_code,
+                                 rated_quantity, unit_price_amount, line_total_amount,
+                                 line_type, late_adjustment_invoice_adjustment_id)
+                            VALUES (%s, %s, %s, 1, %s, 'late_adjustment', 'adjustment',
+                                    1, %s, %s, 'late_adjustment', %s)
+                            """,
+                            (
+                                uuid4(),
+                                issued_invoice_id,
+                                tenant.tenant_account_id,
+                                billing_account_reference,
+                                composition.adjustment_amount.copy_abs(),
+                                line_total,
+                                composition.late_adjustment_invoice_adjustment_id,
+                            ),
+                        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_line"
+            ).fetchone()[0],
+            0,
         )
 
     def test_late_adjustment_invoice_adjustment_adapter_boundaries(self) -> None:

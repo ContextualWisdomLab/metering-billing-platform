@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest import mock
@@ -135,6 +136,25 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertNotIn("webhook_secret", json.dumps(envelope))
         self.assertNotIn("api_credential_secret", json.dumps(envelope))
         self.assertEqual(len(ledger.journal_proposals), 0)
+
+    def test_presentment_upgrades_historical_v1_snapshot_to_v2(self) -> None:
+        """Historical stored versions use the current presentment envelope."""
+        ledger, invoice_draft_id = draft_known_morning()
+        issued = IssuedInvoiceService(ledger, clock=lambda: ISSUED_MORNING).issue_invoice(
+            TENANT_ONE, invoice_draft_id
+        )
+        stored = ledger.get_issued_invoice(issued.issued_invoice_id)
+        assert stored is not None
+        ledger.issued_invoices[issued.issued_invoice_id] = replace(
+            stored, issued_invoice_contract_version=1
+        )
+        presented = IssuedInvoicePresentmentService(ledger).present_issued_invoice(
+            TENANT_ONE, issued.issued_invoice_id
+        )
+        payload = presented.as_contract_dict()
+        self.assertEqual(payload["issued_invoice_presentment_contract_version"], 2)
+        self.assertEqual(payload["issued_invoice_contract_version"], 2)
+        self.assertEqual(validate_issued_invoice_presentment(payload), ())
 
     def test_taxed_draft_freezes_assessment_totals_and_optional_due_at(self) -> None:
         """A taxed draft copies exclusive/tax/inclusive and stores caller due_at."""

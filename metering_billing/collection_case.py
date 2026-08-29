@@ -168,14 +168,20 @@ class CollectionCaseService:
             if invoice_draft is None:
                 return _rejected(CollectionCaseRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
 
-        assessment = self.ledger.find_tax_assessment_for_draft(
+        issued_invoice = self.ledger.find_issued_invoice(
             tenant.tenant_account_id, invoice_draft.invoice_draft_id
         )
-        collectible = (
-            assessment.tax_inclusive_amount
-            if assessment is not None
-            else invoice_draft.drafted_total_amount
-        )
+        if issued_invoice is not None:
+            collectible = issued_invoice.tax_inclusive_amount
+        else:
+            assessment = self.ledger.find_tax_assessment_for_draft(
+                tenant.tenant_account_id, invoice_draft.invoice_draft_id
+            )
+            collectible = (
+                assessment.tax_inclusive_amount
+                if assessment is not None
+                else invoice_draft.drafted_total_amount
+            )
         outstanding_amount = parse_collection_amount(collectible)
         if outstanding_amount <= 0:
             return _rejected(CollectionCaseRejectionReasonCode.OUTSTANDING_AMOUNT_INVALID)
@@ -190,7 +196,7 @@ class CollectionCaseService:
                 CollectionCaseOutcomeCode.DUPLICATE_REPLAY,
                 self.ledger.list_collection_dunning_events(existing.collection_case_id),
             )
-        if self.ledger.list_late_adjustment_invoice_adjustments_for_draft(
+        if issued_invoice is None and self.ledger.list_late_adjustment_invoice_adjustments_for_draft(
             tenant.tenant_account_id, invoice_draft.invoice_draft_id
         ):
             return _rejected(CollectionCaseRejectionReasonCode.INVOICE_DRAFT_HAS_LATE_ADJUSTMENT)

@@ -10,7 +10,7 @@
     "issued_invoice_outcome_code"
   ],
   "properties": {
-    "issued_invoice_contract_version": {"type": "integer", "minimum": 1},
+    "issued_invoice_contract_version": {"const": 2},
     "issued_invoice_outcome_code": {
       "type": "string",
       "enum": ["accepted", "duplicate_replay", "rejected"]

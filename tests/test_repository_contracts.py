@@ -3382,7 +3382,7 @@ class RepositoryContractTests(unittest.TestCase):
         """An issued-invoice contract freezes exact totals and cannot invent a number."""
         schema = self._schema("issued-invoice.schema.json")
         instance = {
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "issued_invoice_outcome_code": "accepted",
             "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
             "tenant_reference": "urn:cwl:tenant_001",
@@ -3413,6 +3413,9 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
         self.assertEqual(validate_issued_invoice(instance), ())
+        unsupported_version = dict(instance)
+        unsupported_version["issued_invoice_contract_version"] = 1
+        self.assertNotEqual(validate_schema_instance(schema, unsupported_version), ())
         missing_line_type = dict(instance)
         missing_line_type["issued_invoice_lines"] = [
             {key: value for key, value in instance["issued_invoice_lines"][0].items() if key != "line_type"}
@@ -3508,13 +3511,13 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
         rejected = {
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "issued_invoice_outcome_code": "rejected",
             "rejection_reason_code": "invoice_draft_not_found",
         }
         self.assertEqual(validate_issued_invoice(rejected), ())
         missing_reason = {
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "issued_invoice_outcome_code": "rejected",
         }
         self.assertIn(
@@ -3522,7 +3525,7 @@ class RepositoryContractTests(unittest.TestCase):
             validate_issued_invoice(missing_reason),
         )
         missing_id = {
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "issued_invoice_outcome_code": "accepted",
         }
         self.assertIn(
@@ -3531,7 +3534,7 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertNotEqual(validate_issued_invoice([]), ())
         self.assertNotEqual(
-            validate_issued_invoice({"issued_invoice_contract_version": 1}),
+            validate_issued_invoice({"issued_invoice_contract_version": 2}),
             (),
         )
 
@@ -3541,7 +3544,7 @@ class RepositoryContractTests(unittest.TestCase):
         """An issued-invoice statement records frozen totals and cannot claim a write outcome."""
         schema = self._schema("issued-invoice-presentment.schema.json")
         instance = {
-            "issued_invoice_presentment_contract_version": 1,
+            "issued_invoice_presentment_contract_version": 2,
             "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
             "tenant_reference": "urn:cwl:tenant_001",
             "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
@@ -3555,7 +3558,7 @@ class RepositoryContractTests(unittest.TestCase):
             "issued_at": "2026-08-17T21:00:00Z",
             "due_at": "2026-09-16T21:00:00Z",
             "source_payload_hash": "sha256:" + ("b" * 64),
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "next_operator_action": "collect",
             "issued_invoice_lines": [
                 {
@@ -3572,6 +3575,9 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
         self.assertEqual(validate_issued_invoice_presentment(instance), ())
+        unsupported_version = dict(instance)
+        unsupported_version["issued_invoice_contract_version"] = 1
+        self.assertNotEqual(validate_schema_instance(schema, unsupported_version), ())
         missing_line_type = dict(instance)
         missing_line_type["issued_invoice_lines"] = [
             {key: value for key, value in instance["issued_invoice_lines"][0].items() if key != "line_type"}

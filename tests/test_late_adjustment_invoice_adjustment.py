@@ -242,6 +242,44 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
                 self.assertEqual(replay.issued_invoice_id, issued.issued_invoice_id)
                 self.assertEqual(len(replay.issued_invoice_lines), len(issued.issued_invoice_lines))
 
+    def test_issued_adjustment_uses_frozen_total_for_collection(self) -> None:
+        """An adjusted issued snapshot can enter collection at its frozen total."""
+        ledger, adjustment, draft = prepare_invoice_adjustment("-0.002")
+        composed = LateAdjustmentInvoiceAdjustmentService(ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        issued = IssuedInvoiceService(ledger).issue_invoice(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        self.assertIsNotNone(composed.late_adjustment_invoice_adjustment_id)
+        tenant = ledger.require_tenant(TENANT_ONE)
+        with self.assertRaisesRegex(ValueError, "collection case does not match issued invoice"):
+            ledger.insert_collection_case(
+                StoredCollectionCase(
+                    collection_case_id=uuid4(),
+                    tenant_account_id=tenant.tenant_account_id,
+                    invoice_draft_id=draft.invoice_draft_id,
+                    currency_code=issued.currency_code,
+                    collection_case_status="open",
+                    outstanding_amount=issued.tax_inclusive_amount + Decimal("0.001"),
+                    opened_at=datetime(2026, 8, 3, tzinfo=UTC),
+                )
+            )
+        collection = CollectionCaseService(ledger).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
+        self.assertEqual(collection.outstanding_amount, issued.tax_inclusive_amount)
+        replay = CollectionCaseService(ledger).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(replay.collection_case_outcome_code.value, "duplicate_replay")
+
     def test_taxed_composition_requires_tax_reassessment_before_issue(self) -> None:
         """A stale tax snapshot cannot silently absorb a late signed delta."""
         ledger, adjustment, draft = prepare_invoice_adjustment()

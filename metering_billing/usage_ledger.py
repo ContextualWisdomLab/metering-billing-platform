@@ -4049,10 +4049,18 @@ class MemoryUsageLedger:
             raise ValueError("collection cases are immutable and cannot be replaced")
         if identity_key in self.collection_case_index:
             raise ValueError("collection cases are immutable and cannot be replaced")
-        if self.list_late_adjustment_invoice_adjustments_for_draft(
+        issued_invoice = self.find_issued_invoice(
+            collection_case.tenant_account_id, collection_case.invoice_draft_id
+        )
+        if issued_invoice is None and self.list_late_adjustment_invoice_adjustments_for_draft(
             collection_case.tenant_account_id, collection_case.invoice_draft_id
         ):
             raise ValueError("invoice draft has late adjustment invoice adjustment")
+        if issued_invoice is not None and (
+            collection_case.currency_code != issued_invoice.currency_code
+            or outstanding_amount != issued_invoice.tax_inclusive_amount
+        ):
+            raise ValueError("collection case does not match issued invoice")
         persisted = StoredCollectionCase(
             collection_case_id=collection_case.collection_case_id,
             tenant_account_id=collection_case.tenant_account_id,

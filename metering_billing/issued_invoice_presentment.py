@@ -244,7 +244,7 @@ class IssuedInvoicePresentmentService:
             issued_at=stored.issued_at,
             due_at=stored.due_at,
             source_payload_hash=stored.source_payload_hash,
-            issued_invoice_contract_version=stored.issued_invoice_contract_version,
+            issued_invoice_contract_version=ISSUED_INVOICE_PRESENTMENT_CONTRACT_VERSION,
             next_operator_action=next_operator_action(),
             issued_invoice_lines=tuple(
                 IssuedInvoicePresentmentLine(
