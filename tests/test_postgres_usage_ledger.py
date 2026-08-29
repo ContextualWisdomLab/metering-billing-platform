@@ -394,8 +394,8 @@ class ConnectionPoolTests(unittest.TestCase):
                 with failure_ledger.lease() as session:
                     session.broken = True
                     raise psycopg.OperationalError("connection failed")
-            self.assertEqual(failure_ledger._pool.open_count, 0)
         finally:
+            self.assertEqual(failure_ledger._pool.open_count, 0)
             failure_ledger.close()
 
 
