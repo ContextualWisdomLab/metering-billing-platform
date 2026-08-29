@@ -4636,6 +4636,18 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(
             validate_schema_instance({"type": "array", "items": True}, [1]), ()
         )
+        prefix_items_schema = {
+            "type": "array",
+            "prefixItems": [{"type": "string"}],
+            "items": {"type": "integer"},
+        }
+        self.assertEqual(
+            validate_schema_instance(prefix_items_schema, ["ok", 1]), ()
+        )
+        self.assertEqual(
+            validate_schema_instance(prefix_items_schema, ["ok", "bad"]),
+            ("$[1]: expected integer",),
+        )
 
         object_schema = {
             "type": "object",
