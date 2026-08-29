@@ -228,6 +228,10 @@ class AisOutboxDrainTests(unittest.TestCase):
             AisOutboxScheduler(drain_service, lambda: (), interval_seconds=0)
         with self.assertRaises(ValueError):
             AisOutboxScheduler(drain_service, lambda: (), interval_seconds=True)
+        for invalid_interval in (float("nan"), float("inf"), float("-inf"), 10**400):
+            with self.subTest(invalid_interval=invalid_interval):
+                with self.assertRaises(ValueError):
+                    AisOutboxScheduler(drain_service, lambda: (), interval_seconds=invalid_interval)
         default_scheduler = AisOutboxScheduler(drain_service, lambda: ())
         default_scheduler._stop_event.set()
         default_scheduler.run_forever()

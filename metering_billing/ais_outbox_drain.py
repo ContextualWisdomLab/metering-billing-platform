@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from collections.abc import Iterable
+import math
 from threading import Event
 from typing import Callable
 from uuid import UUID
@@ -241,11 +242,17 @@ class AisOutboxScheduler:
         stop_event: Event | None = None,
     ) -> None:
         """Bind a dynamic tenant source and a bounded, wakeable interval."""
-        if type(interval_seconds) not in (int, float) or interval_seconds <= 0:
+        if type(interval_seconds) not in (int, float):
+            raise ValueError("interval_seconds must be a positive number")
+        try:
+            normalized_interval = float(interval_seconds)
+        except OverflowError as error:
+            raise ValueError("interval_seconds must be a positive number") from error
+        if not math.isfinite(normalized_interval) or normalized_interval <= 0:
             raise ValueError("interval_seconds must be a positive number")
         self._drain_service = drain_service
         self._tenant_references = tenant_references
-        self._interval_seconds = float(interval_seconds)
+        self._interval_seconds = normalized_interval
         self._stop_event = stop_event if stop_event is not None else Event()
 
     def run_once(self) -> tuple[tuple[str, AisOutboxDrainResult], ...]:
