@@ -219,8 +219,6 @@ class PostgresUsageLedger:
         self, period: BillingPeriod, *, allow_reconciled: bool
     ) -> BillingPeriod:
         """Persist a period, allowing reconciled only from the gated command."""
-        if period.status == BillingPeriodStatus.RECONCILED and not allow_reconciled:
-            raise ValueError("reconciled periods require reconcile_billing_period")
         with self._cursor() as cursor:
             tenant_account_id = self._tenant_account_id_with_cursor(
                 cursor, period.tenant_reference
@@ -258,8 +256,14 @@ class PostgresUsageLedger:
             prefix = period.transitions[: len(existing.transitions)]
             if existing.transitions != prefix:
                 raise ValueError("billing period transition history cannot be rewritten")
+            new_transitions = period.transitions[len(existing.transitions) :]
+            if not allow_reconciled and any(
+                transition.to_status == BillingPeriodStatus.RECONCILED
+                for transition in new_transitions
+            ):
+                raise ValueError("reconciled periods require reconcile_billing_period")
             for transition_number, transition in enumerate(
-                period.transitions[len(existing.transitions) :],
+                new_transitions,
                 start=len(existing.transitions) + 1,
             ):
                 cursor.execute(
@@ -350,7 +354,7 @@ class PostgresUsageLedger:
                                      AND resolution.exception_code = exception.exception_code
                                )
                            ) AS unresolved_exception_count,
-                           COUNT(run_line.reconciliation_line_id) AS run_line_count,
+                           COUNT(DISTINCT run_line.reconciliation_line_id) AS run_line_count,
                            (
                                SELECT COUNT(*)
                                FROM billing_core.reconciliation_line AS period_line

@@ -435,6 +435,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self.ledger.insert_billing_period(reconciled)
+        ungated_invoiced = reconciled.advance(
+            "invoiced",
+            actor_reference="operator:finance_006",
+            authorization_reference="approval:period_004",
+            reason="ungated invoice must not persist",
+            transitioned_at=CATALOG_START + timedelta(hours=2),
+            transition_id=uuid4(),
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_billing_period(ungated_invoiced)
         empty_run = ReconciliationRun(
             run_id=uuid4(),
             period_id=period.period_id,
@@ -997,7 +1007,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             assessed_at=CATALOG_START + timedelta(hours=2),
             reconciliation_line_id=uuid4(),
             internal_currency_code="USD",
-            provider_currency_code="USD",
+            provider_currency_code="EUR",
             cash_currency_code="USD",
         )
         self.ledger.insert_reconciliation_line(TENANT_ONE, matched)
@@ -1008,7 +1018,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             started_at=CATALOG_START + timedelta(hours=3),
             completed_at=CATALOG_START + timedelta(hours=4),
             reconciliation_line_ids=(matched.reconciliation_line_id, exception.reconciliation_line_id),
-            blocking_exception_count=1,
+            blocking_exception_count=2,
         )
         self.ledger.insert_reconciliation_run(TENANT_ONE, run)
         with self.assertRaises(ValueError):
@@ -1058,7 +1068,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             run,
             run_id=uuid4(),
             completed_at=CATALOG_START + timedelta(hours=5, minutes=30),
-            blocking_exception_count=2,
+            blocking_exception_count=3,
         )
         self.ledger.insert_reconciliation_run(TENANT_ONE, inconsistent_run)
         with self.assertRaises(ValueError):
@@ -1083,6 +1093,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             resolved_at=CATALOG_START + timedelta(hours=5),
         )
         self.ledger.insert_reconciliation_resolution(TENANT_ONE, resolution)
+        currency_resolution = replace(
+            resolution,
+            resolution_id=uuid4(),
+            exception_code=ReconciliationExceptionCode.CURRENCY_MISMATCH,
+            resolution_reason="provider currency evidence accepted",
+            evidence_reference="urn:cwl:evidence:period-gate-currency-001",
+        )
+        self.ledger.insert_reconciliation_resolution(TENANT_ONE, currency_resolution)
         valid_run = replace(
             run,
             run_id=uuid4(),
