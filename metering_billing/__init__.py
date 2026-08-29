@@ -1,8 +1,8 @@
-"""Importable commercial contracts, usage, rating, draft, export, collection, intent, settlement, credit, catalog, and HTTP services.
+"""Importable commercial contracts, usage, rating, draft, export, collection, intent, settlement, credit, late-adjustment, catalog, and HTTP services.
 
 This package is the standalone library surface for Contextual Wisdom Lab's
 Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
-canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
+canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events and late-adjustment facts, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
 those drafts as statements, present already-rated spend for one billing
 account and window grouped by product, optional project, optional credential, optional principal, or optional cost center, publish one commercial spend budget for one billing account and window, evaluate that published budget against already-rated spend, list those evaluations for one billing account,     observe first-over utilization onto the commercial webhook outbox, present that live over-signal plus stored outbox observation, observe first-at approaching utilization onto the commercial webhook outbox, issue an immutable commercial invoice snapshot

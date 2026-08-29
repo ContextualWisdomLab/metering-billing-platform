@@ -66,12 +66,21 @@ FOCUS export, and statutory accounting remain downstream capabilities.
 `LateAdjustmentPresentmentService` exposes the fact through tenant-scoped
 item/list reads and reports `apply_late_adjustment` until
 `LateAdjustmentApplicationService` records the append-only
-`late_adjustment_application` acknowledgement. The nested application route
-requires actor and authorization references, enforces source equality and
-tenant scope, and then reports `rate_late_adjustment`. It never rewrites the
-late fact, period, usage, rating, tax, journal, provider state, or webhook.
-`LateAdjustmentRatingService` consumes the acknowledgement through the nested
-`/ratings` command and appends `late_adjustment_rating`. The exact signed delta
+`late_adjustment_application` acknowledgement. The PostgreSQL trigger locks
+the target period and requires its latest append-only status to be `open` for
+new applications; replays bypass that guard and return the first writer's
+audit data. The nested application route requires actor and authorization
+references, enforces source equality and tenant scope, and then reports
+`rate_late_adjustment`. The memory adapter persists the same period aggregate
+and maps missing or closed targets to `target_period_not_found` or
+`target_period_not_open` rejected results (HTTP 422). It never rewrites the late fact, period, usage, rating,
+tax, journal, provider state, or webhook.
+List reads pass the decoded cursor and `limit + 1` to the ledger; PostgreSQL
+applies the tenant-scoped keyset predicate and hydrates only those bounded rows,
+then performs one bulk application-existence and one bulk rating-existence lookup
+for the page. `LateAdjustmentRatingService` consumes the acknowledgement through
+the nested `/ratings` command and appends `late_adjustment_rating` only while the
+target remains open; a stored rating replays after closure. The exact signed delta
 is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
 `LateAdjustmentInvoiceAdjustmentService` consumes that rating through the
 nested `/invoice-adjustments` command and appends one tenant-scoped
@@ -106,6 +115,10 @@ version 2: usage lines are non-negative and late-adjustment lines retain their
 signed exact total and composition ID. The draft and issued snapshot remain
 immutable; collection, journal, provider export, and tax/legal-document
 settlement remain downstream boundaries.
+The memory adapter serializes recording, application, rating, and period
+lifecycle writes so concurrent application/close or rating/close races cannot
+create a second acknowledgement or accept a new fact for a closed target;
+application audit timestamps are timezone-aware and not future-dated.
 
 ## Usage ingestion
 

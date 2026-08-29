@@ -252,15 +252,27 @@ append-only `late_adjustment_application` per tenant and late-adjustment ID,
 including the equal target period, signed exact amount, currency, actor,
 authorization reference, and application instant. Presentment exposes
 `apply_late_adjustment` before that row exists and `rate_late_adjustment`
-afterward. The application row has composite source/target foreign keys and
-immutable update/delete triggers; migration `0052` also rechecks target
-openness for a first application while preserving already-stored replays; it
-does not mutate the late adjustment.
+afterward. A new application locks and rechecks the target period's latest
+append-only status and requires `open`; replay bypasses that new-fact guard and
+returns the first writer's immutable audit fields. The application row has
+composite source/target foreign keys and immutable update/delete triggers; it
+does not mutate the late adjustment. The memory reference adapter stores the
+same billing-period aggregate and enforces source/target tenant, lifecycle, and
+ordering invariants before storing a late-adjustment fact. Migration `0051`
+rechecks concurrent application replays after the source lock and rejects future
+application audit timestamps.
+The list read passes the decoded cursor and `limit + 1` to the ledger, and
+PostgreSQL evaluates one tenant-scoped ordered keyset query so the page never
+scans or hydrates the complete history; application and rating existence are
+loaded with one bulk lookup each for the bounded page.
+Application audit timestamps are timezone-aware and not future-dated. The
+memory adapter serializes recording, application, and target-period lifecycle writes while
+preserving the same replay identity.
 
 `LateAdjustmentRatingService` consumes that application and stores one
-append-only `late_adjustment_rating` per tenant and late-adjustment ID. It
-copies the application target, signed amount, and currency and adds the rating
-actor, authorization reference, and instant. Migrations `0051` and `0052` protect the
+append-only `late_adjustment_rating` per tenant and late-adjustment ID. It copies
+the application target, signed amount, and currency and adds the rating actor,
+authorization reference, and instant. Migrations `0051` and `0053` protect the
 application/source/target links, exact-value equality, replay identity, current
 target openness for first ratings, and update/delete immutability. Migration
 `0053` preserves already-stored rating replays after target closure. This is a rating-consumption fact, not a synthetic

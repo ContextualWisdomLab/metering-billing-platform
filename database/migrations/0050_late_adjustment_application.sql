@@ -45,6 +45,8 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     adjustment billing_core.late_adjustment%ROWTYPE;
+    target_period billing_core.billing_period%ROWTYPE;
+    target_status text;
 BEGIN
     -- Let ON CONFLICT classify both generated-id and tenant/source replays,
     -- even if the target period has since advanced or closed.
@@ -77,6 +79,29 @@ BEGIN
     END IF;
     IF NEW.currency_code <> adjustment.currency_code THEN
         RAISE EXCEPTION 'late adjustment application currency does not match source';
+    END IF;
+
+    SELECT *
+    INTO target_period
+    FROM billing_core.billing_period
+    WHERE tenant_account_id = NEW.tenant_account_id
+      AND period_id = adjustment.target_period_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'late adjustment application target period is missing';
+    END IF;
+
+    SELECT COALESCE((
+        SELECT transition.to_status
+        FROM billing_core.billing_period_transition AS transition
+        WHERE transition.tenant_account_id = target_period.tenant_account_id
+          AND transition.period_id = target_period.period_id
+        ORDER BY transition.transition_number DESC
+        LIMIT 1
+    ), 'open')
+    INTO target_status;
+    IF target_status <> 'open' THEN
+        RAISE EXCEPTION 'late adjustment application target period must be open';
     END IF;
     RETURN NEW;
 END;

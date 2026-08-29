@@ -75,8 +75,11 @@ operator action is `apply_late_adjustment` until
 `LateAdjustmentApplicationService` records one immutable application through
 `POST /v1/late-adjustments/{late_adjustment_id}/applications`; thereafter it
 is `rate_late_adjustment`. The application requires actor and authorization
-references, preserves the source target/exact signed amount/currency, and is
-replay-safe and rejects a first application after its target period closes.
+references, preserves the source target/exact signed amount/currency, locks and
+rechecks that the target period is still `open` for a new application, and is
+replay-safe. A stored application replays after the target closes and retains
+its first-writer audit data. A first application after its target period closes
+is rejected.
 `POST /v1/late-adjustments/{late_adjustment_id}/ratings` then
 consumes the application into one immutable rating fact only while its target
 period is open; a first rating after closure is rejected while a stored rating
@@ -119,6 +122,23 @@ projected result above 10,000 lines. Migration `0059` fails closed on legacy
     and signed amount to be represented. Migration `0062` enforces issued-invoice
     snapshot and line immutability for direct PostgreSQL UPDATE/DELETE and removes
     the `line_type` default from issued lines.
+`POST /v1/late-adjustments/{late_adjustment_id}/ratings` then consumes the
+application into one immutable rating fact only while its target period is
+open; a first rating after closure is rejected while a stored rating replays.
+This preserves the original usage `rating_run` and exact signed delta. Because
+the adjustment has no usage snapshot or rate-card input, this command does not
+synthesize one; invoice-adjustment composition is the next explicit action.
+Neither command mutates a period, posts a journal, calls a provider, or creates
+a tax document. The memory reference adapter stores billing periods and applies
+the same source/target lifecycle and ordering checks as PostgreSQL; target
+lifecycle rejections remain stable `target_period_not_found` or
+`target_period_not_open` 422 results. Its recording, application, rating, and
+target-period lifecycle writes serialize to preserve at-most-once behavior;
+application timestamps must be timezone-aware and not future-dated. The list
+repository contract accepts a decoded `(recorded_at, late_adjustment_id)` cursor
+and bounded limit; PostgreSQL performs one ordered tenant-scoped keyset query
+with `limit + 1`. Presentment uses one bulk application-existence and one bulk
+rating-existence lookup for the returned page, not one query per item.
 
 ## Provider plane
 
