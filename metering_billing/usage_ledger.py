@@ -1775,6 +1775,10 @@ class MemoryUsageLedger:
         existing_id = self.tax_assessment_index.get(identity)
         if existing_id is not None:
             return self.tax_assessments[existing_id]
+        if self.list_late_adjustment_invoice_adjustments_for_draft(
+            assessment.tenant_account_id, assessment.invoice_draft_id
+        ):
+            raise ValueError("invoice draft has late adjustment invoice adjustment")
         draft_key = (assessment.tenant_account_id, assessment.invoice_draft_id)
         existing_draft_id = self.tax_assessment_draft_index.get(draft_key)
         if existing_draft_id is not None:
@@ -3445,6 +3449,10 @@ class MemoryUsageLedger:
         existing_id = self.credit_adjustment_index.get(identity)
         if existing_id is not None:
             return self.credit_adjustments[existing_id]
+        if self.list_late_adjustment_invoice_adjustments_for_draft(
+            credit.tenant_account_id, credit.invoice_draft_id
+        ):
+            raise ValueError("invoice draft has late adjustment invoice adjustment")
         persisted = StoredCreditAdjustment(
             credit_adjustment_id=credit.credit_adjustment_id,
             tenant_account_id=credit.tenant_account_id,
@@ -3902,6 +3910,13 @@ class MemoryUsageLedger:
             and credit_note_void_identity_key in self.credit_note_void_journal_proposal_index
         ):
             raise ValueError("journal proposals are immutable and cannot be replaced")
+        if (
+            journal_proposal.invoice_draft_id is not None
+            and self.list_late_adjustment_invoice_adjustments_for_draft(
+                journal_proposal.tenant_account_id, journal_proposal.invoice_draft_id
+            )
+        ):
+            raise ValueError("invoice draft has late adjustment invoice adjustment")
         persisted = StoredJournalProposal(
             journal_proposal_id=journal_proposal.journal_proposal_id,
             tenant_account_id=journal_proposal.tenant_account_id,
@@ -4001,6 +4016,10 @@ class MemoryUsageLedger:
             raise ValueError("collection cases are immutable and cannot be replaced")
         if identity_key in self.collection_case_index:
             raise ValueError("collection cases are immutable and cannot be replaced")
+        if self.list_late_adjustment_invoice_adjustments_for_draft(
+            collection_case.tenant_account_id, collection_case.invoice_draft_id
+        ):
+            raise ValueError("invoice draft has late adjustment invoice adjustment")
         persisted = StoredCollectionCase(
             collection_case_id=collection_case.collection_case_id,
             tenant_account_id=collection_case.tenant_account_id,

@@ -282,7 +282,7 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
                 "authorization_reference": "change:456",
             },
         )
-        self.assertEqual(status, 404)
+        self.assertEqual(status, 422)
         self.assertEqual(body["rejection_reason_code"], "late_adjustment_not_found")
 
         status, body = invoke_http(

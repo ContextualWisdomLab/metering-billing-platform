@@ -144,6 +144,16 @@ class CollectionCaseService:
         ``collection_case_id`` and exact outstanding.  Another tenant cannot
         see or collect that case.  The operator next sends a dunning notice.
         """
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._open_collection_case(tenant_reference, invoice_draft_id)
+        with transaction():
+            return self._open_collection_case(tenant_reference, invoice_draft_id)
+
+    def _open_collection_case(
+        self, tenant_reference: str, invoice_draft_id: UUID
+    ) -> CollectionCaseResult:
+        """Open one collection case inside the ledger transaction boundary."""
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
             return _rejected(CollectionCaseRejectionReasonCode.TENANT_NOT_FOUND)
@@ -152,6 +162,11 @@ class CollectionCaseService:
         invoice_draft = self.ledger.get_invoice_draft(invoice_draft_id)
         if invoice_draft is None or invoice_draft.tenant_account_id != tenant.tenant_account_id:
             return _rejected(CollectionCaseRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
+        locked_draft = getattr(self.ledger, "lock_invoice_draft", None)
+        if locked_draft is not None:
+            invoice_draft = locked_draft(tenant.tenant_account_id, invoice_draft.invoice_draft_id)
+            if invoice_draft is None:
+                return _rejected(CollectionCaseRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
 
         assessment = self.ledger.find_tax_assessment_for_draft(
             tenant.tenant_account_id, invoice_draft.invoice_draft_id
@@ -175,6 +190,10 @@ class CollectionCaseService:
                 CollectionCaseOutcomeCode.DUPLICATE_REPLAY,
                 self.ledger.list_collection_dunning_events(existing.collection_case_id),
             )
+        if self.ledger.list_late_adjustment_invoice_adjustments_for_draft(
+            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        ):
+            return _rejected(CollectionCaseRejectionReasonCode.INVOICE_DRAFT_HAS_LATE_ADJUSTMENT)
 
         stored = self.ledger.insert_collection_case(
             StoredCollectionCase(

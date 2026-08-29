@@ -281,6 +281,11 @@ class CreditAdjustmentService:
         invoice_draft = self.ledger.get_invoice_draft(invoice_draft_id)
         if invoice_draft is None or invoice_draft.tenant_account_id != tenant.tenant_account_id:
             return _rejected(CreditAdjustmentRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
+        locked_draft = getattr(self.ledger, "lock_invoice_draft", None)
+        if locked_draft is not None:
+            invoice_draft = locked_draft(tenant.tenant_account_id, invoice_draft.invoice_draft_id)
+            if invoice_draft is None:
+                return _rejected(CreditAdjustmentRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
         try:
             parsed_amount = parse_credit_amount(credit_amount)
         except ExactDecimalError:
@@ -336,6 +341,10 @@ class CreditAdjustmentService:
                 CreditAdjustmentOutcomeCode.DUPLICATE_REPLAY,
                 _remaining_adjustable(self.ledger, tenant.tenant_account_id, invoice_draft),
             )
+        if self.ledger.list_late_adjustment_invoice_adjustments_for_draft(
+            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        ):
+            return _rejected(CreditAdjustmentRejectionReasonCode.INVOICE_DRAFT_HAS_LATE_ADJUSTMENT)
 
         remaining_adjustable = _remaining_adjustable(
             self.ledger, tenant.tenant_account_id, invoice_draft

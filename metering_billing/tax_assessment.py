@@ -22,7 +22,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_EVEN, Decimal
-from typing import Any, Callable
+from typing import Callable
 from uuid import UUID
 
 from metering_billing.errors import (
@@ -31,7 +31,7 @@ from metering_billing.errors import (
     TaxAssessmentQueryError,
     TaxAssessmentRejectionReasonCode,
 )
-from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
+from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.invoice_draft import parse_invoice_amount
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
@@ -232,6 +232,11 @@ class TaxAssessmentService:
         invoice_draft = self.ledger.get_invoice_draft(invoice_draft_id)
         if invoice_draft is None or invoice_draft.tenant_account_id != tenant.tenant_account_id:
             return _rejected(TaxAssessmentRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
+        locked_draft = getattr(self.ledger, "lock_invoice_draft", None)
+        if locked_draft is not None:
+            invoice_draft = locked_draft(tenant.tenant_account_id, invoice_draft.invoice_draft_id)
+            if invoice_draft is None:
+                return _rejected(TaxAssessmentRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
         rate_version = _resolve_rate_version(
             self.ledger, tenant.tenant_account_id, tax_rate_version
         )
@@ -276,6 +281,10 @@ class TaxAssessmentService:
                 tenant.tenant_reference,
                 TaxAssessmentOutcomeCode.DUPLICATE_REPLAY,
             )
+        if self.ledger.list_late_adjustment_invoice_adjustments_for_draft(
+            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        ):
+            return _rejected(TaxAssessmentRejectionReasonCode.INVOICE_DRAFT_HAS_LATE_ADJUSTMENT)
         stored = self.ledger.insert_tax_assessment(
             StoredTaxAssessment(
                 tax_assessment_id=generate_record_id(),

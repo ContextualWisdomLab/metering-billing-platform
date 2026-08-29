@@ -113,7 +113,7 @@
             "required": ["late_adjustment_invoice_adjustment_id"],
             "properties": {"rated_quantity": {"pattern": "^1(\\.0+)?$"}},
             "not": {
-              "properties": {"line_total_amount": {"enum": ["0", "-0"]}}
+              "properties": {"line_total_amount": {"pattern": "^-?0(?:\\.0+)?$"}}
             }
           }
         }

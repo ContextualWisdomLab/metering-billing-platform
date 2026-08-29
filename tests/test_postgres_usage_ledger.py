@@ -296,8 +296,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 56:
-            raise AssertionError(f"expected 56 migrations, got {len(applied)}")
+        if len(applied) != 57:
+            raise AssertionError(f"expected 57 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13112,6 +13112,72 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 self.assertEqual(
                     rejected.rejection_reason_code.value,
                     "invoice_draft_has_downstream_records",
+                )
+
+    def test_postgres_downstream_writes_reject_after_composition(self) -> None:
+        """The draft lock and database trigger prevent stale downstream facts."""
+        for downstream in ("collection", "journal", "tax", "credit"):
+            with self.subTest(downstream=downstream):
+                adjustment, draft = prepare_postgres_late_adjustment(
+                    self.ledger,
+                    "0.002",
+                    f"provider:late-after-composition-{downstream}",
+                    quantity=str(1810 + ("collection", "journal", "tax", "credit").index(downstream)),
+                )
+                composed = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    draft.invoice_draft_id,
+                    recorded_by="operator:finance",
+                    authorization_reference="approval:invoice-adjustment",
+                )
+                self.assertEqual(composed.late_adjustment_invoice_adjustment_outcome_code.value, "accepted")
+                if downstream == "collection":
+                    tenant = self.ledger.require_tenant(TENANT_ONE)
+                    with self.assertRaises(psycopg.errors.RaiseException):
+                        with self.connection.transaction():
+                            self.connection.execute(
+                                """
+                                INSERT INTO billing_core.collection_case
+                                    (collection_case_id, tenant_account_id, invoice_draft_id,
+                                     currency_code, collection_case_status, outstanding_amount, opened_at)
+                                VALUES (%s, %s, %s, 'USD', 'open', %s, %s)
+                                """,
+                                (
+                                    uuid4(),
+                                    tenant.tenant_account_id,
+                                    draft.invoice_draft_id,
+                                    Decimal("0.002"),
+                                    CATALOG_START,
+                                ),
+                            )
+                    result = CollectionCaseService(self.ledger).open_collection_case(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    table = "collection_case"
+                elif downstream == "journal":
+                    result = AccountingExportService(self.ledger).propose_journal(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    table = "journal_proposal"
+                elif downstream == "tax":
+                    TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.10")
+                    result = TaxAssessmentService(self.ledger).assess_tax(
+                        TENANT_ONE, draft.invoice_draft_id, 1
+                    )
+                    table = "tax_assessment"
+                else:
+                    result = CreditAdjustmentService(self.ledger).record_credit_adjustment(
+                        TENANT_ONE, draft.invoice_draft_id, "0.001", "rating_correction"
+                    )
+                    table = "credit_adjustment"
+                self.assertEqual(result.rejection_reason_code.value, "invoice_draft_has_late_adjustment")
+                self.assertEqual(
+                    self.connection.execute(
+                        f"SELECT COUNT(*) FROM billing_core.{table} WHERE invoice_draft_id = %s",
+                        (draft.invoice_draft_id,),
+                    ).fetchone()[0],
+                    0,
                 )
 
     def test_postgres_composition_rejects_unrepresentable_fractional_amount(self) -> None:

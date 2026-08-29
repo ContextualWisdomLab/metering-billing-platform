@@ -3423,6 +3423,26 @@ class RepositoryContractTests(unittest.TestCase):
             {**instance["issued_invoice_lines"][0], "line_total_amount": "-1"}
         ]
         self.assertNotEqual(validate_schema_instance(schema, negative_usage), ())
+        late_adjustment_line = {
+            **instance["issued_invoice_lines"][0],
+            "line_type": "late_adjustment",
+            "rated_quantity": "1",
+            "late_adjustment_invoice_adjustment_id": (
+                "019d7b92-1aa0-7a7f-b61c-962c0f4bf632"
+            ),
+        }
+        for amount in ("0", "-0", "0.0", "-0.00"):
+            zero_late_adjustment = dict(instance)
+            zero_late_adjustment["issued_invoice_lines"] = [
+                {**late_adjustment_line, "line_total_amount": amount}
+            ]
+            self.assertNotEqual(validate_schema_instance(schema, zero_late_adjustment), ())
+        for amount in ("1", "-1"):
+            nonzero_late_adjustment = dict(instance)
+            nonzero_late_adjustment["issued_invoice_lines"] = [
+                {**late_adjustment_line, "line_total_amount": amount}
+            ]
+            self.assertEqual(validate_schema_instance(schema, nonzero_late_adjustment), ())
         usage_with_adjustment_id = dict(instance)
         usage_with_adjustment_id["issued_invoice_lines"] = [
             {
@@ -3562,6 +3582,26 @@ class RepositoryContractTests(unittest.TestCase):
             {**instance["issued_invoice_lines"][0], "line_total_amount": "-1"}
         ]
         self.assertNotEqual(validate_schema_instance(schema, negative_usage), ())
+        late_adjustment_line = {
+            **instance["issued_invoice_lines"][0],
+            "line_type": "late_adjustment",
+            "rated_quantity": "1",
+            "late_adjustment_invoice_adjustment_id": (
+                "019d7b92-1aa0-7a7f-b61c-962c0f4bf632"
+            ),
+        }
+        for amount in ("0", "-0", "0.0", "-0.00"):
+            zero_late_adjustment = dict(instance)
+            zero_late_adjustment["issued_invoice_lines"] = [
+                {**late_adjustment_line, "line_total_amount": amount}
+            ]
+            self.assertNotEqual(validate_schema_instance(schema, zero_late_adjustment), ())
+        for amount in ("1", "-1"):
+            nonzero_late_adjustment = dict(instance)
+            nonzero_late_adjustment["issued_invoice_lines"] = [
+                {**late_adjustment_line, "line_total_amount": amount}
+            ]
+            self.assertEqual(validate_schema_instance(schema, nonzero_late_adjustment), ())
         usage_with_adjustment_id = dict(instance)
         usage_with_adjustment_id["issued_invoice_lines"] = [
             {

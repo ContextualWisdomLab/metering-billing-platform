@@ -1368,17 +1368,9 @@ def create_http_app(
                     applied_by=payload.get("applied_by"),
                     authorization_reference=payload.get("authorization_reference"),
                 )
-                reason = (
-                    result.rejection_reason_code.value
-                    if result.rejection_reason_code is not None
-                    else None
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
                 )
-                status_code = (
-                    404
-                    if reason in {"tenant_not_found", "late_adjustment_not_found"}
-                    else _status_for_result(result)
-                )
-                return _send_json(start_response, status_code, result.as_contract_dict())
             except HttpRequestError as error:
                 return _send_json(
                     start_response,
@@ -1401,17 +1393,9 @@ def create_http_app(
                     rated_by=payload.get("rated_by"),
                     authorization_reference=payload.get("authorization_reference"),
                 )
-                reason = (
-                    result.rejection_reason_code.value
-                    if result.rejection_reason_code is not None
-                    else None
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
                 )
-                status_code = (
-                    404
-                    if reason in {"tenant_not_found", "late_adjustment_not_found"}
-                    else _status_for_result(result)
-                )
-                return _send_json(start_response, status_code, result.as_contract_dict())
             except HttpRequestError as error:
                 return _send_json(
                     start_response,
@@ -1435,23 +1419,9 @@ def create_http_app(
                     recorded_by=payload.get("recorded_by"),
                     authorization_reference=payload.get("authorization_reference"),
                 )
-                reason = (
-                    result.rejection_reason_code.value
-                    if result.rejection_reason_code is not None
-                    else None
+                return _send_json(
+                    start_response, _status_for_result(result), result.as_contract_dict()
                 )
-                status_code = (
-                    404
-                    if reason
-                    in {
-                        "tenant_not_found",
-                        "late_adjustment_not_found",
-                        "late_adjustment_rating_not_found",
-                        "invoice_draft_not_found",
-                    }
-                    else _status_for_result(result)
-                )
-                return _send_json(start_response, status_code, result.as_contract_dict())
             except HttpRequestError as error:
                 return _send_json(
                     start_response,

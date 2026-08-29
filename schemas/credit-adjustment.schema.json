@@ -72,7 +72,8 @@
         "credit_reason_invalid",
         "credit_exceeds_remaining",
         "credit_exceeds_outstanding",
-        "tax_split_invalid"
+        "tax_split_invalid",
+        "invoice_draft_has_late_adjustment"
       ]
     }
   }

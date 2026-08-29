@@ -255,6 +255,16 @@ class AccountingExportService:
         cannot see or propose from that draft.  AIS next pulls validated
         proposals; this service never posts.
         """
+        transaction = getattr(self.ledger, "transaction", None)
+        if transaction is None:
+            return self._propose_journal(tenant_reference, invoice_draft_id)
+        with transaction():
+            return self._propose_journal(tenant_reference, invoice_draft_id)
+
+    def _propose_journal(
+        self, tenant_reference: str, invoice_draft_id: UUID
+    ) -> JournalProposalResult:
+        """Propose one draft journal inside the ledger transaction boundary."""
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
             return _rejected(JournalProposalRejectionReasonCode.TENANT_NOT_FOUND)
@@ -263,6 +273,11 @@ class AccountingExportService:
         invoice_draft = self.ledger.get_invoice_draft(invoice_draft_id)
         if invoice_draft is None or invoice_draft.tenant_account_id != tenant.tenant_account_id:
             return _rejected(JournalProposalRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
+        locked_draft = getattr(self.ledger, "lock_invoice_draft", None)
+        if locked_draft is not None:
+            invoice_draft = locked_draft(tenant.tenant_account_id, invoice_draft.invoice_draft_id)
+            if invoice_draft is None:
+                return _rejected(JournalProposalRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND)
 
         drafted_total_amount = parse_proposal_amount(invoice_draft.drafted_total_amount)
         if drafted_total_amount <= 0:
@@ -303,6 +318,10 @@ class AccountingExportService:
                 existing.proposed_at,
             )
             return result
+        if self.ledger.list_late_adjustment_invoice_adjustments_for_draft(
+            tenant.tenant_account_id, invoice_draft.invoice_draft_id
+        ):
+            return _rejected(JournalProposalRejectionReasonCode.INVOICE_DRAFT_HAS_LATE_ADJUSTMENT)
 
         journal_proposal_id = generate_record_id()
         stored_lines = _build_proposal_lines(

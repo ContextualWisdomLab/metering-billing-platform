@@ -51,7 +51,7 @@
         "next_operator_action"
       ],
       "properties": {
-        "late_adjustment_invoice_adjustment_contract_version": {"type": "integer", "minimum": 1},
+        "late_adjustment_invoice_adjustment_contract_version": {"type": "integer", "minimum": 2},
         "late_adjustment_invoice_adjustment_outcome_code": {"type": "string", "enum": ["accepted", "duplicate_replay"]},
         "late_adjustment_invoice_adjustment_id": {"type": "string", "format": "uuid"},
         "late_adjustment_rating_id": {"type": "string", "format": "uuid"},
@@ -81,7 +81,7 @@
         "next_operator_action"
       ],
       "properties": {
-        "late_adjustment_invoice_adjustment_contract_version": {"type": "integer", "minimum": 1},
+        "late_adjustment_invoice_adjustment_contract_version": {"type": "integer", "minimum": 2},
         "late_adjustment_invoice_adjustment_outcome_code": {"type": "string", "const": "rejected"},
         "rejection_reason_code": {
           "type": "string",

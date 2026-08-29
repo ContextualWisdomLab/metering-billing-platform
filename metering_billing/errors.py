@@ -262,6 +262,7 @@ class TaxAssessmentRejectionReasonCode(StrEnum):
     DRAFT_TOTAL_INVALID = "draft_total_invalid"
     CURRENCY_EXPONENT_UNKNOWN = "currency_exponent_unknown"
     TAX_ASSESSMENT_NOT_FOUND = "tax_assessment_not_found"
+    INVOICE_DRAFT_HAS_LATE_ADJUSTMENT = "invoice_draft_has_late_adjustment"
 
 
 class TaxAssessmentQueryError(ValueError):
@@ -850,6 +851,7 @@ class JournalProposalRejectionReasonCode(StrEnum):
     VOIDED_AMOUNT_INVALID = "voided_amount_invalid"
     JOURNAL_LINE_AMOUNT_INVALID = "journal_line_amount_invalid"
     CURRENCY_MISMATCH = "currency_mismatch"
+    INVOICE_DRAFT_HAS_LATE_ADJUSTMENT = "invoice_draft_has_late_adjustment"
 
 
 class JournalProposalQueryError(ValueError):
@@ -933,6 +935,7 @@ class CollectionCaseRejectionReasonCode(StrEnum):
     OUTSTANDING_AMOUNT_INVALID = "outstanding_amount_invalid"
     DUNNING_NOTICE_INVALID = "dunning_notice_invalid"
     COLLECTION_CASE_DISPUTED = "collection_case_disputed"
+    INVOICE_DRAFT_HAS_LATE_ADJUSTMENT = "invoice_draft_has_late_adjustment"
 
 
 class PaymentIntentOutcomeCode(StrEnum):
@@ -977,6 +980,7 @@ class CreditAdjustmentRejectionReasonCode(StrEnum):
     CREDIT_EXCEEDS_REMAINING = "credit_exceeds_remaining"
     CREDIT_EXCEEDS_OUTSTANDING = "credit_exceeds_outstanding"
     TAX_SPLIT_INVALID = "tax_split_invalid"
+    INVOICE_DRAFT_HAS_LATE_ADJUSTMENT = "invoice_draft_has_late_adjustment"
 
 
 class CreditAdjustmentQueryError(ValueError):
