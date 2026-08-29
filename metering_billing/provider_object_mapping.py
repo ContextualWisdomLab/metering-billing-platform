@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from threading import RLock
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -131,31 +132,24 @@ class ProviderObjectMappingRegistry:
     """Record and resolve sticky mappings without implicit provider failover."""
 
     def __init__(self) -> None:
+        # ponytail: one registry lock keeps replacement atomic; shard by provider account if throughput requires it.
+        self._lock = RLock()
         self._mappings: list[_StoredMapping] = []
 
     def record(self, mapping: ProviderObjectMapping) -> ProviderObjectMapping:
         """Record a mapping only when its internal and external intervals are free."""
         if not isinstance(mapping, ProviderObjectMapping):
             raise ProviderObjectMappingError("mapping_invalid")
-        for stored in self._mappings:
-            current = stored.mapping
-            same_internal = (
-                current.provider_account_reference == mapping.provider_account_reference
-                and current.internal_object_type == mapping.internal_object_type
-                and current.internal_object_reference == mapping.internal_object_reference
-            )
-            same_external = (
-                current.provider_account_reference == mapping.provider_account_reference
-                and current.provider_object_type == mapping.provider_object_type
-                and current.provider_object_reference == mapping.provider_object_reference
-            )
-            if (same_internal or same_external) and _overlap(
-                current.valid_from, current.valid_to, mapping.valid_from, mapping.valid_to
-            ):
-                raise ProviderObjectMappingError(
-                    "internal_mapping_conflict" if same_internal else "external_mapping_conflict"
-                )
-        self._mappings.append(_StoredMapping(mapping))
+        with self._lock:
+            for stored in self._mappings:
+                current = stored.mapping
+                if self._same_internal(current, mapping):
+                    raise ProviderObjectMappingError("internal_mapping_conflict")
+                if self._same_external(current, mapping) and _overlap(
+                    current.valid_from, current.valid_to, mapping.valid_from, mapping.valid_to
+                ):
+                    raise ProviderObjectMappingError("external_mapping_conflict")
+            self._mappings.append(_StoredMapping(mapping))
         return mapping
 
     def replace(
@@ -168,37 +162,40 @@ class ProviderObjectMappingRegistry:
         if not isinstance(mapping, ProviderObjectMapping):
             raise ProviderObjectMappingError("mapping_invalid")
         instant = _aware_utc(effective_from, "valid_from_invalid")
-        active = self._find_internal(
-            mapping.provider_account_reference,
-            mapping.internal_object_type,
-            mapping.internal_object_reference,
-            instant,
-        )
-        if active is None or instant <= active.valid_from:
-            raise ProviderObjectMappingError("replacement_target_missing")
-        if mapping.valid_from != instant:
-            raise ProviderObjectMappingError("replacement_time_mismatch")
-        if mapping.provider_code != active.provider_code:
-            raise ProviderObjectMappingError("replacement_provider_mismatch")
-        self._mappings.remove(_StoredMapping(active))
-        closed = ProviderObjectMapping(
-            active.provider_account_reference,
-            active.provider_code,
-            active.internal_object_type,
-            active.internal_object_reference,
-            active.provider_object_type,
-            active.provider_object_reference,
-            active.valid_from,
-            instant,
-            active.recorded_at,
-        )
-        self._mappings.append(_StoredMapping(closed))
-        try:
-            return self.record(mapping)
-        except ProviderObjectMappingError:
-            self._mappings.remove(_StoredMapping(closed))
-            self._mappings.append(_StoredMapping(active))
-            raise
+        with self._lock:
+            active = self._find_internal(
+                mapping.provider_account_reference,
+                mapping.internal_object_type,
+                mapping.internal_object_reference,
+                instant,
+            )
+            if active is None or instant <= active.valid_from:
+                raise ProviderObjectMappingError("replacement_target_missing")
+            if mapping.valid_from != instant:
+                raise ProviderObjectMappingError("replacement_time_mismatch")
+            if mapping.provider_code != active.provider_code:
+                raise ProviderObjectMappingError("replacement_provider_mismatch")
+            self._mappings.remove(_StoredMapping(active))
+            closed = ProviderObjectMapping(
+                active.provider_account_reference,
+                active.provider_code,
+                active.internal_object_type,
+                active.internal_object_reference,
+                active.provider_object_type,
+                active.provider_object_reference,
+                active.valid_from,
+                instant,
+                active.recorded_at,
+            )
+            self._mappings.append(_StoredMapping(closed))
+            try:
+                self._check_external_conflict(mapping)
+                self._mappings.append(_StoredMapping(mapping))
+            except ProviderObjectMappingError:
+                self._mappings.remove(_StoredMapping(closed))
+                self._mappings.append(_StoredMapping(active))
+                raise
+        return mapping
 
     def resolve_internal(
         self,
@@ -210,12 +207,13 @@ class ProviderObjectMappingRegistry:
     ) -> ProviderObjectMapping:
         """Resolve one internal object or fail closed without provider fallback."""
         instant = _aware_utc(at or _now_utc(), "routing_time_invalid")
-        mapping = self._find_internal(
-            provider_account_reference,
-            internal_object_type,
-            internal_object_reference,
-            instant,
-        )
+        with self._lock:
+            mapping = self._find_internal(
+                provider_account_reference,
+                internal_object_type,
+                internal_object_reference,
+                instant,
+            )
         if mapping is None:
             raise ProviderObjectMappingError("mapping_not_found")
         return mapping
@@ -230,32 +228,63 @@ class ProviderObjectMappingRegistry:
     ) -> ProviderObjectMapping:
         """Resolve one provider object or fail closed."""
         instant = _aware_utc(at or _now_utc(), "routing_time_invalid")
-        for stored in self._mappings:
-            mapping = stored.mapping
-            if (
-                mapping.provider_account_reference == provider_account_reference
-                and mapping.provider_object_type == provider_object_type
-                and mapping.provider_object_reference == provider_object_reference
-                and mapping.valid_from <= instant
-                and (mapping.valid_to is None or instant < mapping.valid_to)
-            ):
-                return mapping
+        with self._lock:
+            for stored in self._mappings:
+                mapping = stored.mapping
+                if (
+                    mapping.provider_account_reference == provider_account_reference
+                    and mapping.provider_object_type == provider_object_type
+                    and mapping.provider_object_reference == provider_object_reference
+                    and mapping.valid_from <= instant
+                    and (mapping.valid_to is None or instant < mapping.valid_to)
+                ):
+                    return mapping
         raise ProviderObjectMappingError("mapping_not_found")
 
     def all_mappings(self) -> tuple[ProviderObjectMapping, ...]:
         """Return mapping history in deterministic effective order."""
-        return tuple(
-            stored.mapping
-            for stored in sorted(
-                self._mappings,
-                key=lambda item: (
-                    item.mapping.provider_account_reference,
-                    item.mapping.internal_object_type,
-                    item.mapping.internal_object_reference,
-                    item.mapping.valid_from,
-                ),
+        with self._lock:
+            return tuple(
+                stored.mapping
+                for stored in sorted(
+                    self._mappings,
+                    key=lambda item: (
+                        item.mapping.provider_account_reference,
+                        item.mapping.internal_object_type,
+                        item.mapping.internal_object_reference,
+                        item.mapping.valid_from,
+                    ),
+                )
             )
+
+    @staticmethod
+    def _same_internal(
+        first: ProviderObjectMapping, second: ProviderObjectMapping
+    ) -> bool:
+        return (
+            first.provider_account_reference == second.provider_account_reference
+            and first.internal_object_type == second.internal_object_type
+            and first.internal_object_reference == second.internal_object_reference
         )
+
+    @staticmethod
+    def _same_external(
+        first: ProviderObjectMapping, second: ProviderObjectMapping
+    ) -> bool:
+        return (
+            first.provider_account_reference == second.provider_account_reference
+            and first.provider_object_type == second.provider_object_type
+            and first.provider_object_reference == second.provider_object_reference
+        )
+
+    def _check_external_conflict(self, mapping: ProviderObjectMapping) -> None:
+        """Reject external identity reuse during explicit replacement."""
+        for stored in self._mappings:
+            current = stored.mapping
+            if self._same_external(current, mapping) and _overlap(
+                current.valid_from, current.valid_to, mapping.valid_from, mapping.valid_to
+            ):
+                raise ProviderObjectMappingError("external_mapping_conflict")
 
     def _find_internal(
         self,

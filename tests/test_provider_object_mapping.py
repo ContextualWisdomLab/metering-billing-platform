@@ -42,6 +42,7 @@ class ProviderObjectMappingTests(unittest.TestCase):
             valid_to=NOW + timedelta(days=1),
         )
         self.assertEqual(validate_provider_object_mapping(stored.as_contract_dict()), ())
+        self.assertEqual(validate_provider_object_mapping(None), ("$: expected object",))
         self.assertEqual(stored.as_contract_dict()["valid_from"], "2026-08-29T08:00:00Z")
         self.assertEqual(stored.as_contract_dict()["valid_to"], "2026-08-30T12:00:00Z")
         self.assertNotIn("valid_to", mapping().as_contract_dict())
@@ -104,6 +105,16 @@ class ProviderObjectMappingTests(unittest.TestCase):
         with self.assertRaises(ProviderObjectMappingError) as error:
             registry.record(mapping(internal_object_reference="payment_intent_002"))
         self.assertEqual(error.exception.reason_code, "external_mapping_conflict")
+        with self.assertRaises(ProviderObjectMappingError) as error:
+            registry.record(
+                mapping(
+                    provider_code="manual_enterprise",
+                    provider_object_type="orders",
+                    provider_object_reference="order_002",
+                    valid_from=NOW + timedelta(days=1),
+                )
+            )
+        self.assertEqual(error.exception.reason_code, "internal_mapping_conflict")
         with self.assertRaises(ProviderObjectMappingError) as error:
             registry.resolve_internal("provider_account_001", "payment_intent", "missing")
         self.assertEqual(error.exception.reason_code, "mapping_not_found")
@@ -181,6 +192,40 @@ class ProviderObjectMappingTests(unittest.TestCase):
                 at=NOW,
             ),
             first,
+        )
+
+    def test_contract_rejects_runtime_only_mapping_invariants(self) -> None:
+        """Published validation stays aligned with runtime reference rules."""
+        body = mapping().as_contract_dict()
+        for field in (
+            "provider_account_reference",
+            "internal_object_reference",
+            "provider_object_reference",
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    validate_provider_object_mapping(dict(body, **{field: "bad\nref"})),
+                    (f"$: {field} must not contain control characters",),
+                )
+        self.assertEqual(
+            validate_provider_object_mapping(
+                dict(
+                    body,
+                    valid_from="2026-08-29T12:00:00Z",
+                    valid_to="2026-08-29T12:00:00Z",
+                )
+            ),
+            ("$: valid_to must be after valid_from",),
+        )
+        self.assertEqual(
+            validate_provider_object_mapping(
+                dict(
+                    body,
+                    valid_from="2026-08-29T12:00:00Z",
+                    valid_to="2026-08-29T11:00:00Z",
+                )
+            ),
+            ("$: valid_to must be after valid_from",),
         )
 
 
