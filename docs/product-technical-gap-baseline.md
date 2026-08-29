@@ -17,15 +17,17 @@ is the separate stacked review for the next immutable invoice-intent
 composition slice; its initial implementation commit is
 `5ef90218bf7660e0a4e6d29c8ee6ea0c87b42fa9`, with review-fix commit
 `4201a55`; the implementation review-fix commit is
-`01733ba3a4c5f390e91b68ae8d8fa39ce27c6f72`.
+`1c0e824`.
 
 The implemented #87 path now covers PostgreSQL migrations
-`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`/`0056`, the `LateAdjustment`,
+`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`/`0056`/`0057`, the `LateAdjustment`,
 application, rating-consumption, and invoice-adjustment contracts,
 tenant-scoped presentment reads, and durable application/rating/composition
 facts for late usage, correction, and reversal evidence. Composition now
 captures the single billing account, rejects drafts already captured by
-collection/journal/tax/credit downstream facts, and rejects amounts that would
+collection/journal/tax/credit downstream facts, blocks new downstream
+collection/journal/tax/credit writes after composition under the shared draft
+lock, and rejects amounts that would
 round in issued-invoice storage. Issuance consumes linked compositions under
 the draft lock as signed invoice lines, rejects zero or negative resulting
 totals, and rejects stale tax assessments pending reassessment. The source period

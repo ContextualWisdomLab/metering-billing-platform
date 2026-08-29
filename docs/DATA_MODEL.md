@@ -275,6 +275,12 @@ issue the invoice, calculate tax, or call a provider. Migration `0055` adds
 Usage lines remain non-negative; a late-adjustment line carries the signed
 non-zero delta, selected billing-account reference, and immutable composition identity. Migration `0056` persists and validates that account evidence,
 backfills only unambiguous legacy drafts, and rejects ambiguous new drafts.
+Migration `0057` adds one shared `BEFORE INSERT` trigger to collection cases,
+tax assessments, credit adjustments, and journal proposals. It locks the
+tenant-scoped invoice draft and rejects a new downstream row when an
+immutable `late_adjustment_invoice_adjustment` already exists. This is the
+database counterpart to the service guards and makes ordering safe for direct
+PostgreSQL persistence and concurrent writers.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a

@@ -78,7 +78,11 @@ nested `/invoice-adjustments` command and appends one tenant-scoped
 `late_adjustment_invoice_adjustment` linked to an unissued invoice draft and
 the one billing account shared by its draft lines. Composition fails closed
 when the draft has no single payer or has already produced collection,
-journal, tax, or credit downstream facts.
+journal, tax, or credit downstream facts. Composition and collection,
+tax-assessment, journal-proposal, and credit-adjustment writes share the
+invoice-draft lock. After a composition is stored, those downstream writes
+return `invoice_draft_has_late_adjustment` without persisting; migration `0057`
+enforces the same rule for direct PostgreSQL inserts.
 Presentment then reports `issue_invoice`. `IssuedInvoiceService` locks the
 draft, consumes all linked composition facts exactly once, and freezes each as
 a signed `late_adjustment` issued-invoice line while adjusting the untaxed

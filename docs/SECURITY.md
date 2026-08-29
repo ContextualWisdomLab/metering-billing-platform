@@ -64,6 +64,9 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
 - Rated adjustment targeting an issued invoice draft: `invoice_already_issued`
 - Composition after collection, journal, tax, or credit capture:
   `invoice_draft_has_downstream_records`
+- New collection, journal, tax-assessment, or credit writes after composition:
+  `invoice_draft_has_late_adjustment`; the draft lock and PostgreSQL migration
+  `0057` prevent stale downstream capture.
 - Draft with no single tenant-scoped payer:
   `invoice_draft_billing_account_not_found` or
   `invoice_draft_billing_account_ambiguous`
@@ -71,5 +74,8 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
   `adjustment_amount_not_representable`
 - Late-adjustment composition on a draft with an existing tax assessment:
   `late_adjustment_tax_reassessment_required`; stale tax is never reused.
+- Rejected late-adjustment application, rating, and invoice-adjustment command
+  writes, including missing source records, return HTTP 422; only reads use
+  HTTP 404 to hide unknown or cross-tenant resources.
 
 Do not store card data, PAT plaintext, prompt text, response text, provider secrets, or webhook-subscription plaintext.  Do not start a web UI in this slice.

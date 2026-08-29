@@ -39,6 +39,9 @@ issued invoice snapshots are never overwritten.
 - Composition is rejected after collection, journal, tax, or credit facts have
   captured the draft. A zero resulting issue is rejected because the existing
   collection workflow has no zero-value action.
+- Once composition exists, collection, tax, journal, and credit writes reject
+  with `invoice_draft_has_late_adjustment` under the same invoice-draft lock;
+  migration `0057` enforces this ordering for direct PostgreSQL inserts.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not
   part of the replay identity.

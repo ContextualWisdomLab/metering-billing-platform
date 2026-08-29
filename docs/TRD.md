@@ -100,6 +100,13 @@ issued snapshot remain append-only;
 collection, journal, provider export, and statutory tax treatment remain
 downstream boundaries.
 
+Composition and the collection, tax-assessment, journal-proposal, and
+credit-adjustment write paths take the same invoice-draft lock. After a
+composition exists, they reject with `invoice_draft_has_late_adjustment`
+without writing a stale fact. Migration `0057` repeats that rule in a
+PostgreSQL `BEFORE INSERT` trigger so direct persistence cannot bypass the
+application guard.
+
 ## Provider plane
 
 Provider integration is capability-based. Checkout, subscription, usage export, invoice export, collection, refund, dispute, tax document, and settlement are separate ports. A provider implements only declared capabilities.
