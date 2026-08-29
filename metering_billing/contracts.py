@@ -21,6 +21,10 @@ from scripts.validate_repository import (
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "BILLING_PERIOD_SCHEMA_NAME",
+    "FX_RATE_SCHEMA_NAME",
+    "FX_CONVERSION_SCHEMA_NAME",
+    "RECONCILIATION_LINE_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
     "PAYMENT_RECEIPT_SCHEMA_NAME",
@@ -85,6 +89,10 @@ __all__ = (
     "default_schemas_directory",
     "load_json_schema",
     "validate_accounting_journal_proposal",
+    "validate_billing_period",
+    "validate_fx_rate",
+    "validate_fx_conversion",
+    "validate_reconciliation_line",
     "validate_collection_case",
     "validate_invoice_draft",
     "validate_invoice_presentment",
@@ -261,6 +269,10 @@ TAX_ASSESSMENT_SCHEMA_NAME = "tax-assessment.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
+BILLING_PERIOD_SCHEMA_NAME = "billing-period.schema.json"
+FX_RATE_SCHEMA_NAME = "fx-rate.schema.json"
+FX_CONVERSION_SCHEMA_NAME = "fx-conversion.schema.json"
+RECONCILIATION_LINE_SCHEMA_NAME = "reconciliation-line.schema.json"
 
 
 def default_schemas_directory() -> Path:
@@ -302,6 +314,38 @@ def load_json_schema(
     if not isinstance(loaded, dict):
         raise ValueError(f"schema root must be an object: {schema_file_name}")
     return loaded
+
+
+def validate_billing_period(
+    period: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate an immutable billing-period snapshot and transition history."""
+    schema = load_json_schema(BILLING_PERIOD_SCHEMA_NAME, schemas_directory)
+    return validate_schema_instance(schema, period)
+
+
+def validate_fx_rate(
+    rate: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one versioned exact FX-rate evidence document."""
+    schema = load_json_schema(FX_RATE_SCHEMA_NAME, schemas_directory)
+    return validate_schema_instance(schema, rate)
+
+
+def validate_fx_conversion(
+    conversion: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one frozen exact FX conversion result."""
+    schema = load_json_schema(FX_CONVERSION_SCHEMA_NAME, schemas_directory)
+    return validate_schema_instance(schema, conversion)
+
+
+def validate_reconciliation_line(
+    line: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one provider/account/period/currency reconciliation line."""
+    schema = load_json_schema(RECONCILIATION_LINE_SCHEMA_NAME, schemas_directory)
+    return validate_schema_instance(schema, line)
 
 
 def validate_usage_event(

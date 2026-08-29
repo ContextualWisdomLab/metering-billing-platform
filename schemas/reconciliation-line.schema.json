@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/reconciliation-line/v1",
+  "title": "Reconciliation Line",
+  "description": "Immutable provider/account/period/currency comparison. Provider fees, withholding, and reserves remain separate from internal expected revenue.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reconciliation_line_contract_version",
+    "reconciliation_line_id",
+    "period_id",
+    "provider_account_reference",
+    "currency_code",
+    "internal_expected_amount",
+    "provider_actual_amount",
+    "cash_actual_amount",
+    "provider_fee_amount",
+    "withheld_tax_amount",
+    "reserve_amount",
+    "expected_cash_amount",
+    "reconciliation_line_status",
+    "exceptions",
+    "assessed_at"
+  ],
+  "properties": {
+    "reconciliation_line_contract_version": {"type": "integer", "minimum": 1},
+    "reconciliation_line_id": {"type": "string", "format": "uuid"},
+    "period_id": {"type": "string", "format": "uuid"},
+    "provider_account_reference": {"type": "string", "minLength": 1},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "internal_currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "provider_currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "cash_currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "internal_expected_amount": {"$ref": "#/$defs/signed_amount"},
+    "provider_actual_amount": {"$ref": "#/$defs/signed_amount"},
+    "cash_actual_amount": {"$ref": "#/$defs/signed_amount"},
+    "provider_fee_amount": {"$ref": "#/$defs/non_negative_amount"},
+    "withheld_tax_amount": {"$ref": "#/$defs/non_negative_amount"},
+    "reserve_amount": {"$ref": "#/$defs/non_negative_amount"},
+    "expected_cash_amount": {"$ref": "#/$defs/signed_amount"},
+    "reconciliation_line_status": {"type": "string", "enum": ["matched", "exception"]},
+    "exceptions": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {"$ref": "#/$defs/reconciliation_exception"}
+    },
+    "assessed_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "signed_amount": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 40
+    },
+    "non_negative_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "reconciliation_exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exception_code", "next_action"],
+      "properties": {
+        "exception_code": {
+          "type": "string",
+          "enum": ["currency_mismatch", "price_mismatch", "provider_fee_mismatch", "settlement_mismatch"]
+        },
+        "next_action": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

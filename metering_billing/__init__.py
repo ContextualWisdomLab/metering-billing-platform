@@ -57,6 +57,7 @@ from metering_billing.dunning_event_presentment import DunningEventPresentmentSe
 from metering_billing.contracts import (
     ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME,
     ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME,
+    BILLING_PERIOD_SCHEMA_NAME,
     COLLECTION_CASE_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_SCHEMA_NAME,
     RATE_CARD_SCHEMA_NAME,
@@ -93,6 +94,9 @@ from metering_billing.contracts import (
     WEBHOOK_DELIVERY_SCHEMA_NAME,
     WEBHOOK_SUBSCRIPTION_SCHEMA_NAME,
     WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME,
+    FX_RATE_SCHEMA_NAME,
+    FX_CONVERSION_SCHEMA_NAME,
+    RECONCILIATION_LINE_SCHEMA_NAME,
     DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME,
     WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME,
     ISSUED_CREDIT_NOTE_SCHEMA_NAME,
@@ -173,6 +177,10 @@ from metering_billing.contracts import (
     validate_webhook_delivery,
     validate_webhook_subscription,
     validate_journal_proposal,
+    validate_billing_period,
+    validate_fx_rate,
+    validate_fx_conversion,
+    validate_reconciliation_line,
     validate_payment_intent,
     validate_payment_receipt,
     validate_rating_run,
@@ -285,6 +293,7 @@ from metering_billing.errors import (
     RatingOutcomeCode,
     RatingRejectionReasonCode,
     RejectionReasonCode,
+    PeriodCloseValidationError,
 )
 from metering_billing.exact_decimal import format_exact_decimal, parse_exact_decimal
 from metering_billing.http_app import create_http_app
@@ -357,6 +366,22 @@ from metering_billing.posting_receipt_observation_presentment import (
 )
 from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
 from metering_billing.payment_settlement import PaymentSettlementService
+from metering_billing.period_close import (
+    BillingPeriod,
+    BillingPeriodStatus,
+    BillingPeriodTransition,
+    FxConversion,
+    FxRate,
+    FxRateType,
+    ReconciliationException,
+    ReconciliationExceptionCode,
+    ReconciliationLine,
+    ReconciliationLineStatus,
+    assess_reconciliation_line,
+    convert_currency_amount,
+    create_billing_period,
+    create_fx_rate,
+)
 from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
 from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
 from metering_billing.usage_ingestion import UsageIngestionService
@@ -367,6 +392,10 @@ from metering_billing.usage_rating import UsageRatingService
 __all__ = (
     "ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME",
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
+    "BILLING_PERIOD_SCHEMA_NAME",
+    "FX_RATE_SCHEMA_NAME",
+    "FX_CONVERSION_SCHEMA_NAME",
+    "RECONCILIATION_LINE_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_SCHEMA_NAME",
@@ -385,6 +414,8 @@ __all__ = (
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "UNAPPLIED_CASH_SCHEMA_NAME",
     "UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME",
+    "UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME",
+    "UNAPPLIED_CASH_APPLICATION_PRESENTMENT_SCHEMA_NAME",
     "UNAPPLIED_CASH_REFUND_SCHEMA_NAME",
     "UNAPPLIED_CASH_REFUND_PRESENTMENT_SCHEMA_NAME",
     "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
@@ -586,6 +617,21 @@ __all__ = (
     "RatingOutcomeCode",
     "RatingRejectionReasonCode",
     "RejectionReasonCode",
+    "PeriodCloseValidationError",
+    "BillingPeriod",
+    "BillingPeriodStatus",
+    "BillingPeriodTransition",
+    "create_billing_period",
+    "FxRate",
+    "FxRateType",
+    "create_fx_rate",
+    "FxConversion",
+    "convert_currency_amount",
+    "ReconciliationException",
+    "ReconciliationExceptionCode",
+    "ReconciliationLine",
+    "ReconciliationLineStatus",
+    "assess_reconciliation_line",
     "TimeWindow",
     "UsageIngestionService",
     "UsageRatingService",
@@ -657,6 +703,10 @@ __all__ = (
     "validate_webhook_delivery",
     "validate_webhook_subscription",
     "validate_journal_proposal",
+    "validate_billing_period",
+    "validate_fx_rate",
+    "validate_fx_conversion",
+    "validate_reconciliation_line",
     "validate_payment_intent",
     "validate_payment_receipt",
     "validate_rating_run",

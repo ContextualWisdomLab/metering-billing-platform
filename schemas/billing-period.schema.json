@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/billing-period/v1",
+  "title": "Billing Period",
+  "description": "Immutable tenant billing-period snapshot with authorized append-only forward transitions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "period_contract_version",
+    "period_id",
+    "tenant_reference",
+    "period_start",
+    "period_end",
+    "opened_at",
+    "opened_by",
+    "period_status",
+    "transitions"
+  ],
+  "properties": {
+    "period_contract_version": {"type": "integer", "minimum": 1},
+    "period_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "period_start": {"type": "string", "format": "date"},
+    "period_end": {"type": "string", "format": "date"},
+    "opened_at": {"type": "string", "format": "date-time"},
+    "opened_by": {"type": "string", "minLength": 1},
+    "period_status": {
+      "type": "string",
+      "enum": ["open", "soft_closed", "reconciled", "invoiced", "hard_closed"]
+    },
+    "transitions": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {"$ref": "#/$defs/period_transition"}
+    }
+  },
+  "$defs": {
+    "period_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transition_id",
+        "from_status",
+        "to_status",
+        "actor_reference",
+        "authorization_reference",
+        "reason",
+        "transitioned_at"
+      ],
+      "properties": {
+        "transition_id": {"type": "string", "format": "uuid"},
+        "from_status": {
+          "type": "string",
+          "enum": ["open", "soft_closed", "reconciled", "invoiced"]
+        },
+        "to_status": {
+          "type": "string",
+          "enum": ["soft_closed", "reconciled", "invoiced", "hard_closed"]
+        },
+        "actor_reference": {"type": "string", "minLength": 1},
+        "authorization_reference": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "transitioned_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}
