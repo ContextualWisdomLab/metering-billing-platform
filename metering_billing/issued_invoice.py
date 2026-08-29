@@ -408,7 +408,7 @@ def _project_draft_lines(
             meter_code="late_adjustment",
             unit_code="adjustment",
             rated_quantity=Decimal("1"),
-            unit_price_amount=abs(composition.adjustment_amount),
+            unit_price_amount=composition.adjustment_amount.copy_abs(),
             line_total_amount=composition.adjustment_amount,
             line_type="late_adjustment",
             late_adjustment_invoice_adjustment_id=(
@@ -452,7 +452,7 @@ def _build_issued_lines(
             meter_code="late_adjustment",
             unit_code="adjustment",
             rated_quantity=Decimal("1"),
-            unit_price_amount=abs(composition.adjustment_amount),
+            unit_price_amount=composition.adjustment_amount.copy_abs(),
             line_total_amount=composition.adjustment_amount,
             line_type="late_adjustment",
             late_adjustment_invoice_adjustment_id=(

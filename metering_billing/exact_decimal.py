@@ -56,7 +56,8 @@ def sum_exact_decimals(*amounts: Decimal) -> Decimal:
     maximum_adjusted = max(amount.adjusted() for amount in amounts)
     with localcontext() as context:
         context.prec = max(
-            context.prec, maximum_adjusted - minimum_exponent + 2
+            context.prec,
+            maximum_adjusted - minimum_exponent + len(str(len(amounts))) + 2,
         )
         return sum(amounts, Decimal("0"))
 

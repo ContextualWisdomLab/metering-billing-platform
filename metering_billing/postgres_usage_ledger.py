@@ -73,6 +73,7 @@ from metering_billing.usage_ledger import (
     StoredLateAdjustmentApplication,
     StoredLateAdjustmentInvoiceAdjustment,
     StoredLateAdjustmentRating,
+    LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION,
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoice,
@@ -791,6 +792,13 @@ class PostgresUsageLedger:
         self, composition: StoredLateAdjustmentInvoiceAdjustment
     ) -> StoredLateAdjustmentInvoiceAdjustment:
         """Persist one composition or return its tenant-scoped replay."""
+        if (
+            composition.late_adjustment_invoice_adjustment_contract_version
+            != LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION
+        ):
+            raise ValueError(
+                "late adjustment invoice adjustment contract version must be 2"
+            )
         if CURRENCY_CODE_PATTERN.fullmatch(composition.currency_code) is None:
             raise ValueError("currency_code must be a three-letter ISO code")
         if (

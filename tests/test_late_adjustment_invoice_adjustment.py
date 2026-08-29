@@ -33,7 +33,11 @@ from metering_billing import (
 )
 from metering_billing.errors import ExactDecimalError
 from metering_billing.exact_decimal import issued_invoice_amount_exceeds_storage_precision
-from metering_billing.issued_invoice import _format_signed_decimal, _tax_amounts
+from metering_billing.issued_invoice import (
+    _format_signed_decimal,
+    _project_draft_lines,
+    _tax_amounts,
+)
 from test_http_app import invoke_http
 from test_usage_ingestion import TENANT_ONE, TENANT_TWO
 from test_usage_rating import MORNING_WINDOW, ingest_known_batch
@@ -625,6 +629,27 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
             issued.tax_exclusive_amount,
             Decimal("99999999999999999999999999.999999999998"),
         )
+        large_adjustment = Decimal("99999999999999999999999999.000000000001")
+        bulk_compositions = tuple(
+            replace(
+                candidate,
+                adjustment_amount=(
+                    large_adjustment
+                    if index < 100
+                    else large_adjustment.copy_negate()
+                ),
+            )
+            for index in range(200)
+        )
+        self.assertEqual(
+            _tax_amounts(ledger, stored_draft, bulk_compositions)[0],
+            stored_draft.drafted_total_amount,
+        )
+        projected = _project_draft_lines(
+            stored_draft,
+            (replace(candidate, adjustment_amount=large_adjustment),),
+        )
+        self.assertEqual(projected[-1].unit_price_amount, large_adjustment)
 
     def test_issuer_rejects_adjusted_invoice_line_limit(self) -> None:
         """A late line cannot make the issued contract exceed its 10,000-line bound."""
@@ -934,6 +959,10 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
         candidate = stored_candidate(ledger, adjustment, draft)
         self.assertIsNone(ledger.get_late_adjustment_invoice_adjustment(uuid4()))
         for bad in (
+            replace(
+                candidate,
+                late_adjustment_invoice_adjustment_contract_version=1,
+            ),
             replace(candidate, late_adjustment_invoice_adjustment_status="pending"),
             replace(candidate, currency_code="US"),
             replace(candidate, adjustment_amount=Decimal("0")),

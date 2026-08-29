@@ -22,6 +22,7 @@ from metering_billing.errors import (
 )
 from metering_billing.exact_decimal import issued_invoice_amount_exceeds_storage_precision
 from metering_billing.usage_ledger import (
+    LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION,
     MemoryUsageLedger,
     StoredLateAdjustmentInvoiceAdjustment,
     generate_record_id,
@@ -29,7 +30,6 @@ from metering_billing.usage_ledger import (
 
 
 Clock = Callable[[], datetime]
-LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION = 2
 LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_STATUS = "recorded"
 OPERATOR_ACTION_ISSUE_INVOICE = "issue_invoice"
 OPERATOR_ACTION_APPLY = "apply_late_adjustment"

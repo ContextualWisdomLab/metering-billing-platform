@@ -297,8 +297,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 58:
-            raise AssertionError(f"expected 58 migrations, got {len(applied)}")
+        if len(applied) != 59:
+            raise AssertionError(f"expected 59 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13364,6 +13364,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 return "01"
 
         for bad in (
+            replace(stored, late_adjustment_invoice_adjustment_contract_version=1),
             replace(stored, currency_code="US"),
             replace(stored, adjustment_amount=Decimal("0")),
             replace(stored, adjustment_amount=Decimal("NaN")),

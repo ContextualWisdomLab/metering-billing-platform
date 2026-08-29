@@ -38,6 +38,7 @@ CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error
 TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
 CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 SOURCE_PAYLOAD_HASH_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION = 2
 
 
 def generate_record_id(uuid_module: ModuleType = uuid) -> UUID:
@@ -3307,6 +3308,13 @@ class MemoryUsageLedger:
         self, composition: StoredLateAdjustmentInvoiceAdjustment
     ) -> StoredLateAdjustmentInvoiceAdjustment:
         """Store one immutable composition or return its rating replay."""
+        if (
+            composition.late_adjustment_invoice_adjustment_contract_version
+            != LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION
+        ):
+            raise ValueError(
+                "late adjustment invoice adjustment contract version must be 2"
+            )
         if composition.late_adjustment_invoice_adjustment_status != "recorded":
             raise ValueError("late adjustment invoice adjustment status must be recorded")
         if CURRENCY_CODE_PATTERN.fullmatch(composition.currency_code) is None:
