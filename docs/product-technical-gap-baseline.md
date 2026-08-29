@@ -43,8 +43,8 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
-> **Status update (2026-08-29):** GitHub reports eight open pull requests
-> (`#142`–`#147`, `#153`, and `#154`). PRs `#142`–`#146`, `#153`, and `#154`
+> **Status update (2026-08-29):** GitHub reports ten open pull requests
+> (`#142`–`#147` and `#153`–`#156`). PRs `#142`–`#146`, `#153`–`#156`
 > target `develop`; PR `#147` is stacked on the canonical producer SDK branch
 > from PR `#146`. PRs `#148` and `#149` were
 > merged on 2026-08-28 and are no longer open-PR evidence.
@@ -53,8 +53,8 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 > on 2026-08-26. The merged release train and the Compose, threaded API,
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
-> PRs `#142`–`#146`, `#153`, and `#154` are `BLOCKED`; PR `#147` is `UNSTABLE`
-> while its Devin review is pending. All eight have zero qualifying approvals;
+> PRs `#142`–`#146`, `#153`–`#156` are `BLOCKED`; PR `#147` is `CLEAN` but
+> stacked on the unmerged PR `#146`. All ten have zero qualifying approvals;
 > current internal review threads are resolved. None is merge evidence for
 > `develop`.
 
@@ -74,7 +74,7 @@ operational contract.
 As queried from GitHub on 2026-08-29:
 
 - open issues: **8** (`#84`–`#91`);
-- open pull requests: **8** (`#142`–`#147`, `#153`, and `#154`); `#142`–`#146`, `#153`, and `#154` target `develop`, and `#147` targets the branch of `#146`;
+- open pull requests: **10** (`#142`–`#147` and `#153`–`#156`); `#142`–`#146`, `#153`–`#156` target `develop`, and `#147` targets the branch of `#146`;
 - producer work: `#146` provides the canonical Python producer reference and `#147` adds the durable producer outbox slice; the Rust reference from `#148` and TypeScript reference from `#149` were merged on 2026-08-28;
 - latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`;
 - the merged PR #141 rollup included a failed `Semgrep (multi-language SAST)` job alongside successful repository, analysis, dependency, coverage, and other checks; therefore the merge is not a blanket claim that every release/security gate is complete.
@@ -168,7 +168,7 @@ Work can be stacked when public contracts are stable, but each PR must remain in
 
 ## Current pull-request inventory
 
-GitHub reports **eight open pull requests** on 2026-08-29. The latest merged
+GitHub reports **ten open pull requests** on 2026-08-29. The latest merged
 change is PR #141; the following open PR heads are current snapshots and are
 not merge evidence:
 
@@ -180,9 +180,11 @@ not merge evidence:
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required, zero unresolved threads, zero approvals |
 | #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `3b4d915cae4a3eee1dcb694db9df83f0126f5490`; open, blocked, review required, zero unresolved threads, zero approvals; OpenCode/Strix current-head evidence is unavailable because their providers failed |
-| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `82bf0836de7b53be046b1488352bc9f800c67b31`; open, unstable, dependent on #146; Repository contracts passed and Devin remains pending; zero unresolved threads and zero approvals |
-| #153 | Bounded PostgreSQL connection pool and lifecycle hardening for #84 | `develop` | `ee1dbf4de4aaeafe96600bb1891d6dbd68abe15a`; open, blocked, hosted checks re-running; zero unresolved threads and zero approvals |
+| #147 | Durable producer outbox and retry/dead-letter boundary for #90 | `feat/canonical-producer-sdk-20260828` (stacked on #146) | `55f5ee2643ac14c90dfb0f2dd283e71e7f175d05`; open, clean, dependent on #146; Repository contracts and Devin passed, zero unresolved threads and zero approvals |
+| #153 | Bounded PostgreSQL connection pool and lifecycle hardening for #84 | `develop` | `46235a6382b5df4ed02b9540d9afa4ea3d1d3074`; open, blocked, review required, hosted Checks re-running; zero unresolved threads and zero approvals |
 | #154 | Opt-in OpenTelemetry HTTP tracing for #91 | `develop` | `f8414fcbcde07d99b50add8b7e698a1a85d99902`; open, blocked, hosted checks re-running; zero unresolved threads and zero approvals |
+| #155 | Stoppable AIS outbox scheduler and drain-cycle reporting for #91 | `develop` | `47b8f2ef6a01ae2b95f911a6abf39e08a03a007e`; open, blocked, review required; implementation, security, coverage, and Devin Checks passed, but OpenCode failed and Strix is pending; zero unresolved threads and zero approvals |
+| #156 | Usage-event schema compatibility and fail-closed versioning for #90 | `develop` | `b5c8c966b9cf49528814cc1d41701d5d537519bc`; open, blocked, review required; implementation, security, coverage, and Devin passed, but OpenCode failed; zero unresolved threads and zero approvals |
 
 PRs #148 (Rust SDK) and #149 (TypeScript SDK) merged on 2026-08-28. Their
 historical heads are retained in GitHub, but must not be reused as current
