@@ -2996,7 +2996,14 @@ class MemoryUsageLedger:
     def insert_late_adjustment(
         self, tenant_reference: str, adjustment: LateAdjustment
     ) -> LateAdjustment:
-        """Store one immutable late adjustment with tenant-scoped replay identity."""
+        """Store one late adjustment while serializing period lifecycle changes."""
+        with self._late_adjustment_application_lock:
+            return self._insert_late_adjustment(tenant_reference, adjustment)
+
+    def _insert_late_adjustment(
+        self, tenant_reference: str, adjustment: LateAdjustment
+    ) -> LateAdjustment:
+        """Store one immutable late adjustment while the lifecycle lock is held."""
         tenant = self.require_tenant(tenant_reference)
         existing_id = self.late_adjustment_source_index.get(
             (tenant.tenant_account_id, adjustment.source_reference)

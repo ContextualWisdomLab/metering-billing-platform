@@ -21,7 +21,7 @@ from metering_billing import (
     validate_late_adjustment_application,
     validate_late_adjustment_presentment,
 )
-from metering_billing.usage_ledger import StoredLateAdjustmentApplication
+from metering_billing.usage_ledger import MemoryUsageLedger, StoredLateAdjustmentApplication
 from test_http_app import invoke_http
 from test_usage_ingestion import TENANT_ONE, TENANT_TWO, seed_ledger
 
@@ -375,6 +375,56 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             result = result_future.result()
         self.assertEqual(result.rejection_reason_code, "target_period_not_open")
         self.assertEqual(len(ledger.late_adjustment_applications), 0)
+
+    def test_memory_recording_racing_target_close_rejects_stale_fact(self) -> None:
+        """A target close that acquires the lock first rejects stale recording."""
+        close_started = Event()
+        release_close = Event()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "3.50",
+            "USD",
+            "provider:recording-memory-close-race",
+            "sha256:" + "2" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+
+        class BlockingCloseLedger(MemoryUsageLedger):
+            """Hold the lifecycle lock after the close has acquired it."""
+
+            def _insert_billing_period(self, period):
+                if period.period_id == adjustment.target_period_id and period.transitions:
+                    close_started.set()
+                    if not release_close.wait(timeout=5):
+                        raise AssertionError("recording did not reach the lifecycle lock")
+                return super()._insert_billing_period(period)
+
+        ledger = seed_ledger(BlockingCloseLedger)
+        seed_adjustment_periods(ledger, adjustment)
+        target = ledger.get_billing_period(TENANT_ONE, adjustment.target_period_id)
+        assert target is not None
+        closed_target = target.advance(
+            BillingPeriodStatus.SOFT_CLOSED,
+            actor_reference="operator:closer",
+            authorization_reference="change:recording-close-race",
+            reason="close target",
+            transitioned_at=datetime(2026, 8, 18, tzinfo=UTC),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            close_future = pool.submit(ledger.insert_billing_period, closed_target)
+            self.assertTrue(close_started.wait(timeout=5))
+            recording_future = pool.submit(
+                ledger.insert_late_adjustment, TENANT_ONE, adjustment
+            )
+            release_close.set()
+            close_future.result()
+            with self.assertRaises(ValueError):
+                recording_future.result()
+        self.assertNotIn(adjustment.late_adjustment_id, ledger.late_adjustments)
 
     def test_http_application_and_rejection_contracts_fail_closed(self) -> None:
         """The nested command preserves tenant and audit-reference boundaries."""
