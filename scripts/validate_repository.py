@@ -157,6 +157,8 @@ REQUIRED_FILES = (
     "schemas/usage-event.schema.json",
     "schemas/provider-capability.schema.json",
     "schemas/lemon-squeezy-webhook.schema.json",
+    "metering_billing/provider_capabilities.py",
+    "metering_billing/lemon_squeezy_webhook.py",
     "schemas/accounting-journal-proposal.schema.json",
     "schemas/usage-ingestion-receipt.schema.json",
     "schemas/rating-run.schema.json",

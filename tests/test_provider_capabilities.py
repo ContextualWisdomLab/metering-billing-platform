@@ -58,6 +58,25 @@ class ProviderCapabilityTests(unittest.TestCase):
         )
         body = stored.as_contract_dict()
         self.assertEqual(validate_provider_capability(body), ())
+        self.assertEqual(
+            validate_provider_capability(
+                ProviderCapabilityManifest(
+                    "short_name",
+                    ("payment_processor",),
+                    ("hosted_checkout",),
+                    NOW,
+                ).as_contract_dict()
+            ),
+            (),
+        )
+        self.assertEqual(validate_provider_capability(None), ("$: expected object",))
+        for effective_to in ("2026-08-29T08:00:00Z", "2026-08-29T07:00:00Z"):
+            invalid_body = dict(body, effective_to=effective_to)
+            self.assertEqual(
+                validate_provider_capability(invalid_body),
+                ("$: effective_to must be after effective_from",),
+            )
+        self.assertTrue(validate_provider_capability(dict(body, effective_to="not-a-date")))
         self.assertEqual(body["effective_from"], "2026-08-29T08:00:00Z")
         self.assertEqual(body["supported_currency_codes"], ["USD"])
         self.assertTrue(stored.supports("hosted_checkout", at=NOW, provider_role_code="payment_processor"))
