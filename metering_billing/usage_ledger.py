@@ -3284,6 +3284,7 @@ class MemoryUsageLedger:
         self, rating: StoredLateAdjustmentRating
     ) -> StoredLateAdjustmentRating:
         """Store one immutable rating fact while the lifecycle lock is held."""
+        _validate_audit_timestamp(rating.rated_at, "rated_at")
         if rating.late_adjustment_rating_status != "rated":
             raise ValueError("late_adjustment_rating_status must be rated")
         if CURRENCY_CODE_PATTERN.fullmatch(rating.currency_code) is None:

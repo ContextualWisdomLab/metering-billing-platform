@@ -43,7 +43,8 @@
   rating against a target period that closed after recording while preserving
   replays. It preserves the original usage `rating_run`, replays safely, and
   leaves invoice-adjustment composition and downstream invoice issuance as
-  explicit actions (ADR 0135).
+  explicit actions. Rating audit timestamps must be timezone-aware and not
+  future-dated at service, adapter, and PostgreSQL boundaries (ADR 0135).
 - Issue #87 now composes a rated late adjustment into an unissued invoice draft
   through the tenant-scoped immutable `late_adjustment_invoice_adjustment`
   fact and migration `0054`. Matching signed amount/currency/evidence,

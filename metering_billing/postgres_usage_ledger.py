@@ -622,6 +622,7 @@ class PostgresUsageLedger:
         self, rating: StoredLateAdjustmentRating
     ) -> StoredLateAdjustmentRating:
         """Persist one rating fact or return its tenant-scoped replay."""
+        _validate_audit_timestamp(rating.rated_at, "rated_at")
         if CURRENCY_CODE_PATTERN.fullmatch(rating.currency_code) is None:
             raise ValueError("currency_code must be a three-letter ISO code")
         if (

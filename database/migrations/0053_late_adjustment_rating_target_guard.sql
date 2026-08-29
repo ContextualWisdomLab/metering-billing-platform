@@ -25,6 +25,10 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    IF NEW.rated_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'late adjustment rating rated_at must not be in the future';
+    END IF;
+
     PERFORM 1
     FROM billing_core.billing_period
     WHERE period_id = NEW.target_period_id

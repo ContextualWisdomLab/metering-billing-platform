@@ -23,6 +23,7 @@ from metering_billing.errors import (
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredLateAdjustmentRating,
+    _validate_audit_timestamp,
     generate_record_id,
 )
 
@@ -185,7 +186,7 @@ class LateAdjustmentRatingService:
             currency_code=adjustment.currency_code,
             rated_by=rated_by_text,
             authorization_reference=authorization_text,
-            rated_at=self._clock(),
+            rated_at=_validate_audit_timestamp(self._clock(), "rated_at"),
             late_adjustment_rating_contract_version=(
                 LATE_ADJUSTMENT_RATING_CONTRACT_VERSION
             ),

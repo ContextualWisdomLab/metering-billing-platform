@@ -1570,6 +1570,60 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertIsNotNone(stored_rating)
         assert stored_rating is not None
         self.assertEqual(stored_rating.target_period_id, target.period_id)
+        future_adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "3.00",
+            "USD",
+            "provider:rating-future-time",
+            "sha256:" + "8" * 64,
+            CATALOG_START + timedelta(hours=8),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, future_adjustment)
+        future_application = LateAdjustmentApplicationService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=9),
+        ).apply_late_adjustment(
+            TENANT_ONE,
+            future_adjustment.late_adjustment_id,
+            applied_by="operator:finance_future",
+            authorization_reference="approval:application_future",
+        )
+        self.assertEqual(
+            future_application.late_adjustment_application_outcome_code, "accepted"
+        )
+        with self.assertRaisesRegex(
+            psycopg.errors.RaiseException, "rated_at.*future"
+        ):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_rating
+                        (late_adjustment_rating_id, tenant_account_id,
+                         late_adjustment_application_id, late_adjustment_id,
+                         target_period_id, adjustment_amount, currency_code,
+                         rated_by, authorization_reference, rated_at,
+                         late_adjustment_rating_contract_version,
+                         late_adjustment_rating_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                        future_application.late_adjustment_application_id,
+                        future_adjustment.late_adjustment_id,
+                        future_adjustment.target_period_id,
+                        future_adjustment.adjustment_amount,
+                        future_adjustment.currency_code,
+                        "operator:finance_future",
+                        "approval:rating_future",
+                        datetime.now(UTC) + timedelta(days=1),
+                        1,
+                        "rated",
+                    ),
+                )
         for invalid in (
             replace(stored_rating, currency_code="usd"),
             replace(stored_rating, adjustment_amount=Decimal("0")),
@@ -1577,6 +1631,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             replace(stored_rating, late_adjustment_rating_status="pending"),
             replace(stored_rating, rated_by=" "),
             replace(stored_rating, authorization_reference=" "),
+            replace(stored_rating, rated_at=datetime(2027, 1, 1, 0, 0)),
+            replace(stored_rating, rated_at=datetime.now(UTC) + timedelta(days=1)),
         ):
             with self.assertRaises(ValueError):
                 self.ledger.insert_late_adjustment_rating(invalid)

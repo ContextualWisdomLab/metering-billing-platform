@@ -272,7 +272,8 @@ preserving the same replay identity.
 `LateAdjustmentRatingService` consumes that application and stores one
 append-only `late_adjustment_rating` per tenant and late-adjustment ID. It copies
 the application target, signed amount, and currency and adds the rating actor,
-authorization reference, and instant. Migrations `0051` and `0053` protect the
+authorization reference, and instant. Rating instants must be timezone-aware
+and not future-dated. Migrations `0051` and `0053` protect the
 application/source/target links, exact-value equality, replay identity, current
 target openness for first ratings, and update/delete immutability. Migration
 `0053` preserves already-stored rating replays after target closure. This is a rating-consumption fact, not a synthetic

@@ -81,7 +81,8 @@ then performs one bulk application-existence and one bulk rating-existence looku
 for the page. `LateAdjustmentRatingService` consumes the acknowledgement through
 the nested `/ratings` command and appends `late_adjustment_rating` only while the
 target remains open; a stored rating replays after closure. The exact signed delta
-is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
+is copied; its audit timestamp is timezone-aware and not future-dated; no
+synthetic usage snapshot or ordinary `rating_run` is created.
 `LateAdjustmentInvoiceAdjustmentService` consumes that rating through the
 nested `/invoice-adjustments` command and appends one tenant-scoped
 `late_adjustment_invoice_adjustment` linked to an unissued invoice draft and
@@ -118,7 +119,7 @@ settlement remain downstream boundaries.
 The memory adapter serializes recording, application, rating, and period
 lifecycle writes so concurrent application/close or rating/close races cannot
 create a second acknowledgement or accept a new fact for a closed target;
-application audit timestamps are timezone-aware and not future-dated.
+application and rating audit timestamps are timezone-aware and not future-dated.
 
 ## Usage ingestion
 
