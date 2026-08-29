@@ -206,8 +206,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 50:
-            raise AssertionError(f"expected 50 migrations, got {len(applied)}")
+        if len(applied) != 51:
+            raise AssertionError(f"expected 51 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -1398,6 +1398,46 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             .next_operator_action,
             "rate_late_adjustment",
         )
+        future_adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "2.00",
+            "USD",
+            "provider:application-future-time",
+            "sha256:" + "6" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, future_adjustment)
+        with self.assertRaisesRegex(
+            psycopg.errors.RaiseException, "applied_at.*future"
+        ):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_application
+                        (late_adjustment_application_id, tenant_account_id,
+                         late_adjustment_id, target_period_id, adjustment_amount,
+                         currency_code, applied_by, authorization_reference, applied_at,
+                         late_adjustment_application_contract_version,
+                         late_adjustment_application_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                        future_adjustment.late_adjustment_id,
+                        target.period_id,
+                        future_adjustment.adjustment_amount,
+                        future_adjustment.currency_code,
+                        "operator:future",
+                        "approval:future",
+                        datetime.now(UTC) + timedelta(days=1),
+                        1,
+                        "applied",
+                    ),
+                )
         with self.assertRaises(ValueError):
             self.ledger.insert_late_adjustment_application(
                 replace(

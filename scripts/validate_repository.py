@@ -292,6 +292,7 @@ REQUIRED_FILES = (
     "database/migrations/0048_late_adjustment.sql",
     "database/migrations/0049_late_adjustment_replay.sql",
     "database/migrations/0050_late_adjustment_application.sql",
+    "database/migrations/0051_late_adjustment_application_race.sql",
     "schemas/late-adjustment-application.schema.json",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
