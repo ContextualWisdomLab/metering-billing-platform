@@ -137,37 +137,26 @@ class LateAdjustmentPresentmentService:
         tenant = self._require_tenant(tenant_reference)
         cursor_key = _parse_page_cursor(cursor)
         limit = _parse_page_limit(page_limit)
-        stored_rows = sorted(
-            self.ledger.list_late_adjustments(tenant.tenant_reference),
-            key=lambda adjustment: (
-                adjustment.recorded_at,
-                adjustment.late_adjustment_id,
-            ),
+        stored_rows = self.ledger.list_late_adjustments(
+            tenant.tenant_reference,
+            after=cursor_key,
+            limit=limit + 1,
         )
-        matched = tuple(
-            adjustment
-            for adjustment in stored_rows
-            if cursor_key is None
-            or (adjustment.recorded_at, adjustment.late_adjustment_id) > cursor_key
-        )
-        page_rows = matched[:limit]
+        page_rows = stored_rows[:limit]
         next_cursor = None
-        if len(matched) > limit:
+        if len(stored_rows) > limit:
             last = page_rows[-1]
             next_cursor = _encode_page_cursor(last.recorded_at, last.late_adjustment_id)
+        application_ids = self.ledger.find_late_adjustment_application_ids(
+            tenant.tenant_account_id,
+            tuple(adjustment.late_adjustment_id for adjustment in page_rows),
+        )
         return LateAdjustmentPresentmentPage(
             late_adjustments=tuple(
                 self._project_adjustment(
                     tenant.tenant_reference,
                     adjustment,
-                    applied=self.ledger.find_late_adjustment_application(
-                        tenant.tenant_account_id, adjustment.late_adjustment_id
-                    )
-                    is not None,
-                    rated=self.ledger.find_late_adjustment_rating(
-                        tenant.tenant_account_id, adjustment.late_adjustment_id
-                    )
-                    is not None,
+                    applied=adjustment.late_adjustment_id in application_ids,
                 )
                 for adjustment in page_rows
             ),

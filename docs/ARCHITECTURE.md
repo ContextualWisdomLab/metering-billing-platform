@@ -66,15 +66,22 @@ FOCUS export, and statutory accounting remain downstream capabilities.
 `LateAdjustmentPresentmentService` exposes the fact through tenant-scoped
 item/list reads and reports `apply_late_adjustment` until
 `LateAdjustmentApplicationService` records the append-only
-`late_adjustment_application` acknowledgement. The nested application route
-requires actor and authorization references, enforces source equality and
-tenant scope, and then reports `rate_late_adjustment`. It never rewrites the
-late fact, period, usage, rating, tax, journal, provider state, or webhook.
-`LateAdjustmentRatingService` consumes the acknowledgement through the nested
-`/ratings` command and appends `late_adjustment_rating`. The exact signed delta
-is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
-Presentment then reports `record_invoice_adjustment` for the still-separate
-invoice-adjustment workflow.
+`late_adjustment_application` acknowledgement. The PostgreSQL trigger locks
+the target period and requires its latest append-only status to be `open` for
+new applications; replays bypass that guard and return the first writer's
+audit data. The nested application route requires actor and authorization
+references, enforces source equality and tenant scope, and then reports
+`rate_late_adjustment`. The memory adapter persists the same period aggregate
+and maps missing or closed targets to `target_period_not_found` or
+`target_period_not_open` rejected results (HTTP 422). It never rewrites the late fact, period, usage, rating,
+tax, journal, provider state, or webhook.
+List reads pass the decoded cursor and `limit + 1` to the ledger; PostgreSQL
+applies the tenant-scoped keyset predicate and hydrates only those bounded rows,
+then performs one bulk application-existence lookup for the page.
+The memory adapter serializes recording, application, and period lifecycle writes so a
+concurrent application/close race cannot create a second acknowledgement or
+accept a new application for a closed target; application audit timestamps are
+timezone-aware and not future-dated.
 
 ## Usage ingestion
 

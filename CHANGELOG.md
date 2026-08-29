@@ -27,18 +27,22 @@
 - Issue #87 now presents stored late-adjustment evidence through tenant-scoped
   item/list reads with exact signed amounts, keyset pagination, and the closed
   `apply_late_adjustment` next action. Presentment does not apply, re-rate, or
-  post the fact (ADR 0133).
+  post the fact (ADR 0133). The read contract now passes the decoded cursor and
+  bounded `limit + 1` to each ledger; PostgreSQL resolves one tenant-scoped
+  keyset query and hydrates only that bounded page, followed by one bulk
+  application-existence lookup rather than one lookup per item.
 - Issue #87 now records a tenant-scoped immutable late-adjustment application
-  acknowledgement in migration `0050`. The nested command is replay-safe,
+  acknowledgement in migrations `0050`/`0051`. The nested command is replay-safe,
   preserves the signed source amount/target/currency, and advances presentment
-  to `rate_late_adjustment`; full re-rating remains a separate workflow (ADR
-  0134).
-- Issue #87 now records the consumption of an applied late adjustment as a
-  separate immutable rating fact in migration `0051`; migrations `0052` and
-  `0053` guard first application/rating against a target period that closed
-  after recording while preserving replays. It preserves the original usage
-  `rating_run`, replays safely, and leaves invoice-adjustment composition as
-  the next explicit action (ADR 0135).
+  to `rate_late_adjustment`; first application still requires the target period
+  to be open, while a stored application replays after that period closes and
+  retains the first writer's audit data (ADR 0134). The memory reference ledger
+  now stores the same billing-period lifecycle and rejects missing,
+  cross-tenant, open-source, closed-target, or incorrectly ordered late facts;
+  target lifecycle rejections publish stable HTTP 422 contract results.
+  The memory adapter serializes recording, application, and period lifecycle writes for
+  at-most-once behavior, and application audit timestamps must be timezone
+  aware and not future-dated.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

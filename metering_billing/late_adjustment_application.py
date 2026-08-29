@@ -19,9 +19,11 @@ from metering_billing.errors import (
     LateAdjustmentApplicationTargetPeriodNotOpen,
     require_resolved,
 )
+from metering_billing.period_close import BillingPeriodStatus
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredLateAdjustmentApplication,
+    _validate_audit_timestamp,
     generate_record_id,
 )
 
@@ -155,6 +157,17 @@ class LateAdjustmentApplicationService:
                 tenant.tenant_reference,
                 LateAdjustmentApplicationOutcomeCode.DUPLICATE_REPLAY,
             )
+        target = self.ledger.get_billing_period(
+            tenant.tenant_reference, adjustment.target_period_id
+        )
+        if target is None:
+            return _rejected(
+                LateAdjustmentApplicationRejectionReasonCode.TARGET_PERIOD_NOT_FOUND
+            )
+        if target.status != BillingPeriodStatus.OPEN:
+            return _rejected(
+                LateAdjustmentApplicationRejectionReasonCode.TARGET_PERIOD_NOT_OPEN
+            )
         candidate = StoredLateAdjustmentApplication(
             late_adjustment_application_id=generate_record_id(),
             tenant_account_id=tenant.tenant_account_id,
@@ -164,7 +177,7 @@ class LateAdjustmentApplicationService:
             currency_code=adjustment.currency_code,
             applied_by=applied_by_text,
             authorization_reference=authorization_text,
-            applied_at=self._clock(),
+            applied_at=_validate_audit_timestamp(self._clock(), "applied_at"),
             late_adjustment_application_contract_version=(
                 LATE_ADJUSTMENT_APPLICATION_CONTRACT_VERSION
             ),
@@ -172,10 +185,11 @@ class LateAdjustmentApplicationService:
         )
         try:
             stored = self.ledger.insert_late_adjustment_application(candidate)
-        except LateAdjustmentApplicationTargetPeriodNotOpen:
-            return _rejected(
-                LateAdjustmentApplicationRejectionReasonCode.TARGET_PERIOD_NOT_OPEN
-            )
+        except Exception as error:
+            rejection_reason = _target_period_rejection_reason(error)
+            if rejection_reason is None:
+                raise
+            return _rejected(rejection_reason)
         outcome = (
             LateAdjustmentApplicationOutcomeCode.ACCEPTED
             if stored.late_adjustment_application_id
@@ -191,6 +205,23 @@ def _audit_reference(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _target_period_rejection_reason(
+    error: Exception,
+) -> LateAdjustmentApplicationRejectionReasonCode | None:
+    """Map only the PostgreSQL trigger's target-lifecycle failures."""
+    message = getattr(getattr(error, "diag", None), "message_primary", None)
+    if message is None and isinstance(error, ValueError):
+        message = str(error)
+    return {
+        "late adjustment application target period is missing": (
+            LateAdjustmentApplicationRejectionReasonCode.TARGET_PERIOD_NOT_FOUND
+        ),
+        "late adjustment application target period must be open": (
+            LateAdjustmentApplicationRejectionReasonCode.TARGET_PERIOD_NOT_OPEN
+        ),
+    }.get(message)
 
 
 def _rejected(
