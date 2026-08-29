@@ -159,6 +159,23 @@ class RepositoryContractTests(unittest.TestCase):
             errors = validate_runbooks(root)
         self.assertIn("runbook is not indexed: docs/operations/runbooks/orphan.md", errors)
 
+    def test_hidden_runbook_links_are_not_index_entries(self) -> None:
+        """Code fences and comments cannot satisfy rendered index coverage."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n"
+                "```markdown\n[incident](runbooks/incident.md)\n```\n"
+                "<!-- [incident](runbooks/incident.md) -->\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertIn("runbook index must link Markdown runbooks", errors)
+
     def test_empty_runbook_section_is_reported(self) -> None:
         """A heading without operator content cannot satisfy the support contract."""
         with tempfile.TemporaryDirectory() as temporary_directory:

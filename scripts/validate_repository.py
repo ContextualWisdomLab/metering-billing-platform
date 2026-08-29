@@ -533,7 +533,7 @@ def validate_runbooks(root: Path) -> tuple[str, ...]:
         index_text = index_path.read_text(encoding="utf-8")
         index_section_match = RUNBOOK_INDEX_SECTION_PATTERN.search(index_text)
         index_section = index_section_match.group(1) if index_section_match else ""
-        relative_targets = RUNBOOK_INDEX_LINK_PATTERN.findall(index_section)
+        relative_targets = RUNBOOK_INDEX_LINK_PATTERN.findall(_visible_markdown(index_section))
         indexed_paths = tuple(
             (index_path.parent / relative_target).resolve()
             for relative_target in relative_targets
@@ -555,10 +555,7 @@ def validate_runbooks(root: Path) -> tuple[str, ...]:
     for runbook_path in runbook_paths:
         text = runbook_path.read_text(encoding="utf-8")
         relative_path = runbook_path.relative_to(root).as_posix()
-        text_without_fenced_code = re.sub(
-            r"(?ms)^(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^(?P=fence)\s*$\n?", "", text
-        )
-        visible_text = re.sub(r"(?s)<!--.*?-->", "", text_without_fenced_code)
+        visible_text = _visible_markdown(text)
         for heading in RUNBOOK_REQUIRED_HEADINGS:
             heading_match = re.search(
                 rf"^## {re.escape(heading)}$\n(.*?)(?=^## |\Z)",
@@ -570,6 +567,14 @@ def validate_runbooks(root: Path) -> tuple[str, ...]:
             elif not heading_match.group(1).strip():
                 errors.append(f"{relative_path}: empty required runbook section: {heading}")
     return tuple(errors)
+
+
+def _visible_markdown(text: str) -> str:
+    """Remove fenced code and HTML comments before validating rendered Markdown."""
+    text_without_fenced_code = re.sub(
+        r"(?ms)^(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^(?P=fence)\s*$\n?", "", text
+    )
+    return re.sub(r"(?s)<!--.*?-->", "", text_without_fenced_code)
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

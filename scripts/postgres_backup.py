@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -17,22 +16,64 @@ class PostgresBackupError(RuntimeError):
     """Raised when a PostgreSQL archive operation cannot complete safely."""
 
 
+def _keyword_contains_password(dsn: str) -> bool:
+    """Find a password keyword without treating values as connection keys."""
+    index = 0
+    while True:
+        while index < len(dsn) and dsn[index].isspace():
+            index += 1
+        if index >= len(dsn):
+            return False
+        key_start = index
+        while index < len(dsn) and not dsn[index].isspace() and dsn[index] != "=":
+            index += 1
+        key = dsn[key_start:index]
+        while index < len(dsn) and dsn[index].isspace():
+            index += 1
+        if index >= len(dsn) or dsn[index] != "=":
+            while index < len(dsn) and not dsn[index].isspace():
+                index += 1
+            continue
+        index += 1
+        while index < len(dsn) and dsn[index].isspace():
+            index += 1
+        if index < len(dsn) and dsn[index] in {"'", '"'}:
+            quote = dsn[index]
+            index += 1
+            while index < len(dsn):
+                if dsn[index] == "\\":
+                    index += 2
+                elif dsn[index] == quote:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            else:
+                raise ValueError("unterminated PostgreSQL connection value")
+        else:
+            while index < len(dsn) and not dsn[index].isspace():
+                index += 1
+        if key.casefold() == "password":
+            return True
+
+
 def _require_dsn(dsn: str) -> None:
     """Reject absent or password-bearing connection strings."""
     if not isinstance(dsn, str) or not dsn.strip():
         raise PostgresBackupError("a non-empty PostgreSQL connection string is required")
     try:
         parsed_dsn = urlsplit(dsn)
-        keyword_parts = shlex.split(dsn)
+        is_uri = bool(parsed_dsn.scheme)
+        uri_contains_password = is_uri and (
+            parsed_dsn.password is not None
+            or any(
+                key.casefold() == "password"
+                for key, _value in parse_qsl(parsed_dsn.query, keep_blank_values=True)
+            )
+        )
+        keyword_contains_password = not is_uri and _keyword_contains_password(dsn)
     except ValueError as error:
         raise PostgresBackupError("invalid PostgreSQL connection string") from error
-    uri_contains_password = parsed_dsn.password is not None or any(
-        key.casefold() == "password"
-        for key, _value in parse_qsl(parsed_dsn.query, keep_blank_values=True)
-    )
-    keyword_contains_password = any(
-        part.partition("=")[0].casefold() == "password" for part in keyword_parts
-    )
     if uri_contains_password or keyword_contains_password:
         raise PostgresBackupError(
             "PostgreSQL connection strings must omit passwords; use a secret-managed libpq boundary"

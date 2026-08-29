@@ -36,7 +36,9 @@ uv run python scripts/postgres_backup.py verify \
 
 The helper uses PostgreSQL custom format, refuses to overwrite an existing
 final archive, publishes through a same-directory temporary file, and removes
-an incomplete temporary archive after a failed dump. Capture the archive SHA-256
+an incomplete temporary archive after a failed dump when cleanup succeeds. If
+cleanup fails, inspect and remove the remaining `.partial` archive before
+retrying. Capture the archive SHA-256
 and the two command exit statuses in the incident record without capturing
 client output that could contain connection or payload data.
 

@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 
 from scripts.postgres_backup import (
     PostgresBackupError,
+    _require_dsn,
     create_backup,
     main,
     restore_backup,
@@ -210,6 +211,9 @@ class PostgresBackupTests(unittest.TestCase):
                 create_backup("host=database password = secret", archive)
             with self.assertRaisesRegex(PostgresBackupError, "invalid PostgreSQL"):
                 create_backup("postgresql://[", archive)
+            _require_dsn("host value")
+            with self.assertRaisesRegex(PostgresBackupError, "invalid PostgreSQL"):
+                create_backup("host='unterminated", archive)
             allowed_output = Path(temporary_directory) / "allowed.dump"
 
             def dump_without_password_false_positive(
@@ -229,6 +233,9 @@ class PostgresBackupTests(unittest.TestCase):
                     ),
                     allowed_output,
                 )
+            _require_dsn("postgresql://secret.example/db?application_name=O'Reilly")
+            _require_dsn("host=database application_name = password")
+            _require_dsn(r"host=database application_name='escaped\\'value'")
             with self.assertRaisesRegex(PostgresBackupError, "client binary"):
                 create_backup("dsn", archive, pg_dump_binary="")
             with self.assertRaisesRegex(PostgresBackupError, "connection string"):
