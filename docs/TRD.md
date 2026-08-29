@@ -87,6 +87,9 @@ rejections remain stable `target_period_not_found` or `target_period_not_open`
 The list repository contract accepts a decoded `(recorded_at,
 late_adjustment_id)` cursor and bounded limit; the PostgreSQL adapter performs
 one ordered tenant-scoped keyset query with `limit + 1`.
+The application timestamp must be timezone-aware and not future-dated. The
+memory adapter serializes application and target-period lifecycle writes to
+preserve at-most-once behavior during concurrent application and close.
 
 ## Provider plane
 

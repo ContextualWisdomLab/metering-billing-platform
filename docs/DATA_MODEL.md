@@ -262,6 +262,9 @@ ordering invariants before storing a late-adjustment fact.
 The list read passes the decoded cursor and `limit + 1` to the ledger, and
 PostgreSQL evaluates one tenant-scoped ordered keyset query so the page never
 scans or hydrates the complete history.
+Application audit timestamps are timezone-aware and not future-dated. The
+memory adapter serializes application and target-period lifecycle writes while
+preserving the same replay identity.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

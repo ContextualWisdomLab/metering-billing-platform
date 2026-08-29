@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 from decimal import Decimal
 import unittest
 from unittest import mock
@@ -217,6 +219,162 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
                 accepted.as_contract_dict() | {"adjustment_amount": "not-a-decimal"}
             )
         )
+
+    def test_application_clock_requires_aware_non_future_audit_time(self) -> None:
+        """Injected clocks cannot create ambiguous or future audit facts."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "1.00",
+            "USD",
+            "provider:application-clock",
+            "sha256:" + "d" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        seed_adjustment_periods(ledger, adjustment)
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        for clock, message in (
+            (lambda: datetime(2026, 8, 17, 22, 0), "timezone-aware"),
+            (lambda: datetime.now(UTC) + timedelta(days=1), "not be in the future"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    LateAdjustmentApplicationService(ledger, clock=clock).apply_late_adjustment(
+                        TENANT_ONE,
+                        adjustment.late_adjustment_id,
+                        applied_by="operator:alice",
+                        authorization_reference="change:clock",
+                    )
+
+    def test_memory_concurrent_applications_are_at_most_once(self) -> None:
+        """Concurrent memory applications return one acceptance and replays."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "2.00",
+            "USD",
+            "provider:application-memory-race",
+            "sha256:" + "f" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        seed_adjustment_periods(ledger, adjustment)
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        barrier = Barrier(2)
+
+        class BarrierLedger:
+            """Force both service prechecks to observe no application."""
+
+            def __init__(self, delegate):
+                self.delegate = delegate
+
+            def find_late_adjustment_application(self, tenant_account_id, late_adjustment_id):
+                result = self.delegate.find_late_adjustment_application(
+                    tenant_account_id, late_adjustment_id
+                )
+                barrier.wait()
+                return result
+
+            def __getattr__(self, name):
+                return getattr(self.delegate, name)
+
+        shared = BarrierLedger(ledger)
+
+        def apply_once(worker: int) -> str:
+            return LateAdjustmentApplicationService(
+                shared,
+                clock=lambda: datetime(2026, 8, 29, 1, 2, 3, tzinfo=UTC),
+            ).apply_late_adjustment(
+                TENANT_ONE,
+                adjustment.late_adjustment_id,
+                applied_by=f"operator:memory_{worker}",
+                authorization_reference=f"change:memory_{worker}",
+            ).late_adjustment_application_outcome_code.value
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(apply_once, (0, 1)))
+        self.assertEqual(sorted(outcomes), ["accepted", "duplicate_replay"])
+        self.assertEqual(len(ledger.late_adjustment_applications), 1)
+
+    def test_memory_application_racing_target_close_rejects_new_fact(self) -> None:
+        """A target close cannot slip between application validation and insert."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "3.00",
+            "USD",
+            "provider:application-memory-close-race",
+            "sha256:" + "1" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        seed_adjustment_periods(ledger, adjustment)
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        target = ledger.get_billing_period(TENANT_ONE, adjustment.target_period_id)
+        assert target is not None
+        closed_target = target.advance(
+            BillingPeriodStatus.SOFT_CLOSED,
+            actor_reference="operator:closer",
+            authorization_reference="change:close-race",
+            reason="close target",
+            transitioned_at=datetime(2026, 8, 18, tzinfo=UTC),
+        )
+        target_checked = Event()
+        target_closed = Event()
+
+        class ClosingLedger:
+            """Close the target after the service's stale open read."""
+
+            def __init__(self, delegate):
+                self.delegate = delegate
+
+            def get_billing_period(self, tenant_reference, period_id):
+                result = self.delegate.get_billing_period(tenant_reference, period_id)
+                if period_id == adjustment.target_period_id:
+                    target_checked.set()
+                    self.assert_event(target_closed)
+                return result
+
+            @staticmethod
+            def assert_event(event: Event) -> None:
+                if not event.wait(timeout=5):
+                    raise AssertionError("target close did not complete")
+
+            def __getattr__(self, name):
+                return getattr(self.delegate, name)
+
+        shared = ClosingLedger(ledger)
+
+        def close_target() -> None:
+            if not target_checked.wait(timeout=5):
+                raise AssertionError("application did not check target")
+            ledger.insert_billing_period(closed_target)
+            target_closed.set()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            close_future = pool.submit(close_target)
+            result_future = pool.submit(
+                lambda: LateAdjustmentApplicationService(
+                    shared,
+                    clock=lambda: datetime(2026, 8, 29, 1, 2, 3, tzinfo=UTC),
+                ).apply_late_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    applied_by="operator:memory_close-race",
+                    authorization_reference="change:memory_close-race",
+                )
+            )
+            close_future.result()
+            result = result_future.result()
+        self.assertEqual(result.rejection_reason_code, "target_period_not_open")
+        self.assertEqual(len(ledger.late_adjustment_applications), 0)
 
     def test_http_application_and_rejection_contracts_fail_closed(self) -> None:
         """The nested command preserves tenant and audit-reference boundaries."""

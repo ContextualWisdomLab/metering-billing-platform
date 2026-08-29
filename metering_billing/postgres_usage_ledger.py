@@ -96,6 +96,7 @@ from metering_billing.usage_ledger import (
     StoredWebhookOutboxEvent,
     StoredWebhookSubscription,
     TenantAccount,
+    _validate_audit_timestamp,
     _require_tenant_scoped_reference,
     _resource_code,
     _single_urn_segment,
@@ -397,6 +398,7 @@ class PostgresUsageLedger:
             or not application.authorization_reference.strip()
         ):
             raise ValueError("authorization_reference must be non-empty")
+        _validate_audit_timestamp(application.applied_at, "applied_at")
         with self._cursor() as cursor:
             cursor.execute(
                 """

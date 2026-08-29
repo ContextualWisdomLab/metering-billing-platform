@@ -77,6 +77,10 @@ and maps missing or closed targets to `target_period_not_found` or
 tax, journal, provider state, or webhook.
 List reads pass the decoded cursor and `limit + 1` to the ledger; PostgreSQL
 applies the tenant-scoped keyset predicate and hydrates only those bounded rows.
+The memory adapter serializes application and period lifecycle writes so a
+concurrent application/close race cannot create a second acknowledgement or
+accept a new application for a closed target; application audit timestamps are
+timezone-aware and not future-dated.
 
 ## Usage ingestion
 

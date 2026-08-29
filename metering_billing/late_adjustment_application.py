@@ -22,6 +22,7 @@ from metering_billing.period_close import BillingPeriodStatus
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredLateAdjustmentApplication,
+    _validate_audit_timestamp,
     generate_record_id,
 )
 
@@ -175,7 +176,7 @@ class LateAdjustmentApplicationService:
             currency_code=adjustment.currency_code,
             applied_by=applied_by_text,
             authorization_reference=authorization_text,
-            applied_at=self._clock(),
+            applied_at=_validate_audit_timestamp(self._clock(), "applied_at"),
             late_adjustment_application_contract_version=(
                 LATE_ADJUSTMENT_APPLICATION_CONTRACT_VERSION
             ),
@@ -210,6 +211,8 @@ def _target_period_rejection_reason(
 ) -> LateAdjustmentApplicationRejectionReasonCode | None:
     """Map only the PostgreSQL trigger's target-lifecycle failures."""
     message = getattr(getattr(error, "diag", None), "message_primary", None)
+    if message is None and isinstance(error, ValueError):
+        message = str(error)
     return {
         "late adjustment application target period is missing": (
             LateAdjustmentApplicationRejectionReasonCode.TARGET_PERIOD_NOT_FOUND

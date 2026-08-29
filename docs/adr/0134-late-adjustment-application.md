@@ -35,6 +35,10 @@ Add an append-only, tenant-scoped `late_adjustment_application` fact:
   lifecycle, and ordering checks. Missing or closed targets return stable
   `target_period_not_found` or `target_period_not_open` result codes, while
   stored applications retain replay behavior after closure.
+- Application timestamps must be timezone-aware and not future-dated. The
+  memory adapter serializes application and target-period lifecycle writes so
+  concurrent application and close operations preserve the same at-most-once
+  boundary as the durable trigger.
 
 This fact does not mutate a billing period, usage event, rating run, tax
 assessment, journal proposal, provider state, or webhook outbox. Full

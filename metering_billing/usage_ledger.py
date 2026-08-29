@@ -14,10 +14,11 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
+from threading import RLock
 from types import ModuleType
-from typing import Callable
+from typing import Any, Callable
 from uuid import UUID
 
 from metering_billing.errors import RejectionReasonCode
@@ -31,6 +32,19 @@ from metering_billing.period_close import (
     BillingPeriodStatus,
     LateAdjustment,
 )
+
+
+def _validate_audit_timestamp(value: object, field_name: str) -> datetime:
+    """Require a timezone-aware audit instant that is not in the future."""
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise ValueError(f"{field_name} must be timezone-aware")
+    if value > datetime.now(UTC):
+        raise ValueError(f"{field_name} must not be in the future")
+    return value
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
 TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
@@ -1109,6 +1123,9 @@ class MemoryUsageLedger:
     )
     unapplied_cash_refund_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
+    )
+    _late_adjustment_application_lock: Any = field(
+        default_factory=RLock, repr=False, compare=False
     )
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
@@ -2910,6 +2927,11 @@ class MemoryUsageLedger:
 
     def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
         """Store one period and append only new lifecycle transitions."""
+        with self._late_adjustment_application_lock:
+            return self._insert_billing_period(period)
+
+    def _insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
+        """Store one period while the late-adjustment lifecycle lock is held."""
         self.require_tenant(period.tenant_reference)
         existing = self.billing_periods.get(period.period_id)
         if existing is not None:
@@ -3032,6 +3054,14 @@ class MemoryUsageLedger:
         self, application: StoredLateAdjustmentApplication
     ) -> StoredLateAdjustmentApplication:
         """Store one immutable application or return its identity replay."""
+        with self._late_adjustment_application_lock:
+            return self._insert_late_adjustment_application(application)
+
+    def _insert_late_adjustment_application(
+        self, application: StoredLateAdjustmentApplication
+    ) -> StoredLateAdjustmentApplication:
+        """Store one application while the lifecycle lock is held."""
+        _validate_audit_timestamp(application.applied_at, "applied_at")
         if application.late_adjustment_application_status != "applied":
             raise ValueError("late_adjustment_application_status must be applied")
         if CURRENCY_CODE_PATTERN.fullmatch(application.currency_code) is None:
