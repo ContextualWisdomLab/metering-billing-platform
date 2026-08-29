@@ -140,6 +140,7 @@ def _seed_smoke_ledger() -> UsageIngestionService:
     ledger = seed_ledger()
     for meter_code, unit_code, quality_code in (
         ("gen_ai_input_token", "token", "provider_reported"),
+        ("gen_ai_output_token", "token", "provider_reported"),
         ("document_byte", "byte", "locally_measured"),
         ("document_page", "page", "locally_measured"),
         ("document_ocr_page", "page", "locally_measured"),
