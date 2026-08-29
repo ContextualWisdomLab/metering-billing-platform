@@ -32,7 +32,7 @@ def create_tracer(environ: Mapping[str, str] | None = None) -> Tracer:
     enabled = settings.get(OTEL_ENABLED_ENVIRONMENT_VARIABLE, "").strip().lower()
     if enabled not in _ENABLED_VALUES:
         return trace.get_tracer(INSTRUMENTATION_SCOPE)
-    traces_endpoint = settings.get(OTEL_TRACES_ENDPOINT_ENVIRONMENT_VARIABLE)
+    traces_endpoint = settings.get(OTEL_TRACES_ENDPOINT_ENVIRONMENT_VARIABLE) or None
     base_endpoint = settings.get(OTEL_ENDPOINT_ENVIRONMENT_VARIABLE)
     endpoint = traces_endpoint or base_endpoint
     if not endpoint:
