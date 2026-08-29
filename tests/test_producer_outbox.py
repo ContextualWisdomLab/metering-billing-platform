@@ -120,6 +120,8 @@ class ProducerOutboxTests(unittest.TestCase):
             outbox = ProducerOutbox(path)
             outbox.close()
             self.assertTrue(path.is_file())
+            memory_outbox = ProducerOutbox(":memory:")
+            memory_outbox.close()
 
         for invalid in (None, "2026-08-28T12:00:00"):
             with self.assertRaises(ValueError):
