@@ -71,7 +71,8 @@ contextual-orchestrator usage
   journal or webhook, call a provider, or create a tax/statutory document.
 - The ledger read receives the decoded cursor and `page_limit + 1`; PostgreSQL
   evaluates the tenant-scoped recorded-at/ID keyset predicate in one ordered
-  query so `next_cursor` is derived only from a bounded result.
+  query so `next_cursor` is derived only from a bounded result, then performs
+  one bulk application-existence lookup for that page.
 
 ## Late-adjustment-application acceptance
 
@@ -84,6 +85,9 @@ contextual-orchestrator usage
   application requires the current target period to remain `open`; a stored
   application remains replayable after the target closes and returns its first
   writer's audit references and timestamp.
+- `applied_at` is timezone-aware and not future-dated. Memory application and
+  target-period lifecycle writes serialize so concurrent requests preserve
+  at-most-once application identity.
 - After application, late-adjustment item/list presentment reports
   `rate_late_adjustment`; before application it reports
   `apply_late_adjustment`. Unknown or cross-tenant facts return 404 and invalid

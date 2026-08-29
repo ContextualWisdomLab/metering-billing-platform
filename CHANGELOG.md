@@ -29,7 +29,8 @@
   `apply_late_adjustment` next action. Presentment does not apply, re-rate, or
   post the fact (ADR 0133). The read contract now passes the decoded cursor and
   bounded `limit + 1` to each ledger; PostgreSQL resolves one tenant-scoped
-  keyset query and hydrates only that bounded page.
+  keyset query and hydrates only that bounded page, followed by one bulk
+  application-existence lookup rather than one lookup per item.
 - Issue #87 now records a tenant-scoped immutable late-adjustment application
   acknowledgement in migration `0050`. The nested command is replay-safe,
   preserves the signed source amount/target/currency, and advances presentment

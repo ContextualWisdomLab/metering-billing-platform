@@ -11,7 +11,7 @@
 The current #87 work is stacked through PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172),
 with parent PR [#171](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/171).
 The implementation snapshots are parent `36bc3f2ad0a9ba298695812fc2c96831b1a1c2e6`
-and application `4b377dee9379b673675814ba7134cbd9edb77d30`; both PRs remain open
+and application `3a4513ff5def748f28646c2c928b2d121e48adc2`; both PRs remain open
 pending hosted checks and a qualifying independent approval. Local pass status is
 not merge evidence.
 
@@ -23,7 +23,9 @@ must be at least `soft_closed`; the target must be `open` and start no earlier
 than the source end. A new application rechecks and locks the target's latest
 append-only status, while a stored application remains replayable after target
 close and preserves its first writer audit data. The memory adapter enforces the
-same period state and tenant/order checks. Full local PostgreSQL,
+same period state and tenant/order checks, serializes application/close races,
+and validates aware non-future audit timestamps. Presentment uses one bulk
+application-existence lookup per bounded page. Full local PostgreSQL,
 repository-contract, and 100% statement/branch coverage checks pass on the
 respective branches. Applying or re-rating the fact, provider settlement
 ingestion, FOCUS 1.4 export, and statutory accounting remain open gaps.
