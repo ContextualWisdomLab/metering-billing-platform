@@ -13,7 +13,9 @@ delivered by another worker.
 
 ## Decision
 
-Add an append-only, tenant-scoped `late_adjustment_application` fact:
+Add an append-only, tenant-scoped `late_adjustment_application` fact. Migrations
+`0050`/`0051` keep the trigger definition current without rewriting an applied
+migration checksum:
 
 - `POST /v1/late-adjustments/{late_adjustment_id}/applications` requires
   `applied_by` and `authorization_reference`;

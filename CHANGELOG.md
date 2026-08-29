@@ -32,7 +32,7 @@
   keyset query and hydrates only that bounded page, followed by one bulk
   application-existence lookup rather than one lookup per item.
 - Issue #87 now records a tenant-scoped immutable late-adjustment application
-  acknowledgement in migration `0050`. The nested command is replay-safe,
+  acknowledgement in migrations `0050`/`0051`. The nested command is replay-safe,
   preserves the signed source amount/target/currency, and advances presentment
   to `rate_late_adjustment`; first application still requires the target period
   to be open, while a stored application replays after that period closes and

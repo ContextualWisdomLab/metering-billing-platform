@@ -10,12 +10,12 @@
 
 The current #87 work is stacked through PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172),
 with parent PR [#171](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/171).
-The implementation snapshots are parent `36bc3f2ad0a9ba298695812fc2c96831b1a1c2e6`
-and application `3a4513ff5def748f28646c2c928b2d121e48adc2`; both PRs remain open
+The implementation snapshots are parent `cad00706d4da01029907b4add8649f81dcae6392`
+and application `6550105ac8652f7b72e76270af61f41e2fc2e04d`; both PRs remain open
 pending hosted checks and a qualifying independent approval. Local pass status is
 not merge evidence.
 
-This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`, the
+This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`/`0051`, the
 `LateAdjustment` and application contracts, tenant-scoped presentment reads,
 bounded recorded-at/ID keyset pagination, and a durable application
 acknowledgement for late usage, correction, and reversal facts. The source period

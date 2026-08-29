@@ -50,7 +50,8 @@ contextual-orchestrator usage
   and period transitions are never rewritten.
 - PostgreSQL migrations `0048`/`0049` enforce tenant-scoped foreign keys,
   lifecycle ordering, target openness, replay conflict handling, and
-  update/delete immutability. Application,
+  update/delete immutability; migrations `0050`/`0051` enforce application
+  source equality, target locking, replay rechecks, and audit-time bounds. Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
   posting remain separate workflows.
 
