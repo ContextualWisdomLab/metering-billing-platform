@@ -144,6 +144,8 @@ class ProducerOutbox:
             raise ValueError("max_backoff_seconds must be a positive integer")
         if type(lease_seconds) is not int or lease_seconds < 1:
             raise ValueError("lease_seconds must be a positive integer")
+        if str(database_path) != ":memory:":
+            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(
             str(database_path), check_same_thread=False, isolation_level=None
         )

@@ -107,7 +107,7 @@ class ProducerOutboxTests(unittest.TestCase):
 
     def test_configuration_and_private_timestamp_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "outbox.sqlite3"
+            path = Path(directory) / "nested" / "outbox.sqlite3"
             for name, value in (
                 ("max_attempts", 0),
                 ("base_backoff_seconds", 0),
@@ -119,6 +119,7 @@ class ProducerOutboxTests(unittest.TestCase):
                     ProducerOutbox(path, **kwargs)
             outbox = ProducerOutbox(path)
             outbox.close()
+            self.assertTrue(path.is_file())
 
         for invalid in (None, "2026-08-28T12:00:00"):
             with self.assertRaises(ValueError):
