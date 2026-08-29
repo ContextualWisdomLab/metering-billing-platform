@@ -104,6 +104,14 @@ class BillingPeriodTests(unittest.TestCase):
         with self.assertRaises(PeriodCloseValidationError):
             create_billing_period(
                 "urn:cwl:tenant_001",
+                datetime(2026, 8, 1, tzinfo=UTC),  # type: ignore[arg-type]
+                date(2026, 9, 1),
+                opened_by="operator:finance_001",
+                opened_at=OPENED_AT,
+            )
+        with self.assertRaises(PeriodCloseValidationError):
+            create_billing_period(
+                "urn:cwl:tenant_001",
                 "2026-08-01",  # type: ignore[arg-type]
                 date(2026, 9, 1),
                 opened_by="operator:finance_001",
@@ -378,6 +386,8 @@ class FxContractTests(unittest.TestCase):
             replace(conversion, rate=Decimal("0"))
         with self.assertRaises(PeriodCloseValidationError):
             replace(conversion, rate_precision=3)
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(conversion, quote_amount=Decimal("1.234"))
         with self.assertRaises(PeriodCloseValidationError):
             replace(conversion, converted_at=datetime(2026, 8, 1))
 

@@ -210,7 +210,12 @@ class BillingPeriod:
         if not isinstance(self.period_id, UUID):
             raise PeriodCloseValidationError("period_id must be a UUID")
         _tenant_reference(self.tenant_reference)
-        if not isinstance(self.period_start, date) or not isinstance(self.period_end, date):
+        if (
+            not isinstance(self.period_start, date)
+            or isinstance(self.period_start, datetime)
+            or not isinstance(self.period_end, date)
+            or isinstance(self.period_end, datetime)
+        ):
             raise PeriodCloseValidationError("period_start and period_end must be dates")
         if self.period_start >= self.period_end:
             raise PeriodCloseValidationError("period_start must precede period_end")
@@ -421,7 +426,7 @@ class FxConversion:
         object.__setattr__(self, "quote_amount", _signed_decimal(self.quote_amount, "quote_amount"))
         _currency(self.source_currency, "source_currency")
         _currency(self.quote_currency, "quote_currency")
-        _minor_units(self.quote_minor_units)
+        minor_units = _minor_units(self.quote_minor_units)
         object.__setattr__(self, "rate", _non_negative_decimal(self.rate, "rate"))
         if self.rate <= 0:
             raise PeriodCloseValidationError("rate must be greater than zero")
@@ -431,6 +436,8 @@ class FxConversion:
             or self.rate_precision < _rate_scale(self.rate)
         ):
             raise PeriodCloseValidationError("rate_precision must cover the exact rate scale")
+        if self.quote_amount != self.quote_amount.quantize(Decimal(1).scaleb(-minor_units)):
+            raise PeriodCloseValidationError("quote_amount exceeds quote_minor_units scale")
         _aware_datetime(self.converted_at, "converted_at")
 
     def as_contract_dict(self) -> dict[str, object]:
