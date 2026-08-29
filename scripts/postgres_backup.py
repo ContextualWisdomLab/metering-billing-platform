@@ -9,6 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import urlsplit
 
 
 class PostgresBackupError(RuntimeError):
@@ -16,9 +17,17 @@ class PostgresBackupError(RuntimeError):
 
 
 def _require_dsn(dsn: str) -> None:
-    """Reject an absent connection string without echoing its value."""
+    """Reject absent or password-bearing connection strings."""
     if not isinstance(dsn, str) or not dsn.strip():
         raise PostgresBackupError("a non-empty PostgreSQL connection string is required")
+    try:
+        uri_contains_password = urlsplit(dsn).password is not None
+    except ValueError as error:
+        raise PostgresBackupError("invalid PostgreSQL connection string") from error
+    if "password=" in dsn.casefold() or uri_contains_password:
+        raise PostgresBackupError(
+            "PostgreSQL connection strings must omit passwords; use a secret-managed libpq boundary"
+        )
 
 
 def _require_binary(binary: str, operation: str) -> None:

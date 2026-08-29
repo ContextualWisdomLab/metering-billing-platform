@@ -202,6 +202,12 @@ class PostgresBackupTests(unittest.TestCase):
             archive.write_bytes(b"archive")
             with self.assertRaisesRegex(PostgresBackupError, "connection string"):
                 create_backup(" ", archive)
+            with self.assertRaisesRegex(PostgresBackupError, "must omit passwords"):
+                create_backup("postgresql://user:secret@host/database", archive)
+            with self.assertRaisesRegex(PostgresBackupError, "must omit passwords"):
+                create_backup("host=database password=secret", archive)
+            with self.assertRaisesRegex(PostgresBackupError, "invalid PostgreSQL"):
+                create_backup("postgresql://[", archive)
             with self.assertRaisesRegex(PostgresBackupError, "client binary"):
                 create_backup("dsn", archive, pg_dump_binary="")
             with self.assertRaisesRegex(PostgresBackupError, "connection string"):

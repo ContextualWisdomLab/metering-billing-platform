@@ -12,8 +12,9 @@ separate incident record.
 
 ## Preconditions
 
-- Use an approved secret-manager or libpq environment boundary. Do not commit,
-  paste, or record a DSN, password, certificate, or raw database payload.
+- Use an approved secret-manager, `.pgpass`, or libpq service boundary. The
+  `--dsn` value must omit passwords; do not commit, paste, or record a DSN,
+  password, certificate, or raw database payload.
 - Confirm the source and target environment, tenant scope, retention policy,
   maintenance window, and the intended RPO/RTO measurement method.
 - Install `pg_dump` and `pg_restore` from the PostgreSQL client version
@@ -27,7 +28,7 @@ umask 077
 mkdir -p "$BACKUP_DIR"
 BACKUP_ARCHIVE="$BACKUP_DIR/metering-billing-$(date -u +%Y%m%dT%H%M%SZ).dump"
 uv run python scripts/postgres_backup.py backup \
-  --dsn "$DATABASE_URL" \
+  --dsn "$DATABASE_TARGET_WITHOUT_PASSWORD" \
   --output "$BACKUP_ARCHIVE"
 uv run python scripts/postgres_backup.py verify \
   --archive "$BACKUP_ARCHIVE"
@@ -50,7 +51,7 @@ client output that could contain connection or payload data.
 
 ```sh
 uv run python scripts/postgres_backup.py restore \
-  --dsn "$RESTORE_DATABASE_URL" \
+  --dsn "$RESTORE_DATABASE_TARGET_WITHOUT_PASSWORD" \
   --archive "$BACKUP_ARCHIVE"
 ```
 
