@@ -96,6 +96,14 @@ class ProviderCapabilityTests(unittest.TestCase):
             at=NOW,
         )
         self.assertTrue(stored.matches(request))
+        self.assertTrue(
+            ProviderCapabilityManifest(
+                "unscoped_provider",
+                ("payment_processor",),
+                ("hosted_checkout",),
+                NOW - timedelta(days=1),
+            ).matches(request)
+        )
         for field, value in (
             ("currency_code", "EUR"),
             ("jurisdiction_code", "DE"),

@@ -226,7 +226,10 @@ class ProviderCapabilityManifest:
             (request.contract_type_code, self.contract_type_codes),
             (request.tenant_policy_code, self.tenant_policy_codes),
         )
-        return all(value is None or value in supported for value, supported in dimensions)
+        return all(
+            value is None or not supported or value in supported
+            for value, supported in dimensions
+        )
 
 
 @dataclass(frozen=True)
