@@ -236,7 +236,7 @@ class ProviderCapabilityTests(unittest.TestCase):
         registry = ProviderCapabilityRegistry()
         request = ProviderRouteRequest(("hosted_checkout",), at=NOW)
         ready = Barrier(2)
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def register() -> None:
             try:
@@ -245,7 +245,7 @@ class ProviderCapabilityTests(unittest.TestCase):
                     registry.register(
                         manifest(provider_code=f"provider_{index}")
                     )
-            except BaseException as error:  # pragma: no cover - failure is asserted below
+            except Exception as error:  # pragma: no cover - failure is asserted below
                 errors.append(error)
 
         def read() -> None:
@@ -255,9 +255,9 @@ class ProviderCapabilityTests(unittest.TestCase):
                     try:
                         registry.select(request)
                     except ProviderRoutingError:
-                        pass
+                        continue  # Expected while registration changes the available providers.
                     registry.active_manifests(NOW)
-            except BaseException as error:  # pragma: no cover - failure is asserted below
+            except Exception as error:  # pragma: no cover - failure is asserted below
                 errors.append(error)
 
         registration = Thread(target=register)
