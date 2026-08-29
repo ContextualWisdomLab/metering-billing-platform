@@ -54,6 +54,8 @@ issued invoice snapshots are never overwritten.
 - Migration `0060` rejects amounts that cannot be represented by
   `numeric(38,12)`, validates direct issued-line draft/amount/payer equality,
   and permits post-issue collection only from the frozen inclusive total.
+- Migration `0061` uses deferred PostgreSQL checks to require every linked
+  composition to appear once in issued lines and in the frozen exclusive total.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not
   part of the replay identity. Historical stored v1 invoices remain readable

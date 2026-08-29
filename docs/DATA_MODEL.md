@@ -291,6 +291,9 @@ Migration `0060` rejects composition amounts that cannot round-trip through
 `numeric(38,12)`, validates late-adjustment issued lines against their
 composition draft/amount/payer, and lets a post-issue collection row copy only
 the frozen issued inclusive total.
+Migration `0061` adds deferred PostgreSQL checks requiring every composition
+linked to an issued draft to have one matching late-adjustment line and to be
+included in the issued exclusive total.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a

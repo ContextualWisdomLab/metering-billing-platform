@@ -9,7 +9,7 @@
 ## Current working snapshot (2026-08-30)
 
 The #87 work is stacked from exact head
-`837db28` of PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174)
+`bd06e17` of PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174)
 on branch `feat/late-adjustment-invoice-intent-20260830`; PR #173 remains the
 base review.
 PR #173 remains open with no qualifying independent approval; mergeability and
@@ -20,10 +20,11 @@ composition slice; its initial implementation commit is
 `4201a55`; the implementation review-fix commits are
 `1c0e824`, `32693becf9cbaf4a8d09b2e1c47ad639a5f64289`, and
 `0d58ddcbeea2c3c2d3424346df12f6e9afab6325`, and
-`837db28`.
+`837db28`, and
+`bd06e17`.
 
 The implemented #87 path now covers PostgreSQL migrations
-`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`/`0059`/`0060`, the `LateAdjustment`,
+`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`, the `LateAdjustment`,
 application, rating-consumption, and invoice-adjustment contracts,
 tenant-scoped presentment reads, and durable application/rating/composition
 facts for late usage, correction, and reversal evidence. Composition now
@@ -37,8 +38,9 @@ totals, rejects stale tax assessments pending reassessment, preserves large exac
 totals before storage validation, and rejects a projected issued invoice above
 10,000 lines. Direct composition persistence after downstream capture is blocked
 by migration `0058`, enforces composition contract version 2 through migration
-`0059`, `0060`, and historical v1 issued invoices remain readable through the
-v2 presentment envelope; post-issue collection uses the frozen adjusted total.
+`0059`, `0060`, `0061`, and historical v1 issued invoices remain readable through
+the v2 presentment and issuance-replay envelopes; post-issue collection uses the
+frozen adjusted total and direct issued persistence cannot omit linked lines.
 The source period
 must be at least `soft_closed`; the target must be `open` and start no earlier
 than the source end; composition requires a rated adjustment and an unissued

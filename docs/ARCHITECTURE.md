@@ -82,7 +82,8 @@ journal, tax, or credit downstream facts. Composition and collection,
 tax-assessment, journal-proposal, and credit-adjustment writes share the
 invoice-draft lock. After a composition is stored, those downstream writes
 return `invoice_draft_has_late_adjustment` without persisting; migrations
-`0057`, `0058`, and `0060` enforce both orderings for direct PostgreSQL inserts while
+`0057`, `0058`, `0060`, and `0061` enforce both orderings and issued-invoice
+completeness for direct PostgreSQL inserts while
 allowing an existing composition replay. Issuance preserves exact totals before
 storage validation, expands the local decimal context for bulk exact sums, and
 rejects more than 10,000 projected lines. Migration `0059` fails closed on legacy
@@ -90,6 +91,8 @@ composition rows without payer evidence, upgrades compatible version metadata,
 and enforces composition contract version 2 in PostgreSQL. Migration `0060`
 rejects composition precision loss, validates direct issued-line draft/amount/
 payer equality, and lets collection start after issuance from the frozen total.
+Migration `0061` defers the completeness check until all direct issued lines are
+inserted, rejecting omitted compositions or stale signed totals.
 Presentment then reports `issue_invoice`. `IssuedInvoiceService` locks the
 draft, consumes all linked composition facts exactly once, and freezes each as
 a signed `late_adjustment` issued-invoice line while adjusting the untaxed

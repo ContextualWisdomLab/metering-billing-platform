@@ -109,12 +109,14 @@ preventing direct persistence from bypassing the application guard. Issuance
 preserves exact representable totals before checking `numeric(38,12)`, uses a
 count-aware local decimal context for bulk exact summation, and rejects a
 projected result above 10,000 lines. Migration `0059` fails closed on legacy
-composition rows without payer evidence, upgrades compatible version metadata,
-and enforces contract version 2 for direct PostgreSQL inserts. Migration `0060`
-also rejects direct composition precision loss, binds late-adjustment issued
-lines to their composition draft/amount/payer evidence, and allows collection
-after issuance only when its currency and outstanding amount equal the frozen
-issued snapshot.
+    composition rows without payer evidence, upgrades compatible version metadata,
+    and enforces contract version 2 for direct PostgreSQL inserts. Migration `0060`
+    also rejects direct composition precision loss, binds late-adjustment issued
+    lines to their composition draft/amount/payer evidence, and allows collection
+    after issuance only when its currency and outstanding amount equal the frozen
+    issued snapshot. Migration `0061` defers issued-invoice completeness checks
+    until the header and all lines are present, requiring every linked composition
+    and signed amount to be represented.
 
 ## Provider plane
 
