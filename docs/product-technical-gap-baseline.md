@@ -55,9 +55,9 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 > durable credential, and k6 baseline work are on `develop`. Issue #83 is
 > closed; the remaining open gap backlog is #84–#91. At this assessment,
 > all thirteen open PRs are `BLOCKED`; #147 and #161 are merged only into
-> their respective feature parents, not `develop`. The live inventory has zero qualifying approvals, and
-> current internal review threads observed in this audit are resolved. None
-> is merge evidence for `develop`.
+> their respective feature parents, not `develop`. The live inventory has zero
+> qualifying approvals. Review threads and Checks remain GitHub-authoritative
+> per PR; none is merge evidence for `develop`.
 
 ### Default branch
 
@@ -169,14 +169,13 @@ Work can be stacked when public contracts are stable, but each PR must remain in
 
 ## Current pull-request inventory
 
-GitHub reports **fifteen open pull requests** on 2026-08-29. The latest merged
+GitHub reports **thirteen open pull requests** on 2026-08-29. The latest merged
 change is PR #141; the following open PR heads are current snapshots and are
 not merge evidence:
 
 | PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
-| #141 | Compose deployment, threaded web tier, durable credentials, and measured k6 baseline for #84 | `develop` | merged 2026-08-26 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` |
-| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | `d183c4b04e201532f79014ee7268aede84aa669d`; open, blocked after the baseline refresh; hosted checks re-ran, zero qualifying approvals |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | open, blocked; this self-authored inventory intentionally omits a fixed head for #142; query GitHub for its exact current head, Checks, reviews, and merge state; zero qualifying approvals observed in this assessment |
 | #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
 | #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required; implementation, security, coverage, Noema, and OpenCode checks passed; zero qualifying approvals |
 | #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
@@ -188,7 +187,7 @@ not merge evidence:
 | #157 | Validated incident runbooks for #91 | `develop` | `38c8e46a8a4721cf123b6f075af61d42731094a0`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
 | #158 | Exact-head release evidence manifest for #91 | `develop` | `c55a1925c9063da727fc25dd42d1cf2810e6c587`; open, blocked, no formal review decision; Repository contracts passed and remaining hosted checks are re-running after the latest push; zero qualifying approvals |
 | #159 | PostgreSQL backup and restore rehearsal for #84 | `develop` | `35a1e467b6b6dd77ab5594d3adcbc2293dc9af67`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
-| #160 | Provider capability routing foundation for #86 | `develop` | `c53e3c981dff65070e908f93d24664afc837db8c`; open, blocked after the #161 stacked merge and review fixes; hosted checks are re-running, zero qualifying approvals |
+| #160 | Provider capability routing foundation for #86 | `develop` | `b06bf5cfcb42592fcedf0c49afa0b7ec3c46ba9c`; open, blocked after the #161 stacked merge and review fixes; hosted checks are re-running after the concurrent-test quality fix, zero qualifying approvals |
 
 PRs #147 (durable producer outbox) and #161 (provider-sticky object mappings)
 merged into their feature-parent branches on 2026-08-29. PRs #148 (Rust SDK)
