@@ -97,6 +97,7 @@ from metering_billing.issued_invoice_void import (
 )
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.period_close import (
+    _NEXT_ACTIONS,
     ReconciliationException,
     ReconciliationExceptionCode,
     ReconciliationEvidence,
@@ -553,6 +554,22 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, matched), matched)
         self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, exception), exception)
         self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, exception), exception)
+        changed_exception_list = replace(
+            exception,
+            exceptions=exception.exceptions
+            + (
+                ReconciliationException(
+                    ReconciliationExceptionCode.QUANTITY_MISMATCH,
+                    _NEXT_ACTIONS[ReconciliationExceptionCode.QUANTITY_MISMATCH],
+                ),
+            ),
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_line(TENANT_ONE, changed_exception_list)
+        self.assertEqual(
+            self.ledger.get_reconciliation_line(TENANT_ONE, exception.reconciliation_line_id),
+            exception,
+        )
         expanded_exception = ReconciliationLine(
             reconciliation_line_id=uuid4(),
             period_id=period.period_id,
@@ -572,7 +589,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             exceptions=(
                 ReconciliationException(
                     ReconciliationExceptionCode.TAX_MISMATCH,
-                    "inspect provider tax document",
+                    _NEXT_ACTIONS[ReconciliationExceptionCode.TAX_MISMATCH],
                 ),
             ),
             assessed_at=CATALOG_START + timedelta(minutes=4, seconds=1),
@@ -746,6 +763,50 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_line(TENANT_ONE, missing_period_line)
+        immutable_mutations = (
+            (
+                "UPDATE billing_core.billing_period_transition "
+                "SET transition_reason = 'rewrite' WHERE transition_id = %s",
+                (hard_closed.transitions[0].transition_id,),
+            ),
+            (
+                "DELETE FROM billing_core.billing_period_transition WHERE transition_id = %s",
+                (hard_closed.transitions[0].transition_id,),
+            ),
+            (
+                "UPDATE billing_core.reconciliation_line "
+                "SET provider_account_reference = 'provider:rewrite' "
+                "WHERE reconciliation_line_id = %s",
+                (matched.reconciliation_line_id,),
+            ),
+            (
+                "DELETE FROM billing_core.reconciliation_line WHERE reconciliation_line_id = %s",
+                (matched.reconciliation_line_id,),
+            ),
+            (
+                "UPDATE billing_core.reconciliation_evidence "
+                "SET evidence_reference = 'urn:cwl:evidence:rewrite' WHERE evidence_id = %s",
+                (evidence.evidence_id,),
+            ),
+            (
+                "DELETE FROM billing_core.reconciliation_evidence WHERE evidence_id = %s",
+                (evidence.evidence_id,),
+            ),
+            (
+                "UPDATE billing_core.reconciliation_resolution "
+                "SET resolution_reason = 'rewrite' WHERE resolution_id = %s",
+                (resolution.resolution_id,),
+            ),
+            (
+                "DELETE FROM billing_core.reconciliation_resolution WHERE resolution_id = %s",
+                (resolution.resolution_id,),
+            ),
+        )
+        for statement, parameters in immutable_mutations:
+            with self.subTest(statement=statement.split()[0:2]):
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    with self.connection.transaction():
+                        self.connection.execute(statement, parameters)
         with self.assertRaises(KeyError):
             self.ledger.list_reconciliation_lines("urn:cwl:missing_tenant")
 

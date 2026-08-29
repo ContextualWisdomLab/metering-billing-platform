@@ -592,6 +592,9 @@ def _validate_node(
         return [f"{path}: expected {expected_type}"]
 
     errors: list[str] = []
+    if "allOf" in schema:
+        for branch in schema["allOf"]:
+            errors.extend(_validate_node(root_schema, branch, instance, path))
     if "enum" in schema and instance not in schema["enum"]:
         errors.append(f"{path}: value is not in the allowed enumeration")
     if "const" in schema and instance != schema["const"]:
@@ -682,6 +685,10 @@ def _validate_array(
         errors.append(f"{path}: array has fewer than minItems")
     if maximum_items is not None and len(instance) > maximum_items:
         errors.append(f"{path}: array has more than maxItems")
+    prefix_items = schema.get("prefixItems", [])
+    for index, item_schema in enumerate(prefix_items):
+        if index < len(instance):
+            errors.extend(_validate_node(root_schema, item_schema, instance[index], f"{path}[{index}]"))
     if schema.get("uniqueItems") and len({_canonical_value(item) for item in instance}) != len(instance):
         errors.append(f"{path}: array items must be unique")
     item_schema = schema.get("items")

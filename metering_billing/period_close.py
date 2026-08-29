@@ -606,6 +606,8 @@ class ReconciliationException:
         except ValueError as error:
             raise PeriodCloseValidationError("reconciliation exception code is unsupported") from error
         object.__setattr__(self, "exception_code", code)
+        if self.next_action != _NEXT_ACTIONS[code]:
+            raise PeriodCloseValidationError("next_action must match the reconciliation exception code")
         _reference(self.next_action, "next_action")
 
     def as_contract_dict(self) -> dict[str, object]:

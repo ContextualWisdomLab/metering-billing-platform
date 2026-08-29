@@ -6,7 +6,7 @@ Accepted for the first implementation slice of issue #87.
 
 ## Decision
 
-Add immutable, side-effect-free Python contracts for three facts that later
+Add immutable, side-effect-free Python contracts for five facts that later
 PostgreSQL/provider services can persist atomically:
 
 1. `BillingPeriod` advances only through `open → soft_closed → reconciled →
@@ -22,11 +22,15 @@ PostgreSQL/provider services can persist atomically:
    deterministic comparison reports currency, price, fee, or settlement
    exceptions with a next action; provider values never overwrite internal
    expectation.
+4. `ReconciliationEvidence` binds one typed exception to a source reference,
+   SHA-256 digest, capture operator, and capture time.
+5. `ReconciliationResolution` records a resolved or waived exception with an
+   owner, reason, evidence reference, and distinct maker and checker.
 
 The contracts are published as Draft 2020-12 schemas and expose no database,
-provider, or HTTP side effects. Persistence, maker-checker resolution,
-late-event adjustment, FOCUS 1.4 export, and period-wide reconciliation remain
-follow-up slices of #87.
+provider, or HTTP side effects. Persistence of these immutable facts,
+late-event adjustment, FOCUS 1.4 export, maker-checker workflow orchestration,
+and period-wide reconciliation remain follow-up slices of #87.
 
 The published validators also reconstruct the domain objects after schema
 validation, so lifecycle continuity, positive FX rates, exact conversion
