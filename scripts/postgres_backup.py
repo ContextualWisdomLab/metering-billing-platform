@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Sequence
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 
 class PostgresBackupError(RuntimeError):
@@ -21,10 +22,18 @@ def _require_dsn(dsn: str) -> None:
     if not isinstance(dsn, str) or not dsn.strip():
         raise PostgresBackupError("a non-empty PostgreSQL connection string is required")
     try:
-        uri_contains_password = urlsplit(dsn).password is not None
+        parsed_dsn = urlsplit(dsn)
+        keyword_parts = shlex.split(dsn)
     except ValueError as error:
         raise PostgresBackupError("invalid PostgreSQL connection string") from error
-    if "password=" in dsn.casefold() or uri_contains_password:
+    uri_contains_password = parsed_dsn.password is not None or any(
+        key.casefold() == "password"
+        for key, _value in parse_qsl(parsed_dsn.query, keep_blank_values=True)
+    )
+    keyword_contains_password = any(
+        part.partition("=")[0].casefold() == "password" for part in keyword_parts
+    )
+    if uri_contains_password or keyword_contains_password:
         raise PostgresBackupError(
             "PostgreSQL connection strings must omit passwords; use a secret-managed libpq boundary"
         )

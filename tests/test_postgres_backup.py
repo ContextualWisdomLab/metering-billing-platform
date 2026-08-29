@@ -206,8 +206,29 @@ class PostgresBackupTests(unittest.TestCase):
                 create_backup("postgresql://user:secret@host/database", archive)
             with self.assertRaisesRegex(PostgresBackupError, "must omit passwords"):
                 create_backup("host=database password=secret", archive)
+            with self.assertRaisesRegex(PostgresBackupError, "must omit passwords"):
+                create_backup("host=database password = secret", archive)
             with self.assertRaisesRegex(PostgresBackupError, "invalid PostgreSQL"):
                 create_backup("postgresql://[", archive)
+            allowed_output = Path(temporary_directory) / "allowed.dump"
+
+            def dump_without_password_false_positive(
+                command: tuple[str, ...], **_: object
+            ) -> subprocess.CompletedProcess[str]:
+                Path(command[command.index("--file") + 1]).write_bytes(b"archive")
+                return self._result()
+
+            with unittest.mock.patch(
+                "scripts.postgres_backup.subprocess.run",
+                side_effect=dump_without_password_false_positive,
+            ):
+                self.assertEqual(
+                    create_backup(
+                        "host=database application_name='password=rotation'",
+                        allowed_output,
+                    ),
+                    allowed_output,
+                )
             with self.assertRaisesRegex(PostgresBackupError, "client binary"):
                 create_backup("dsn", archive, pg_dump_binary="")
             with self.assertRaisesRegex(PostgresBackupError, "connection string"):
