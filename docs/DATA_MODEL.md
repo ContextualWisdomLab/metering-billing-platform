@@ -283,7 +283,10 @@ immutable `late_adjustment_invoice_adjustment` already exists. Migration
 direct composition after a downstream fact while allowing an existing
 composition identity to replay. These are the database counterparts to the
 service guards and make ordering safe for direct PostgreSQL persistence and
-concurrent writers.
+concurrent writers. Migration `0059` fails closed if a legacy version-1
+composition lacks billing-account evidence; otherwise it upgrades only the
+contract metadata to version 2 and adds an exact-version check constraint.
+Application and direct PostgreSQL writes use the same version-2 constant.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a

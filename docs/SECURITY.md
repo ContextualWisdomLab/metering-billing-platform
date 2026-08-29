@@ -68,7 +68,12 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
   `invoice_draft_has_late_adjustment`; the draft lock and PostgreSQL migration
   `0057` prevent stale downstream capture. Migration `0058` applies the same
   tenant-scoped lock to direct composition inserts after an existing downstream
-  fact and preserves identity replays.
+  fact and preserves identity replays. Migration `0059` fails closed on legacy
+  compositions without payer evidence, upgrades compatible version metadata,
+  and enforces composition contract version 2.
+- Composition or direct persistence with a contract version other than 2 is
+  rejected; stored v1 issued-invoice snapshots are upgraded only at the
+  presentment envelope and are not rewritten.
 - Draft with no single tenant-scoped payer:
   `invoice_draft_billing_account_not_found` or
   `invoice_draft_billing_account_ambiguous`

@@ -46,6 +46,11 @@ issued invoice snapshots are never overwritten.
   after an existing downstream fact, while allowing an existing composition
   identity to replay. Issuance preserves exact representable totals and rejects
   more than 10,000 projected lines.
+- Composition writes require contract version 2. Migration `0059` fails closed
+  for legacy composition rows without billing-account evidence, upgrades only
+  compatible version metadata, and then enforces the version in PostgreSQL.
+  Historical v1 issued-invoice snapshots remain readable because presentment
+  upgrades only the response envelope.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not
   part of the replay identity. Historical stored v1 invoices remain readable

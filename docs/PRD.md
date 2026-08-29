@@ -52,9 +52,9 @@ contextual-orchestrator usage
   lifecycle ordering, target openness, replay conflict handling, and
   update/delete immutability. Migrations `0050`/`0052` also require the target
   to still be open when first applying the fact while preserving replays.
-  Migrations `0054`/`0056`/`0057`/`0058` protect composition evidence, selected
-  billing-account identity, and the same-draft downstream write boundary in
-  either write order.
+  Migrations `0054`/`0056`/`0057`/`0058`/`0059` protect composition evidence,
+  selected billing-account identity, the same-draft downstream write boundary
+  in either write order, and the version-2 contract invariant.
   Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
   posting remain separate workflows.
@@ -128,7 +128,9 @@ contextual-orchestrator usage
   rejected after an existing collection, tax, journal, or credit fact, while
   an existing composition remains replayable. Issued invoices reject more than
   10,000 projected lines and preserve exact representable totals before the
-  `numeric(38,12)` check. All three write routes return HTTP 422 for rejected
+  `numeric(38,12)` check. Migration `0059` upgrades legacy composition metadata
+  only when payer evidence is present, fails closed otherwise, and then enforces
+  version 2. All three write routes return HTTP 422 for rejected
   command results, including missing tenant or source records.
 - After composition, late-adjustment presentment reports `issue_invoice`.
   The command does not rewrite the invoice draft, issue an invoice, calculate
@@ -276,6 +278,7 @@ contextual-orchestrator usage
 - A draft with a linked late-adjustment composition and an existing tax assessment rejects `late_adjustment_tax_reassessment_required` until tax reassessment is implemented; the stale tax snapshot is never reused.
 - Composition rejects drafts already captured by a collection case, journal proposal, tax assessment, or credit adjustment. Drafts with no billing account or multiple billing accounts fail closed rather than fabricating a tenant payer.
 - Issued-invoice and presentment line contracts are version 2; `line_type` is required, usage lines are non-negative and cannot carry a composition ID, and late-adjustment lines require a non-zero signed total plus their composition ID.
+- Late-adjustment composition persistence accepts only contract version 2. Migration `0059` fails closed on legacy rows without billing-account evidence, upgrades compatible version metadata, and enforces the same invariant in PostgreSQL; stored v1 issued-invoice snapshots remain readable through presentment without rewriting their facts.
 - A known stored issued invoice presents one tenant-scoped statement with identity, draft source, frozen totals, lines, `issued_at`, optional `due_at`, optional stored `tax_assessment_id` when the draft assessment amounts still match those totals, and `next_operator_action` (`collect`).
 - `GET /v1/issued-invoices/{issued_invoice_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/issued-invoices` lists summaries as `{issued_invoices, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{issued_invoice_id}`.

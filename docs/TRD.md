@@ -106,8 +106,11 @@ composition exists, they reject with `invoice_draft_has_late_adjustment`
 without writing a stale fact. Migrations `0057` and `0058` repeat both orderings
 in PostgreSQL `BEFORE INSERT` triggers, preserving composition replays while
 preventing direct persistence from bypassing the application guard. Issuance
-preserves exact representable totals before checking `numeric(38,12)` and
-rejects a projected result above 10,000 lines.
+preserves exact representable totals before checking `numeric(38,12)`, uses a
+count-aware local decimal context for bulk exact summation, and rejects a
+projected result above 10,000 lines. Migration `0059` fails closed on legacy
+composition rows without payer evidence, upgrades compatible version metadata,
+and enforces contract version 2 for direct PostgreSQL inserts.
 
 ## Provider plane
 

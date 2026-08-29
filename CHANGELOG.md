@@ -68,6 +68,11 @@
   rounding, rejects more than 10,000 projected lines, and maps a concurrent
   composition identity conflict to its documented rejection code. Historical
   stored v1 issued invoices remain readable through the v2 presentment envelope.
+- Issue #87 now makes late-adjustment composition version 2 an enforced contract:
+  migration `0059` fails closed on legacy composition rows without billing-account
+  evidence, upgrades compatible version metadata, and adds a PostgreSQL check;
+  application and direct-memory persistence reject other versions. Bulk exact
+  invoice sums expand their local decimal context by operand count.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).
