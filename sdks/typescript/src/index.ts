@@ -242,12 +242,18 @@ export class FileUsageOutbox {
     const temporaryPath = `${this.filePath}.tmp`;
     writeFileSync(temporaryPath, JSON.stringify(records), { encoding: "utf8", mode: 0o600 });
     const descriptor = openSync(temporaryPath, "r");
-    fsyncSync(descriptor);
-    closeSync(descriptor);
+    try {
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
     renameSync(temporaryPath, this.filePath);
     const directory = openSync(dirname(this.filePath), "r");
-    fsyncSync(directory);
-    closeSync(directory);
+    try {
+      fsyncSync(directory);
+    } finally {
+      closeSync(directory);
+    }
   }
 }
 

@@ -139,7 +139,7 @@ jobs:
         run: mkdir -p package-artifacts && npm pack --ignore-scripts --pack-destination package-artifacts
       - name: Run TypeScript producer SDK conformance tests
         run: >-
-          node --experimental-strip-types --test
+          node --experimental-strip-types --test --experimental-test-coverage
           --test-coverage-include=sdks/typescript/src/index.ts
           --test-coverage-lines=100
           --test-coverage-branches=100
