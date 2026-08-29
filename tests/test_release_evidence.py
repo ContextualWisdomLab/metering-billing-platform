@@ -16,6 +16,7 @@ from scripts.release_evidence import (
     _sha256,
     _source_commit,
     _tracked_paths,
+    _require_clean_checkout,
     _worktree_root,
     build_manifest,
     create_manifest,
@@ -79,6 +80,13 @@ class ReleaseEvidenceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ReleaseEvidenceError, "clean checkout"):
                 build_manifest(ROOT, "0.3.0", ROOT / "manifest.json")
+        with mock.patch(
+            "scripts.release_evidence._source_commit", return_value="a" * 40
+        ), mock.patch(
+            "scripts.release_evidence._run_git", side_effect=("", "h tracked.py\0")
+        ):
+            with self.assertRaisesRegex(ReleaseEvidenceError, "hidden index"):
+                _require_clean_checkout(ROOT, "a" * 40)
         with mock.patch("scripts.release_evidence._worktree_root", return_value=ROOT), mock.patch(
             "scripts.release_evidence._source_commit", side_effect=("a" * 40, "b" * 40)
         ):

@@ -87,6 +87,9 @@ def _require_clean_checkout(root: Path, expected_commit: str) -> None:
         )
     if _run_git(root, ("status", "--porcelain=v1", "--untracked-files=all")).strip():
         raise ReleaseEvidenceError("release evidence requires a clean checkout")
+    index_entries = _run_git(root, ("ls-files", "-v", "-z")).split("\0")
+    if any(entry and not entry.startswith("H ") for entry in index_entries):
+        raise ReleaseEvidenceError("release evidence rejects hidden index changes")
 
 
 def _manifest_relative_path(root: Path, manifest_path: Path) -> str | None:
