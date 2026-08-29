@@ -629,6 +629,14 @@ class ReconciliationTests(unittest.TestCase):
             checker_reference="operator:finance_002",
             resolved_at=OPENED_AT,
         )
+        run = ReconciliationRun(
+            run_id=uuid4(),
+            period_id=PERIOD_ID,
+            started_at=OPENED_AT,
+            completed_at=OPENED_AT + timedelta(minutes=1),
+            reconciliation_line_ids=(line.reconciliation_line_id,),
+            blocking_exception_count=0,
+        )
         versioned_facts = (
             (make_period(), "period_contract_version"),
             (rate, "fx_rate_contract_version"),
@@ -636,6 +644,7 @@ class ReconciliationTests(unittest.TestCase):
             (line, "reconciliation_line_contract_version"),
             (evidence, "reconciliation_evidence_contract_version"),
             (resolution, "reconciliation_resolution_contract_version"),
+            (run, "reconciliation_run_contract_version"),
         )
         for fact, field_name in versioned_facts:
             with self.subTest(field_name=field_name):

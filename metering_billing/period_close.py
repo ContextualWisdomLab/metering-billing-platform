@@ -699,6 +699,10 @@ class ReconciliationRun:
 
     def __post_init__(self) -> None:
         """Require ordered unique lines and a non-negative exception summary."""
+        _contract_version(
+            self.reconciliation_run_contract_version,
+            "reconciliation_run_contract_version",
+        )
         if not isinstance(self.run_id, UUID) or not isinstance(self.period_id, UUID):
             raise PeriodCloseValidationError("run identifiers must be UUIDs")
         _aware_datetime(self.started_at, "started_at")
