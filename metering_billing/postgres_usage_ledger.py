@@ -446,6 +446,7 @@ class PostgresUsageLedger:
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s)
                 ON CONFLICT (reconciliation_line_id) DO NOTHING
+                RETURNING reconciliation_line_id
                 """,
                 (
                     line.reconciliation_line_id,
@@ -468,26 +469,77 @@ class PostgresUsageLedger:
                     line.reconciliation_line_contract_version,
                 ),
             )
-            for exception_number, exception in enumerate(line.exceptions, start=1):
+            inserted = cursor.fetchone() is not None
+            cursor.execute(
+                """
+                SELECT tenant_account_id, period_id, provider_account_reference,
+                       currency_code, internal_currency_code, provider_currency_code,
+                       cash_currency_code, internal_expected_amount, provider_actual_amount,
+                       cash_actual_amount, provider_fee_amount, withheld_tax_amount,
+                       reserve_amount, expected_cash_amount, reconciliation_line_status,
+                       assessed_at, reconciliation_line_contract_version
+                FROM billing_core.reconciliation_line
+                WHERE reconciliation_line_id = %s
+                """,
+                (line.reconciliation_line_id,),
+            )
+            parent = cursor.fetchone()
+            if parent is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation line insert did not return a parent row")
+            if parent != (
+                tenant_account_id,
+                line.period_id,
+                line.provider_account_reference,
+                line.currency_code,
+                line.internal_currency_code,
+                line.provider_currency_code,
+                line.cash_currency_code,
+                line.internal_expected_amount,
+                line.provider_actual_amount,
+                line.cash_actual_amount,
+                line.provider_fee_amount,
+                line.withheld_tax_amount,
+                line.reserve_amount,
+                line.expected_cash_amount,
+                line.status.value,
+                line.assessed_at,
+                line.reconciliation_line_contract_version,
+            ):
+                raise ValueError("reconciliation line identity cannot change after persistence")
+            expected_exceptions = tuple(
+                (exception_number, exception.exception_code.value, exception.next_action)
+                for exception_number, exception in enumerate(line.exceptions, start=1)
+            )
+            if not inserted:
                 cursor.execute(
                     """
-                    INSERT INTO billing_core.reconciliation_exception
-                        (reconciliation_line_id, exception_number, exception_code, next_action)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (reconciliation_line_id, exception_number) DO NOTHING
+                    SELECT exception_number, exception_code, next_action
+                    FROM billing_core.reconciliation_exception
+                    WHERE reconciliation_line_id = %s
+                    ORDER BY exception_number
                     """,
-                    (
-                        line.reconciliation_line_id,
-                        exception_number,
-                        exception.exception_code.value,
-                        exception.next_action,
-                    ),
+                    (line.reconciliation_line_id,),
                 )
+                if tuple(cursor.fetchall()) != expected_exceptions:
+                    raise ValueError("reconciliation line exception history cannot change")
+            else:
+                for exception_number, exception in enumerate(line.exceptions, start=1):
+                    cursor.execute(
+                        """
+                        INSERT INTO billing_core.reconciliation_exception
+                            (reconciliation_line_id, exception_number, exception_code, next_action)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (
+                            line.reconciliation_line_id,
+                            exception_number,
+                            exception.exception_code.value,
+                            exception.next_action,
+                        ),
+                    )
             existing = self._fetch_reconciliation_line(cursor, line.reconciliation_line_id)
             if existing is None:  # pragma: no cover - the insert or conflict must expose a row
                 raise RuntimeError("reconciliation line insert did not return a row")
-            if existing.as_contract_dict() != line.as_contract_dict():
-                raise ValueError("reconciliation line identity cannot change after persistence")
             return existing
 
     def list_reconciliation_lines(

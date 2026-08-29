@@ -9,6 +9,7 @@ from decimal import Decimal, ROUND_HALF_UP, localcontext
 from uuid import UUID, uuid4
 
 import metering_billing.contracts as contracts_module
+import metering_billing.period_close as period_close_module
 from metering_billing import (
     BillingPeriod,
     BillingPeriodStatus,
@@ -34,6 +35,7 @@ from metering_billing import (
     validate_reconciliation_evidence,
     validate_reconciliation_resolution,
 )
+from scripts.validate_repository import validate_schema_instance
 
 
 OPENED_AT = datetime(2026, 8, 1, 0, 0, tzinfo=UTC)
@@ -556,11 +558,11 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(
-                ReconciliationException(code, f"inspect {code.value}").as_contract_dict()
+                ReconciliationException(code, period_close_module._NEXT_ACTIONS[code]).as_contract_dict()
                 for code in codes
             ),
             tuple(
-                {"exception_code": code.value, "next_action": f"inspect {code.value}"}
+                {"exception_code": code.value, "next_action": period_close_module._NEXT_ACTIONS[code]}
                 for code in codes
             ),
         )
@@ -581,7 +583,7 @@ class ReconciliationTests(unittest.TestCase):
             exceptions=(
                 ReconciliationException(
                     ReconciliationExceptionCode.TAX_MISMATCH,
-                    "inspect tax",
+                    period_close_module._NEXT_ACTIONS[ReconciliationExceptionCode.TAX_MISMATCH],
                 ),
             ),
         )
@@ -592,6 +594,27 @@ class ReconciliationTests(unittest.TestCase):
         period = make_period().as_contract_dict()
         period["period_status"] = "hard_closed"
         self.assertTrue(validate_billing_period(period))
+        reconciled = make_period().advance(
+            BillingPeriodStatus.SOFT_CLOSED,
+            actor_reference="operator:finance_001",
+            authorization_reference="approval:period_001",
+            reason="soft close",
+            transitioned_at=OPENED_AT + timedelta(hours=1),
+        ).advance(
+            BillingPeriodStatus.RECONCILED,
+            actor_reference="operator:finance_002",
+            authorization_reference="approval:period_002",
+            reason="reconcile",
+            transitioned_at=OPENED_AT + timedelta(hours=2),
+        )
+        invalid_transition = reconciled.as_contract_dict()
+        invalid_transition["transitions"][1]["from_status"] = "open"
+        self.assertTrue(
+            validate_schema_instance(
+                contracts_module.load_json_schema("billing-period.schema.json"),
+                invalid_transition,
+            )
+        )
 
         rate = make_rate().as_contract_dict()
         rate["rate"] = "0"
@@ -654,8 +677,14 @@ class ReconciliationTests(unittest.TestCase):
                 matched,
                 status=ReconciliationLineStatus.EXCEPTION,
                 exceptions=(
-                    ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect"),
-                    ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect again"),
+                    ReconciliationException(
+                        ReconciliationExceptionCode.PRICE_MISMATCH,
+                        period_close_module._NEXT_ACTIONS[ReconciliationExceptionCode.PRICE_MISMATCH],
+                    ),
+                    ReconciliationException(
+                        ReconciliationExceptionCode.PRICE_MISMATCH,
+                        period_close_module._NEXT_ACTIONS[ReconciliationExceptionCode.PRICE_MISMATCH],
+                    ),
                 ),
             )
         with self.assertRaises(PeriodCloseValidationError):
@@ -670,7 +699,7 @@ class ReconciliationTests(unittest.TestCase):
                 exceptions=(
                     ReconciliationException(
                         ReconciliationExceptionCode.PRICE_MISMATCH,
-                        "inspect",
+                        period_close_module._NEXT_ACTIONS[ReconciliationExceptionCode.PRICE_MISMATCH],
                     ),
                 ),
                 status=ReconciliationLineStatus.EXCEPTION,
