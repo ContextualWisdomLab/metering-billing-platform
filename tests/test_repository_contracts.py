@@ -4740,9 +4740,13 @@ class RepositoryContractTests(unittest.TestCase):
         for expected_fragment in (
             "CREATE TABLE billing_core.late_adjustment",
             "UNIQUE (\n        tenant_account_id,\n        source_period_id,",
+            "UNIQUE (tenant_account_id, source_reference)",
+            "adjustment_amount NOT IN (",
+            "length(adjustment_amount::text) <= 40",
             "FOREIGN KEY (tenant_account_id, source_period_id)",
             "FOREIGN KEY (tenant_account_id, target_period_id)",
             "CREATE OR REPLACE FUNCTION billing_core.validate_late_adjustment_periods()",
+            "late adjustment source period history is malformed",
             "late adjustment source period must be closed",
             "late adjustment target period must be open",
             "late adjustment target period must follow source period",

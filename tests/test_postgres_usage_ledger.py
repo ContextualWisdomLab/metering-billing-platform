@@ -572,9 +572,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.insert_late_adjustment(
                 TENANT_ONE, replace(adjustment, adjustment_amount=Decimal("12.35"))
             )
-        with self.assertRaises(ValueError):
+        self.assertEqual(
             self.ledger.insert_late_adjustment(
                 TENANT_ONE, replace(adjustment, late_adjustment_id=uuid4())
+            ),
+            adjustment,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE,
+                replace(
+                    adjustment,
+                    late_adjustment_id=uuid4(),
+                    source_payload_hash="sha256:" + "e" * 64,
+                ),
             )
         alternate_source = create_billing_period(
             TENANT_ONE,
@@ -594,7 +605,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.insert_late_adjustment(
                 TENANT_ONE,
-                replace(adjustment, source_period_id=alternate_source.period_id),
+                replace(
+                    adjustment,
+                    source_period_id=alternate_source.period_id,
+                    source_reference="provider:event_other",
+                ),
             )
         with self.assertRaises(psycopg.errors.RaiseException):
             with self.connection.transaction():
@@ -609,6 +624,35 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                     "DELETE FROM billing_core.late_adjustment WHERE late_adjustment_id = %s",
                     (adjustment.late_adjustment_id,),
                 )
+        for invalid_amount, source_reference, payload_hash in (
+            ("NaN", "provider:event_nan", "sha256:" + "f" * 64),
+            ("1" * 41, "provider:event_oversized", "sha256:" + "1" * 64),
+        ):
+            with self.assertRaises(psycopg.errors.CheckViolation):
+                with self.connection.transaction():
+                    self.connection.execute(
+                        """
+                        INSERT INTO billing_core.late_adjustment
+                            (late_adjustment_id, tenant_account_id, source_period_id,
+                             target_period_id, adjustment_kind, adjustment_amount,
+                             currency_code, source_reference, source_payload_hash,
+                             recorded_at, late_adjustment_contract_version)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            uuid4(),
+                            self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                            period.period_id,
+                            target_period.period_id,
+                            "correction",
+                            invalid_amount,
+                            "USD",
+                            source_reference,
+                            payload_hash,
+                            CATALOG_START + timedelta(hours=4),
+                            1,
+                        ),
+                    )
 
         open_source = create_billing_period(
             TENANT_ONE,
@@ -628,6 +672,28 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.ledger.insert_billing_period(open_source)
         self.ledger.insert_billing_period(open_target)
+        with self.connection.transaction():
+            self.connection.execute(
+                """
+                INSERT INTO billing_core.billing_period_transition
+                    (transition_id, tenant_account_id, period_id, transition_number,
+                     from_status, to_status, actor_reference, authorization_reference,
+                     transition_reason, transitioned_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    uuid4(),
+                    self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                    open_source.period_id,
+                    1,
+                    "soft_closed",
+                    "reconciled",
+                    "operator:finance_015",
+                    "approval:period_009",
+                    "malformed direct history",
+                    CATALOG_START + timedelta(hours=5),
+                ),
+            )
         with self.assertRaises(psycopg.errors.RaiseException):
             self.ledger.insert_late_adjustment(
                 TENANT_ONE,

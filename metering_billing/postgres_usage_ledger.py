@@ -272,11 +272,16 @@ class PostgresUsageLedger:
                     SELECT late_adjustment_id
                     FROM billing_core.late_adjustment
                     WHERE tenant_account_id = %s
-                      AND source_period_id = %s
-                      AND target_period_id = %s
-                      AND adjustment_kind = %s
-                      AND source_payload_hash = %s
-                      AND late_adjustment_contract_version = %s
+                      AND (
+                          (
+                              source_period_id = %s
+                              AND target_period_id = %s
+                              AND adjustment_kind = %s
+                              AND source_payload_hash = %s
+                              AND late_adjustment_contract_version = %s
+                          )
+                          OR source_reference = %s
+                      )
                     """,
                     (
                         tenant_account_id,
@@ -285,6 +290,7 @@ class PostgresUsageLedger:
                         adjustment.adjustment_kind.value,
                         adjustment.source_payload_hash,
                         adjustment.late_adjustment_contract_version,
+                        adjustment.source_reference,
                     ),
                 )
                 row = cursor.fetchone()
@@ -299,7 +305,11 @@ class PostgresUsageLedger:
                 stored is None
             ):  # pragma: no cover - the insert or conflict exposes a row
                 raise RuntimeError("late adjustment insert did not return a row")
-            if stored.as_contract_dict() != adjustment.as_contract_dict():
+            stored_contract = stored.as_contract_dict()
+            adjustment_contract = adjustment.as_contract_dict()
+            stored_contract.pop("late_adjustment_id")
+            adjustment_contract.pop("late_adjustment_id")
+            if stored_contract != adjustment_contract:
                 raise ValueError("late adjustment identity cannot change")
             return stored
 

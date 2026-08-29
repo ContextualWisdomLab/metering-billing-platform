@@ -10,7 +10,15 @@ CREATE TABLE billing_core.late_adjustment (
         'correction',
         'reversal'
     )),
-    adjustment_amount numeric NOT NULL CHECK (adjustment_amount <> 0),
+    adjustment_amount numeric NOT NULL CHECK (
+        adjustment_amount <> 0
+        AND adjustment_amount NOT IN (
+            'NaN'::numeric,
+            'Infinity'::numeric,
+            '-Infinity'::numeric
+        )
+        AND length(adjustment_amount::text) <= 40
+    ),
     currency_code text NOT NULL CHECK (currency_code ~ '^[A-Z]{3}$'),
     source_reference text NOT NULL CHECK (source_reference <> ''),
     source_payload_hash text NOT NULL CHECK (source_payload_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -26,6 +34,7 @@ CREATE TABLE billing_core.late_adjustment (
         source_payload_hash,
         late_adjustment_contract_version
     ),
+    UNIQUE (tenant_account_id, source_reference),
     FOREIGN KEY (tenant_account_id, source_period_id)
         REFERENCES billing_core.billing_period (tenant_account_id, period_id),
     FOREIGN KEY (tenant_account_id, target_period_id)
@@ -43,8 +52,11 @@ AS $$
 DECLARE
     source_period billing_core.billing_period%ROWTYPE;
     target_period billing_core.billing_period%ROWTYPE;
+    source_transition RECORD;
     source_status text;
     target_status text;
+    expected_source_status text := 'open';
+    expected_source_transition_number integer := 1;
 BEGIN
     SELECT *
     INTO source_period
@@ -66,15 +78,21 @@ BEGIN
         RAISE EXCEPTION 'late adjustment target period is missing';
     END IF;
 
-    SELECT COALESCE((
-        SELECT transition.to_status
-        FROM billing_core.billing_period_transition AS transition
-        WHERE transition.tenant_account_id = source_period.tenant_account_id
-          AND transition.period_id = source_period.period_id
-        ORDER BY transition.transition_number DESC
-        LIMIT 1
-    ), 'open')
-    INTO source_status;
+    FOR source_transition IN
+        SELECT transition_number, from_status, to_status
+        FROM billing_core.billing_period_transition
+        WHERE tenant_account_id = source_period.tenant_account_id
+          AND period_id = source_period.period_id
+        ORDER BY transition_number
+    LOOP
+        IF source_transition.transition_number <> expected_source_transition_number
+           OR source_transition.from_status <> expected_source_status THEN
+            RAISE EXCEPTION 'late adjustment source period history is malformed';
+        END IF;
+        expected_source_status := source_transition.to_status;
+        expected_source_transition_number := expected_source_transition_number + 1;
+    END LOOP;
+    source_status := expected_source_status;
 
     SELECT COALESCE((
         SELECT transition.to_status

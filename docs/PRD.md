@@ -42,11 +42,12 @@ contextual-orchestrator usage
   that is still `open`; the target starts at or after the source end.
 - `late_usage`, `correction`, and `reversal` are the only adjustment kinds.
   The amount is a non-zero signed exact-decimal string, the currency is an
-  uppercase ISO 4217 code, and the source payload hash is part of the replay
-  identity.
-- An identical replay returns the stored fact. A changed amount, source
-  reference, hash, or identity fails closed; the source period, rating facts,
-  reconciliation facts, and period transitions are never rewritten.
+  uppercase ISO 4217 code, and the tenant-scoped source reference is the stable
+  replay identity with the source payload hash included in the payload identity.
+- An identical replay, including one with a regenerated opaque ID, returns the
+  stored fact. A changed amount, source reference, hash, or other identity
+  field fails closed; the source period, rating facts, reconciliation facts,
+  and period transitions are never rewritten.
 - PostgreSQL migration `0048` enforces tenant-scoped foreign keys, lifecycle
   ordering, target openness, and update/delete immutability. Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory

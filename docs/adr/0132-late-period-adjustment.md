@@ -24,10 +24,11 @@ Add an immutable `late_adjustment` fact with:
 
 The source period must be at least `soft_closed`, the target period must be
 `open`, and `target_period.start >= source_period.end`. The original usage,
-rating, reconciliation, and period rows are never updated. The identity is
+rating, reconciliation, and period rows are never updated. The stable replay
+identity is `(tenant, source_reference)`; the payload identity is
 `(tenant, source_period, target_period, adjustment_kind, source_payload_hash,
-contract_version)`; an identical retry returns the stored fact and a changed
-payload is a conflict.
+contract_version)`. An identical retry, including one with a regenerated
+opaque ID, returns the stored fact; a changed payload is a conflict.
 
 The Python contract validates exact money and the PostgreSQL migration enforces
 tenant-scoped foreign keys, lifecycle/order checks, the idempotency key, and

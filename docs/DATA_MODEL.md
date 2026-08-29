@@ -237,12 +237,14 @@ period-scoped line reads; age is never stored or used to mutate the exception.
 `late_adjustment` is an append-only commercial fact with source and target
 periods, one of `late_usage`, `correction`, or `reversal`, a signed exact
 amount, currency, source reference, source payload hash, and contract version.
-Its tenant-scoped identity makes identical retries durable and rejects changed
-replays. Composite foreign keys and migration `0048` triggers require an
-adequately closed source, an open target beginning no earlier than the source
-end, and immutable rows. The fact does not rewrite usage, rating, or source
-period history and does not itself create a journal, tax document, or FOCUS
-export.
+Its tenant-scoped source reference is the stable replay key; the source/target,
+kind, hash, and contract version also have a unique payload identity. Identical
+retries remain durable even when an opaque ID is regenerated, while changed
+payloads fail closed. Composite foreign keys and migration `0048` triggers
+require an adequately closed source, an open target beginning no earlier than
+the source end, and immutable rows. The fact does not rewrite usage, rating,
+or source period history and does not itself create a journal, tax document, or
+FOCUS export.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

@@ -58,12 +58,14 @@ readiness, recovery, HA, and telemetry requirements remain tracked by issue
 #84.
 
 Migration `0048` also stores the immutable `late_adjustment` fact. Its
-tenant-scoped composite identity and period foreign keys are protected by
-PostgreSQL checks and triggers: a source period must be closed enough to be
-adjusted, the target must remain open and begin no earlier than the source
-end, and the row cannot be updated or deleted. The contract records commercial
-evidence only; a later application or re-rating workflow must explicitly
-consume it and no FX, tax, FOCUS, or statutory posting is inferred here.
+tenant-scoped source reference is a stable replay key, while the source/target,
+kind, payload hash, and contract version form the payload identity; period
+foreign keys are protected by PostgreSQL checks and triggers. A source period
+must be closed enough to be adjusted, the target must remain open and begin no
+earlier than the source end, and the row cannot be updated or deleted. The
+contract records commercial evidence only; a later application or re-rating
+workflow must explicitly consume it and no FX, tax, FOCUS, or statutory
+posting is inferred here.
 
 ## Provider plane
 
