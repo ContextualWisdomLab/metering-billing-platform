@@ -77,7 +77,13 @@ and maps missing or closed targets to `target_period_not_found` or
 tax, journal, provider state, or webhook.
 List reads pass the decoded cursor and `limit + 1` to the ledger; PostgreSQL
 applies the tenant-scoped keyset predicate and hydrates only those bounded rows,
-then performs one bulk application-existence lookup for the page.
+then performs one bulk application-existence and one bulk rating-existence lookup
+for the page. `LateAdjustmentRatingService` consumes the acknowledgement through
+the nested `/ratings` command and appends `late_adjustment_rating` only while the
+target remains open; a stored rating replays after closure. The exact signed delta
+is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
+Presentment reports `record_invoice_adjustment` for the still-separate
+invoice-adjustment workflow.
 The memory adapter serializes recording, application, and period lifecycle writes so a
 concurrent application/close race cannot create a second acknowledgement or
 accept a new application for a closed target; application audit timestamps are

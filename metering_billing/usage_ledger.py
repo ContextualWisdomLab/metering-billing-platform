@@ -22,7 +22,6 @@ from typing import Any, Callable
 from uuid import UUID
 
 from metering_billing.errors import (
-    LateAdjustmentApplicationTargetPeriodNotOpen,
     LateAdjustmentRatingTargetPeriodNotOpen,
     RejectionReasonCode,
 )
@@ -3068,39 +3067,6 @@ class MemoryUsageLedger:
         ] = adjustment.late_adjustment_id
         return adjustment
 
-    def get_billing_period(
-        self, tenant_reference: str, period_id: UUID
-    ) -> BillingPeriod | None:
-        """Return one tenant-scoped period aggregate, if present."""
-        tenant, tenant_error = self.resolve_tenant(tenant_reference)
-        if tenant_error is not None or tenant is None:
-            return None
-        period = self.billing_periods.get(period_id)
-        if period is None or period.tenant_reference != tenant.tenant_reference:
-            return None
-        return period
-
-    def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
-        """Store one period snapshot while preserving its transition prefix."""
-        self.require_tenant(period.tenant_reference)
-        existing = self.billing_periods.get(period.period_id)
-        if existing is None:
-            self.billing_periods[period.period_id] = period
-            return period
-        if (
-            existing.tenant_reference != period.tenant_reference
-            or existing.period_start != period.period_start
-            or existing.period_end != period.period_end
-            or existing.opened_at != period.opened_at
-            or existing.opened_by != period.opened_by
-            or existing.period_contract_version != period.period_contract_version
-        ):
-            raise ValueError("billing period identity cannot change after persistence")
-        if existing.transitions != period.transitions[: len(existing.transitions)]:
-            raise ValueError("billing period transition history cannot be rewritten")
-        self.billing_periods[period.period_id] = period
-        return period
-
     def find_late_adjustment_application(
         self, tenant_account_id: UUID, late_adjustment_id: UUID
     ) -> StoredLateAdjustmentApplication | None:
@@ -3120,6 +3086,17 @@ class MemoryUsageLedger:
         return frozenset(
             late_adjustment_id
             for (stored_tenant_id, late_adjustment_id) in self.late_adjustment_application_index
+            if stored_tenant_id == tenant_account_id and late_adjustment_id in requested
+        )
+
+    def find_late_adjustment_rating_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return rated late-adjustment IDs for one bounded page."""
+        requested = set(late_adjustment_ids)
+        return frozenset(
+            late_adjustment_id
+            for (stored_tenant_id, late_adjustment_id) in self.late_adjustment_rating_index
             if stored_tenant_id == tenant_account_id and late_adjustment_id in requested
         )
 
@@ -3238,7 +3215,14 @@ class MemoryUsageLedger:
     def insert_late_adjustment_rating(
         self, rating: StoredLateAdjustmentRating
     ) -> StoredLateAdjustmentRating:
-        """Store one immutable rating consumption fact or return its replay."""
+        """Store one rating fact while serializing target lifecycle changes."""
+        with self._late_adjustment_application_lock:
+            return self._insert_late_adjustment_rating(rating)
+
+    def _insert_late_adjustment_rating(
+        self, rating: StoredLateAdjustmentRating
+    ) -> StoredLateAdjustmentRating:
+        """Store one immutable rating fact while the lifecycle lock is held."""
         if rating.late_adjustment_rating_status != "rated":
             raise ValueError("late_adjustment_rating_status must be rated")
         if CURRENCY_CODE_PATTERN.fullmatch(rating.currency_code) is None:

@@ -51,7 +51,8 @@ contextual-orchestrator usage
 - PostgreSQL migrations `0048`/`0049` enforce tenant-scoped foreign keys,
   lifecycle ordering, target openness, replay conflict handling, and
   update/delete immutability; migrations `0050`/`0051` enforce application
-  source equality, target locking, replay rechecks, and audit-time bounds. Application,
+  source equality, target locking, replay rechecks, and audit-time bounds, while
+  `0051`/`0053` protect the separate late-adjustment rating fact. Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
   posting remain separate workflows.
 
@@ -73,7 +74,8 @@ contextual-orchestrator usage
 - The ledger read receives the decoded cursor and `page_limit + 1`; PostgreSQL
   evaluates the tenant-scoped recorded-at/ID keyset predicate in one ordered
   query so `next_cursor` is derived only from a bounded result, then performs
-  one bulk application-existence lookup for that page.
+  one bulk application-existence and one bulk rating-existence lookup for that
+  page.
 
 ## Late-adjustment-application acceptance
 

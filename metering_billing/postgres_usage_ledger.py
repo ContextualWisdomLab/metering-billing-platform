@@ -401,6 +401,25 @@ class PostgresUsageLedger:
             )
             return frozenset(UUID(str(row[0])) for row in cursor.fetchall())
 
+    def find_late_adjustment_rating_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return rated late-adjustment IDs for one bounded page."""
+        if not late_adjustment_ids:
+            return frozenset()
+        placeholders = ", ".join("%s" for _ in late_adjustment_ids)
+        with self._cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT late_adjustment_id
+                FROM billing_core.late_adjustment_rating
+                WHERE tenant_account_id = %s
+                  AND late_adjustment_id IN ({placeholders})
+                """,
+                (tenant_account_id, *late_adjustment_ids),
+            )
+            return frozenset(UUID(str(row[0])) for row in cursor.fetchall())
+
     def get_late_adjustment_application(
         self, late_adjustment_application_id: UUID
     ) -> StoredLateAdjustmentApplication | None:

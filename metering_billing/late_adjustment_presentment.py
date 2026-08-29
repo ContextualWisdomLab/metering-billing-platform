@@ -151,12 +151,17 @@ class LateAdjustmentPresentmentService:
             tenant.tenant_account_id,
             tuple(adjustment.late_adjustment_id for adjustment in page_rows),
         )
+        rating_ids = self.ledger.find_late_adjustment_rating_ids(
+            tenant.tenant_account_id,
+            tuple(adjustment.late_adjustment_id for adjustment in page_rows),
+        )
         return LateAdjustmentPresentmentPage(
             late_adjustments=tuple(
                 self._project_adjustment(
                     tenant.tenant_reference,
                     adjustment,
                     applied=adjustment.late_adjustment_id in application_ids,
+                    rated=adjustment.late_adjustment_id in rating_ids,
                 )
                 for adjustment in page_rows
             ),
