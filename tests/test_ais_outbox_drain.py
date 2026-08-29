@@ -16,6 +16,7 @@ from wsgiref.simple_server import make_server
 
 from metering_billing import (
     AisOutboxDrainService,
+    AisOutboxScheduler,
     CreditAdjustmentService,
     MemoryUsageLedger,
     PostingReceiptPullService,
@@ -203,6 +204,49 @@ class ScriptedOutboxClient:
 
 class AisOutboxDrainTests(unittest.TestCase):
     """Verify the drain matches constructed URNs and reuses the #16 receipt GET."""
+
+    def test_scheduler_runs_tenants_and_wakes_for_shutdown(self) -> None:
+        """Repeat tenant drains and stop without waiting out the interval."""
+        drain_service = mock.Mock()
+        drain_service.drain_ais_outbox.side_effect = lambda tenant: tenant
+        scheduler = AisOutboxScheduler(
+            drain_service,
+            lambda: (TENANT_ONE, TENANT_TWO),
+            interval_seconds=1,
+            stop_event=threading.Event(),
+        )
+        self.assertEqual(
+            scheduler.run_once(),
+            ((TENANT_ONE, TENANT_ONE), (TENANT_TWO, TENANT_TWO)),
+        )
+        self.assertEqual(
+            drain_service.drain_ais_outbox.call_args_list,
+            [mock.call(TENANT_ONE), mock.call(TENANT_TWO)],
+        )
+
+        with self.assertRaises(ValueError):
+            AisOutboxScheduler(drain_service, lambda: (), interval_seconds=0)
+        with self.assertRaises(ValueError):
+            AisOutboxScheduler(drain_service, lambda: (), interval_seconds=True)
+        default_scheduler = AisOutboxScheduler(drain_service, lambda: ())
+        default_scheduler._stop_event.set()
+        default_scheduler.run_forever()
+
+        stop_event = threading.Event()
+        one_cycle_service = mock.Mock()
+
+        def stop_after_drain(tenant: str) -> str:
+            stop_event.set()
+            return tenant
+
+        one_cycle_service.drain_ais_outbox.side_effect = stop_after_drain
+        AisOutboxScheduler(
+            one_cycle_service,
+            lambda: (TENANT_ONE,),
+            interval_seconds=0.001,
+            stop_event=stop_event,
+        ).run_forever()
+        one_cycle_service.drain_ais_outbox.assert_called_once_with(TENANT_ONE)
 
     def test_pinned_urns_are_constructed_from_proposal_id(self) -> None:
         """AIS Draft #2 pins payload and aggregate URNs to Billing proposal_id."""

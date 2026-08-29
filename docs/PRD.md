@@ -564,7 +564,8 @@ contextual-orchestrator usage
 - Receipt lookup stays `GET /posting-receipts?idempotency_key=` with the stored Billing key (`invoice_draft`, `cash_receipt`, or `credit_adjustment` as published). The payload URN is never the query.
 - A successful or existing observation for the matched proposal POSTs `/outbox-events/{outbox_event_id}/publish`. AIS 403 is cross-tenant and is not retried as another tenant. AIS 404 does not invent a row.
 - `journal_reversal` and `period_close` are not drained. `proposal_status` stays `validated`.
-- Missing tenant, unconfigured AIS, insecure `AIS_BASE_URL`, invalid outbox envelopes, and transport failure fail closed. There is no scheduler.
+- Missing tenant, unconfigured AIS, insecure `AIS_BASE_URL`, invalid outbox envelopes, and transport failure fail closed.
+- `AisOutboxScheduler` is an explicit operator/worker loop: it resolves the current tenant set each cycle, calls the existing tenant-scoped drain, and wakes immediately when its stop event is set. It adds no retry state or money effect; the existing drain remains the idempotent replay boundary.
 - Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.
 
 ## Credit-adjustment acceptance

@@ -171,6 +171,11 @@ The deployment surface is Docker Compose (`compose/docker-compose.yml`, fixed pr
 
 ## AIS outbox drain
 
+The optional `AisOutboxScheduler` refreshes the injected tenant source each
+cycle, delegates to the same idempotent drain, and waits on a stop event so
+graceful shutdown is not delayed by the interval. It adds no delivery state or
+monetary effect.
+
 `metering_billing.AisOutboxDrainService` drains AIS `GET /outbox-events?event_type_code=posting_receipt`.  The client reads `outbox_events` and `next_cursor` only.  Empty unpublished pages are success and perform zero receipt GETs.  For `posting_receipt`, Billing constructs `urn:cwl:accounting:posting_receipt:{proposal_id}` and `urn:cwl:accounting:general_journal:{proposal_id}` from stored `proposal_id` and matches those strings by equality.  It does not parse `payload_reference`.  The stored Billing `idempotency_key` is the only `GET /posting-receipts` query.  After a successful or existing observation, the drain POSTs `/outbox-events/{outbox_event_id}/publish`.  AIS 403 is not retried as another tenant.  AIS 404 does not invent a row.  `journal_reversal` and `period_close` are not drained.  `POST /v1/ais-outbox-drains` uses the tenant pin plus the API-credential key rule.  Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.
 
 ## Tax assessment
