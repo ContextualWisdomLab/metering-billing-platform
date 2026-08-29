@@ -287,13 +287,18 @@ concurrent writers. Migration `0059` fails closed if a legacy version-1
 composition lacks billing-account evidence; otherwise it upgrades only the
 contract metadata to version 2 and adds an exact-version check constraint.
 Application and direct PostgreSQL writes use the same version-2 constant.
+Migration `0060` rejects composition amounts that cannot round-trip through
+`numeric(38,12)`, validates late-adjustment issued lines against their
+composition draft/amount/payer, and lets a post-issue collection row copy only
+the frozen issued inclusive total.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a
 tax reassessment path exists; it never reuses a stale tax snapshot. The issued
 payload hash and presentment include the signed lines. Composition is rejected
 after collection, journal, tax, or credit facts capture the draft, and a zero
-resulting issue is rejected. Collection, journal,
+resulting issue is rejected. Collection after issuance copies the frozen issued
+inclusive total; collection before issuance, journal,
 provider export, and statutory tax treatment remain downstream boundaries.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`

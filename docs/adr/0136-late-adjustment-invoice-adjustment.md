@@ -51,6 +51,9 @@ issued invoice snapshots are never overwritten.
   compatible version metadata, and then enforces the version in PostgreSQL.
   Historical v1 issued-invoice snapshots remain readable because presentment
   upgrades only the response envelope.
+- Migration `0060` rejects amounts that cannot be represented by
+  `numeric(38,12)`, validates direct issued-line draft/amount/payer equality,
+  and permits post-issue collection only from the frozen inclusive total.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not
   part of the replay identity. Historical stored v1 invoices remain readable

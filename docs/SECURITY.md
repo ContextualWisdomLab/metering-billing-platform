@@ -64,13 +64,16 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
 - Rated adjustment targeting an issued invoice draft: `invoice_already_issued`
 - Composition after collection, journal, tax, or credit capture:
   `invoice_draft_has_downstream_records`
-- New collection, journal, tax-assessment, or credit writes after composition:
-  `invoice_draft_has_late_adjustment`; the draft lock and PostgreSQL migration
-  `0057` prevent stale downstream capture. Migration `0058` applies the same
-  tenant-scoped lock to direct composition inserts after an existing downstream
-  fact and preserves identity replays. Migration `0059` fails closed on legacy
-  compositions without payer evidence, upgrades compatible version metadata,
-  and enforces composition contract version 2.
+- New collection, journal, tax-assessment, or credit writes before issuance after
+  composition: `invoice_draft_has_late_adjustment`; the draft lock and
+  PostgreSQL migrations `0057`/`0058` prevent stale downstream capture.
+  Migration `0059` fails closed on legacy compositions without payer evidence,
+  upgrades compatible version metadata, and enforces composition contract
+  version 2. After issuance, collection is allowed only against the frozen
+  issued currency and inclusive total; other downstream writes remain blocked.
+- Direct PostgreSQL issued lines must match their composition's draft, signed
+  amount, absolute unit price, and billing-account reference. Composition
+  amounts that would round in `numeric(38,12)` are rejected by migration `0060`.
 - Composition or direct persistence with a contract version other than 2 is
   rejected; stored v1 issued-invoice snapshots are upgraded only at the
   presentment envelope and are not rewritten.
