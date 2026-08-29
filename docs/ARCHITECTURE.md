@@ -71,7 +71,9 @@ the target period and requires its latest append-only status to be `open` for
 new applications; replays bypass that guard and return the first writer's
 audit data. The nested application route requires actor and authorization
 references, enforces source equality and tenant scope, and then reports
-`rate_late_adjustment`. It never rewrites the late fact, period, usage, rating,
+`rate_late_adjustment`. The memory adapter persists the same period aggregate
+and maps missing or closed targets to `target_period_not_found` or
+`target_period_not_open` rejected results (HTTP 422). It never rewrites the late fact, period, usage, rating,
 tax, journal, provider state, or webhook.
 
 ## Usage ingestion

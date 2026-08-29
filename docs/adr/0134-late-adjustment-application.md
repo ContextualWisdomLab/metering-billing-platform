@@ -31,6 +31,10 @@ Add an append-only, tenant-scoped `late_adjustment_application` fact:
   to `rate_late_adjustment` after the application exists;
 - PostgreSQL composite foreign keys and an immutable trigger enforce tenant
   ownership, source equality, and no update/delete mutation.
+- The memory reference adapter mirrors the billing-period existence, tenant,
+  lifecycle, and ordering checks. Missing or closed targets return stable
+  `target_period_not_found` or `target_period_not_open` result codes, while
+  stored applications retain replay behavior after closure.
 
 This fact does not mutate a billing period, usage event, rating run, tax
 assessment, journal proposal, provider state, or webhook outbox. Full

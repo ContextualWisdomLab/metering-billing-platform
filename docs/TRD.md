@@ -80,6 +80,10 @@ rechecks that the target period is still `open` for a new application, and is
 replay-safe. A stored application replays after the target closes and retains
 its first-writer audit data. Neither command applies a rating, mutates a
 period, posts a journal, calls a provider, or creates a tax document.
+The memory reference adapter stores billing periods and applies the same
+source/target lifecycle and ordering checks as PostgreSQL; target lifecycle
+rejections remain stable `target_period_not_found` or `target_period_not_open`
+422 results.
 
 ## Provider plane
 

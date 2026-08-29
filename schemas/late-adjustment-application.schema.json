@@ -81,7 +81,9 @@
             "tenant_not_found",
             "late_adjustment_not_found",
             "actor_reference_invalid",
-            "authorization_reference_invalid"
+            "authorization_reference_invalid",
+            "target_period_not_found",
+            "target_period_not_open"
           ]
         },
         "next_operator_action": {"type": "string", "const": "wait"}

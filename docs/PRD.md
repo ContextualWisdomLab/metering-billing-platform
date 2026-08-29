@@ -85,6 +85,11 @@ contextual-orchestrator usage
   `rate_late_adjustment`; before application it reports
   `apply_late_adjustment`. Unknown or cross-tenant facts return 404 and invalid
   audit references return 422.
+- The memory reference ledger enforces the same source/target period existence,
+  tenant, lifecycle, and ordering invariants as PostgreSQL. A missing target or
+  non-open target rejects with `target_period_not_found` or
+  `target_period_not_open` and HTTP 422; an already-stored application still
+  replays after target closure.
 - This slice does not re-rate, mutate a period or usage fact, create a tax or
   journal document, settle a provider, export FOCUS, or emit a webhook. Those
   remain explicit downstream workflows.

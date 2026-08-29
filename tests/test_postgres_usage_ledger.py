@@ -1447,16 +1447,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaises(psycopg.errors.RaiseException):
-            LateAdjustmentApplicationService(
-                self.ledger,
-                clock=lambda: CATALOG_START + timedelta(hours=4),
-            ).apply_late_adjustment(
-                TENANT_ONE,
-                adjustment.late_adjustment_id,
-                applied_by="operator:finance_028",
-                authorization_reference="approval:application_021",
-            )
+        result = LateAdjustmentApplicationService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=4),
+        ).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:finance_028",
+            authorization_reference="approval:application_021",
+        )
+        self.assertEqual(result.late_adjustment_application_outcome_code, "rejected")
+        self.assertEqual(result.rejection_reason_code, "target_period_not_open")
         self.assertIsNone(
             self.ledger.find_late_adjustment_application(
                 self.ledger.require_tenant(TENANT_ONE).tenant_account_id,

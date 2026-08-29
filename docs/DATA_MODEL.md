@@ -256,7 +256,9 @@ afterward. A new application locks and rechecks the target period's latest
 append-only status and requires `open`; replay bypasses that new-fact guard and
 returns the first writer's immutable audit fields. The application row has
 composite source/target foreign keys and immutable update/delete triggers; it
-does not mutate the late adjustment.
+does not mutate the late adjustment. The memory reference adapter stores the
+same billing-period aggregate and enforces source/target tenant, lifecycle, and
+ordering invariants before storing a late-adjustment fact.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

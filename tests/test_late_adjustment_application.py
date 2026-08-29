@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 import unittest
 from unittest import mock
 from uuid import uuid4
 
 from metering_billing import (
+    BillingPeriodStatus,
     LateAdjustmentApplicationService,
     LateAdjustmentPresentmentService,
+    create_billing_period,
     create_http_app,
     create_late_adjustment,
     validate_late_adjustment_application,
@@ -19,6 +21,42 @@ from metering_billing import (
 )
 from test_http_app import invoke_http
 from test_usage_ingestion import TENANT_ONE, TENANT_TWO, seed_ledger
+
+
+def seed_adjustment_periods(ledger, adjustment, *, target_status=BillingPeriodStatus.OPEN):
+    """Seed the source and target lifecycle rows required by the memory adapter."""
+    source = create_billing_period(
+        TENANT_ONE,
+        date(2026, 7, 1),
+        date(2026, 8, 1),
+        opened_by="operator:test_source",
+        opened_at=datetime(2026, 8, 17, 20, 0, tzinfo=UTC),
+        period_id=adjustment.source_period_id,
+    ).advance(
+        BillingPeriodStatus.SOFT_CLOSED,
+        actor_reference="operator:test_source",
+        authorization_reference="change:test_source",
+        reason="close source",
+        transitioned_at=datetime(2026, 8, 17, 20, 30, tzinfo=UTC),
+    )
+    target = create_billing_period(
+        TENANT_ONE,
+        date(2026, 8, 1),
+        date(2026, 9, 1),
+        opened_by="operator:test_target",
+        opened_at=datetime(2026, 8, 17, 20, 0, tzinfo=UTC),
+        period_id=adjustment.target_period_id,
+    )
+    if target_status != BillingPeriodStatus.OPEN:
+        target = target.advance(
+            target_status,
+            actor_reference="operator:test_target",
+            authorization_reference="change:test_target",
+            reason="close target",
+            transitioned_at=datetime(2026, 8, 17, 20, 30, tzinfo=UTC),
+        )
+    ledger.insert_billing_period(source)
+    ledger.insert_billing_period(target)
 
 
 class LateAdjustmentApplicationTests(unittest.TestCase):
@@ -40,6 +78,7 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
             late_adjustment_id=uuid4(),
         )
+        seed_adjustment_periods(ledger, adjustment)
         ledger.insert_late_adjustment(TENANT_ONE, adjustment)
         service = LateAdjustmentApplicationService(
             ledger, clock=lambda: datetime(2026, 8, 29, 1, 2, 3, tzinfo=UTC)
@@ -192,6 +231,7 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
             late_adjustment_id=uuid4(),
         )
+        seed_adjustment_periods(ledger, adjustment)
         ledger.insert_late_adjustment(TENANT_ONE, adjustment)
         app = create_http_app(ledger)
         path = f"/v1/late-adjustments/{adjustment.late_adjustment_id}/applications"
@@ -272,6 +312,157 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         method_status, method_body = invoke_http(app, "GET", path)
         self.assertEqual(method_status, 422)
         self.assertEqual(method_body["rejection_reason_code"], "request_invalid")
+
+    def test_memory_application_rechecks_target_and_preserves_replay(self) -> None:
+        """Memory application rejects missing targets and replays after closure."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "4.00",
+            "USD",
+            "provider:application-target-state",
+            "sha256:" + "c" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        seed_adjustment_periods(ledger, adjustment)
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        target = ledger.get_billing_period(TENANT_ONE, adjustment.target_period_id)
+        self.assertIsNotNone(target)
+        assert target is not None
+        del ledger.billing_periods[adjustment.target_period_id]
+        missing = LateAdjustmentApplicationService(ledger).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:alice",
+            authorization_reference="change:target-state",
+        )
+        self.assertEqual(missing.rejection_reason_code, "target_period_not_found")
+
+        ledger.insert_billing_period(target)
+        accepted = LateAdjustmentApplicationService(ledger).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:alice",
+            authorization_reference="change:target-state",
+        )
+        self.assertEqual(accepted.late_adjustment_application_outcome_code, "accepted")
+        closed_target = target.advance(
+            BillingPeriodStatus.SOFT_CLOSED,
+            actor_reference="operator:alice",
+            authorization_reference="change:target-state-close",
+            reason="close target",
+            transitioned_at=datetime(2026, 8, 18, tzinfo=UTC),
+        )
+        ledger.insert_billing_period(closed_target)
+        replay = LateAdjustmentApplicationService(ledger).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:bob",
+            authorization_reference="change:target-state-replay",
+        )
+        self.assertEqual(replay.late_adjustment_application_outcome_code, "duplicate_replay")
+        self.assertEqual(replay.applied_by, "operator:alice")
+        self.assertEqual(replay.authorization_reference, "change:target-state")
+
+    def test_http_rejects_closed_target_as_contract_error(self) -> None:
+        """A closed target is a domain rejection rather than a server error."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "4.00",
+            "USD",
+            "provider:application-http-closed",
+            "sha256:" + "d" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        seed_adjustment_periods(ledger, adjustment)
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        target = ledger.get_billing_period(TENANT_ONE, adjustment.target_period_id)
+        self.assertIsNotNone(target)
+        assert target is not None
+        ledger.insert_billing_period(
+            target.advance(
+                BillingPeriodStatus.SOFT_CLOSED,
+                actor_reference="operator:alice",
+                authorization_reference="change:http-close",
+                reason="close target",
+                transitioned_at=datetime(2026, 8, 18, tzinfo=UTC),
+            )
+        )
+        status, body = invoke_http(
+            create_http_app(ledger),
+            "POST",
+            f"/v1/late-adjustments/{adjustment.late_adjustment_id}/applications",
+            {
+                "tenant_reference": TENANT_ONE,
+                "applied_by": "operator:alice",
+                "authorization_reference": "change:http-closed",
+            },
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(body["rejection_reason_code"], "target_period_not_open")
+        self.assertEqual(validate_late_adjustment_application(body), ())
+
+    def test_postgres_target_trigger_errors_become_domain_rejections(self) -> None:
+        """Only recognized PostgreSQL target lifecycle failures are translated."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "4.00",
+            "USD",
+            "provider:application-target-trigger",
+            "sha256:" + "e" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        seed_adjustment_periods(ledger, adjustment)
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        target = ledger.get_billing_period(TENANT_ONE, adjustment.target_period_id)
+        assert target is not None
+        service = LateAdjustmentApplicationService(ledger)
+        for message, reason in (
+            (
+                "late adjustment application target period is missing",
+                "target_period_not_found",
+            ),
+            (
+                "late adjustment application target period must be open",
+                "target_period_not_open",
+            ),
+        ):
+            error = RuntimeError(message)
+            error.diag = type("Diag", (), {"message_primary": message})()
+            with mock.patch.object(
+                ledger, "insert_late_adjustment_application", side_effect=error
+            ):
+                result = service.apply_late_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    applied_by="operator:alice",
+                    authorization_reference="change:trigger",
+                )
+            self.assertEqual(result.rejection_reason_code, reason)
+
+        with mock.patch.object(
+            ledger,
+            "insert_late_adjustment_application",
+            side_effect=RuntimeError("unrelated persistence failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unrelated persistence failure"):
+                service.apply_late_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    applied_by="operator:alice",
+                    authorization_reference="change:trigger",
+                )
 
 
 if __name__ == "__main__":

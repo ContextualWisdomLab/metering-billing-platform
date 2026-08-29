@@ -163,6 +163,8 @@ class LateAdjustmentApplicationRejectionReasonCode(StrEnum):
     LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
     ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
     AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
+    TARGET_PERIOD_NOT_FOUND = "target_period_not_found"
+    TARGET_PERIOD_NOT_OPEN = "target_period_not_open"
 
 
 class TaxRateOutcomeCode(StrEnum):

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 import unittest
 from unittest import mock
 from uuid import uuid4
 
 from metering_billing import (
+    BillingPeriodStatus,
     LateAdjustmentPresentmentService,
     create_http_app,
+    create_billing_period,
     create_late_adjustment,
     validate_late_adjustment_presentment,
 )
@@ -40,6 +42,54 @@ def make_adjustment(
     )
 
 
+def seed_adjustment_periods(
+    ledger,
+    adjustment,
+    *,
+    period_tenant_reference=TENANT_ONE,
+    source_status=BillingPeriodStatus.SOFT_CLOSED,
+    target_status=BillingPeriodStatus.OPEN,
+    target_start=date(2026, 8, 1),
+):
+    """Seed the source and target lifecycle rows required by the memory adapter."""
+    source = create_billing_period(
+        period_tenant_reference,
+        date(2026, 7, 1),
+        date(2026, 8, 1),
+        opened_by="operator:test_source",
+        opened_at=RECORDED_AT,
+        period_id=adjustment.source_period_id,
+    )
+    if source_status != BillingPeriodStatus.OPEN:
+        source = source.advance(
+            source_status,
+            actor_reference="operator:test_source",
+            authorization_reference="change:test_source",
+            reason="close source",
+            transitioned_at=RECORDED_AT,
+        )
+    target = create_billing_period(
+        period_tenant_reference,
+        target_start,
+        date(2026, 9, 1),
+        opened_by="operator:test_target",
+        opened_at=RECORDED_AT,
+        period_id=adjustment.target_period_id,
+    )
+    if target_status != BillingPeriodStatus.OPEN:
+        target = target.advance(
+            target_status,
+            actor_reference="operator:test_target",
+            authorization_reference="change:test_target",
+            reason="close target",
+            transitioned_at=RECORDED_AT,
+        )
+    ledger.insert_billing_period(source)
+    ledger.insert_billing_period(target)
+
+
+
+
 class LateAdjustmentPresentmentTests(unittest.TestCase):
     """Verify exact projections, pagination, and tenant isolation."""
 
@@ -54,6 +104,8 @@ class LateAdjustmentPresentmentTests(unittest.TestCase):
             recorded_at=datetime(2026, 8, 17, 22, 0, tzinfo=UTC),
             amount="-2.25",
         )
+        seed_adjustment_periods(ledger, first)
+        seed_adjustment_periods(ledger, second)
         self.assertEqual(ledger.insert_late_adjustment(TENANT_ONE, first), first)
         self.assertEqual(ledger.insert_late_adjustment(TENANT_ONE, second), second)
         service = LateAdjustmentPresentmentService(ledger)
@@ -122,6 +174,7 @@ class LateAdjustmentPresentmentTests(unittest.TestCase):
         adjustment = make_adjustment(
             source_reference="provider:late_003", recorded_at=RECORDED_AT
         )
+        seed_adjustment_periods(ledger, adjustment)
         ledger.insert_late_adjustment(TENANT_ONE, adjustment)
         replay = replace(adjustment, late_adjustment_id=uuid4())
         self.assertEqual(ledger.insert_late_adjustment(TENANT_ONE, replay), adjustment)
@@ -152,12 +205,108 @@ class LateAdjustmentPresentmentTests(unittest.TestCase):
             error.exception.rejection_reason_code, "late_adjustment_not_found"
         )
 
+    def test_memory_late_adjustment_requires_period_lifecycle_and_order(self) -> None:
+        """The memory adapter applies the same period boundary as PostgreSQL."""
+        missing_ledger = seed_ledger()
+        missing = make_adjustment(
+            source_reference="provider:late_missing_period", recorded_at=RECORDED_AT
+        )
+        with self.assertRaises(ValueError):
+            missing_ledger.insert_late_adjustment(TENANT_ONE, missing)
+
+        open_source_ledger = seed_ledger()
+        open_source = make_adjustment(
+            source_reference="provider:late_open_source", recorded_at=RECORDED_AT
+        )
+        seed_adjustment_periods(
+            open_source_ledger, open_source, source_status=BillingPeriodStatus.OPEN
+        )
+        with self.assertRaises(ValueError):
+            open_source_ledger.insert_late_adjustment(TENANT_ONE, open_source)
+
+        closed_target_ledger = seed_ledger()
+        closed_target = make_adjustment(
+            source_reference="provider:late_closed_target", recorded_at=RECORDED_AT
+        )
+        seed_adjustment_periods(
+            closed_target_ledger,
+            closed_target,
+            target_status=BillingPeriodStatus.SOFT_CLOSED,
+        )
+        with self.assertRaises(ValueError):
+            closed_target_ledger.insert_late_adjustment(TENANT_ONE, closed_target)
+
+        cross_tenant_ledger = seed_ledger()
+        cross_tenant = make_adjustment(
+            source_reference="provider:late_cross_tenant", recorded_at=RECORDED_AT
+        )
+        seed_adjustment_periods(
+            cross_tenant_ledger,
+            cross_tenant,
+            period_tenant_reference=TENANT_TWO,
+        )
+        with self.assertRaises(ValueError):
+            cross_tenant_ledger.insert_late_adjustment(TENANT_ONE, cross_tenant)
+
+        ordered_ledger = seed_ledger()
+        incorrectly_ordered = make_adjustment(
+            source_reference="provider:late_wrong_order", recorded_at=RECORDED_AT
+        )
+        seed_adjustment_periods(
+            ordered_ledger, incorrectly_ordered, target_start=date(2026, 7, 31)
+        )
+        with self.assertRaises(ValueError):
+            ordered_ledger.insert_late_adjustment(TENANT_ONE, incorrectly_ordered)
+
+        target_missing_ledger = seed_ledger()
+        target_missing = make_adjustment(
+            source_reference="provider:late_target_missing", recorded_at=RECORDED_AT
+        )
+        source_only = create_billing_period(
+            TENANT_ONE,
+            date(2026, 7, 1),
+            date(2026, 8, 1),
+            opened_by="operator:test_source",
+            opened_at=RECORDED_AT,
+            period_id=target_missing.source_period_id,
+        ).advance(
+            BillingPeriodStatus.SOFT_CLOSED,
+            actor_reference="operator:test_source",
+            authorization_reference="change:test_source",
+            reason="close source",
+            transitioned_at=RECORDED_AT,
+        )
+        target_missing_ledger.insert_billing_period(source_only)
+        with self.assertRaises(ValueError):
+            target_missing_ledger.insert_late_adjustment(TENANT_ONE, target_missing)
+
+        self.assertIsNone(
+            target_missing_ledger.get_billing_period("urn:cwl:missing", uuid4())
+        )
+        stored_source = ordered_ledger.get_billing_period(
+            TENANT_ONE, incorrectly_ordered.source_period_id
+        )
+        self.assertIsNotNone(stored_source)
+        assert stored_source is not None
+        with self.assertRaises(ValueError):
+            ordered_ledger.insert_billing_period(
+                replace(stored_source, opened_by="operator:rewrite")
+            )
+        with self.assertRaises(ValueError):
+            ordered_ledger.insert_billing_period(
+                replace(
+                    stored_source,
+                    transitions=(replace(stored_source.transitions[0], reason="rewrite"),),
+                )
+            )
+
     def test_invalid_query_inputs_and_http_errors_fail_closed(self) -> None:
         """Invalid cursors, bounds, tenants, and methods never expose evidence."""
         ledger = seed_ledger()
         adjustment = make_adjustment(
             source_reference="provider:late_004", recorded_at=RECORDED_AT
         )
+        seed_adjustment_periods(ledger, adjustment)
         ledger.insert_late_adjustment(TENANT_ONE, adjustment)
         service = LateAdjustmentPresentmentService(ledger)
         with self.assertRaises(LateAdjustmentPresentmentQueryError):

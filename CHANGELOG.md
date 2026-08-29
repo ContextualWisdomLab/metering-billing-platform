@@ -33,7 +33,10 @@
   preserves the signed source amount/target/currency, and advances presentment
   to `rate_late_adjustment`; first application still requires the target period
   to be open, while a stored application replays after that period closes and
-  retains the first writer's audit data (ADR 0134).
+  retains the first writer's audit data (ADR 0134). The memory reference ledger
+  now stores the same billing-period lifecycle and rejects missing,
+  cross-tenant, open-source, closed-target, or incorrectly ordered late facts;
+  target lifecycle rejections publish stable HTTP 422 contract results.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

@@ -26,7 +26,11 @@ from metering_billing.exact_decimal import (
     parse_exact_decimal,
     require_postable_journal_line_amounts,
 )
-from metering_billing.period_close import LateAdjustment
+from metering_billing.period_close import (
+    BillingPeriod,
+    BillingPeriodStatus,
+    LateAdjustment,
+)
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
 TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
@@ -1003,6 +1007,7 @@ class MemoryUsageLedger:
     credit_adjustment_index: dict[tuple[UUID, UUID, str, int], UUID] = field(
         default_factory=dict
     )
+    billing_periods: dict[UUID, BillingPeriod] = field(default_factory=dict)
     late_adjustments: dict[UUID, LateAdjustment] = field(default_factory=dict)
     late_adjustment_tenant_index: dict[UUID, UUID] = field(default_factory=dict)
     late_adjustment_source_index: dict[tuple[UUID, str], UUID] = field(
@@ -2891,6 +2896,37 @@ class MemoryUsageLedger:
         """Return one credit adjustment by internal identifier, if present."""
         return self.credit_adjustments.get(credit_adjustment_id)
 
+    def get_billing_period(
+        self, tenant_reference: str, period_id: UUID
+    ) -> BillingPeriod | None:
+        """Return one same-tenant billing period with its current status."""
+        tenant, tenant_error = self.resolve_tenant(tenant_reference)
+        if tenant_error is not None or tenant is None:
+            return None
+        period = self.billing_periods.get(period_id)
+        if period is None or period.tenant_reference != tenant.tenant_reference:
+            return None
+        return period
+
+    def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
+        """Store one period and append only new lifecycle transitions."""
+        self.require_tenant(period.tenant_reference)
+        existing = self.billing_periods.get(period.period_id)
+        if existing is not None:
+            if (
+                existing.tenant_reference != period.tenant_reference
+                or existing.period_start != period.period_start
+                or existing.period_end != period.period_end
+                or existing.opened_at != period.opened_at
+                or existing.opened_by != period.opened_by
+                or existing.period_contract_version != period.period_contract_version
+            ):
+                raise ValueError("billing period identity cannot change after persistence")
+            if period.transitions[: len(existing.transitions)] != existing.transitions:
+                raise ValueError("billing period transition history cannot be rewritten")
+        self.billing_periods[period.period_id] = period
+        return period
+
     def get_late_adjustment(
         self, tenant_reference: str, late_adjustment_id: UUID
     ) -> LateAdjustment | None:
@@ -2935,6 +2971,18 @@ class MemoryUsageLedger:
             return existing
         if adjustment.late_adjustment_id in self.late_adjustments:
             raise ValueError("late adjustment identity conflicts with another tenant")
+        source = self.get_billing_period(tenant_reference, adjustment.source_period_id)
+        if source is None:
+            raise ValueError("late adjustment source period is missing")
+        if source.status == BillingPeriodStatus.OPEN:
+            raise ValueError("late adjustment source period must be closed")
+        target = self.get_billing_period(tenant_reference, adjustment.target_period_id)
+        if target is None:
+            raise ValueError("late adjustment target period is missing")
+        if target.status != BillingPeriodStatus.OPEN:
+            raise ValueError("late adjustment target period must be open")
+        if target.period_start < source.period_end:
+            raise ValueError("late adjustment target period must follow source")
         self.late_adjustments[adjustment.late_adjustment_id] = adjustment
         self.late_adjustment_tenant_index[adjustment.late_adjustment_id] = (
             tenant.tenant_account_id
