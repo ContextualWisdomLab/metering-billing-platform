@@ -65,19 +65,35 @@ class ReconciliationResolutionStatus(StrEnum):
 
 
 class ReconciliationExceptionCode(StrEnum):
-    """Stable exception vocabulary for the first reconciliation slice."""
+    """Stable typed exception vocabulary for three-way reconciliation."""
 
-    CURRENCY_MISMATCH = "currency_mismatch"
+    QUANTITY_MISMATCH = "quantity_mismatch"
     PRICE_MISMATCH = "price_mismatch"
-    PROVIDER_FEE_MISMATCH = "provider_fee_mismatch"
+    TAX_MISMATCH = "tax_mismatch"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    PAYMENT_MISSING = "payment_missing"
+    DUPLICATE_CHARGE = "duplicate_charge"
+    REFUND_MISMATCH = "refund_mismatch"
+    DISPUTE_MISMATCH = "dispute_mismatch"
     SETTLEMENT_MISMATCH = "settlement_mismatch"
+    PROVIDER_FEE_MISMATCH = "provider_fee_mismatch"
+    CASH_TIMING_DIFFERENCE = "cash_timing_difference"
+    UNMAPPED_PROVIDER_OBJECT = "unmapped_provider_object"
 
 
 _NEXT_ACTIONS = {
-    ReconciliationExceptionCode.CURRENCY_MISMATCH: "Map the source currencies and record the authoritative FX rate.",
+    ReconciliationExceptionCode.QUANTITY_MISMATCH: "Compare provider-accepted quantity with internal usage aggregates.",
     ReconciliationExceptionCode.PRICE_MISMATCH: "Compare rejected usage, rating inputs, and the pinned price version.",
+    ReconciliationExceptionCode.TAX_MISMATCH: "Compare tax-inclusive provider facts with the internal tax assessment.",
+    ReconciliationExceptionCode.CURRENCY_MISMATCH: "Map the source currencies and record the authoritative FX rate.",
+    ReconciliationExceptionCode.PAYMENT_MISSING: "Trace the expected provider payment and its authoritative receipt.",
+    ReconciliationExceptionCode.DUPLICATE_CHARGE: "Match duplicate provider charges to the original internal intent.",
+    ReconciliationExceptionCode.REFUND_MISMATCH: "Compare the provider refund with the internal refund fact.",
+    ReconciliationExceptionCode.DISPUTE_MISMATCH: "Compare provider dispute status and amount with the internal case.",
     ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH: "Request the provider fee or reserve breakdown for this payout.",
     ReconciliationExceptionCode.SETTLEMENT_MISMATCH: "Trace the provider payout to remittance and bank evidence.",
+    ReconciliationExceptionCode.CASH_TIMING_DIFFERENCE: "Record the payout timing window and expected settlement date.",
+    ReconciliationExceptionCode.UNMAPPED_PROVIDER_OBJECT: "Map the provider object before treating the comparison as complete.",
 }
 
 _NEXT_PERIOD_STATUS = {

@@ -504,6 +504,59 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(settlement.exceptions[0].exception_code, ReconciliationExceptionCode.SETTLEMENT_MISMATCH)
         self.assertEqual(validate_reconciliation_line(price.as_contract_dict()), ())
 
+    def test_exception_vocabulary_covers_the_required_provider_cases(self) -> None:
+        """Every minimum issue code remains constructible and serializable."""
+        codes = tuple(ReconciliationExceptionCode)
+        self.assertEqual(
+            codes,
+            (
+                ReconciliationExceptionCode.QUANTITY_MISMATCH,
+                ReconciliationExceptionCode.PRICE_MISMATCH,
+                ReconciliationExceptionCode.TAX_MISMATCH,
+                ReconciliationExceptionCode.CURRENCY_MISMATCH,
+                ReconciliationExceptionCode.PAYMENT_MISSING,
+                ReconciliationExceptionCode.DUPLICATE_CHARGE,
+                ReconciliationExceptionCode.REFUND_MISMATCH,
+                ReconciliationExceptionCode.DISPUTE_MISMATCH,
+                ReconciliationExceptionCode.SETTLEMENT_MISMATCH,
+                ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH,
+                ReconciliationExceptionCode.CASH_TIMING_DIFFERENCE,
+                ReconciliationExceptionCode.UNMAPPED_PROVIDER_OBJECT,
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                ReconciliationException(code, f"inspect {code.value}").as_contract_dict()
+                for code in codes
+            ),
+            tuple(
+                {"exception_code": code.value, "next_action": f"inspect {code.value}"}
+                for code in codes
+            ),
+        )
+        expanded_line = replace(
+            assess_reconciliation_line(
+                PERIOD_ID,
+                "provider_account:001",
+                "USD",
+                "100",
+                "99",
+                "97",
+                provider_fee_amount="2",
+                assessed_at=OPENED_AT,
+                internal_currency_code="USD",
+                provider_currency_code="USD",
+                cash_currency_code="USD",
+            ),
+            exceptions=(
+                ReconciliationException(
+                    ReconciliationExceptionCode.TAX_MISMATCH,
+                    "inspect tax",
+                ),
+            ),
+        )
+        self.assertEqual(validate_reconciliation_line(expanded_line.as_contract_dict()), ())
+
     def test_raw_contract_validators_apply_domain_invariants(self) -> None:
         """Schema-valid documents cannot bypass lifecycle, arithmetic, or FX invariants."""
         period = make_period().as_contract_dict()

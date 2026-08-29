@@ -24,7 +24,20 @@
     "reconciliation_line_id": {"type": "string", "format": "uuid"},
     "exception_code": {
       "type": "string",
-      "enum": ["currency_mismatch", "price_mismatch", "provider_fee_mismatch", "settlement_mismatch"]
+      "enum": [
+        "quantity_mismatch",
+        "price_mismatch",
+        "tax_mismatch",
+        "currency_mismatch",
+        "payment_missing",
+        "duplicate_charge",
+        "refund_mismatch",
+        "dispute_mismatch",
+        "settlement_mismatch",
+        "provider_fee_mismatch",
+        "cash_timing_difference",
+        "unmapped_provider_object"
+      ]
     },
     "resolution_status": {"type": "string", "enum": ["resolved", "waived"]},
     "owner_reference": {"type": "string", "minLength": 1},

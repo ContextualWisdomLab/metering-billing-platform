@@ -200,11 +200,12 @@ later rate when re-exporting a closed result.
 `reconciliation-line` keeps internal expected, provider actual, cash actual,
 provider fee, withholding, and reserve amounts separate, and requires the
 internal, provider, and cash source currencies as evidence.  Its deterministic
-status reports currency, price, provider-fee, or settlement exceptions with a
-next action. Raw contract validation re-applies the domain lifecycle, exact
-arithmetic, and exception/status invariants. PostgreSQL stores the line and
-exception children atomically, preserving the pinned FX snapshot and exact
-`numeric` amounts. These contracts are not a FOCUS export, tax engine,
+status reports typed quantity, price, tax, currency, payment, duplicate-charge,
+refund, dispute, settlement, provider-fee, cash-timing, or unmapped-provider
+exceptions with a next action. Raw contract validation re-applies the domain
+lifecycle, exact arithmetic, and exception/status invariants. PostgreSQL stores
+the line and exception children atomically, preserving the pinned FX snapshot
+and exact `numeric` amounts. These contracts are not a FOCUS export, tax engine,
 statutory invoice authority, provider connector, or period-wide reconciliation
 run.
 

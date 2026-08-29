@@ -16,6 +16,11 @@
 
 ### Added
 
+- Issue #87 now uses the complete minimum typed reconciliation exception
+  vocabulary: quantity, price, tax, currency, payment, duplicate charge,
+  refund, dispute, settlement, provider fee, cash timing, and unmapped provider
+  object. The existing append-only line and resolution persistence accepts the
+  expanded codes through migration 0042.
 - Issue #87 now records immutable reconciliation exception resolutions in
   PostgreSQL. Each resolution retains owner, reason, evidence, resolved or
   waived status, and distinct maker/checker references, and can reference only

@@ -271,6 +271,7 @@ REQUIRED_FILES = (
     "database/migrations/0039_spend_budget_status.sql",
     "database/migrations/0040_period_close_persistence.sql",
     "database/migrations/0041_reconciliation_resolution.sql",
+    "database/migrations/0042_reconciliation_exception_vocabulary.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",

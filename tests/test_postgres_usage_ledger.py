@@ -95,7 +95,10 @@ from metering_billing.issued_invoice_void import (
 )
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.period_close import (
+    ReconciliationException,
     ReconciliationExceptionCode,
+    ReconciliationLine,
+    ReconciliationLineStatus,
     ReconciliationResolution,
     ReconciliationResolutionStatus,
     assess_reconciliation_line,
@@ -193,8 +196,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 41:
-            raise AssertionError(f"expected 41 migrations, got {len(applied)}")
+        if len(applied) != 42:
+            raise AssertionError(f"expected 42 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -540,16 +543,52 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.insert_reconciliation_line(matched), matched)
         self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
         self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
+        expanded_exception = ReconciliationLine(
+            reconciliation_line_id=uuid4(),
+            period_id=period.period_id,
+            provider_account_reference="provider:account_001",
+            currency_code="USD",
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+            internal_expected_amount=Decimal("10"),
+            provider_actual_amount=Decimal("9"),
+            cash_actual_amount=Decimal("9"),
+            provider_fee_amount=Decimal("0"),
+            withheld_tax_amount=Decimal("0"),
+            reserve_amount=Decimal("0"),
+            expected_cash_amount=Decimal("9"),
+            status=ReconciliationLineStatus.EXCEPTION,
+            exceptions=(
+                ReconciliationException(
+                    ReconciliationExceptionCode.TAX_MISMATCH,
+                    "inspect provider tax document",
+                ),
+            ),
+            assessed_at=CATALOG_START + timedelta(minutes=4, seconds=1),
+            reconciliation_line_contract_version=1,
+        )
+        self.assertEqual(
+            self.ledger.insert_reconciliation_line(expanded_exception), expanded_exception
+        )
+        self.assertEqual(
+            self.ledger.get_reconciliation_line(expanded_exception.reconciliation_line_id),
+            expanded_exception,
+        )
         self.assertIsNone(self.ledger.get_reconciliation_line(uuid4()))
         self.assertEqual(
             {line.reconciliation_line_id for line in self.ledger.list_reconciliation_lines(TENANT_ONE)},
-            {matched.reconciliation_line_id, exception.reconciliation_line_id},
+            {
+                matched.reconciliation_line_id,
+                exception.reconciliation_line_id,
+                expanded_exception.reconciliation_line_id,
+            },
         )
         self.assertEqual(
             self.ledger.list_reconciliation_lines(
                 TENANT_ONE, period_id=period.period_id
             ),
-            (matched, exception),
+            (matched, exception, expanded_exception),
         )
         self.assertEqual(
             {item.exception_code for item in self.ledger.get_reconciliation_line(exception.reconciliation_line_id).exceptions},

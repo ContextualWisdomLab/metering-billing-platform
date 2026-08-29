@@ -44,7 +44,7 @@
     "reconciliation_line_status": {"type": "string", "enum": ["matched", "exception"]},
     "exceptions": {
       "type": "array",
-      "maxItems": 4,
+      "maxItems": 12,
       "items": {"$ref": "#/$defs/reconciliation_exception"}
     },
     "assessed_at": {"type": "string", "format": "date-time"}
@@ -67,7 +67,20 @@
       "properties": {
         "exception_code": {
           "type": "string",
-          "enum": ["currency_mismatch", "price_mismatch", "provider_fee_mismatch", "settlement_mismatch"]
+          "enum": [
+            "quantity_mismatch",
+            "price_mismatch",
+            "tax_mismatch",
+            "currency_mismatch",
+            "payment_missing",
+            "duplicate_charge",
+            "refund_mismatch",
+            "dispute_mismatch",
+            "settlement_mismatch",
+            "provider_fee_mismatch",
+            "cash_timing_difference",
+            "unmapped_provider_object"
+          ]
         },
         "next_action": {"type": "string", "minLength": 1}
       }
