@@ -16,7 +16,8 @@ local checks are not merge evidence. PR [#174](https://github.com/ContextualWisd
 is the separate stacked review for the next immutable invoice-intent
 composition slice; its initial implementation commit is
 `5ef90218bf7660e0a4e6d29c8ee6ea0c87b42fa9`, with review-fix commit
-`4201a55` and the current review-fix head tracked after validation.
+`4201a55`; the implementation review-fix commit is
+`01733ba3a4c5f390e91b68ae8d8fa39ce27c6f72`.
 
 The implemented #87 path now covers PostgreSQL migrations
 `0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`/`0056`, the `LateAdjustment`,
