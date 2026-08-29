@@ -351,6 +351,19 @@ COLUMN_NAME_PATTERN = re.compile(
     r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean)\b",
     re.IGNORECASE | re.MULTILINE,
 )
+RUNBOOK_REQUIRED_HEADINGS = (
+    "Owner",
+    "Severity and escalation",
+    "Customer communication",
+    "Recovery objective",
+    "Evidence preservation",
+    "Detection",
+    "Containment",
+    "Diagnosis",
+    "Recovery",
+    "Validation receipt",
+    "Exit and RCA",
+)
 TABLE_NAME_PATTERN = re.compile(
     r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
     r"(?:(?:[a-zA-Z_][a-zA-Z0-9_]*)\.)?([a-zA-Z_][a-zA-Z0-9_]*)",
@@ -467,6 +480,8 @@ def validate_repository(root: Path) -> tuple[str, ...]:
         if "--hash=sha256:" not in runtime_requirements_text:
             errors.append("runtime dependencies must be hash locked")
 
+    errors.extend(validate_runbooks(root))
+
     for file_path in _iter_contract_files(root):
         text = file_path.read_text(encoding="utf-8")
         relative_path = file_path.relative_to(root).as_posix()
@@ -478,6 +493,24 @@ def validate_repository(root: Path) -> tuple[str, ...]:
                     f"mutable GitHub Action reference in {relative_path}: {reference}"
                 )
 
+    return tuple(errors)
+
+
+def validate_runbooks(root: Path) -> tuple[str, ...]:
+    """Require each operational runbook to expose its support-control sections."""
+    directory = root / "docs/operations/runbooks"
+    if not directory.is_dir():
+        return ("missing runbook directory: docs/operations/runbooks",)
+    runbook_paths = tuple(sorted(directory.glob("*.md")))
+    if not runbook_paths:
+        return ("runbook directory must contain Markdown runbooks",)
+    errors: list[str] = []
+    for runbook_path in runbook_paths:
+        text = runbook_path.read_text(encoding="utf-8")
+        relative_path = runbook_path.relative_to(root).as_posix()
+        for heading in RUNBOOK_REQUIRED_HEADINGS:
+            if f"## {heading}\n" not in text:
+                errors.append(f"{relative_path}: missing required runbook section: {heading}")
     return tuple(errors)
 
 

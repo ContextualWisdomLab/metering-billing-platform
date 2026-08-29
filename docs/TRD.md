@@ -133,6 +133,17 @@ Provider integration is capability-based. Checkout, subscription, usage export, 
 
 `metering_billing.WebhookSubscriptionService` registers an https callback and returns the signing secret once. The verifier stores a keyed HMAC, never the recoverable secret in SQL (Krawczyk et al., 1997; National Institute of Standards and Technology, 2020). `PostgresUsageLedger` persists subscription metadata, delivery attempts, and the delivered outbox transition with tenant-scoped predicates and composite foreign keys; its one-time secret remains process-local, so restart-safe unattended delivery still requires a secure secret provider. `WebhookSubscriptionPresentmentService` projects stored metadata as a commercial statement. `GET /v1/webhook-subscriptions/{webhook_subscription_id}` and `GET /v1/webhook-subscriptions` are safe tenant-scoped reads and never include the secret (Fielding et al., 2022; Google, 2024). `WebhookDeliveryService.deliver_due_events` POSTs the published commercial envelope and signs the raw body; receivers check `X-CWL-Webhook-Signature` rather than HTTP Message Signatures (Fielding et al., 2022; Backman et al., 2024). `WebhookOutboxEventPresentmentService` projects a stored commercial `webhook_outbox_event` as metadata only. `GET /v1/webhook-outbox-events/{outbox_event_id}` and `GET /v1/webhook-outbox-events` are safe tenant-scoped reads and never publish, send, or return `payload_json` or the webhook secret (Fielding et al., 2022; Google, 2024). `WebhookDeliveryPresentmentService` projects a stored `webhook_delivery_attempt` as a commercial statement. `GET /v1/webhook-deliveries/{delivery_attempt_id}` and `GET /v1/webhook-deliveries` are safe tenant-scoped reads and never resend or return the secret or signed body (Fielding et al., 2022; Google, 2024). Register an https callback, then run deliveries; AIS may keep polling.
 
+## Operations and support
+
+The [`operational runbook index`](operations/runbooks.md) is the repository's
+tabletop support contract. Each runbook names an owner, severity and escalation
+path, customer communication boundary, recovery objective, evidence policy,
+detection, containment, diagnosis, recovery, validation receipt, and exit/RCA
+criteria. Validation receipts record the exact release SHA, command exit status,
+measured outcomes, and secret-free evidence hashes. Runbooks do not claim live
+provider, backup, restore, chaos, RPO, or RTO evidence; those remain deployment-
+owner release gates for issue #91.
+
 ## Security
 
 - No card number, CVC, provider secret, PAT plaintext, prompt, response, tenant API credential plaintext, or webhook-subscription plaintext is accepted in billing contracts after issue or register. The issue and register responses are the only places those secrets appear.

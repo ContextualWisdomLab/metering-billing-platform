@@ -58,6 +58,7 @@ from scripts.validate_repository import (
     find_placeholder_tokens,
     validate_accounting_journal_proposal,
     validate_repository,
+    validate_runbooks,
     validate_schema_instance,
     validate_sql_object_names,
 )
@@ -78,6 +79,32 @@ class RepositoryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             errors = validate_repository(Path(temporary_directory))
         self.assertIn("missing required file: README.md", errors)
+
+    def test_missing_runbook_directory_is_reported(self) -> None:
+        """A checkout without operational runbooks reports the missing directory."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            errors = validate_runbooks(Path(temporary_directory))
+        self.assertEqual(errors, ("missing runbook directory: docs/operations/runbooks",))
+
+    def test_empty_runbook_directory_is_reported(self) -> None:
+        """An empty runbook directory cannot satisfy the support contract."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory) / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            errors = validate_runbooks(Path(temporary_directory))
+        self.assertEqual(errors, ("runbook directory must contain Markdown runbooks",))
+
+    def test_incomplete_runbook_section_is_reported(self) -> None:
+        """Every operational runbook must declare each support-control section."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory) / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            (directory / "incident.md").write_text("# Incident\n## Owner\n", encoding="utf-8")
+            errors = validate_runbooks(Path(temporary_directory))
+        self.assertIn(
+            "docs/operations/runbooks/incident.md: missing required runbook section: Recovery",
+            errors,
+        )
 
     def test_boolean_json_schema_nodes_are_supported(self) -> None:
         """Draft 2020-12 boolean schemas must accept true and reject false."""

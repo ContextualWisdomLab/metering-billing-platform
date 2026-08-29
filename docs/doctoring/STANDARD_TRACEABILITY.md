@@ -20,6 +20,8 @@
 | RFC 2104 | Webhook deliveries sign the raw JSON body with HMAC-SHA256. The header is `X-CWL-Webhook-Signature: sha256=<hex>`. |
 | RFC 9421 | HTTP Message Signatures are not implemented in this slice. Receivers verify the HMAC over the raw body rather than a structured signature input. |
 | NIST SP 800-63B | Tenant API credential and webhook-subscription verifiers persist a keyed HMAC, never the recoverable secret. The plaintext secret is returned once on issue or register. |
+| NIST SP 800-61 Rev. 3 | Incident runbooks name an owner, escalation, customer communication, evidence preservation, containment, recovery, validation receipt, and RCA; incidents feed back into risk and release evidence. |
+| NIST SP 800-34 Rev. 1 | Database and dependency runbooks separate recovery strategy, isolated rehearsal, measured RPO/RTO, exercise receipt, and maintenance; documentation alone is not restore evidence. |
 | OWASP API2:2023 | Leaked tenant API keys are revocable bearer credentials. Unknown and revoked keys fail closed as `api_credential_invalid`. |
 | SOC 2 CC6 | After a tenant has one or more active keys, every `/v1` call except credential issue requires a matching active key whose tenant equals the pin. Zero active keys remain a documented bootstrap window so AIS can keep pulling with `X-CWL-Tenant-Reference`. |
 | TM Forum TMF620 | A commercial rate card is a versioned, queryable price list. Publishing writes an immutable `rate_card_version`; rating resolves that persisted version and does not invent a hidden default price. |

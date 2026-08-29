@@ -46,7 +46,9 @@ When `--wait` returns, the API is serving on port 8000 and you can start
 accepting usage writes over HTTP right away.  The measured performance of
 this deployment is recorded in `docs/operations/load-test-baseline.md`
 (ADR 0124); re-run `compose/k6/e2e_smoke.js` against a healthy stack to add
-your own dated numbers.
+your own dated numbers. Support procedures are indexed in
+[`docs/operations/runbooks.md`](docs/operations/runbooks.md); they are
+tabletop-ready and do not substitute for live production recovery evidence.
 
 ## Run validation
 

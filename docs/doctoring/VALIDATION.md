@@ -47,6 +47,11 @@ Failures print one diagnostic per line: missing required files, schema
 identity errors, SQL naming violations, unresolved placeholders, or mutable
 GitHub Action references.
 
+Operational support procedures are listed in the
+[runbook index](../operations/runbooks.md). The validator also requires every
+runbook to expose its owner, escalation, evidence, recovery, validation, and
+exit/RCA sections.
+
 ## Compile check
 
 ```bash
