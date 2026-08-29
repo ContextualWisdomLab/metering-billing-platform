@@ -2468,16 +2468,12 @@ class RepositoryContractTests(unittest.TestCase):
             "tenant_reference": "urn:cwl:tenant_001",
             "source_event_key": "workflow_381:step_04:attempt_01",
             "event_payload_hash": "sha256:" + ("a" * 64),
-            "event_contract_version": 1,
-            "producer_contract_version": 1,
-            "product_code": "contextual_orchestrator",
             "occurred_at": "2026-08-16T10:27:42.482Z",
             "recorded_at": "2026-08-17T21:00:00Z",
             "next_operator_action": "rate_window",
             "measurements": [
                 {
                     "meter_code": "gen_ai_output_token",
-                    "meter_version": 1,
                     "quantity": "1810",
                     "unit_code": "token",
                     "quality_code": "provider_reported",
@@ -2486,14 +2482,6 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
         self.assertEqual(validate_usage_event_presentment(instance), ())
-        for field_name in ("event_contract_version", "producer_contract_version", "product_code"):
-            missing_metadata = dict(instance)
-            missing_metadata.pop(field_name)
-            self.assertNotEqual(validate_schema_instance(schema, missing_metadata), ())
-        missing_meter_version = dict(instance)
-        missing_meter_version["measurements"] = [dict(instance["measurements"][0])]
-        missing_meter_version["measurements"][0].pop("meter_version")
-        self.assertNotEqual(validate_schema_instance(schema, missing_meter_version), ())
         posted = dict(instance)
         posted["ingestion_outcome_code"] = "accepted"
         self.assertIn(

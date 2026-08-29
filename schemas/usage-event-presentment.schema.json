@@ -11,9 +11,6 @@
     "tenant_reference",
     "source_event_key",
     "event_payload_hash",
-    "event_contract_version",
-    "producer_contract_version",
-    "product_code",
     "occurred_at",
     "recorded_at",
     "next_operator_action",
@@ -77,7 +74,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-          "required": ["meter_code", "meter_version", "quantity", "unit_code", "quality_code"],
+          "required": ["meter_code", "quantity", "unit_code", "quality_code"],
           "properties": {
             "meter_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,95}$"},
             "meter_version": {"type": "integer", "minimum": 1},
