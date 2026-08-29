@@ -16,15 +16,18 @@ local checks are not merge evidence. PR [#174](https://github.com/ContextualWisd
 is the separate stacked review for the next immutable invoice-intent
 composition slice; its initial implementation commit is
 `5ef90218bf7660e0a4e6d29c8ee6ea0c87b42fa9`, with review-fix commit
-`4201a55` on the current working head.
+`4201a55` and the current review-fix head tracked after validation.
 
 The implemented #87 path now covers PostgreSQL migrations
-`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`, the `LateAdjustment`,
+`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`/`0056`, the `LateAdjustment`,
 application, rating-consumption, and invoice-adjustment contracts,
 tenant-scoped presentment reads, and durable application/rating/composition
-facts for late usage, correction, and reversal evidence. Issuance consumes
-linked compositions under the draft lock as signed invoice lines and rejects
-stale tax assessments pending reassessment. The source period
+facts for late usage, correction, and reversal evidence. Composition now
+captures the single billing account, rejects drafts already captured by
+collection/journal/tax/credit downstream facts, and rejects amounts that would
+round in issued-invoice storage. Issuance consumes linked compositions under
+the draft lock as signed invoice lines, rejects zero or negative resulting
+totals, and rejects stale tax assessments pending reassessment. The source period
 must be at least `soft_closed`; the target must be `open` and start no earlier
 than the source end; composition requires a rated adjustment and an unissued
 same-tenant, same-currency invoice draft. Targeted real-PostgreSQL, full

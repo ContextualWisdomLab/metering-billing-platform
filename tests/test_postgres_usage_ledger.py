@@ -184,6 +184,86 @@ from tests.test_usage_ingestion import (
 )
 
 
+def prepare_postgres_late_adjustment(
+    ledger, amount: str, source_reference: str, quantity: str = "1810"
+):
+    """Build one durable rated adjustment and unissued draft for integration tests."""
+    accepted = UsageIngestionService(ledger).ingest_usage_event(
+        make_event(
+            event_id=str(uuid4()),
+            source_event_key=source_reference,
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": quantity,
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+    )
+    assert accepted.ingestion_outcome_code.value == "accepted"
+    card = RateCardService(ledger).publish_rate_card(
+        TENANT_ONE,
+        "cwl_standard",
+        "USD",
+        ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+    )
+    rating = UsageRatingService(ledger).rate_usage_window(
+        TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+    )
+    draft = InvoiceDraftService(ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+    source = create_billing_period(
+        TENANT_ONE,
+        date(2026, 7, 1),
+        date(2026, 8, 1),
+        opened_by="operator:period",
+        opened_at=CATALOG_START,
+        period_id=uuid4(),
+    ).advance(
+        "soft_closed",
+        actor_reference="operator:period",
+        authorization_reference="approval:period",
+        reason="close source",
+        transitioned_at=CATALOG_START + timedelta(hours=1),
+    )
+    target = create_billing_period(
+        TENANT_ONE,
+        date(2026, 8, 1),
+        date(2026, 9, 1),
+        opened_by="operator:period",
+        opened_at=CATALOG_START,
+        period_id=uuid4(),
+    )
+    ledger.insert_billing_period(source)
+    ledger.insert_billing_period(target)
+    adjustment = create_late_adjustment(
+        source.period_id,
+        target.period_id,
+        "correction",
+        amount,
+        "USD",
+        source_reference,
+        "sha256:" + "a" * 64,
+        CATALOG_START + timedelta(hours=2),
+        late_adjustment_id=uuid4(),
+    )
+    ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+    LateAdjustmentApplicationService(ledger).apply_late_adjustment(
+        TENANT_ONE,
+        adjustment.late_adjustment_id,
+        applied_by="operator:finance",
+        authorization_reference="approval:apply",
+    )
+    LateAdjustmentRatingService(ledger).rate_late_adjustment(
+        TENANT_ONE,
+        adjustment.late_adjustment_id,
+        rated_by="operator:finance",
+        authorization_reference="approval:rate",
+    )
+    return adjustment, draft
+
+
 POSTGRES_DSN = os.environ.get(
     "METERING_BILLING_POSTGRES_DSN", "dbname=metering_billing_usage_repo_test"
 )
@@ -216,8 +296,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 55:
-            raise AssertionError(f"expected 55 migrations, got {len(applied)}")
+        if len(applied) != 56:
+            raise AssertionError(f"expected 56 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13002,6 +13082,55 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                         statement, (composed.late_adjustment_invoice_adjustment_id,)
                     )
 
+    def test_late_adjustment_invoice_adjustment_rejects_collection_and_journal(self) -> None:
+        """PostgreSQL refuses composition after collection or journal capture."""
+        for downstream in ("collection", "journal"):
+            with self.subTest(downstream=downstream):
+                adjustment, draft = prepare_postgres_late_adjustment(
+                    self.ledger,
+                    "0.002",
+                    f"provider:late-downstream-{downstream}",
+                    quantity="1810" if downstream == "collection" else "1811",
+                )
+                if downstream == "collection":
+                    result = CollectionCaseService(self.ledger).open_collection_case(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    self.assertEqual(result.collection_case_outcome_code.value, "accepted")
+                else:
+                    result = AccountingExportService(self.ledger).propose_journal(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    self.assertEqual(result.journal_proposal_outcome_code.value, "accepted")
+                rejected = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    draft.invoice_draft_id,
+                    recorded_by="operator:finance",
+                    authorization_reference="approval:invoice-adjustment",
+                )
+                self.assertEqual(
+                    rejected.rejection_reason_code.value,
+                    "invoice_draft_has_downstream_records",
+                )
+
+    def test_postgres_composition_rejects_unrepresentable_fractional_amount(self) -> None:
+        """The composition boundary rejects a non-zero digit beyond numeric(38,12)."""
+        adjustment, draft = prepare_postgres_late_adjustment(
+            self.ledger, "0.0000000000001", "provider:late-precision-001"
+        )
+        rejected = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        self.assertEqual(
+            rejected.rejection_reason_code.value,
+            "adjustment_amount_not_representable",
+        )
+
     def test_late_adjustment_invoice_adjustment_adapter_boundaries(self) -> None:
         """The PostgreSQL adapter rejects malformed, missing, and racing evidence."""
         accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
@@ -13089,11 +13218,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         draft_row = (stored.invoice_draft_id, stored.currency_code)
 
+        class NonCanonicalDecimal(Decimal):
+            """Exercise the adapter's defensive canonical-string check."""
+
+            def __format__(self, _spec: str) -> str:
+                return "01"
+
         for bad in (
             replace(stored, currency_code="US"),
             replace(stored, adjustment_amount=Decimal("0")),
             replace(stored, adjustment_amount=Decimal("NaN")),
             replace(stored, adjustment_amount=Decimal("1E+40")),
+            replace(stored, billing_account_id=None),
+            replace(stored, adjustment_amount=NonCanonicalDecimal("1")),
             replace(stored, late_adjustment_invoice_adjustment_status="pending"),
             replace(stored, recorded_by=" "),
             replace(stored, authorization_reference=" "),
@@ -13132,14 +13269,27 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             def fetchone(self):
                 return next(self.rows)
 
+            def fetchall(self):
+                return next(self.rows)
+
+        billing_account_row = [
+            (stored.billing_account_id, stored.billing_account_reference)
+        ]
         fake_cases = (
             ([None], "late adjustment invoice adjustment rating is missing"),
             ([rating_row, None], "late adjustment invoice adjustment draft is missing"),
-            ([rating_row, draft_row, None], "late adjustment invoice adjustment does not match evidence"),
-            ([rating_row, draft_row, None, (1,)], "invoice draft already has an issued invoice"),
-            ([rating_row, draft_row, None, None, None], "late adjustment invoice adjustment identity conflicts with an existing row"),
+            ([rating_row, draft_row, []], "invoice draft billing account is ambiguous"),
+            (
+                [rating_row, draft_row, [(uuid4(), "urn:cwl:other:billing-account")]],
+                "late adjustment invoice adjustment billing account does not match draft",
+            ),
+            ([rating_row, draft_row, billing_account_row, None], "late adjustment invoice adjustment does not match evidence"),
+            ([rating_row, draft_row, billing_account_row, None, (1,)], "invoice draft already has an issued invoice"),
+            ([rating_row, draft_row, billing_account_row, None, None, None], "late adjustment invoice adjustment identity conflicts with an existing row"),
         )
         fake_candidates = (
+            stored,
+            stored,
             stored,
             stored,
             replace(stored, adjustment_amount=Decimal("-12.51")),
@@ -13155,7 +13305,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                             replace(candidate, late_adjustment_invoice_adjustment_id=uuid4())
                         )
 
-        mismatch_cursor = SequenceCursor([rating_row, draft_row, None, None, (uuid4(),)])
+        mismatch_cursor = SequenceCursor(
+            [rating_row, draft_row, billing_account_row, None, None, (uuid4(),)]
+        )
         with mock.patch.object(
             self.ledger, "_cursor", return_value=nullcontext(mismatch_cursor)
         ), mock.patch.object(

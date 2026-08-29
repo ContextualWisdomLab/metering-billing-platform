@@ -9,19 +9,24 @@ Accepted for the #87 late-period adjustment slice.
 Record a rated late adjustment as a separate immutable
 `late_adjustment_invoice_adjustment` fact linked to one same-tenant invoice
 draft. The fact copies the signed amount, currency, target period, application,
-and rating identities and adds operator and authorization evidence.
+and rating identities, records the single billing account selected from the
+draft lines, and adds operator and authorization evidence.
 
 The command is exposed at
 `POST /v1/late-adjustments/{late_adjustment_id}/invoice-adjustments` and
 requires `invoice_draft_id`, `recorded_by`, and
 `authorization_reference`. Its identity is the tenant and rated adjustment;
 replays return the stored composition. A currency mismatch, cross-tenant draft,
-or already-issued draft is rejected. Existing drafts and issued invoice
-snapshots are never overwritten.
+already-issued draft, downstream collection/journal/tax/credit fact, ambiguous
+billing account, or unrepresentable amount is rejected. Existing drafts and
+issued invoice snapshots are never overwritten.
 
 ## Consequences
 
 - The signed late-adjustment delta now has an explicit invoice-intent target.
+- A composition is single-payer only: no draft lines or multiple billing
+  accounts fail closed, and the selected tenant-scoped account is copied to
+  the issued line. This slice does not infer a payer from the tenant.
 - The next operator action after composition is `issue_invoice`.
 - `IssuedInvoiceService` locks the draft, consumes linked compositions into
   signed `late_adjustment` lines, and includes them in exact totals, payload
@@ -31,5 +36,11 @@ snapshots are never overwritten.
   `late_adjustment_tax_reassessment_required`; stale tax is not silently
   reused. A future tax-reassessment slice must explicitly publish the new
   assessment before issue.
+- Composition is rejected after collection, journal, tax, or credit facts have
+  captured the draft. A zero resulting issue is rejected because the existing
+  collection workflow has no zero-value action.
+- Issued-invoice and presentment line envelopes are contract version 2. Audit
+  actor, authorization, and timestamp remain first-write evidence and are not
+  part of the replay identity.
 - Collection, journal, provider export, and legal invoice authority remain
   separate downstream boundaries; this slice does not claim any of them.

@@ -49,7 +49,9 @@
   adjustment compositions under a draft lock. Each signed delta is frozen as a
   `late_adjustment` issued line and included in exact untaxed totals, payload
   hashing, replay, PostgreSQL persistence, and invoice presentment through
-  migration `0055`. Existing tax assessments reject with
+  migrations `0055` and `0056`. The v2 issued-invoice contracts require
+  typed usage/late-adjustment lines, preserve the selected billing-account
+  identity, and reject precision loss. Existing tax assessments reject with
   `late_adjustment_tax_reassessment_required` until reassessment exists; no
   stale tax, journal, collection, provider, or statutory invoice action is
   invented.

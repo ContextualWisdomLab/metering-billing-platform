@@ -20,6 +20,8 @@ JOURNAL_LINE_AMOUNT_QUANTUM = Decimal("0.000001")
 JOURNAL_LINE_AMOUNT_SCALE_ERROR = (
     "journal proposal line amounts cannot exceed six fractional digits"
 )
+POSTGRES_NUMERIC_38_12_MAX_INTEGER_DIGITS = 26
+POSTGRES_NUMERIC_38_12_MAX_FRACTIONAL_DIGITS = 12
 
 
 def parse_exact_decimal(quantity_text: str) -> Decimal:
@@ -72,3 +74,14 @@ def require_postable_journal_line_amounts(*amounts: Decimal) -> None:
     for amount in amounts:
         if journal_line_amount_exceeds_postable_scale(amount):
             raise JournalLineAmountScaleError(JOURNAL_LINE_AMOUNT_SCALE_ERROR)
+
+
+def issued_invoice_amount_exceeds_storage_precision(amount: Decimal) -> bool:
+    """Return True when *amount* would round in PostgreSQL ``numeric(38, 12)``."""
+    if not isinstance(amount, Decimal) or amount.is_nan() or amount.is_infinite():
+        return True
+    integer, _, fraction = format(abs(amount), "f").partition(".")
+    return (
+        len(integer.lstrip("0") or "0") > POSTGRES_NUMERIC_38_12_MAX_INTEGER_DIGITS
+        or len(fraction.rstrip("0")) > POSTGRES_NUMERIC_38_12_MAX_FRACTIONAL_DIGITS
+    )

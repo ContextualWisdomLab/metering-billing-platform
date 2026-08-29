@@ -300,6 +300,7 @@ REQUIRED_FILES = (
     "database/migrations/0053_late_adjustment_rating_target_guard.sql",
     "database/migrations/0054_late_adjustment_invoice_adjustment.sql",
     "database/migrations/0055_signed_issued_invoice_lines.sql",
+    "database/migrations/0056_late_adjustment_invoice_adjustment_billing_account.sql",
     "schemas/late-adjustment-application.schema.json",
     "schemas/late-adjustment-rating.schema.json",
     "metering_billing/__init__.py",
@@ -623,6 +624,13 @@ def _validate_node(
     if "allOf" in schema:
         for branch in schema["allOf"]:
             errors.extend(_validate_node(root_schema, branch, instance, path))
+    if "if" in schema:
+        condition_matches = not _validate_node(root_schema, schema["if"], instance, path)
+        selected = schema.get("then" if condition_matches else "else")
+        if selected is not None:
+            errors.extend(_validate_node(root_schema, selected, instance, path))
+    if "not" in schema and not _validate_node(root_schema, schema["not"], instance, path):
+        errors.append(f"{path}: value matches a forbidden schema")
     if "enum" in schema and instance not in schema["enum"]:
         errors.append(f"{path}: value is not in the allowed enumeration")
     if "const" in schema and instance != schema["const"]:

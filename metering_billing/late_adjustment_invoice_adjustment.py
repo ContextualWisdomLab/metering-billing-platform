@@ -20,6 +20,7 @@ from metering_billing.errors import (
     LateAdjustmentInvoiceAdjustmentRejectionReasonCode,
     require_resolved,
 )
+from metering_billing.exact_decimal import issued_invoice_amount_exceeds_storage_precision
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
     StoredLateAdjustmentInvoiceAdjustment,
@@ -50,6 +51,8 @@ class LateAdjustmentInvoiceAdjustmentResult:
     late_adjustment_id: UUID | None
     invoice_draft_id: UUID | None
     tenant_reference: str | None
+    billing_account_id: UUID | None
+    billing_account_reference: str | None
     target_period_id: UUID | None
     adjustment_amount: Decimal | None
     currency_code: str | None
@@ -84,6 +87,8 @@ class LateAdjustmentInvoiceAdjustmentResult:
             self.late_adjustment_id,
             self.invoice_draft_id,
             self.tenant_reference,
+            self.billing_account_id,
+            self.billing_account_reference,
             self.target_period_id,
             self.adjustment_amount,
             self.currency_code,
@@ -108,6 +113,8 @@ class LateAdjustmentInvoiceAdjustmentResult:
             "late_adjustment_id": str(self.late_adjustment_id),
             "invoice_draft_id": str(self.invoice_draft_id),
             "tenant_reference": self.tenant_reference,
+            "billing_account_id": str(self.billing_account_id),
+            "billing_account_reference": self.billing_account_reference,
             "target_period_id": str(self.target_period_id),
             "adjustment_amount": format(self.adjustment_amount, "f"),
             "currency_code": self.currency_code,
@@ -236,6 +243,14 @@ class LateAdjustmentInvoiceAdjustmentService:
                 LateAdjustmentInvoiceAdjustmentRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND,
                 OPERATOR_ACTION_WAIT,
             )
+        locked_draft = getattr(self.ledger, "lock_invoice_draft", None)
+        if locked_draft is not None:
+            draft = locked_draft(tenant.tenant_account_id, draft.invoice_draft_id)
+            if draft is None:
+                return _rejected(
+                    LateAdjustmentInvoiceAdjustmentRejectionReasonCode.INVOICE_DRAFT_NOT_FOUND,
+                    OPERATOR_ACTION_WAIT,
+                )
         if draft.currency_code != rating.currency_code:
             return _rejected(
                 LateAdjustmentInvoiceAdjustmentRejectionReasonCode.CURRENCY_MISMATCH,
@@ -246,6 +261,31 @@ class LateAdjustmentInvoiceAdjustmentService:
         ) is not None:
             return _rejected(
                 LateAdjustmentInvoiceAdjustmentRejectionReasonCode.INVOICE_ALREADY_ISSUED,
+                OPERATOR_ACTION_WAIT,
+            )
+        if _has_downstream_records(self.ledger, tenant.tenant_account_id, draft.invoice_draft_id):
+            return _rejected(
+                LateAdjustmentInvoiceAdjustmentRejectionReasonCode.INVOICE_DRAFT_HAS_DOWNSTREAM_RECORDS,
+                OPERATOR_ACTION_WAIT,
+            )
+        billing_accounts = {
+            (line.billing_account_id, line.billing_account_reference)
+            for line in draft.invoice_draft_lines
+        }
+        if not billing_accounts:
+            return _rejected(
+                LateAdjustmentInvoiceAdjustmentRejectionReasonCode.INVOICE_DRAFT_BILLING_ACCOUNT_NOT_FOUND,
+                OPERATOR_ACTION_WAIT,
+            )
+        if len(billing_accounts) != 1:
+            return _rejected(
+                LateAdjustmentInvoiceAdjustmentRejectionReasonCode.INVOICE_DRAFT_BILLING_ACCOUNT_AMBIGUOUS,
+                OPERATOR_ACTION_WAIT,
+            )
+        billing_account_id, billing_account_reference = next(iter(billing_accounts))
+        if issued_invoice_amount_exceeds_storage_precision(rating.adjustment_amount):
+            return _rejected(
+                LateAdjustmentInvoiceAdjustmentRejectionReasonCode.ADJUSTMENT_AMOUNT_NOT_REPRESENTABLE,
                 OPERATOR_ACTION_WAIT,
             )
         source_payload_hash = _payload_hash(
@@ -259,6 +299,8 @@ class LateAdjustmentInvoiceAdjustmentService:
                 "target_period_id": str(rating.target_period_id),
                 "adjustment_amount": format(rating.adjustment_amount, "f"),
                 "currency_code": rating.currency_code,
+                "billing_account_id": str(billing_account_id),
+                "billing_account_reference": billing_account_reference,
                 "late_adjustment_invoice_adjustment_contract_version": (
                     LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION
                 ),
@@ -267,6 +309,8 @@ class LateAdjustmentInvoiceAdjustmentService:
         candidate = StoredLateAdjustmentInvoiceAdjustment(
             late_adjustment_invoice_adjustment_id=generate_record_id(),
             tenant_account_id=tenant.tenant_account_id,
+            billing_account_id=billing_account_id,
+            billing_account_reference=billing_account_reference,
             late_adjustment_rating_id=rating.late_adjustment_rating_id,
             late_adjustment_application_id=rating.late_adjustment_application_id,
             late_adjustment_id=rating.late_adjustment_id,
@@ -293,6 +337,11 @@ class LateAdjustmentInvoiceAdjustmentService:
                     LateAdjustmentInvoiceAdjustmentRejectionReasonCode.INVOICE_ALREADY_ISSUED,
                     OPERATOR_ACTION_WAIT,
                 )
+            if str(error) == "adjustment_amount exceeds numeric(38,12) precision":
+                return _rejected(
+                    LateAdjustmentInvoiceAdjustmentRejectionReasonCode.ADJUSTMENT_AMOUNT_NOT_REPRESENTABLE,
+                    OPERATOR_ACTION_WAIT,
+                )
             raise
         outcome = (
             LateAdjustmentInvoiceAdjustmentOutcomeCode.ACCEPTED
@@ -309,6 +358,20 @@ def _audit_reference(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _has_downstream_records(ledger: MemoryUsageLedger, tenant_account_id: UUID, invoice_draft_id: UUID) -> bool:
+    """Reject composition once a downstream fact has captured the old draft."""
+    if ledger.find_collection_case(tenant_account_id, invoice_draft_id) is not None:
+        return True
+    if ledger.find_journal_proposal_for_invoice_draft(tenant_account_id, invoice_draft_id) is not None:
+        return True
+    if ledger.find_tax_assessment_for_draft(tenant_account_id, invoice_draft_id) is not None:
+        return True
+    return any(
+        credit.invoice_draft_id == invoice_draft_id
+        for credit in ledger.list_credit_adjustments(tenant_account_id)
+    )
 
 
 def _payload_hash(payload: Mapping[str, Any]) -> str:
@@ -335,6 +398,8 @@ def _rejected(
         late_adjustment_id=None,
         invoice_draft_id=None,
         tenant_reference=None,
+        billing_account_id=None,
+        billing_account_reference=None,
         target_period_id=None,
         adjustment_amount=None,
         currency_code=None,
@@ -367,6 +432,8 @@ def _from_stored(
         late_adjustment_id=stored.late_adjustment_id,
         invoice_draft_id=stored.invoice_draft_id,
         tenant_reference=tenant_reference,
+        billing_account_id=stored.billing_account_id,
+        billing_account_reference=stored.billing_account_reference,
         target_period_id=stored.target_period_id,
         adjustment_amount=stored.adjustment_amount,
         currency_code=stored.currency_code,

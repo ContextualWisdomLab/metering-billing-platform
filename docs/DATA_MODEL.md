@@ -267,17 +267,21 @@ target openness for first ratings, and update/delete immutability. Migration
 `rating_run`. `LateAdjustmentInvoiceAdjustmentService` then stores one
 tenant-scoped `late_adjustment_invoice_adjustment` per rated adjustment, linked
 to an unissued invoice draft and copying the signed exact delta, target period,
-application, rating, audit, and source-hash evidence. Migration `0054` protects
+application, rating, audit, source-hash, and single billing-account evidence. Migration `0054` protects
 the tenant-scoped links, currency/evidence equality, replay identity, issued
 draft boundary, and update/delete immutability. It does not rewrite the draft,
 issue the invoice, calculate tax, or call a provider. Migration `0055` adds
 `line_type` and the tenant-scoped composition link to `issued_invoice_line`.
 Usage lines remain non-negative; a late-adjustment line carries the signed
-non-zero delta and its immutable composition identity. `IssuedInvoiceService`
+non-zero delta, selected billing-account reference, and immutable composition identity. Migration `0056` persists and validates that account evidence,
+backfills only unambiguous legacy drafts, and rejects ambiguous new drafts.
+`IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a
 tax reassessment path exists; it never reuses a stale tax snapshot. The issued
-payload hash and presentment include the signed lines. Collection, journal,
+payload hash and presentment include the signed lines. Composition is rejected
+after collection, journal, tax, or credit facts capture the draft, and a zero
+resulting issue is rejected. Collection, journal,
 provider export, and statutory tax treatment remain downstream boundaries.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`

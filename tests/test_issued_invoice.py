@@ -81,7 +81,7 @@ class IssuedInvoiceTests(unittest.TestCase):
             first.idempotency_key,
             (
                 f"{TENANT_ONE}:issued_invoice:{first.issued_invoice_id}:"
-                f"{first.source_payload_hash}:v1"
+                f"{first.source_payload_hash}:v2"
             ),
         )
         self.assertEqual(len(first.issued_invoice_lines), 1)
@@ -111,7 +111,7 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(envelope["data"]["issued_invoice_id"], str(first.issued_invoice_id))
         self.assertEqual(envelope["data"]["invoice_draft_id"], str(invoice_draft_id))
         self.assertEqual(envelope["data"]["source_payload_hash"], first.source_payload_hash)
-        self.assertEqual(envelope["data"]["issued_invoice_contract_version"], 1)
+        self.assertEqual(envelope["data"]["issued_invoice_contract_version"], 2)
         self.assertEqual(envelope["data"]["currency_code"], "USD")
         self.assertEqual(
             envelope["data"]["tax_exclusive_amount"],

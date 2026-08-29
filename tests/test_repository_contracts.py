@@ -3407,11 +3407,32 @@ class RepositoryContractTests(unittest.TestCase):
                     "rated_quantity": "1852.5",
                     "unit_price_amount": "0.000002",
                     "line_total_amount": "0.003705",
+                    "line_type": "usage",
                 }
             ],
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
         self.assertEqual(validate_issued_invoice(instance), ())
+        missing_line_type = dict(instance)
+        missing_line_type["issued_invoice_lines"] = [
+            {key: value for key, value in instance["issued_invoice_lines"][0].items() if key != "line_type"}
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, missing_line_type), ())
+        negative_usage = dict(instance)
+        negative_usage["issued_invoice_lines"] = [
+            {**instance["issued_invoice_lines"][0], "line_total_amount": "-1"}
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, negative_usage), ())
+        usage_with_adjustment_id = dict(instance)
+        usage_with_adjustment_id["issued_invoice_lines"] = [
+            {
+                **instance["issued_invoice_lines"][0],
+                "late_adjustment_invoice_adjustment_id": (
+                    "019d7b92-1aa0-7a7f-b61c-962c0f4bf632"
+                ),
+            }
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, usage_with_adjustment_id), ())
         numbered = dict(instance)
         numbered["invoice_number"] = "INV-0001"
         self.assertIn(
@@ -3525,11 +3546,32 @@ class RepositoryContractTests(unittest.TestCase):
                     "rated_quantity": "50000",
                     "unit_price_amount": "0.002",
                     "line_total_amount": "100.00",
+                    "line_type": "usage",
                 }
             ],
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
         self.assertEqual(validate_issued_invoice_presentment(instance), ())
+        missing_line_type = dict(instance)
+        missing_line_type["issued_invoice_lines"] = [
+            {key: value for key, value in instance["issued_invoice_lines"][0].items() if key != "line_type"}
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, missing_line_type), ())
+        negative_usage = dict(instance)
+        negative_usage["issued_invoice_lines"] = [
+            {**instance["issued_invoice_lines"][0], "line_total_amount": "-1"}
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, negative_usage), ())
+        usage_with_adjustment_id = dict(instance)
+        usage_with_adjustment_id["issued_invoice_lines"] = [
+            {
+                **instance["issued_invoice_lines"][0],
+                "late_adjustment_invoice_adjustment_id": (
+                    "019d7b92-1aa0-7a7f-b61c-962c0f4bf632"
+                ),
+            }
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, usage_with_adjustment_id), ())
         posted = dict(instance)
         posted["issued_invoice_outcome_code"] = "accepted"
         self.assertIn(

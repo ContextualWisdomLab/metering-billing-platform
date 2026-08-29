@@ -86,12 +86,17 @@ invoice-adjustment composition is reported as the next action. The nested
 `/invoice-adjustments` command requires an unissued same-tenant invoice draft,
 matching currency, and non-empty `recorded_by` and
 `authorization_reference`; it appends a separate immutable composition fact
-and reports `issue_invoice`. Issuance locks the draft, consumes all linked
+with the single billing account selected from the draft lines and reports
+`issue_invoice`. Empty or multi-account drafts, drafts with collection,
+journal, tax, or credit downstream facts, and amounts outside
+`numeric(38,12)` fail closed. Issuance locks the draft, consumes all linked
 composition facts into signed `late_adjustment` lines, and adjusts the untaxed
-exact total. If a tax assessment already exists, issuance rejects with
+exact total. A zero or negative result is rejected. If a tax assessment already exists, issuance rejects with
 `late_adjustment_tax_reassessment_required` until reassessment is implemented;
 it does not reuse stale tax. Issued-invoice payload hashing and presentment
-include the signed lines. The draft and issued snapshot remain append-only;
+include the signed lines and billing account. Version 2 makes `line_type`
+required and enforces usage/late-adjustment line invariants. The draft and
+issued snapshot remain append-only;
 collection, journal, provider export, and statutory tax treatment remain
 downstream boundaries.
 

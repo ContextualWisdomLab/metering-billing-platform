@@ -27,6 +27,7 @@ from metering_billing.errors import (
 )
 from metering_billing.exact_decimal import (
     format_exact_decimal,
+    issued_invoice_amount_exceeds_storage_precision,
     parse_exact_decimal,
     require_postable_journal_line_amounts,
 )
@@ -516,6 +517,8 @@ class StoredLateAdjustmentInvoiceAdjustment:
 
     late_adjustment_invoice_adjustment_id: UUID
     tenant_account_id: UUID
+    billing_account_id: UUID | None
+    billing_account_reference: str | None
     late_adjustment_rating_id: UUID
     late_adjustment_application_id: UUID
     late_adjustment_id: UUID
@@ -3310,6 +3313,14 @@ class MemoryUsageLedger:
             or composition.adjustment_amount == 0
         ):
             raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        if issued_invoice_amount_exceeds_storage_precision(composition.adjustment_amount):
+            raise ValueError("adjustment_amount exceeds numeric(38,12) precision")
+        if (
+            composition.billing_account_id is None
+            or not isinstance(composition.billing_account_reference, str)
+            or not composition.billing_account_reference.strip()
+        ):
+            raise ValueError("billing account evidence must be present")
         amount_text = format(composition.adjustment_amount, "f")
         if (
             not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
@@ -3377,6 +3388,11 @@ class MemoryUsageLedger:
             or composition.currency_code != rating.currency_code
             or draft.currency_code != rating.currency_code
             or rating.late_adjustment_rating_status != "rated"
+            or not any(
+                line.billing_account_id == composition.billing_account_id
+                and line.billing_account_reference == composition.billing_account_reference
+                for line in draft.invoice_draft_lines
+            )
         ):
             raise ValueError("late adjustment invoice adjustment does not match evidence")
         self.late_adjustment_invoice_adjustments[

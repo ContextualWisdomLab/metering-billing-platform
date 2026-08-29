@@ -31,6 +31,7 @@ from metering_billing.errors import (
 )
 from metering_billing.exact_decimal import (
     format_exact_decimal,
+    issued_invoice_amount_exceeds_storage_precision,
     parse_exact_decimal,
     require_postable_journal_line_amounts,
 )
@@ -158,6 +159,8 @@ def _same_late_adjustment_invoice_adjustment(
     """Compare immutable composition fields except generated/audit fields."""
     return (
         stored.tenant_account_id == incoming.tenant_account_id
+        and stored.billing_account_id == incoming.billing_account_id
+        and stored.billing_account_reference == incoming.billing_account_reference
         and stored.late_adjustment_rating_id == incoming.late_adjustment_rating_id
         and stored.late_adjustment_application_id
         == incoming.late_adjustment_application_id
@@ -797,6 +800,14 @@ class PostgresUsageLedger:
             or composition.adjustment_amount == 0
         ):
             raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        if issued_invoice_amount_exceeds_storage_precision(composition.adjustment_amount):
+            raise ValueError("adjustment_amount exceeds numeric(38,12) precision")
+        if (
+            composition.billing_account_id is None
+            or not isinstance(composition.billing_account_reference, str)
+            or not composition.billing_account_reference.strip()
+        ):
+            raise ValueError("billing account evidence must be present")
         amount_text = format(composition.adjustment_amount, "f")
         if (
             not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
@@ -842,6 +853,27 @@ class PostgresUsageLedger:
                 raise ValueError("late adjustment invoice adjustment draft is missing")
             cursor.execute(
                 """
+                SELECT DISTINCT line.billing_account_id, account.billing_account_reference
+                FROM billing_core.invoice_draft_line AS line
+                JOIN billing_core.billing_account AS account
+                  ON account.tenant_account_id = line.tenant_account_id
+                 AND account.billing_account_id = line.billing_account_id
+                WHERE line.tenant_account_id = %s AND line.invoice_draft_id = %s
+                """,
+                (composition.tenant_account_id, composition.invoice_draft_id),
+            )
+            billing_accounts = tuple(cursor.fetchall())
+            if len(billing_accounts) != 1:
+                raise ValueError("invoice draft billing account is ambiguous")
+            if billing_accounts[0] != (
+                composition.billing_account_id,
+                composition.billing_account_reference,
+            ):
+                raise ValueError(
+                    "late adjustment invoice adjustment billing account does not match draft"
+                )
+            cursor.execute(
+                """
                 SELECT late_adjustment_invoice_adjustment_id
                 FROM billing_core.late_adjustment_invoice_adjustment
                 WHERE tenant_account_id = %s AND late_adjustment_rating_id = %s
@@ -884,19 +916,22 @@ class PostgresUsageLedger:
                 """
                 INSERT INTO billing_core.late_adjustment_invoice_adjustment
                     (late_adjustment_invoice_adjustment_id, tenant_account_id,
+                     billing_account_id, billing_account_reference,
                      late_adjustment_rating_id, late_adjustment_application_id,
                      late_adjustment_id, invoice_draft_id, target_period_id,
                      adjustment_amount, currency_code, recorded_by,
                      authorization_reference, recorded_at, source_payload_hash,
                      late_adjustment_invoice_adjustment_contract_version,
                      late_adjustment_invoice_adjustment_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 RETURNING late_adjustment_invoice_adjustment_id
                 """,
                 (
                     composition.late_adjustment_invoice_adjustment_id,
                     composition.tenant_account_id,
+                    composition.billing_account_id,
+                    composition.billing_account_reference,
                     composition.late_adjustment_rating_id,
                     composition.late_adjustment_application_id,
                     composition.late_adjustment_id,
@@ -7921,6 +7956,7 @@ class PostgresUsageLedger:
         """Hydrate one invoice composition, optionally enforcing its tenant."""
         query = """
             SELECT late_adjustment_invoice_adjustment_id, tenant_account_id,
+                   billing_account_id, billing_account_reference,
                    late_adjustment_rating_id, late_adjustment_application_id,
                    late_adjustment_id, invoice_draft_id, target_period_id,
                    adjustment_amount, currency_code, recorded_by,
@@ -7941,19 +7977,21 @@ class PostgresUsageLedger:
         return StoredLateAdjustmentInvoiceAdjustment(
             late_adjustment_invoice_adjustment_id=UUID(str(row[0])),
             tenant_account_id=UUID(str(row[1])),
-            late_adjustment_rating_id=UUID(str(row[2])),
-            late_adjustment_application_id=UUID(str(row[3])),
-            late_adjustment_id=UUID(str(row[4])),
-            invoice_draft_id=UUID(str(row[5])),
-            target_period_id=UUID(str(row[6])),
-            adjustment_amount=row[7],
-            currency_code=row[8],
-            recorded_by=row[9],
-            authorization_reference=row[10],
-            recorded_at=row[11],
-            source_payload_hash=row[12],
-            late_adjustment_invoice_adjustment_contract_version=row[13],
-            late_adjustment_invoice_adjustment_status=row[14],
+            billing_account_id=None if row[2] is None else UUID(str(row[2])),
+            billing_account_reference=row[3],
+            late_adjustment_rating_id=UUID(str(row[4])),
+            late_adjustment_application_id=UUID(str(row[5])),
+            late_adjustment_id=UUID(str(row[6])),
+            invoice_draft_id=UUID(str(row[7])),
+            target_period_id=UUID(str(row[8])),
+            adjustment_amount=row[9],
+            currency_code=row[10],
+            recorded_by=row[11],
+            authorization_reference=row[12],
+            recorded_at=row[13],
+            source_payload_hash=row[14],
+            late_adjustment_invoice_adjustment_contract_version=row[15],
+            late_adjustment_invoice_adjustment_status=row[16],
         )
 
     @staticmethod

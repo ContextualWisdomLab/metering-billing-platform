@@ -31,7 +31,10 @@ from metering_billing.errors import (
     IssuedInvoiceRejectionReasonCode,
     TimeWindowError,
 )
-from metering_billing.exact_decimal import format_exact_decimal
+from metering_billing.exact_decimal import (
+    format_exact_decimal,
+    issued_invoice_amount_exceeds_storage_precision,
+)
 from metering_billing.invoice_draft import parse_invoice_amount
 from metering_billing.time_window import parse_iso8601_datetime
 from metering_billing.usage_ledger import (
@@ -49,7 +52,7 @@ from metering_billing.webhook_outbox import (
 
 
 Clock = Callable[[], datetime]
-ISSUED_INVOICE_CONTRACT_VERSION = 1
+ISSUED_INVOICE_CONTRACT_VERSION = 2
 ISSUED_INVOICE_STATUS = "issued"
 OPERATOR_ACTION_COLLECT = "collect"
 ZERO = Decimal("0")
@@ -272,6 +275,19 @@ class IssuedInvoiceService:
         compositions = self.ledger.list_late_adjustment_invoice_adjustments_for_draft(
             tenant.tenant_account_id, invoice_draft.invoice_draft_id
         )
+        draft_billing_accounts = {
+            (line.billing_account_id, line.billing_account_reference)
+            for line in invoice_draft.invoice_draft_lines
+        }
+        if compositions and (
+            len(draft_billing_accounts) != 1
+            or any(
+                (composition.billing_account_id, composition.billing_account_reference)
+                not in draft_billing_accounts
+                for composition in compositions
+            )
+        ):
+            return _rejected(IssuedInvoiceRejectionReasonCode.REQUEST_INVALID)
         if compositions and self.ledger.find_tax_assessment_for_draft(
             tenant.tenant_account_id, invoice_draft.invoice_draft_id
         ) is not None:
@@ -345,14 +361,21 @@ def _tax_amounts(
         exclusive += sum(
             (composition.adjustment_amount for composition in compositions), ZERO
         )
-        if exclusive < ZERO:
-            raise ExactDecimalError("late adjustment total cannot be negative")
+        if exclusive <= ZERO:
+            raise ExactDecimalError("late adjustment total must be positive")
+        if issued_invoice_amount_exceeds_storage_precision(exclusive):
+            raise ExactDecimalError("late adjustment total exceeds storage precision")
         return exclusive, ZERO, exclusive
     exclusive = parse_invoice_amount(assessment.tax_exclusive_amount)
     tax_amount = parse_invoice_amount(assessment.tax_amount)
     inclusive = parse_invoice_amount(assessment.tax_inclusive_amount)
     if exclusive + tax_amount != inclusive:
         raise ExactDecimalError("tax snapshot does not sum to inclusive")
+    if any(
+        issued_invoice_amount_exceeds_storage_precision(amount)
+        for amount in (exclusive, tax_amount, inclusive)
+    ):
+        raise ExactDecimalError("tax snapshot exceeds storage precision")
     return exclusive, tax_amount, inclusive
 
 
@@ -377,7 +400,8 @@ def _project_draft_lines(
     adjustment_lines = tuple(
         IssuedInvoiceLineResult(
             line_number=len(draft_lines) + offset,
-            billing_account_reference=tenant_reference or "urn:cwl:unknown",
+            billing_account_reference=composition.billing_account_reference
+            or "urn:cwl:invalid",
             meter_code="late_adjustment",
             unit_code="adjustment",
             rated_quantity=Decimal("1"),
@@ -421,7 +445,8 @@ def _build_issued_lines(
             issued_invoice_id=issued_invoice_id,
             tenant_account_id=invoice_draft.tenant_account_id,
             line_number=len(draft_lines) + offset,
-            billing_account_reference=tenant_reference or "urn:cwl:unknown",
+            billing_account_reference=composition.billing_account_reference
+            or "urn:cwl:invalid",
             meter_code="late_adjustment",
             unit_code="adjustment",
             rated_quantity=Decimal("1"),

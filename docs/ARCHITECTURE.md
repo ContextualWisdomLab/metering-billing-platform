@@ -75,14 +75,20 @@ late fact, period, usage, rating, tax, journal, provider state, or webhook.
 is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
 `LateAdjustmentInvoiceAdjustmentService` consumes that rating through the
 nested `/invoice-adjustments` command and appends one tenant-scoped
-`late_adjustment_invoice_adjustment` linked to an unissued invoice draft.
+`late_adjustment_invoice_adjustment` linked to an unissued invoice draft and
+the one billing account shared by its draft lines. Composition fails closed
+when the draft has no single payer or has already produced collection,
+journal, tax, or credit downstream facts.
 Presentment then reports `issue_invoice`. `IssuedInvoiceService` locks the
 draft, consumes all linked composition facts exactly once, and freezes each as
 a signed `late_adjustment` issued-invoice line while adjusting the untaxed
 exact total. A stale tax assessment rejects issuance with
-`late_adjustment_tax_reassessment_required`; no tax is silently reused. The
-draft and issued snapshot remain immutable; collection, journal, provider
-export, and tax/legal-document settlement remain downstream boundaries.
+`late_adjustment_tax_reassessment_required`; no tax is silently reused. A zero
+or negative resulting total is rejected. Issued-invoice line contracts are
+version 2: usage lines are non-negative and late-adjustment lines retain their
+signed exact total and composition ID. The draft and issued snapshot remain
+immutable; collection, journal, provider export, and tax/legal-document
+settlement remain downstream boundaries.
 
 ## Usage ingestion
 
