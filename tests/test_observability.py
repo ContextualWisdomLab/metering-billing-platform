@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest import mock
+import unittest.mock
 
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -12,6 +12,7 @@ from metering_billing.observability import (
     OTEL_ENABLED_ENVIRONMENT_VARIABLE,
     OTEL_ENDPOINT_ENVIRONMENT_VARIABLE,
     OTEL_SERVICE_NAME_ENVIRONMENT_VARIABLE,
+    OTEL_TRACES_ENDPOINT_ENVIRONMENT_VARIABLE,
     create_tracer,
     instrument_wsgi,
 )
@@ -36,8 +37,8 @@ class ObservabilityTests(unittest.TestCase):
     def test_enabled_tracing_builds_otlp_provider(self) -> None:
         """Bind the configured service name and OTLP endpoint."""
         with (
-            mock.patch("metering_billing.observability.OTLPSpanExporter") as exporter,
-            mock.patch.object(TracerProvider, "add_span_processor") as add_processor,
+            unittest.mock.patch("metering_billing.observability.OTLPSpanExporter") as exporter,
+            unittest.mock.patch.object(TracerProvider, "add_span_processor") as add_processor,
         ):
             tracer = create_tracer(
                 {
@@ -47,8 +48,19 @@ class ObservabilityTests(unittest.TestCase):
                 }
             )
         self.assertIsNotNone(tracer)
-        exporter.assert_called_once_with(endpoint="http://collector:4318")
+        exporter.assert_called_once_with(endpoint="http://collector:4318/v1/traces")
         add_processor.assert_called_once()
+
+        with unittest.mock.patch(
+            "metering_billing.observability.OTLPSpanExporter"
+        ) as specific_exporter:
+            create_tracer(
+                {
+                    OTEL_ENABLED_ENVIRONMENT_VARIABLE: "true",
+                    OTEL_TRACES_ENDPOINT_ENVIRONMENT_VARIABLE: "http://collector:4318/custom",
+                }
+            )
+        specific_exporter.assert_called_once_with(endpoint="http://collector:4318/custom")
 
     def test_wsgi_span_extracts_w3c_context_without_request_data(self) -> None:
         """Capture bounded route data and preserve a valid remote trace parent."""
