@@ -138,10 +138,12 @@ def _close_snapshot_session(process: subprocess.Popen[str]) -> None:
             process.stdin.flush()
             process.stdin.close()
         except (OSError, ValueError):
+            # Teardown is best-effort because psql may already have closed stdin.
             pass
     try:
         process.wait()
     except OSError:
+        # Teardown is best-effort because the child may already have exited.
         pass
 
 
@@ -238,6 +240,7 @@ def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
             try:
                 path.unlink()
             except FileNotFoundError:
+                # Cleanup is idempotent when another actor already removed it.
                 pass
             except OSError as cleanup_error:
                 raise BackupRestoreError(f"cannot clean backup manifest: {path}") from cleanup_error
@@ -287,6 +290,7 @@ def _remove_owned_backup(backup_path: Path, temporary_name: str) -> None:
     try:
         os.unlink(backup_path)
     except FileNotFoundError:
+        # Rollback is idempotent when the final link was already removed.
         pass
     except OSError as error:
         raise BackupRestoreError(f"cannot roll back backup artifact: {backup_path}") from error
@@ -349,6 +353,7 @@ def create_backup(
             try:
                 os.unlink(temporary_name)
             except FileNotFoundError:
+                # The client may already have removed the temporary artifact.
                 pass
             except OSError as error:
                 if not completed:
