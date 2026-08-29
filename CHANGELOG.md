@@ -40,7 +40,7 @@
   now stores the same billing-period lifecycle and rejects missing,
   cross-tenant, open-source, closed-target, or incorrectly ordered late facts;
   target lifecycle rejections publish stable HTTP 422 contract results.
-  The memory adapter serializes application and period lifecycle writes for
+  The memory adapter serializes recording, application, and period lifecycle writes for
   at-most-once behavior, and application audit timestamps must be timezone
   aware and not future-dated.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in

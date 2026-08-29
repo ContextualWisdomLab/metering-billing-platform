@@ -264,7 +264,7 @@ PostgreSQL evaluates one tenant-scoped ordered keyset query so the page never
 scans or hydrates the complete history; application existence is loaded with
 one bulk lookup for the bounded page.
 Application audit timestamps are timezone-aware and not future-dated. The
-memory adapter serializes application and target-period lifecycle writes while
+memory adapter serializes recording, application, and target-period lifecycle writes while
 preserving the same replay identity.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`

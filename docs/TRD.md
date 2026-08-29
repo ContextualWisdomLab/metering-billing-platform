@@ -90,7 +90,7 @@ one ordered tenant-scoped keyset query with `limit + 1`.
 Presentment uses one bulk application-existence lookup for the returned page,
 not one application query per item.
 The application timestamp must be timezone-aware and not future-dated. The
-memory adapter serializes application and target-period lifecycle writes to
+memory adapter serializes recording, application, and target-period lifecycle writes to
 preserve at-most-once behavior during concurrent application and close.
 
 ## Provider plane
