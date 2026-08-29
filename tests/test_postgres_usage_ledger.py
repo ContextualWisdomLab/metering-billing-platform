@@ -370,20 +370,24 @@ class ConnectionPoolTests(unittest.TestCase):
         business_ledger = PostgresUsageLedger.connect(
             "unused", pool_size=1, connection_factory=factory
         )
-        with self.assertRaises(ValueError):
-            with business_ledger.lease():
-                raise ValueError("business failure")
-        business_ledger.close()
+        try:
+            with self.assertRaises(ValueError):
+                with business_ledger.lease():
+                    raise ValueError("business failure")
+        finally:
+            business_ledger.close()
 
         failure_ledger = PostgresUsageLedger.connect(
             "unused", pool_size=1, connection_factory=factory
         )
-        with self.assertRaises(psycopg.OperationalError):
-            with failure_ledger.lease() as session:
-                session.broken = True
-                raise psycopg.OperationalError("connection failed")
-        self.assertEqual(failure_ledger._pool.open_count, 0)
-        failure_ledger.close()
+        try:
+            with self.assertRaises(psycopg.OperationalError):
+                with failure_ledger.lease() as session:
+                    session.broken = True
+                    raise psycopg.OperationalError("connection failed")
+            self.assertEqual(failure_ledger._pool.open_count, 0)
+        finally:
+            failure_ledger.close()
 
 
 class PostgresUsageLedgerTests(unittest.TestCase):
