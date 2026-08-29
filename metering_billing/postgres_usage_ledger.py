@@ -39,6 +39,7 @@ from metering_billing.period_close import (
     ReconciliationException,
     ReconciliationEvidence,
     ReconciliationLine,
+    ReconciliationRun,
     ReconciliationResolution,
 )
 from metering_billing.usage_ledger import (
@@ -598,6 +599,125 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
         return tuple(item for item in evidence if item is not None)
+
+    def get_reconciliation_run(self, run_id: UUID) -> ReconciliationRun | None:
+        """Return one immutable completed reconciliation run."""
+        with self._cursor() as cursor:
+            return self._fetch_reconciliation_run(cursor, run_id)
+
+    def insert_reconciliation_run(self, run: ReconciliationRun) -> ReconciliationRun:
+        """Persist a completed run and its ordered line membership atomically."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tenant_account_id
+                FROM billing_core.billing_period
+                WHERE period_id = %s
+                """,
+                (run.period_id,),
+            )
+            period = cursor.fetchone()
+            if period is None:
+                raise KeyError(run.period_id)
+            tenant_account_id = UUID(str(period[0]))
+            cursor.execute(
+                """
+                INSERT INTO billing_core.reconciliation_run
+                    (run_id, tenant_account_id, period_id, started_at, completed_at,
+                     blocking_exception_count, reconciliation_run_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id) DO NOTHING
+                """,
+                (
+                    run.run_id,
+                    tenant_account_id,
+                    run.period_id,
+                    run.started_at,
+                    run.completed_at,
+                    run.blocking_exception_count,
+                    run.reconciliation_run_contract_version,
+                ),
+            )
+            for line_number, reconciliation_line_id in enumerate(
+                run.reconciliation_line_ids, start=1
+            ):
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM billing_core.reconciliation_line
+                    WHERE tenant_account_id = %s
+                      AND period_id = %s
+                      AND reconciliation_line_id = %s
+                    """,
+                    (tenant_account_id, run.period_id, reconciliation_line_id),
+                )
+                if cursor.fetchone() is None:
+                    raise KeyError(reconciliation_line_id)
+                cursor.execute(
+                    """
+                    INSERT INTO billing_core.reconciliation_run_line
+                        (run_id, tenant_account_id, period_id, line_number,
+                         reconciliation_line_id)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id, line_number) DO NOTHING
+                    """,
+                    (
+                        run.run_id,
+                        tenant_account_id,
+                        run.period_id,
+                        line_number,
+                        reconciliation_line_id,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    SELECT tenant_account_id, period_id, reconciliation_line_id
+                    FROM billing_core.reconciliation_run_line
+                    WHERE run_id = %s AND line_number = %s
+                    """,
+                    (run.run_id, line_number),
+                )
+                row = cursor.fetchone()
+                if row != (tenant_account_id, run.period_id, reconciliation_line_id):  # pragma: no cover - protected by composite identity constraints
+                    raise ValueError("reconciliation run line identity cannot change")
+            stored = self._fetch_reconciliation_run(cursor, run.run_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation run insert did not return a row")
+            if stored.as_contract_dict() != run.as_contract_dict():
+                raise ValueError("reconciliation run identity cannot change")
+            return stored
+
+    def list_reconciliation_runs(
+        self, tenant_reference: str, period_id: UUID | None = None
+    ) -> tuple[ReconciliationRun, ...]:
+        """Return completed runs for one tenant, optionally one period."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            if period_id is None:
+                cursor.execute(
+                    """
+                    SELECT run_id
+                    FROM billing_core.reconciliation_run
+                    WHERE tenant_account_id = %s
+                    ORDER BY completed_at, run_id
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT run_id
+                    FROM billing_core.reconciliation_run
+                    WHERE tenant_account_id = %s AND period_id = %s
+                    ORDER BY completed_at, run_id
+                    """,
+                    (tenant_account_id, period_id),
+                )
+            runs = tuple(
+                self._fetch_reconciliation_run(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(item for item in runs if item is not None)
 
     def get_reconciliation_resolution(
         self, resolution_id: UUID
@@ -6410,6 +6530,43 @@ class PostgresUsageLedger:
             captured_by=row[6],
             captured_at=row[7],
             reconciliation_evidence_contract_version=row[8],
+        )
+
+    @staticmethod
+    def _fetch_reconciliation_run(
+        cursor: Any, run_id: UUID
+    ) -> ReconciliationRun | None:
+        """Hydrate one completed run with ordered line membership."""
+        cursor.execute(
+            """
+            SELECT run_id, period_id, started_at, completed_at,
+                   blocking_exception_count, reconciliation_run_contract_version
+            FROM billing_core.reconciliation_run
+            WHERE run_id = %s
+            """,
+            (run_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        cursor.execute(
+            """
+            SELECT reconciliation_line_id
+            FROM billing_core.reconciliation_run_line
+            WHERE run_id = %s
+            ORDER BY line_number
+            """,
+            (run_id,),
+        )
+        line_ids = tuple(UUID(str(item[0])) for item in cursor.fetchall())
+        return ReconciliationRun(
+            run_id=UUID(str(row[0])),
+            period_id=UUID(str(row[1])),
+            started_at=row[2],
+            completed_at=row[3],
+            reconciliation_line_ids=line_ids,
+            blocking_exception_count=row[4],
+            reconciliation_run_contract_version=row[5],
         )
 
     def _find_event(self, query: str, parameters: tuple[Any, ...]) -> StoredUsageEvent | None:

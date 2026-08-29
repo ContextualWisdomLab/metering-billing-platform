@@ -24,6 +24,7 @@ FX_CONVERSION_CONTRACT_VERSION = 1
 RECONCILIATION_LINE_CONTRACT_VERSION = 1
 RECONCILIATION_RESOLUTION_CONTRACT_VERSION = 1
 RECONCILIATION_EVIDENCE_CONTRACT_VERSION = 1
+RECONCILIATION_RUN_CONTRACT_VERSION = 1
 ROUNDING_MODE = "ROUND_HALF_UP"
 
 _CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
@@ -653,6 +654,52 @@ class ReconciliationEvidence:
             "evidence_sha256": self.evidence_sha256,
             "captured_by": self.captured_by,
             "captured_at": _format_datetime(self.captured_at),
+        }
+
+
+@dataclass(frozen=True)
+class ReconciliationRun:
+    """Immutable completed run containing an ordered set of reconciliation lines."""
+
+    run_id: UUID
+    period_id: UUID
+    started_at: datetime
+    completed_at: datetime
+    reconciliation_line_ids: tuple[UUID, ...]
+    blocking_exception_count: int
+    reconciliation_run_contract_version: int = RECONCILIATION_RUN_CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        """Require ordered unique lines and a non-negative exception summary."""
+        if not isinstance(self.run_id, UUID) or not isinstance(self.period_id, UUID):
+            raise PeriodCloseValidationError("run identifiers must be UUIDs")
+        _aware_datetime(self.started_at, "started_at")
+        _aware_datetime(self.completed_at, "completed_at")
+        if self.completed_at < self.started_at:
+            raise PeriodCloseValidationError("completed_at must not precede started_at")
+        if not isinstance(self.reconciliation_line_ids, tuple) or any(
+            not isinstance(line_id, UUID) for line_id in self.reconciliation_line_ids
+        ):
+            raise PeriodCloseValidationError("reconciliation_line_ids must contain UUIDs")
+        if len(set(self.reconciliation_line_ids)) != len(self.reconciliation_line_ids):
+            raise PeriodCloseValidationError("reconciliation line identifiers must be unique")
+        if (
+            isinstance(self.blocking_exception_count, bool)
+            or not isinstance(self.blocking_exception_count, int)
+            or self.blocking_exception_count < 0
+        ):
+            raise PeriodCloseValidationError("blocking_exception_count must be non-negative")
+
+    def as_contract_dict(self) -> dict[str, object]:
+        """Return the completed run and its ordered line membership."""
+        return {
+            "reconciliation_run_contract_version": self.reconciliation_run_contract_version,
+            "run_id": str(self.run_id),
+            "period_id": str(self.period_id),
+            "started_at": _format_datetime(self.started_at),
+            "completed_at": _format_datetime(self.completed_at),
+            "reconciliation_line_ids": [str(line_id) for line_id in self.reconciliation_line_ids],
+            "blocking_exception_count": self.blocking_exception_count,
         }
 
 

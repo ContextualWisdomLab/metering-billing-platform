@@ -222,6 +222,12 @@ evidence for an exception that is not present on the referenced line and keeps
 reads tenant-scoped. The repository does not fetch or archive provider payloads
 yet; run-level evidence completeness remains a follow-up.
 
+`reconciliation-run` is an immutable completed-run envelope for one billing
+period. Its normalized child rows preserve ordered reconciliation-line
+membership and PostgreSQL requires every member to belong to the same tenant
+and period. The stored exception count is a run summary; this slice does not
+calculate it, resolve exceptions, or advance the period status.
+
 ## Tenant-API-credential identity
 
 A stored tenant API credential is identified by `tenant_api_credential_id` and is unique on `credential_secret_hash`.  Internal primary key is `tenant_api_credential_id`.  The hash is `hmac-sha256:` plus HMAC-SHA256(pepper, secret).  The plaintext secret is never stored.  `credential_label` is two-or-more-word `snake_case`.  Status is `active` or `revoked`.  A second issue of the same tenant, label, and contract version inserts a new row with a new secret.  Revocation updates `credential_status` and `revoked_at` on the same row and does not delete history.

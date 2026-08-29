@@ -69,6 +69,7 @@ __all__ = (
     "RATING_RUN_SCHEMA_NAME",
     "RECONCILIATION_LINE_SCHEMA_NAME",
     "RECONCILIATION_EVIDENCE_SCHEMA_NAME",
+    "RECONCILIATION_RUN_SCHEMA_NAME",
     "SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME",
     "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
@@ -142,6 +143,7 @@ __all__ = (
     "validate_rating_run_presentment",
     "validate_reconciliation_line",
     "validate_reconciliation_evidence",
+    "validate_reconciliation_run",
     "validate_schema_instance",
     "validate_spend_budget",
     "validate_spend_budget_approaching_signal",
@@ -281,6 +283,7 @@ FX_CONVERSION_SCHEMA_NAME = "fx-conversion.schema.json"
 RECONCILIATION_LINE_SCHEMA_NAME = "reconciliation-line.schema.json"
 RECONCILIATION_RESOLUTION_SCHEMA_NAME = "reconciliation-resolution.schema.json"
 RECONCILIATION_EVIDENCE_SCHEMA_NAME = "reconciliation-evidence.schema.json"
+RECONCILIATION_RUN_SCHEMA_NAME = "reconciliation-run.schema.json"
 
 
 def default_schemas_directory() -> Path:
@@ -381,6 +384,18 @@ def validate_reconciliation_evidence(
     if errors or not isinstance(evidence, Mapping):
         return tuple(errors)
     errors.extend(_reconciliation_evidence_semantic_errors(evidence))
+    return tuple(errors)
+
+
+def validate_reconciliation_run(
+    run: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one immutable completed reconciliation run."""
+    schema = load_json_schema(RECONCILIATION_RUN_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, run))
+    if errors or not isinstance(run, Mapping):
+        return tuple(errors)
+    errors.extend(_reconciliation_run_semantic_errors(run))
     return tuple(errors)
 
 
@@ -575,6 +590,29 @@ def _reconciliation_evidence_semantic_errors(
             captured_at=_contract_datetime(evidence["captured_at"]),
             reconciliation_evidence_contract_version=evidence[
                 "reconciliation_evidence_contract_version"
+            ],
+        )
+    )
+
+
+def _reconciliation_run_semantic_errors(
+    run: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Apply ordered-membership and timing invariants after schema validation."""
+    from metering_billing.period_close import ReconciliationRun
+
+    return _semantic_error(
+        lambda: ReconciliationRun(
+            run_id=_contract_uuid(run["run_id"]),
+            period_id=_contract_uuid(run["period_id"]),
+            started_at=_contract_datetime(run["started_at"]),
+            completed_at=_contract_datetime(run["completed_at"]),
+            reconciliation_line_ids=tuple(
+                _contract_uuid(line_id) for line_id in run["reconciliation_line_ids"]
+            ),
+            blocking_exception_count=run["blocking_exception_count"],
+            reconciliation_run_contract_version=run[
+                "reconciliation_run_contract_version"
             ],
         )
     )

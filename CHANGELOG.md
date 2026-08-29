@@ -16,6 +16,10 @@
 
 ### Added
 
+- Issue #87 now persists completed reconciliation runs with ordered,
+  tenant-and-period-safe line membership and a blocking-exception summary.
+  Runs are replay-safe immutable envelopes; calculation, resolution gates, and
+  period advancement remain separate (ADR 0129).
 - Issue #87 now persists immutable hash-backed reconciliation evidence linked to
   an existing typed exception. Evidence keeps its source reference, SHA-256
   digest, kind, capture operator, and capture instant with tenant-scoped,

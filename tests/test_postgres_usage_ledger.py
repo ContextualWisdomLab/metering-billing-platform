@@ -55,6 +55,7 @@ from metering_billing import (
     WebhookSubscriptionService,
     format_exact_decimal,
     validate_reconciliation_evidence,
+    validate_reconciliation_run,
     validate_reconciliation_resolution,
 )
 from metering_billing.accounting_export import AccountingExportService
@@ -101,6 +102,7 @@ from metering_billing.period_close import (
     ReconciliationEvidence,
     ReconciliationLine,
     ReconciliationLineStatus,
+    ReconciliationRun,
     ReconciliationResolution,
     ReconciliationResolutionStatus,
     assess_reconciliation_line,
@@ -198,8 +200,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 43:
-            raise AssertionError(f"expected 43 migrations, got {len(applied)}")
+        if len(applied) != 44:
+            raise AssertionError(f"expected 44 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -211,6 +213,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.reconciliation_run_line,
+                billing_core.reconciliation_run,
                 billing_core.reconciliation_evidence,
                 billing_core.reconciliation_resolution,
                 billing_core.reconciliation_exception,
@@ -611,6 +615,40 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                     evidence_id=uuid4(),
                     exception_code=ReconciliationExceptionCode.REFUND_MISMATCH,
                 )
+            )
+        run = ReconciliationRun(
+            run_id=uuid4(),
+            period_id=period.period_id,
+            started_at=CATALOG_START + timedelta(minutes=7),
+            completed_at=CATALOG_START + timedelta(minutes=8),
+            reconciliation_line_ids=(
+                matched.reconciliation_line_id,
+                exception.reconciliation_line_id,
+                expanded_exception.reconciliation_line_id,
+            ),
+            blocking_exception_count=3,
+        )
+        self.assertEqual(validate_reconciliation_run(run.as_contract_dict()), ())
+        self.assertEqual(self.ledger.insert_reconciliation_run(run), run)
+        self.assertEqual(self.ledger.insert_reconciliation_run(run), run)
+        self.assertEqual(self.ledger.get_reconciliation_run(run.run_id), run)
+        self.assertIsNone(self.ledger.get_reconciliation_run(uuid4()))
+        self.assertEqual(self.ledger.list_reconciliation_runs(TENANT_TWO), ())
+        self.assertEqual(
+            self.ledger.list_reconciliation_runs(TENANT_ONE, period_id=period.period_id),
+            (run,),
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_run(
+                replace(run, blocking_exception_count=4)
+            )
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_run(
+                replace(run, run_id=uuid4(), reconciliation_line_ids=(uuid4(),))
+            )
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_run(
+                replace(run, run_id=uuid4(), period_id=uuid4())
             )
         self.assertIsNone(self.ledger.get_reconciliation_line(uuid4()))
         self.assertEqual(

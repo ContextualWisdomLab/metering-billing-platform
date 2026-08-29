@@ -20,6 +20,7 @@ from metering_billing import (
     ReconciliationEvidence,
     ReconciliationLine,
     ReconciliationLineStatus,
+    ReconciliationRun,
     ReconciliationResolution,
     ReconciliationResolutionStatus,
     assess_reconciliation_line,
@@ -31,6 +32,7 @@ from metering_billing import (
     validate_fx_rate,
     validate_reconciliation_line,
     validate_reconciliation_evidence,
+    validate_reconciliation_run,
     validate_reconciliation_resolution,
 )
 
@@ -699,6 +701,42 @@ class ReconciliationTests(unittest.TestCase):
         invalid = evidence.as_contract_dict()
         invalid["evidence_sha256"] = "not-a-hash"
         self.assertTrue(validate_reconciliation_evidence(invalid))
+
+    def test_reconciliation_run_preserves_order_and_completion_boundary(self) -> None:
+        """A completed run keeps unique line membership and a non-negative summary."""
+        line_one = uuid4()
+        line_two = uuid4()
+        run = ReconciliationRun(
+            run_id=uuid4(),
+            period_id=PERIOD_ID,
+            started_at=OPENED_AT,
+            completed_at=OPENED_AT + timedelta(minutes=5),
+            reconciliation_line_ids=(line_one, line_two),
+            blocking_exception_count=1,
+        )
+        self.assertEqual(validate_reconciliation_run(run.as_contract_dict()), ())
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, run_id="not-a-uuid")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, period_id="not-a-uuid")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, started_at=datetime(2026, 8, 1))
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, completed_at=OPENED_AT - timedelta(seconds=1))
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, reconciliation_line_ids=[line_one, line_two])  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, reconciliation_line_ids=(line_one, "not-a-uuid"))  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, reconciliation_line_ids=(line_one, line_one))
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, blocking_exception_count=True)
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(run, blocking_exception_count=-1)
+        invalid = run.as_contract_dict()
+        invalid["completed_at"] = "2026-07-31T23:59:59Z"
+        self.assertTrue(validate_reconciliation_run(invalid))
+        self.assertTrue(validate_reconciliation_run({}))
 
 
 if __name__ == "__main__":  # pragma: no cover
