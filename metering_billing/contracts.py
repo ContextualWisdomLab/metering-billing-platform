@@ -21,6 +21,7 @@ from scripts.validate_repository import (
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "PROVIDER_OBJECT_MAPPING_SCHEMA_NAME",
     "LEMON_SQUEEZY_WEBHOOK_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
     "PAYMENT_INTENT_SCHEMA_NAME",
@@ -152,6 +153,7 @@ __all__ = (
     "validate_rating_run",
     "validate_schema_instance",
     "validate_provider_capability",
+    "validate_provider_object_mapping",
     "validate_lemon_squeezy_webhook",
     "validate_usage_event",
     "validate_usage_ingestion_receipt",
@@ -263,6 +265,7 @@ TAX_RATE_SCHEMA_NAME = "tax-rate.schema.json"
 TAX_ASSESSMENT_SCHEMA_NAME = "tax-assessment.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
+PROVIDER_OBJECT_MAPPING_SCHEMA_NAME = "provider-object-mapping.schema.json"
 LEMON_SQUEEZY_WEBHOOK_SCHEMA_NAME = "lemon-squeezy-webhook.schema.json"
 ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
 
@@ -314,6 +317,14 @@ def validate_provider_capability(
     """Validate a provider capability manifest against its published schema."""
     schema = load_json_schema(PROVIDER_CAPABILITY_SCHEMA_NAME, schemas_directory)
     return validate_schema_instance(schema, manifest)
+
+
+def validate_provider_object_mapping(
+    mapping: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate a provider object mapping against its published schema."""
+    schema = load_json_schema(PROVIDER_OBJECT_MAPPING_SCHEMA_NAME, schemas_directory)
+    return validate_schema_instance(schema, mapping)
 
 
 def validate_lemon_squeezy_webhook(

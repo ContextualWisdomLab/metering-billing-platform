@@ -52,6 +52,10 @@ contextual-orchestrator usage
   parsing. The normalized asynchronous contract contains only event name,
   resource type, and resource reference; raw payload, PII, and secrets are
   excluded.
+- A recorded provider object mapping is provider-sticky for its effective
+  interval. Missing mappings and overlapping internal or external mappings
+  fail closed; changing an object requires an explicit replacement that
+  preserves the previous interval and never silently fails over.
 
 ## Tax-assessment acceptance
 

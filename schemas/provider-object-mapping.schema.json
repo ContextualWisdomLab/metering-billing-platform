@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/provider-object-mapping/v1",
+  "title": "Provider Object Mapping",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "provider_object_mapping_contract_version",
+    "provider_account_reference",
+    "provider_code",
+    "internal_object_type",
+    "internal_object_reference",
+    "provider_object_type",
+    "provider_object_reference",
+    "valid_from",
+    "recorded_at"
+  ],
+  "properties": {
+    "provider_object_mapping_contract_version": {"const": 1},
+    "provider_account_reference": {"type": "string", "minLength": 1, "maxLength": 200},
+    "provider_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "internal_object_type": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,99}$"},
+    "internal_object_reference": {"type": "string", "minLength": 1, "maxLength": 200},
+    "provider_object_type": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,99}$"},
+    "provider_object_reference": {"type": "string", "minLength": 1, "maxLength": 200},
+    "valid_from": {"type": "string", "format": "date-time"},
+    "valid_to": {"type": "string", "format": "date-time"},
+    "recorded_at": {"type": "string", "format": "date-time"}
+  }
+}

@@ -58,6 +58,7 @@ from metering_billing.contracts import (
     ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME,
     ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME,
     LEMON_SQUEEZY_WEBHOOK_SCHEMA_NAME,
+    PROVIDER_OBJECT_MAPPING_SCHEMA_NAME,
     COLLECTION_CASE_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_SCHEMA_NAME,
     RATE_CARD_SCHEMA_NAME,
@@ -117,6 +118,7 @@ from metering_billing.contracts import (
     validate_consumed_posting_receipt,
     validate_lemon_squeezy_webhook,
     validate_provider_capability,
+    validate_provider_object_mapping,
     validate_collection_case,
     validate_credit_adjustment,
     validate_rate_card,
@@ -375,6 +377,11 @@ from metering_billing.provider_capabilities import (
     ProviderRouteRequest,
     ProviderRoutingError,
 )
+from metering_billing.provider_object_mapping import (
+    ProviderObjectMapping,
+    ProviderObjectMappingError,
+    ProviderObjectMappingRegistry,
+)
 from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
 from metering_billing.usage_ingestion import UsageIngestionService
 from metering_billing.usage_ledger import MemoryUsageLedger
@@ -385,6 +392,7 @@ __all__ = (
     "ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME",
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
     "LEMON_SQUEEZY_WEBHOOK_SCHEMA_NAME",
+    "PROVIDER_OBJECT_MAPPING_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_SCHEMA_NAME",
@@ -450,6 +458,9 @@ __all__ = (
     "ProviderCapabilityRegistry",
     "ProviderRouteRequest",
     "ProviderRoutingError",
+    "ProviderObjectMapping",
+    "ProviderObjectMappingError",
+    "ProviderObjectMappingRegistry",
     "AccountingExportService",
     "AccountStatementPresentmentQueryError",
     "AccountStatementPresentmentService",
@@ -685,6 +696,7 @@ __all__ = (
     "validate_ais_outbox_drain",
     "validate_lemon_squeezy_webhook",
     "validate_provider_capability",
+    "validate_provider_object_mapping",
     "validate_webhook_delivery",
     "validate_webhook_subscription",
     "validate_journal_proposal",
