@@ -275,6 +275,7 @@ REQUIRED_FILES = (
     "database/migrations/0041_reconciliation_resolution.sql",
     "database/migrations/0042_reconciliation_exception_vocabulary.sql",
     "database/migrations/0043_reconciliation_evidence.sql",
+    "database/migrations/0045_reconciliation_fact_immutability.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
@@ -582,7 +583,11 @@ def _validate_node(
         return [f"{path}: schema is false"]
     if "$ref" in schema:
         resolved = _resolve_reference(root_schema, str(schema["$ref"]))
-        return _validate_node(root_schema, resolved, instance, path)
+        errors = _validate_node(root_schema, resolved, instance, path)
+        sibling_schema = {key: value for key, value in schema.items() if key != "$ref"}
+        if sibling_schema:
+            errors.extend(_validate_node(root_schema, sibling_schema, instance, path))
+        return errors
 
     expected_type = schema.get("type")
     if expected_type is not None and not _matches_type(str(expected_type), instance):
