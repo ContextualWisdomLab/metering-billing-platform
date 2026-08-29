@@ -264,8 +264,13 @@ actor, authorization reference, and instant. Migrations `0051` and `0052` protec
 application/source/target links, exact-value equality, replay identity, current
 target openness for first ratings, and update/delete immutability. Migration
 `0053` preserves already-stored rating replays after target closure. This is a rating-consumption fact, not a synthetic
-`rating_run`; ordinary usage re-rating and invoice-adjustment composition remain
-separate downstream work.
+`rating_run`. `LateAdjustmentInvoiceAdjustmentService` then stores one
+tenant-scoped `late_adjustment_invoice_adjustment` per rated adjustment, linked
+to an unissued invoice draft and copying the signed exact delta, target period,
+application, rating, audit, and source-hash evidence. Migration `0054` protects
+the tenant-scoped links, currency/evidence equality, replay identity, issued
+draft boundary, and update/delete immutability. It does not rewrite the draft,
+issue the invoice, calculate tax, or call a provider.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

@@ -108,6 +108,19 @@ contextual-orchestrator usage
 - Until application, the command returns `apply_late_adjustment`; after rating,
   presentment reports `record_invoice_adjustment`.
 
+## Late-adjustment-invoice-adjustment acceptance
+
+- `POST /v1/late-adjustments/{late_adjustment_id}/invoice-adjustments` requires
+  a stored rating, an unissued same-tenant `invoice_draft_id`, matching
+  currency, and non-empty `recorded_by` and `authorization_reference`.
+- The command records one immutable signed composition fact linking the late
+  adjustment, application, rating, target period, and invoice draft. Replays
+  return the same fact as `duplicate_replay`; a second draft, cross-tenant
+  draft, currency mismatch, or issued draft fails closed.
+- After composition, late-adjustment presentment reports `issue_invoice`.
+  The command does not rewrite the invoice draft, issue an invoice, calculate
+  tax, post a journal, or call a provider; those remain explicit boundaries.
+
 ## Tax-assessment acceptance
 
 - A known tenant publishes one `tax_rate_schedule` and one immutable `tax_rate_version` whose `tax_rate` is an exact decimal in `[0, 1]`.

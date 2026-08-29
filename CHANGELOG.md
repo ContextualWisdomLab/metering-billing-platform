@@ -37,8 +37,14 @@
   separate immutable rating fact in migration `0051`; migrations `0052` and
   `0053` guard first application/rating against a target period that closed
   after recording while preserving replays. It preserves the original usage
-  `rating_run`, replays safely, and leaves invoice-adjustment composition as
-  the next explicit action (ADR 0135).
+  `rating_run`, replays safely, and leaves invoice-adjustment composition and
+  downstream invoice issuance as explicit actions (ADR 0135).
+- Issue #87 now composes a rated late adjustment into an unissued invoice draft
+  through the tenant-scoped immutable `late_adjustment_invoice_adjustment`
+  fact and migration `0054`. Matching signed amount/currency/evidence,
+  cross-tenant links, replay identity, and the issued-draft boundary are
+  enforced; existing drafts and issued invoice snapshots are never rewritten
+  (ADR 0136).
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

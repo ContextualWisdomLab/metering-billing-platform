@@ -509,6 +509,27 @@ class StoredLateAdjustmentRating:
 
 
 @dataclass(frozen=True)
+class StoredLateAdjustmentInvoiceAdjustment:
+    """Append-only invoice-intent composition for one rated late adjustment."""
+
+    late_adjustment_invoice_adjustment_id: UUID
+    tenant_account_id: UUID
+    late_adjustment_rating_id: UUID
+    late_adjustment_application_id: UUID
+    late_adjustment_id: UUID
+    invoice_draft_id: UUID
+    target_period_id: UUID
+    adjustment_amount: Decimal
+    currency_code: str
+    recorded_by: str
+    authorization_reference: str
+    recorded_at: datetime
+    source_payload_hash: str
+    late_adjustment_invoice_adjustment_contract_version: int
+    late_adjustment_invoice_adjustment_status: str
+
+
+@dataclass(frozen=True)
 class StoredCollectionCaseSettlement:
     """Append-only settle-when-zero fact for one collection case.
 
@@ -1041,6 +1062,12 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     late_adjustment_rating_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    late_adjustment_invoice_adjustments: dict[
+        UUID, StoredLateAdjustmentInvoiceAdjustment
+    ] = field(default_factory=dict)
+    late_adjustment_invoice_adjustment_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
     spend_budgets: dict[UUID, StoredSpendBudget] = field(default_factory=dict)
@@ -3216,6 +3243,117 @@ class MemoryUsageLedger:
         self.late_adjustment_ratings[rating.late_adjustment_rating_id] = rating
         self.late_adjustment_rating_index[identity_key] = rating.late_adjustment_rating_id
         return rating
+
+    def find_late_adjustment_invoice_adjustment(
+        self, tenant_account_id: UUID, late_adjustment_rating_id: UUID
+    ) -> StoredLateAdjustmentInvoiceAdjustment | None:
+        """Return one tenant-scoped invoice composition, if present."""
+        adjustment_id = self.late_adjustment_invoice_adjustment_index.get(
+            (tenant_account_id, late_adjustment_rating_id)
+        )
+        if adjustment_id is None:
+            return None
+        return self.late_adjustment_invoice_adjustments[adjustment_id]
+
+    def get_late_adjustment_invoice_adjustment(
+        self, late_adjustment_invoice_adjustment_id: UUID
+    ) -> StoredLateAdjustmentInvoiceAdjustment | None:
+        """Return one invoice composition by opaque identifier."""
+        return self.late_adjustment_invoice_adjustments.get(
+            late_adjustment_invoice_adjustment_id
+        )
+
+    def insert_late_adjustment_invoice_adjustment(
+        self, composition: StoredLateAdjustmentInvoiceAdjustment
+    ) -> StoredLateAdjustmentInvoiceAdjustment:
+        """Store one immutable composition or return its rating replay."""
+        if composition.late_adjustment_invoice_adjustment_status != "recorded":
+            raise ValueError("late adjustment invoice adjustment status must be recorded")
+        if CURRENCY_CODE_PATTERN.fullmatch(composition.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(composition.adjustment_amount, Decimal)
+            or composition.adjustment_amount.is_nan()
+            or composition.adjustment_amount.is_infinite()
+            or composition.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        amount_text = format(composition.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        if (
+            not isinstance(composition.recorded_by, str)
+            or not composition.recorded_by.strip()
+        ):
+            raise ValueError("recorded_by must be non-empty")
+        if (
+            not isinstance(composition.authorization_reference, str)
+            or not composition.authorization_reference.strip()
+        ):
+            raise ValueError("authorization_reference must be non-empty")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(composition.source_payload_hash) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if composition.late_adjustment_invoice_adjustment_id in self.late_adjustment_invoice_adjustments:
+            raise ValueError("late adjustment invoice adjustment id already stored")
+        identity_key = (
+            composition.tenant_account_id,
+            composition.late_adjustment_rating_id,
+        )
+        existing = self.find_late_adjustment_invoice_adjustment(*identity_key)
+        if existing is not None:
+            if (
+                replace(
+                    existing,
+                    late_adjustment_invoice_adjustment_id=(
+                        composition.late_adjustment_invoice_adjustment_id
+                    ),
+                    recorded_at=composition.recorded_at,
+                    recorded_by=composition.recorded_by,
+                    authorization_reference=composition.authorization_reference,
+                )
+                != composition
+            ):
+                raise ValueError(
+                    "late adjustment invoice adjustment identity cannot change"
+                )
+            return existing
+        rating = self.late_adjustment_ratings.get(composition.late_adjustment_rating_id)
+        if (
+            rating is None
+            or self.late_adjustment_rating_index.get(
+                (composition.tenant_account_id, composition.late_adjustment_id)
+            )
+            != composition.late_adjustment_rating_id
+        ):
+            raise ValueError("late adjustment invoice adjustment rating is missing")
+        draft = self.invoice_drafts.get(composition.invoice_draft_id)
+        if draft is None or draft.tenant_account_id != composition.tenant_account_id:
+            raise ValueError("late adjustment invoice adjustment draft is missing")
+        if self.find_issued_invoice(
+            composition.tenant_account_id, composition.invoice_draft_id
+        ) is not None:
+            raise ValueError("invoice draft already has an issued invoice")
+        if (
+            composition.late_adjustment_application_id
+            != rating.late_adjustment_application_id
+            or composition.late_adjustment_id != rating.late_adjustment_id
+            or composition.target_period_id != rating.target_period_id
+            or composition.adjustment_amount != rating.adjustment_amount
+            or composition.currency_code != rating.currency_code
+            or draft.currency_code != rating.currency_code
+            or rating.late_adjustment_rating_status != "rated"
+        ):
+            raise ValueError("late adjustment invoice adjustment does not match evidence")
+        self.late_adjustment_invoice_adjustments[
+            composition.late_adjustment_invoice_adjustment_id
+        ] = composition
+        self.late_adjustment_invoice_adjustment_index[identity_key] = (
+            composition.late_adjustment_invoice_adjustment_id
+        )
+        return composition
 
     def insert_credit_adjustment(
         self, credit: StoredCreditAdjustment

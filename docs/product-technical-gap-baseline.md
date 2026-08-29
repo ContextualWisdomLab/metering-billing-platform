@@ -6,24 +6,28 @@
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
 
-## Current working snapshot (2026-08-29)
+## Current working snapshot (2026-08-30)
 
-The current #87 work is stacked from exact head
-`907d224e5797a198ac10339987dd03b90a78201c` of PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173)
-into the follow-up branch `feat/late-adjustment-rerate-20260829`. PR #173 is
-open, mergeable but unstable, has zero qualifying approvals, and its repository
-contract check plus provider reviews are pending. That state is not merge
-evidence.
+The #87 work is stacked from exact head
+`deb5b18a35b45ac3f725aebd5350560cc4d5a067` of PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173)
+into the follow-up branch `feat/late-adjustment-invoice-intent-20260830`.
+PR #173 remains open with no qualifying independent approval; mergeability and
+local checks are not merge evidence. This branch adds the next immutable
+invoice-intent composition slice and will be reviewed as a separate stacked
+PR.
 
-This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`/`0051`/`0052`/`0053`, the
-`LateAdjustment`, application, and rating-consumption contracts,
-tenant-scoped presentment reads, and durable application/rating facts for late
-usage, correction, and reversal evidence. The source period must be at least
-`soft_closed`; the target must be `open` and start no earlier than the source
-end. Targeted real-PostgreSQL and repository contract tests pass on this
-branch. Recalculation from source usage and rate-card versions, invoice-
-adjustment composition, provider settlement ingestion, FOCUS 1.4 export, and
-statutory accounting remain open gaps.
+The implemented #87 path now covers PostgreSQL migrations
+`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`, the `LateAdjustment`,
+application, rating-consumption, and invoice-adjustment contracts,
+tenant-scoped presentment reads, and durable application/rating/composition
+facts for late usage, correction, and reversal evidence. The source period
+must be at least `soft_closed`; the target must be `open` and start no earlier
+than the source end; composition requires a rated adjustment and an unissued
+same-tenant, same-currency invoice draft. Targeted real-PostgreSQL, full
+repository contract, and full 100% statement/branch coverage tests pass on the
+working branch. Recalculation from source usage and rate-card versions,
+provider settlement ingestion, FOCUS 1.4 export, tax/legal invoice treatment,
+and statutory accounting remain open gaps.
 
 ## Executive decision
 

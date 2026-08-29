@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 from threading import Barrier
 import unittest
@@ -12,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
+from unittest import mock
 
 import psycopg
 
@@ -36,6 +38,7 @@ from metering_billing import (
     IssuedInvoiceVoidService,
     LateAdjustmentApplicationService,
     LateAdjustmentRatingService,
+    LateAdjustmentInvoiceAdjustmentService,
     LateAdjustmentPresentmentService,
     PaymentIntentService,
     PostgresUsageLedger,
@@ -63,6 +66,7 @@ from metering_billing import (
     validate_reconciliation_run,
     validate_reconciliation_resolution,
     validate_late_adjustment_rating,
+    validate_late_adjustment_invoice_adjustment,
 )
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_dispute import compute_dispute_payload_hash
@@ -209,8 +213,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 53:
-            raise AssertionError(f"expected 53 migrations, got {len(applied)}")
+        if len(applied) != 54:
+            raise AssertionError(f"expected 54 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -222,6 +226,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.late_adjustment_invoice_adjustment,
                 billing_core.late_adjustment_rating,
                 billing_core.late_adjustment_application,
                 billing_core.late_adjustment,
@@ -12838,6 +12843,297 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM billing_core.collection_dispute"
             ).fetchone()[0],
             6,
+        )
+
+    def test_late_adjustment_invoice_adjustment_is_durable_and_immutable(self) -> None:
+        """The signed rating is attached to one unissued draft and replays safely."""
+        accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 7, 1),
+            date(2026, 8, 1),
+            opened_by="operator:period",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:period",
+            authorization_reference="approval:period",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 8, 1),
+            date(2026, 9, 1),
+            opened_by="operator:period",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        late = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "-12.50",
+            "USD",
+            "provider:late-invoice-001",
+            "sha256:" + "a" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, late)
+        LateAdjustmentApplicationService(self.ledger).apply_late_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            applied_by="operator:finance",
+            authorization_reference="approval:apply",
+        )
+        rated = LateAdjustmentRatingService(self.ledger).rate_late_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            rated_by="operator:finance",
+            authorization_reference="approval:rate",
+        )
+        composition_service = LateAdjustmentInvoiceAdjustmentService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=3),
+        )
+        composed = composition_service.record_invoice_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        self.assertEqual(
+            composed.late_adjustment_invoice_adjustment_outcome_code, "accepted"
+        )
+        self.assertEqual(validate_late_adjustment_invoice_adjustment(composed.as_contract_dict()), ())
+        stored = self.ledger.get_late_adjustment_invoice_adjustment(
+            composed.late_adjustment_invoice_adjustment_id
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.late_adjustment_rating_id, rated.late_adjustment_rating_id)
+        replay = composition_service.record_invoice_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:other",
+            authorization_reference="approval:other",
+        )
+        self.assertEqual(
+            replay.late_adjustment_invoice_adjustment_outcome_code,
+            "duplicate_replay",
+        )
+        self.assertEqual(
+            replay.late_adjustment_invoice_adjustment_id,
+            composed.late_adjustment_invoice_adjustment_id,
+        )
+        self.assertEqual(
+            LateAdjustmentPresentmentService(self.ledger)
+            .present_late_adjustment(TENANT_ONE, late.late_adjustment_id)
+            .next_operator_action,
+            "issue_invoice",
+        )
+        for statement in (
+            "UPDATE billing_core.late_adjustment_invoice_adjustment "
+            "SET recorded_by = 'operator:rewrite' "
+            "WHERE late_adjustment_invoice_adjustment_id = %s",
+            "DELETE FROM billing_core.late_adjustment_invoice_adjustment "
+            "WHERE late_adjustment_invoice_adjustment_id = %s",
+        ):
+            with self.assertRaises(psycopg.errors.RaiseException):
+                with self.connection.transaction():
+                    self.connection.execute(
+                        statement, (composed.late_adjustment_invoice_adjustment_id,)
+                    )
+
+    def test_late_adjustment_invoice_adjustment_adapter_boundaries(self) -> None:
+        """The PostgreSQL adapter rejects malformed, missing, and racing evidence."""
+        accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 7, 1),
+            date(2026, 8, 1),
+            opened_by="operator:period",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:period",
+            authorization_reference="approval:period",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 8, 1),
+            date(2026, 9, 1),
+            opened_by="operator:period",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        late = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "-12.50",
+            "USD",
+            "provider:late-invoice-002",
+            "sha256:" + "c" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, late)
+        LateAdjustmentApplicationService(self.ledger).apply_late_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            applied_by="operator:finance",
+            authorization_reference="approval:apply",
+        )
+        LateAdjustmentRatingService(self.ledger).rate_late_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            rated_by="operator:finance",
+            authorization_reference="approval:rate",
+        )
+        composed = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        stored = self.ledger.get_late_adjustment_invoice_adjustment(
+            composed.late_adjustment_invoice_adjustment_id
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        rating_row = (
+            stored.late_adjustment_rating_id,
+            stored.late_adjustment_application_id,
+            stored.late_adjustment_id,
+            stored.target_period_id,
+            stored.adjustment_amount,
+            stored.currency_code,
+            "rated",
+        )
+        draft_row = (stored.invoice_draft_id, stored.currency_code)
+
+        for bad in (
+            replace(stored, currency_code="US"),
+            replace(stored, adjustment_amount=Decimal("0")),
+            replace(stored, adjustment_amount=Decimal("NaN")),
+            replace(stored, adjustment_amount=Decimal("1E+40")),
+            replace(stored, late_adjustment_invoice_adjustment_status="pending"),
+            replace(stored, recorded_by=" "),
+            replace(stored, authorization_reference=" "),
+            replace(stored, source_payload_hash="invalid"),
+        ):
+            with self.assertRaises(ValueError):
+                self.ledger.insert_late_adjustment_invoice_adjustment(bad)
+
+        replay = self.ledger.insert_late_adjustment_invoice_adjustment(
+            replace(
+                stored,
+                late_adjustment_invoice_adjustment_id=uuid4(),
+                recorded_by="operator:replay",
+                authorization_reference="approval:replay",
+            )
+        )
+        self.assertEqual(replay, stored)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_invoice_adjustment(
+                replace(
+                    stored,
+                    late_adjustment_invoice_adjustment_id=uuid4(),
+                    adjustment_amount=Decimal("-12.51"),
+                )
+            )
+
+        class SequenceCursor:
+            """Return deterministic rows for adapter-only race branches."""
+
+            def __init__(self, rows):
+                self.rows = iter(rows)
+
+            def execute(self, *_args, **_kwargs):
+                return None
+
+            def fetchone(self):
+                return next(self.rows)
+
+        fake_cases = (
+            ([None], "late adjustment invoice adjustment rating is missing"),
+            ([rating_row, None], "late adjustment invoice adjustment draft is missing"),
+            ([rating_row, draft_row, None], "late adjustment invoice adjustment does not match evidence"),
+            ([rating_row, draft_row, None, (1,)], "invoice draft already has an issued invoice"),
+            ([rating_row, draft_row, None, None, None], "late adjustment invoice adjustment identity conflicts with an existing row"),
+        )
+        fake_candidates = (
+            stored,
+            stored,
+            replace(stored, adjustment_amount=Decimal("-12.51")),
+            stored,
+            stored,
+        )
+        for (rows, expected), candidate in zip(fake_cases, fake_candidates):
+            with self.subTest(expected=expected):
+                cursor = SequenceCursor(rows)
+                with mock.patch.object(self.ledger, "_cursor", return_value=nullcontext(cursor)):
+                    with self.assertRaisesRegex(ValueError, expected):
+                        self.ledger.insert_late_adjustment_invoice_adjustment(
+                            replace(candidate, late_adjustment_invoice_adjustment_id=uuid4())
+                        )
+
+        mismatch_cursor = SequenceCursor([rating_row, draft_row, None, None, (uuid4(),)])
+        with mock.patch.object(
+            self.ledger, "_cursor", return_value=nullcontext(mismatch_cursor)
+        ), mock.patch.object(
+            self.ledger,
+            "_fetch_late_adjustment_invoice_adjustment",
+            return_value=replace(stored, adjustment_amount=Decimal("-12.51")),
+        ):
+            with self.assertRaisesRegex(ValueError, "identity cannot change"):
+                self.ledger.insert_late_adjustment_invoice_adjustment(
+                    replace(stored, late_adjustment_invoice_adjustment_id=uuid4())
+                )
+
+        self.assertIsNone(
+            PostgresUsageLedger._fetch_late_adjustment_invoice_adjustment(
+                SequenceCursor([None]), uuid4()
+            )
         )
 
     def test_transaction_context_and_connection_lifecycle(self) -> None:

@@ -58,5 +58,9 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
 - Applying after the target period closes: `late_adjustment_target_period_not_open`
 - Rating after the target period closes: `late_adjustment_target_period_not_open`
 - Unknown or cross-tenant late-adjustment rating source: `late_adjustment_not_found`
+- Unknown or cross-tenant invoice draft for a rated adjustment: `invoice_draft_not_found`
+- Invoice-draft currency different from the rated adjustment: `currency_mismatch`
+- Rated adjustment already attached to another draft: `late_adjustment_invoice_adjustment_identity_conflict`
+- Rated adjustment targeting an issued invoice draft: `invoice_already_issued`
 
 Do not store card data, PAT plaintext, prompt text, response text, provider secrets, or webhook-subscription plaintext.  Do not start a web UI in this slice.

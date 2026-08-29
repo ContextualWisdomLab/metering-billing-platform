@@ -82,8 +82,12 @@ consumes the application into one immutable rating fact only while its target
 period is open; a first rating after closure is rejected while a stored rating
 replays. This preserves the original usage `rating_run` and exact signed delta. Because the adjustment has
 no usage snapshot or rate-card input, this command does not synthesize one;
-invoice-adjustment composition is reported as the next action. Neither command
-mutates a period, posts a journal, calls a provider, or creates a tax document.
+invoice-adjustment composition is reported as the next action. The nested
+`/invoice-adjustments` command requires an unissued same-tenant invoice draft,
+matching currency, and non-empty `recorded_by` and
+`authorization_reference`; it appends a separate immutable composition fact
+and reports `issue_invoice`. It does not mutate the draft, issue a snapshot,
+post a journal, call a provider, or create a tax document.
 
 ## Provider plane
 

@@ -193,6 +193,28 @@ class LateAdjustmentRatingTargetPeriodNotOpen(ValueError):
     """Raised when a new rating targets a period that is not open."""
 
 
+class LateAdjustmentInvoiceAdjustmentOutcomeCode(StrEnum):
+    """Terminal result of composing one rated late adjustment into a draft."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class LateAdjustmentInvoiceAdjustmentRejectionReasonCode(StrEnum):
+    """Why a rated late adjustment was not attached to an invoice draft."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
+    LATE_ADJUSTMENT_RATING_NOT_FOUND = "late_adjustment_rating_not_found"
+    INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    INVOICE_ALREADY_ISSUED = "invoice_already_issued"
+    IDENTITY_CONFLICT = "late_adjustment_invoice_adjustment_identity_conflict"
+    ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
+    AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
+
+
 class TaxRateOutcomeCode(StrEnum):
     """Terminal result of publishing one tenant-scoped tax-rate version."""
 

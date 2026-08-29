@@ -53,6 +53,7 @@ __all__ = (
     "LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
     "LATE_ADJUSTMENT_APPLICATION_SCHEMA_NAME",
     "LATE_ADJUSTMENT_RATING_SCHEMA_NAME",
+    "LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_VOID_PRESENTMENT_SCHEMA_NAME",
@@ -132,6 +133,7 @@ __all__ = (
     "validate_late_adjustment_presentment",
     "validate_late_adjustment_application",
     "validate_late_adjustment_rating",
+    "validate_late_adjustment_invoice_adjustment",
     "validate_issued_credit_note",
     "validate_issued_credit_note_presentment",
     "validate_issued_credit_note_void",
@@ -194,6 +196,9 @@ LATE_ADJUSTMENT_SCHEMA_NAME = "late-adjustment.schema.json"
 LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "late-adjustment-presentment.schema.json"
 LATE_ADJUSTMENT_APPLICATION_SCHEMA_NAME = "late-adjustment-application.schema.json"
 LATE_ADJUSTMENT_RATING_SCHEMA_NAME = "late-adjustment-rating.schema.json"
+LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_SCHEMA_NAME = (
+    "late-adjustment-invoice-adjustment.schema.json"
+)
 COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME = "collection-case-presentment.schema.json"
 COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME = "collection-aging-presentment.schema.json"
 ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME = "account-statement-presentment.schema.json"
@@ -408,6 +413,7 @@ def validate_late_adjustment_presentment(
         "apply_late_adjustment",
         "rate_late_adjustment",
         "record_invoice_adjustment",
+        "issue_invoice",
     ):
         errors.append("$: stored late adjustment must be applied downstream")
     return tuple(errors)
@@ -442,6 +448,26 @@ def validate_late_adjustment_rating(
     if not isinstance(rating, Mapping):
         return tuple(errors)
     amount = rating.get("adjustment_amount")
+    if isinstance(amount, str):
+        try:
+            if Decimal(amount) == 0:
+                errors.append("$: adjustment_amount must not be zero")
+        except Exception:
+            errors.append("$: adjustment_amount must be an exact decimal")
+    return tuple(errors)
+
+
+def validate_late_adjustment_invoice_adjustment(
+    composition: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one rated late-adjustment invoice-intent composition."""
+    schema = load_json_schema(
+        LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_SCHEMA_NAME, schemas_directory
+    )
+    errors = list(validate_schema_instance(schema, composition))
+    if not isinstance(composition, Mapping):
+        return tuple(errors)
+    amount = composition.get("adjustment_amount")
     if isinstance(amount, str):
         try:
             if Decimal(amount) == 0:

@@ -46,7 +46,8 @@
       "enum": [
         "apply_late_adjustment",
         "rate_late_adjustment",
-        "record_invoice_adjustment"
+        "record_invoice_adjustment",
+        "issue_invoice"
       ]
     }
   }

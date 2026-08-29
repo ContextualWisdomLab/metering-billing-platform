@@ -23,10 +23,15 @@ MAXIMUM_PAGE_LIMIT = 100
 OPERATOR_ACTION_APPLY = "apply_late_adjustment"
 OPERATOR_ACTION_RATE = "rate_late_adjustment"
 OPERATOR_ACTION_RECORD_INVOICE_ADJUSTMENT = "record_invoice_adjustment"
+OPERATOR_ACTION_ISSUE_INVOICE = "issue_invoice"
 
 
-def next_operator_action(*, applied: bool = False, rated: bool = False) -> str:
+def next_operator_action(
+    *, applied: bool = False, rated: bool = False, invoice_adjusted: bool = False
+) -> str:
     """Return the next action for recorded evidence."""
+    if invoice_adjusted:
+        return OPERATOR_ACTION_ISSUE_INVOICE
     if rated:
         return OPERATOR_ACTION_RECORD_INVOICE_ADJUSTMENT
     return OPERATOR_ACTION_RATE if applied else OPERATOR_ACTION_APPLY
@@ -125,6 +130,9 @@ class LateAdjustmentPresentmentService:
                 tenant.tenant_account_id, adjustment.late_adjustment_id
             )
             is not None,
+            invoice_adjusted=self._invoice_adjusted(
+                tenant.tenant_account_id, adjustment.late_adjustment_id
+            ),
         )
 
     def list_late_adjustments(
@@ -168,6 +176,9 @@ class LateAdjustmentPresentmentService:
                         tenant.tenant_account_id, adjustment.late_adjustment_id
                     )
                     is not None,
+                    invoice_adjusted=self._invoice_adjusted(
+                        tenant.tenant_account_id, adjustment.late_adjustment_id
+                    ),
                 )
                 for adjustment in page_rows
             ),
@@ -182,6 +193,17 @@ class LateAdjustmentPresentmentService:
         assert tenant is not None
         return tenant
 
+    def _invoice_adjusted(
+        self, tenant_account_id: UUID, late_adjustment_id: UUID
+    ) -> bool:
+        """Return whether the rated adjustment is attached to an invoice draft."""
+        rating = self.ledger.find_late_adjustment_rating(
+            tenant_account_id, late_adjustment_id
+        )
+        return rating is not None and self.ledger.find_late_adjustment_invoice_adjustment(
+            tenant_account_id, rating.late_adjustment_rating_id
+        ) is not None
+
     @staticmethod
     def _project_adjustment(
         tenant_reference: str,
@@ -189,6 +211,7 @@ class LateAdjustmentPresentmentService:
         *,
         applied: bool = False,
         rated: bool = False,
+        invoice_adjusted: bool = False,
     ) -> LateAdjustmentPresentmentResult:
         """Project only persisted commercial evidence."""
         return LateAdjustmentPresentmentResult(
@@ -202,7 +225,9 @@ class LateAdjustmentPresentmentService:
             source_reference=adjustment.source_reference,
             source_payload_hash=adjustment.source_payload_hash,
             recorded_at=adjustment.recorded_at,
-            next_operator_action=next_operator_action(applied=applied, rated=rated),
+            next_operator_action=next_operator_action(
+                applied=applied, rated=rated, invoice_adjusted=invoice_adjusted
+            ),
         )
 
 

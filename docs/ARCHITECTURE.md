@@ -73,8 +73,12 @@ late fact, period, usage, rating, tax, journal, provider state, or webhook.
 `LateAdjustmentRatingService` consumes the acknowledgement through the nested
 `/ratings` command and appends `late_adjustment_rating`. The exact signed delta
 is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
-Presentment then reports `record_invoice_adjustment` for the still-separate
-invoice-adjustment workflow.
+`LateAdjustmentInvoiceAdjustmentService` consumes that rating through the
+nested `/invoice-adjustments` command and appends one tenant-scoped
+`late_adjustment_invoice_adjustment` linked to an unissued invoice draft.
+Presentment then reports `issue_invoice`. The draft and any issued invoice
+snapshot remain immutable; provider export and tax/legal-document treatment
+remain downstream boundaries.
 
 ## Usage ingestion
 
