@@ -788,10 +788,45 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 (hard_closed.transitions[0].transition_id,),
             ),
             (
+                "UPDATE billing_core.billing_period SET opened_by = 'rewrite' WHERE period_id = %s",
+                (period.period_id,),
+            ),
+            (
+                "DELETE FROM billing_core.billing_period WHERE period_id = %s",
+                (period.period_id,),
+            ),
+            (
+                "UPDATE billing_core.fx_rate SET rate_source = 'rewrite' WHERE fx_rate_id = %s",
+                (rate.fx_rate_id,),
+            ),
+            (
+                "DELETE FROM billing_core.fx_rate WHERE fx_rate_id = %s",
+                (rate.fx_rate_id,),
+            ),
+            (
+                "UPDATE billing_core.fx_conversion SET source_currency = 'EUR' "
+                "WHERE fx_conversion_id = %s",
+                (conversion.fx_conversion_id,),
+            ),
+            (
+                "DELETE FROM billing_core.fx_conversion WHERE fx_conversion_id = %s",
+                (conversion.fx_conversion_id,),
+            ),
+            (
                 "UPDATE billing_core.reconciliation_line "
                 "SET provider_account_reference = 'provider:rewrite' "
                 "WHERE reconciliation_line_id = %s",
                 (matched.reconciliation_line_id,),
+            ),
+            (
+                "UPDATE billing_core.reconciliation_exception SET next_action = 'rewrite' "
+                "WHERE reconciliation_line_id = %s AND exception_number = 1",
+                (exception.reconciliation_line_id,),
+            ),
+            (
+                "DELETE FROM billing_core.reconciliation_exception "
+                "WHERE reconciliation_line_id = %s AND exception_number = 1",
+                (exception.reconciliation_line_id,),
             ),
             (
                 "DELETE FROM billing_core.reconciliation_line WHERE reconciliation_line_id = %s",
