@@ -66,7 +66,9 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
   `invoice_draft_has_downstream_records`
 - New collection, journal, tax-assessment, or credit writes after composition:
   `invoice_draft_has_late_adjustment`; the draft lock and PostgreSQL migration
-  `0057` prevent stale downstream capture.
+  `0057` prevent stale downstream capture. Migration `0058` applies the same
+  tenant-scoped lock to direct composition inserts after an existing downstream
+  fact and preserves identity replays.
 - Draft with no single tenant-scoped payer:
   `invoice_draft_billing_account_not_found` or
   `invoice_draft_billing_account_ambiguous`

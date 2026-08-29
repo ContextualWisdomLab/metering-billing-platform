@@ -109,7 +109,7 @@ Presentment does not add a table.  `GET /v1/invoice-drafts/{invoice_draft_id}` p
 
 ## Issued-invoice identity
 
-A stored issued invoice is identified by `(tenant_account_id, invoice_draft_id)`.  Internal primary key is the opaque generated `issued_invoice_id`.  The hash covers the draft, contract version, rating run, usage snapshot, currency, exclusive/tax/inclusive totals, and issued lines.  Status is `issued` only.  `due_at` is optional.  The snapshot does not store a statutory invoice number, fiscal signature, or customer PII.  First successful issue appends one `webhook_outbox_event` with `event_type_code` `invoice.issued` and `source_id` `issued_invoice_id`.  The outbox `data` is a thin reference plus hash and omits issued lines.  `GET /v1/issued-invoices/{issued_invoice_id}` projects the stored row and, when a stored `tax_assessment` for the same draft still matches the frozen exclusive/tax/inclusive amounts, optional `tax_assessment_id`.  The issued row does not persist that identifier.  `GET /v1/issued-invoices` lists `{issued_invoices, next_cursor}` ordered by `issued_at` then `issued_invoice_id`.
+A stored issued invoice is identified by `(tenant_account_id, invoice_draft_id)`.  Internal primary key is the opaque generated `issued_invoice_id`.  The hash covers the draft, contract version, rating run, usage snapshot, currency, exclusive/tax/inclusive totals, and issued lines.  Status is `issued` only.  `due_at` is optional.  The snapshot does not store a statutory invoice number, fiscal signature, or customer PII.  First successful issue appends one `webhook_outbox_event` with `event_type_code` `invoice.issued` and `source_id` `issued_invoice_id`.  The outbox `data` is a thin reference plus hash and omits issued lines.  Issued-invoice and presentment line envelopes are version 2; presentment upgrades a stored historical v1 line snapshot to the v2 envelope without rewriting the stored invoice.  Issuance preserves exact representable totals before the `numeric(38,12)` check and caps the projected issued lines at 10,000.  `GET /v1/issued-invoices/{issued_invoice_id}` projects the stored row and, when a stored `tax_assessment` for the same draft still matches the frozen exclusive/tax/inclusive amounts, optional `tax_assessment_id`.  The issued row does not persist that identifier.  `GET /v1/issued-invoices` lists `{issued_invoices, next_cursor}` ordered by `issued_at` then `issued_invoice_id`.
 
 ## Issued-invoice-void identity
 
@@ -278,9 +278,12 @@ backfills only unambiguous legacy drafts, and rejects ambiguous new drafts.
 Migration `0057` adds one shared `BEFORE INSERT` trigger to collection cases,
 tax assessments, credit adjustments, and journal proposals. It locks the
 tenant-scoped invoice draft and rejects a new downstream row when an
-immutable `late_adjustment_invoice_adjustment` already exists. This is the
-database counterpart to the service guards and makes ordering safe for direct
-PostgreSQL persistence and concurrent writers.
+immutable `late_adjustment_invoice_adjustment` already exists. Migration
+`0058` adds the reverse composition trigger: it takes the same lock and rejects
+direct composition after a downstream fact while allowing an existing
+composition identity to replay. These are the database counterparts to the
+service guards and make ordering safe for direct PostgreSQL persistence and
+concurrent writers.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a

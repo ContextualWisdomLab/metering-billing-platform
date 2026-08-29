@@ -60,6 +60,14 @@
   invoice-draft lock. PostgreSQL migration `0057` enforces the same ordering
   for direct inserts, the new `invoice_draft_has_late_adjustment` rejection
   contract is returned as HTTP 422, and composition contracts emit version 2.
+- Issue #87 now closes the reverse direct-persistence ordering in migration
+  `0058`: a composition insert locks its tenant-scoped draft and rejects an
+  existing collection, tax, journal, or credit fact while preserving identity
+  replays. Memory and PostgreSQL direct inserts now require the same single
+  billing-account evidence. Issuance sums large Decimal values without context
+  rounding, rejects more than 10,000 projected lines, and maps a concurrent
+  composition identity conflict to its documented rejection code. Historical
+  stored v1 issued invoices remain readable through the v2 presentment envelope.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

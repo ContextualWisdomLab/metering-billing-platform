@@ -42,8 +42,13 @@ issued invoice snapshots are never overwritten.
 - Once composition exists, collection, tax, journal, and credit writes reject
   with `invoice_draft_has_late_adjustment` under the same invoice-draft lock;
   migration `0057` enforces this ordering for direct PostgreSQL inserts.
+  Migration `0058` also locks the draft before rejecting a direct composition
+  after an existing downstream fact, while allowing an existing composition
+  identity to replay. Issuance preserves exact representable totals and rejects
+  more than 10,000 projected lines.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not
-  part of the replay identity.
+  part of the replay identity. Historical stored v1 invoices remain readable
+  because presentment upgrades only the response envelope.
 - Collection, journal, provider export, and legal invoice authority remain
   separate downstream boundaries; this slice does not claim any of them.

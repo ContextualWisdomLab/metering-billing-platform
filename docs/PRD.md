@@ -52,8 +52,9 @@ contextual-orchestrator usage
   lifecycle ordering, target openness, replay conflict handling, and
   update/delete immutability. Migrations `0050`/`0052` also require the target
   to still be open when first applying the fact while preserving replays.
-  Migrations `0054`/`0056`/`0057` protect composition evidence, selected
-  billing-account identity, and the same-draft downstream write boundary.
+  Migrations `0054`/`0056`/`0057`/`0058` protect composition evidence, selected
+  billing-account identity, and the same-draft downstream write boundary in
+  either write order.
   Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
   posting remain separate workflows.
@@ -122,9 +123,13 @@ contextual-orchestrator usage
 - Composition and every downstream collection, tax, journal, or credit write
   serialize on the invoice-draft lock. Once a composition exists, a new
   downstream write is rejected with `invoice_draft_has_late_adjustment` and
-  does not create a stale fact; PostgreSQL migration `0057` enforces this
-  boundary for direct persistence too. All three write routes return HTTP 422
-  for rejected command results, including missing tenant or source records.
+  does not create a stale fact; PostgreSQL migrations `0057` and `0058` enforce
+  both write orders for direct persistence too. A direct composition insert is
+  rejected after an existing collection, tax, journal, or credit fact, while
+  an existing composition remains replayable. Issued invoices reject more than
+  10,000 projected lines and preserve exact representable totals before the
+  `numeric(38,12)` check. All three write routes return HTTP 422 for rejected
+  command results, including missing tenant or source records.
 - After composition, late-adjustment presentment reports `issue_invoice`.
   The command does not rewrite the invoice draft, issue an invoice, calculate
   tax, post a journal, or call a provider; those remain explicit boundaries.

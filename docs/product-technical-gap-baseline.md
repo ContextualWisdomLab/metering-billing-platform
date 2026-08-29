@@ -9,18 +9,19 @@
 ## Current working snapshot (2026-08-30)
 
 The #87 work is stacked from exact head
-`deb5b18a35b45ac3f725aebd5350560cc4d5a067` of PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173)
-into the follow-up branch `feat/late-adjustment-invoice-intent-20260830`.
+`32693becf9cbaf4a8d09b2e1c47ad639a5f64289` of PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174)
+on branch `feat/late-adjustment-invoice-intent-20260830`; PR #173 remains the
+base review.
 PR #173 remains open with no qualifying independent approval; mergeability and
 local checks are not merge evidence. PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174)
 is the separate stacked review for the next immutable invoice-intent
 composition slice; its initial implementation commit is
 `5ef90218bf7660e0a4e6d29c8ee6ea0c87b42fa9`, with review-fix commit
-`4201a55`; the implementation review-fix commit is
-`1c0e824`.
+`4201a55`; the implementation review-fix commits are
+`1c0e824` and `32693becf9cbaf4a8d09b2e1c47ad639a5f64289`.
 
 The implemented #87 path now covers PostgreSQL migrations
-`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`/`0056`/`0057`, the `LateAdjustment`,
+`0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`, the `LateAdjustment`,
 application, rating-consumption, and invoice-adjustment contracts,
 tenant-scoped presentment reads, and durable application/rating/composition
 facts for late usage, correction, and reversal evidence. Composition now
@@ -30,7 +31,11 @@ collection/journal/tax/credit writes after composition under the shared draft
 lock, and rejects amounts that would
 round in issued-invoice storage. Issuance consumes linked compositions under
 the draft lock as signed invoice lines, rejects zero or negative resulting
-totals, and rejects stale tax assessments pending reassessment. The source period
+totals, rejects stale tax assessments pending reassessment, preserves large exact
+totals before storage validation, and rejects a projected issued invoice above
+10,000 lines. Direct composition persistence after downstream capture is blocked
+by migration `0058`, and historical v1 issued invoices remain readable through
+the v2 presentment envelope. The source period
 must be at least `soft_closed`; the target must be `open` and start no earlier
 than the source end; composition requires a rated adjustment and an unissued
 same-tenant, same-currency invoice draft. Targeted real-PostgreSQL, full
