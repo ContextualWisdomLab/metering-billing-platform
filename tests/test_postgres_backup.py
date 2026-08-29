@@ -5,10 +5,10 @@ from __future__ import annotations
 import io
 import subprocess
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest import mock
 
 from scripts.postgres_backup import (
     PostgresBackupError,
@@ -36,7 +36,7 @@ class PostgresBackupTests(unittest.TestCase):
                 archive.write_bytes(b"custom archive")
                 return self._result()
 
-            with mock.patch("scripts.postgres_backup.subprocess.run", side_effect=dump) as runner:
+            with unittest.mock.patch("scripts.postgres_backup.subprocess.run", side_effect=dump) as runner:
                 self.assertEqual(
                     create_backup("postgresql://secret.example/db", output, pg_dump_binary="dump"),
                     output,
@@ -58,7 +58,7 @@ class PostgresBackupTests(unittest.TestCase):
                 create_backup("dsn", output)
 
             output.unlink()
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run", return_value=self._result()
             ):
                 with self.assertRaisesRegex(PostgresBackupError, "empty archive"):
@@ -70,7 +70,7 @@ class PostgresBackupTests(unittest.TestCase):
         """Failed clients and clients that remove their output leave no partial file."""
         with TemporaryDirectory() as temporary_directory:
             output = Path(temporary_directory) / "billing.dump"
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run", return_value=self._result(7)
             ):
                 with self.assertRaisesRegex(PostgresBackupError, "exit status 7"):
@@ -81,7 +81,7 @@ class PostgresBackupTests(unittest.TestCase):
                 Path(command[command.index("--file") + 1]).unlink()
                 return self._result()
 
-            with mock.patch("scripts.postgres_backup.subprocess.run", side_effect=remove_output):
+            with unittest.mock.patch("scripts.postgres_backup.subprocess.run", side_effect=remove_output):
                 with self.assertRaisesRegex(PostgresBackupError, "empty archive"):
                     create_backup("dsn", output)
 
@@ -91,18 +91,18 @@ class PostgresBackupTests(unittest.TestCase):
                 output.write_bytes(b"existing archive")
                 return self._result()
 
-            with mock.patch("scripts.postgres_backup.subprocess.run", side_effect=create_race):
+            with unittest.mock.patch("scripts.postgres_backup.subprocess.run", side_effect=create_race):
                 with self.assertRaisesRegex(PostgresBackupError, "became occupied"):
                     create_backup("dsn", output)
             self.assertEqual(output.read_bytes(), b"existing archive")
 
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run",
                 side_effect=lambda command, **_: (
                     Path(command[command.index("--file") + 1]).write_bytes(b"archive"),
                     self._result(),
                 )[1],
-            ), mock.patch("scripts.postgres_backup.os.link", side_effect=OSError):
+            ), unittest.mock.patch("scripts.postgres_backup.os.link", side_effect=OSError):
                 output.unlink()
                 with self.assertRaisesRegex(PostgresBackupError, "publication failed"):
                     create_backup("dsn", output)
@@ -114,12 +114,12 @@ class PostgresBackupTests(unittest.TestCase):
             with self.assertRaisesRegex(PostgresBackupError, "does not exist"):
                 verify_backup(archive)
             archive.write_bytes(b"archive")
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run", return_value=self._result(3)
             ):
                 with self.assertRaisesRegex(PostgresBackupError, "verification.*exit status 3"):
                     verify_backup(archive)
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run", side_effect=FileNotFoundError
             ):
                 with self.assertRaisesRegex(PostgresBackupError, "client is unavailable"):
@@ -132,7 +132,7 @@ class PostgresBackupTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             archive = Path(temporary_directory) / "billing.dump"
             archive.write_bytes(b"archive")
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run", return_value=self._result()
             ) as runner:
                 self.assertEqual(
@@ -161,17 +161,17 @@ class PostgresBackupTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             archive = Path(temporary_directory) / "billing.dump"
             archive.write_bytes(b"archive")
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run", return_value=self._result()
             ):
                 with self.assertRaisesRegex(PostgresBackupError, "requires"):
                     restore_backup("dsn", archive, clean=True)
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run", side_effect=[self._result(), self._result(9)]
             ):
                 with self.assertRaisesRegex(PostgresBackupError, "exit status 9"):
                     restore_backup("postgresql://secret.example/db", archive, clean=True, confirm_destructive_restore=True)
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.subprocess.run", return_value=self._result()
             ) as runner:
                 restore_backup("dsn", archive, clean=True, confirm_destructive_restore=True)
@@ -194,22 +194,22 @@ class PostgresBackupTests(unittest.TestCase):
         """The CLI prints only operation status and sanitized failures."""
         with TemporaryDirectory() as temporary_directory:
             archive = Path(temporary_directory) / "billing.dump"
-            with mock.patch("scripts.postgres_backup.create_backup", return_value=archive):
+            with unittest.mock.patch("scripts.postgres_backup.create_backup", return_value=archive):
                 output = io.StringIO()
                 with redirect_stdout(output):
                     self.assertEqual(main(["backup", "--dsn", "dsn", "--output", str(archive)]), 0)
                 self.assertIn("backup complete", output.getvalue())
-            with mock.patch("scripts.postgres_backup.verify_backup", return_value=archive):
+            with unittest.mock.patch("scripts.postgres_backup.verify_backup", return_value=archive):
                 output = io.StringIO()
                 with redirect_stdout(output):
                     self.assertEqual(main(["verify", "--archive", str(archive)]), 0)
                 self.assertIn("verify complete", output.getvalue())
-            with mock.patch("scripts.postgres_backup.restore_backup", return_value=archive):
+            with unittest.mock.patch("scripts.postgres_backup.restore_backup", return_value=archive):
                 output = io.StringIO()
                 with redirect_stdout(output):
                     self.assertEqual(main(["restore", "--dsn", "dsn", "--archive", str(archive)]), 0)
                 self.assertIn("restore complete", output.getvalue())
-            with mock.patch(
+            with unittest.mock.patch(
                 "scripts.postgres_backup.create_backup",
                 side_effect=PostgresBackupError("client failed"),
             ):
