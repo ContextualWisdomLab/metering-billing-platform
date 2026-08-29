@@ -8,9 +8,9 @@
 
 ## Current working snapshot (2026-08-30)
 
-The current #87 work is stacked through PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172),
-whose exact head is `0ae0233ebb54ccf14f10f00303511ebf0262e0f7` on
-`feat/late-adjustment-apply-20260829`. PR #172 remains open pending hosted
+The current #87 work is stacked through PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172).
+Its implementation snapshot is commit `7dd35341b096162348d52dafa83a01b1c27a1550`
+on `feat/late-adjustment-apply-20260829`. PR #172 remains open pending hosted
 checks and a qualifying independent approval; local pass status is not merge
 evidence.
 
