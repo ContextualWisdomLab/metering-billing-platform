@@ -3465,7 +3465,10 @@ def _read_json_object(environ: WSGIEnvironment) -> dict[str, Any]:
     input_stream = environ.get("wsgi.input")
     if content_length < 0 or input_stream is None:
         raise HttpRequestError("request_invalid")
-    raw = input_stream.read(content_length)
+    try:
+        raw = input_stream.read(content_length)
+    except TimeoutError as error:
+        raise HttpRequestError("request_invalid") from error
     if not raw:
         raise HttpRequestError("request_invalid")
     try:

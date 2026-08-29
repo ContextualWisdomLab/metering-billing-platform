@@ -32,6 +32,7 @@ from metering_billing.http_app import (
     HttpRequestError,
     _dispatch_write,
     _parse_uuid,
+    _read_json_object,
     _send_json,
     _status_for_contract,
     _status_for_result,
@@ -670,16 +671,15 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         body_read_started = threading.Event()
         body_read_timed_out = threading.Event()
 
-        def application(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+        def read_json(environ: dict[str, Any]) -> dict[str, Any]:
             body_read_started.set()
             try:
-                environ["wsgi.input"].read(int(environ["CONTENT_LENGTH"]))
-            except TimeoutError:
+                return _read_json_object(environ)
+            except HttpRequestError:
                 body_read_timed_out.set()
-                start_response("408 Request Timeout", [("Content-Type", "application/json")])
-                return [b"{}"]
-            start_response("200 OK", [("Content-Type", "application/json")])
-            return [b"{}"]
+                raise
+
+        application = create_http_app(MemoryUsageLedger())
 
         with mock.patch.object(RequestTimeoutWSGIRequestHandler, "timeout", 0.05):
             httpd = stdlib_make_server(
@@ -692,22 +692,22 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
             client = socket.create_connection(("127.0.0.1", httpd.server_address[1]))
             self.addCleanup(client.close)
             client.sendall(
-                b"POST / HTTP/1.1\r\n"
+                b"POST /v1/usage-events HTTP/1.1\r\n"
                 b"Host: 127.0.0.1\r\n"
                 b"Content-Length: 100\r\n"
                 b"Connection: close\r\n\r\n"
                 b"{"
             )
 
-            signal_thread = threading.Thread(
-                target=lambda: (
-                    body_read_started.wait(1.0),
-                    os.kill(os.getpid(), signal.SIGTERM),
-                )
-            )
+            def terminate_on_body_read() -> None:
+                body_read_started.wait(1.0)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+            signal_thread = threading.Thread(target=terminate_on_body_read)
             signal_thread.start()
             with mock.patch("metering_billing.http_app.make_server", return_value=httpd):
-                self.assertEqual(main(()), 0)
+                with mock.patch("metering_billing.http_app._read_json_object", side_effect=read_json):
+                    self.assertEqual(main(()), 0)
             signal_thread.join(1.0)
             self.assertTrue(body_read_started.is_set())
             self.assertTrue(body_read_timed_out.is_set())
