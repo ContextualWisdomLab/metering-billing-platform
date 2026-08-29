@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from threading import Barrier
+from threading import Barrier, Event
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -589,6 +589,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (adjustment, second_adjustment),
         )
         self.assertEqual(self.ledger.list_late_adjustments(TENANT_TWO), ())
+        self.assertEqual(
+            self.ledger.find_late_adjustment_application_ids(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id, ()
+            ),
+            frozenset(),
+        )
         presentment = LateAdjustmentPresentmentService(self.ledger)
         statement = presentment.present_late_adjustment(
             TENANT_ONE, adjustment.late_adjustment_id
@@ -1565,6 +1571,112 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 ),
             ).fetchone()[0],
             1,
+        )
+
+    def test_late_adjustment_application_and_close_serialize(self) -> None:
+        """A target close committed first rejects the blocked new application."""
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 11, 1),
+            date(2026, 12, 1),
+            opened_by="operator:finance_033",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_034",
+            authorization_reference="approval:period_027",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 12, 1),
+            date(2027, 1, 1),
+            opened_by="operator:finance_035",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "5.25",
+            "USD",
+            "provider:application_close_race",
+            "sha256:" + "a" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        target_locked = Event()
+        release_close = Event()
+        application_insert_started = Event()
+        closed_target = target.advance(
+            "soft_closed",
+            actor_reference="operator:finance_036",
+            authorization_reference="approval:period_028",
+            reason="close target",
+            transitioned_at=CATALOG_START + timedelta(hours=3),
+        )
+
+        class BlockingCloseLedger(PostgresUsageLedger):
+            """Hold the target row lock until the application attempts its insert."""
+
+            @staticmethod
+            def _fetch_billing_period(
+                cursor, period_id, *, tenant_account_id=None, lock=False
+            ):
+                result = PostgresUsageLedger._fetch_billing_period(
+                    cursor, period_id, tenant_account_id=tenant_account_id, lock=lock
+                )
+                if lock and period_id == target.period_id and result is not None:
+                    target_locked.set()
+                    if not release_close.wait(timeout=5):
+                        raise AssertionError("application did not reach insert")
+                return result
+
+        class BlockingApplicationLedger(PostgresUsageLedger):
+            """Expose the application insert boundary for the two-session race."""
+
+            def insert_late_adjustment_application(self, application):
+                application_insert_started.set()
+                return super().insert_late_adjustment_application(application)
+
+        def close_once():
+            with psycopg.connect(POSTGRES_DSN) as connection:
+                return BlockingCloseLedger(connection).insert_billing_period(
+                    closed_target
+                )
+
+        def apply_once():
+            with psycopg.connect(POSTGRES_DSN) as connection:
+                return LateAdjustmentApplicationService(
+                    BlockingApplicationLedger(connection),
+                    clock=lambda: CATALOG_START + timedelta(hours=4),
+                ).apply_late_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    applied_by="operator:finance_037",
+                    authorization_reference="approval:application_023",
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            close_future = pool.submit(close_once)
+            self.assertTrue(target_locked.wait(timeout=5))
+            application_future = pool.submit(apply_once)
+            self.assertTrue(application_insert_started.wait(timeout=5))
+            release_close.set()
+            close_future.result()
+            result = application_future.result()
+        self.assertEqual(result.rejection_reason_code, "target_period_not_open")
+        self.assertIsNone(
+            self.ledger.find_late_adjustment_application(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                adjustment.late_adjustment_id,
+            )
         )
 
     def test_reconcile_period_requires_a_complete_latest_run(self) -> None:

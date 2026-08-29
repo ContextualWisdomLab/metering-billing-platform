@@ -3044,6 +3044,17 @@ class MemoryUsageLedger:
             return None
         return self.late_adjustment_applications[application_id]
 
+    def find_late_adjustment_application_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return applied late-adjustment IDs for one bounded page."""
+        requested = set(late_adjustment_ids)
+        return frozenset(
+            late_adjustment_id
+            for (stored_tenant_id, late_adjustment_id) in self.late_adjustment_application_index
+            if stored_tenant_id == tenant_account_id and late_adjustment_id in requested
+        )
+
     def get_late_adjustment_application(
         self, late_adjustment_application_id: UUID
     ) -> StoredLateAdjustmentApplication | None:

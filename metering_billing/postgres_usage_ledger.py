@@ -358,6 +358,25 @@ class PostgresUsageLedger:
                 )
             )
 
+    def find_late_adjustment_application_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return applied late-adjustment IDs for one bounded page."""
+        if not late_adjustment_ids:
+            return frozenset()
+        placeholders = ", ".join("%s" for _ in late_adjustment_ids)
+        with self._cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT late_adjustment_id
+                FROM billing_core.late_adjustment_application
+                WHERE tenant_account_id = %s
+                  AND late_adjustment_id IN ({placeholders})
+                """,
+                (tenant_account_id, *late_adjustment_ids),
+            )
+            return frozenset(UUID(str(row[0])) for row in cursor.fetchall())
+
     def get_late_adjustment_application(
         self, late_adjustment_application_id: UUID
     ) -> StoredLateAdjustmentApplication | None:
@@ -503,6 +522,17 @@ class PostgresUsageLedger:
         with self._cursor() as cursor:
             tenant_account_id = self._tenant_account_id_with_cursor(
                 cursor, period.tenant_reference
+            )
+            # Serialize transition writers with the application trigger's
+            # target-period FOR UPDATE lock before appending any transition.
+            cursor.execute(
+                """
+                SELECT period_id
+                FROM billing_core.billing_period
+                WHERE tenant_account_id = %s AND period_id = %s
+                FOR UPDATE
+                """,
+                (tenant_account_id, period.period_id),
             )
             cursor.execute(
                 """
