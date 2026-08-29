@@ -40,6 +40,9 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 packages[0]["verifiedUsing"][0]["hashValue"],
                 sha256(b"python").hexdigest(),
             )
+            creation_info = next(item for item in graph if item.get("type") == "CreationInfo")
+            self.assertEqual(creation_info["@id"], "_:creation-info")
+            self.assertEqual(packages[0]["creationInfo"], "_:creation-info")
 
             write_sbom(root, output, RELEASE_SHA, "2026-08-29T00:00:00Z")
             self.assertEqual(json.loads(output.read_text(encoding="utf-8")), first)

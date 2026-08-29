@@ -37,7 +37,7 @@ def build_sbom(
         raise ValueError(f"artifact root has no files: {artifact_root}")
 
     document_id = f"https://github.com/ContextualWisdomLab/metering-billing-platform/sbom/{release_sha}"
-    creation_info_id = f"{document_id}#creation-info"
+    creation_info_id = "_:creation-info"
     sbom_id = f"{document_id}#producer-artifacts"
     package_ids: list[str] = []
     packages: list[dict[str, object]] = []
@@ -60,6 +60,7 @@ def build_sbom(
         )
 
     creation_info = {
+        "@id": creation_info_id,
         "type": "CreationInfo",
         "created": created,
         "createdBy": ["https://github.com/ContextualWisdomLab"],

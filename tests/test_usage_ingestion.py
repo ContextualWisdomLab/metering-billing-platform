@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -14,6 +16,7 @@ from types import SimpleNamespace
 from unittest import mock
 from uuid import UUID
 
+import metering_billing.contracts as contracts_module
 from metering_billing import (
     ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME,
     IngestionOutcomeCode,
@@ -750,6 +753,21 @@ class UsageIngestionTests(unittest.TestCase):
 
 class LedgerAndContractUnitTests(unittest.TestCase):
     """Cover catalog edge cases, exact decimals, time windows, and hashing."""
+
+    def test_contract_helpers_keep_source_tree_fallbacks(self) -> None:
+        """Use repository modules when packaged resource modules are absent."""
+        with mock.patch.dict(
+            sys.modules,
+            {"metering_billing._repository_validation.validate_repository": None},
+        ):
+            importlib.reload(contracts_module)
+            self.assertTrue(callable(contracts_module.validate_schema_instance))
+        with mock.patch.dict(sys.modules, {"metering_billing._schemas": None}):
+            self.assertEqual(
+                contracts_module.default_schemas_directory(),
+                Path(__file__).resolve().parents[1] / "schemas",
+            )
+        importlib.reload(contracts_module)
 
     def test_catalog_registration_is_idempotent_and_tenant_bound(self) -> None:
         """Re-registering the same URN returns the same row and cannot cross tenants."""
