@@ -76,6 +76,9 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
   amounts that would round in `numeric(38,12)` are rejected by migration `0060`.
   Migration `0061` rejects direct issued headers that omit linked composition
   lines or freeze a total that excludes a signed adjustment.
+- Migration `0062` rejects direct UPDATE/DELETE of issued-invoice snapshots and
+  lines and removes the issued-line `line_type` default so a direct insert cannot
+  silently become a usage line.
 - Composition or direct persistence with a contract version other than 2 is
   rejected; stored v1 issued-invoice snapshots are upgraded only at the
   presentment and issuance-replay envelopes and are not rewritten.

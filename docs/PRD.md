@@ -52,9 +52,10 @@ contextual-orchestrator usage
   lifecycle ordering, target openness, replay conflict handling, and
   update/delete immutability. Migrations `0050`/`0052` also require the target
   to still be open when first applying the fact while preserving replays.
-  Migrations `0054`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061` protect composition evidence,
+  Migrations `0054`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062` protect composition evidence,
   selected billing-account identity, the same-draft downstream write boundary
-  in either write order, and the version-2 contract invariant.
+  in either write order, the version-2 contract invariant, and issued-invoice
+  snapshot/line immutability.
   Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
   posting remain separate workflows.
@@ -123,7 +124,7 @@ contextual-orchestrator usage
 - Composition and every downstream collection, tax, journal, or credit write
   serialize on the invoice-draft lock. Once a composition exists, a new
   downstream write is rejected with `invoice_draft_has_late_adjustment` and
-  does not create a stale fact; PostgreSQL migrations `0057`, `0058`, `0060`, and `0061` enforce
+  does not create a stale fact; PostgreSQL migrations `0057`, `0058`, `0060`, `0061`, and `0062` enforce
   both write orders for direct persistence too. A direct composition insert is
   rejected after an existing collection, tax, journal, or credit fact, while
   an existing composition remains replayable. Issued invoices reject more than
@@ -134,6 +135,8 @@ contextual-orchestrator usage
   adjustment lines to their composition evidence, and permits collection only
   from the frozen issued total. Migration `0061` requires every linked
   composition to have a matching issued line and included signed total.
+  Migration `0062` makes issued snapshots and lines immutable to direct database
+  UPDATE/DELETE and removes the issued-line `line_type` default.
   All three write routes return HTTP 422 for rejected
   command results, including missing tenant or source records.
 - After composition, late-adjustment presentment reports `issue_invoice`.
@@ -284,6 +287,7 @@ contextual-orchestrator usage
 - Issued-invoice and presentment line contracts are version 2; `line_type` is required, usage lines are non-negative and cannot carry a composition ID, and late-adjustment lines require a non-zero signed total plus their composition ID.
 - Late-adjustment composition persistence accepts only contract version 2. Migration `0059` fails closed on legacy rows without billing-account evidence, upgrades compatible version metadata, and enforces the same invariant in PostgreSQL; stored v1 issued-invoice snapshots remain readable through presentment and issuance replay envelopes without rewriting their facts.
 - After successful issuance, collection uses the frozen adjusted inclusive total and remains blocked before issuance; direct PostgreSQL collection inserts must match that issued currency and total.
+- Issued-invoice snapshots and lines remain immutable after issuance, including for direct PostgreSQL writes; direct issued lines must provide `line_type` explicitly.
 - A known stored issued invoice presents one tenant-scoped statement with identity, draft source, frozen totals, lines, `issued_at`, optional `due_at`, optional stored `tax_assessment_id` when the draft assessment amounts still match those totals, and `next_operator_action` (`collect`).
 - `GET /v1/issued-invoices/{issued_invoice_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/issued-invoices` lists summaries as `{issued_invoices, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{issued_invoice_id}`.

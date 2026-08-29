@@ -294,6 +294,9 @@ the frozen issued inclusive total.
 Migration `0061` adds deferred PostgreSQL checks requiring every composition
 linked to an issued draft to have one matching late-adjustment line and to be
 included in the issued exclusive total.
+Migration `0062` adds database immutability triggers for issued invoices and
+issued lines and removes the `line_type` default, so direct issued-line writes
+must provide the explicit version-2 type.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a

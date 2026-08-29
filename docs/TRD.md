@@ -116,7 +116,9 @@ projected result above 10,000 lines. Migration `0059` fails closed on legacy
     after issuance only when its currency and outstanding amount equal the frozen
     issued snapshot. Migration `0061` defers issued-invoice completeness checks
     until the header and all lines are present, requiring every linked composition
-    and signed amount to be represented.
+    and signed amount to be represented. Migration `0062` enforces issued-invoice
+    snapshot and line immutability for direct PostgreSQL UPDATE/DELETE and removes
+    the `line_type` default from issued lines.
 
 ## Provider plane
 

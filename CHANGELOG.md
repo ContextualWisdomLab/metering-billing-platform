@@ -83,6 +83,9 @@
 - Issue #87 now adds deferred migration `0061` checks so direct issued headers
   cannot omit linked adjustment lines or freeze an exclusive total without every
   signed composition.
+- Issue #87 now makes issued-invoice snapshots and lines immutable at the
+  PostgreSQL boundary in migration `0062`, and removes the `line_type` default
+  so direct issued-line inserts must declare their contract type explicitly.
 - Issue #87 now gates the PostgreSQL `soft_closed` to `reconciled` transition
   on the latest completed run's exact period-line membership, exception count,
   and resolved-or-waived exception facts. Direct persistence cannot bypass the
