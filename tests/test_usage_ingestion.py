@@ -421,6 +421,20 @@ class UsageIngestionTests(unittest.TestCase):
         self.assertEqual(service.ledger.usage_events, {})
         self.assertEqual(validate_event_contract(make_event()), ())
         self.assertEqual(validate_usage_event(make_event()), ())
+        additive = make_event(
+            operation_code="complete_step",
+            cost_center_reference="urn:cwl:tenant_001:cost_center:platform",
+            project_reference="urn:cwl:tenant_001:project:metering",
+            recorded_at="2026-08-16T10:27:43Z",
+        )
+        self.assertEqual(validate_event_contract(additive), ())
+        breaking = make_event(event_contract_version=2)
+        self.assertTrue(validate_event_contract(breaking))
+        self.assertEqual(
+            service.ingest_usage_event(breaking).rejection_reason_code,
+            RejectionReasonCode.SCHEMA_INVALID,
+        )
+        self.assertEqual(service.ledger.usage_events, {})
         audit_rows = service.query_ingestion_receipts()
         self.assertGreaterEqual(len(audit_rows), 3)
         self.assertTrue(all(row.ingestion_outcome_code == "rejected" for row in audit_rows))

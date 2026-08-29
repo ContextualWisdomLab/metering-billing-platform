@@ -30,7 +30,7 @@
     "occurred_at": {"type": "string", "format": "date-time"},
     "recorded_at": {"type": "string", "format": "date-time"},
     "measurements": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/measurement"}},
-    "event_contract_version": {"type": "integer", "minimum": 1},
+    "event_contract_version": {"type": "integer", "const": 1},
     "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
   },
   "$defs": {

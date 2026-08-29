@@ -350,6 +350,7 @@ contextual-orchestrator usage
 ## Usage-event-presentment acceptance
 
 - `POST /v1/usage-events` remains the #5 ingest. Replay of the same tenant, source-event key, payload hash, and contract version returns the same `usage_event_id`. PAN, CVC, and provider secrets are refused.
+- The v1 usage contract remains closed and accepts its optional attribution and operation fields without changing the event identity. Additive fields must preserve existing semantics; breaking semantics require a new schema/version, and unsupported versions are rejected as `schema_invalid` without storing usage.
 - A known stored usage event presents one tenant-scoped statement with `source_event_key`, `event_payload_hash`, `occurred_at`, `recorded_at`, measurement quantities, and `next_operator_action` (`rate_window`).
 - `GET /v1/usage-events/{usage_event_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/usage-events` lists summaries as `{usage_events, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{recorded_at}|{usage_event_id}`.
