@@ -1,5 +1,12 @@
 # Product Requirements Document
 
+## Release evidence boundary
+
+Release candidates must bind the exact protected source `HEAD` and tracked
+artifact bytes to a versioned source manifest before packaging. This manifest
+is necessary reproducibility evidence, not an SPDX SBOM, SLSA provenance
+statement, signature, operational rehearsal, or compliance certification.
+
 ## Product outcome
 
 Organizations can attribute AI-platform and CWL-product usage to a billing account, principal, credential, project, and cost center; apply versioned commercial rules; control spend; explain charges; and project those results to replaceable collection providers.
