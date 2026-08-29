@@ -296,6 +296,44 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
                         authorization_reference="change:clock",
                     )
 
+    def test_rating_clock_requires_aware_non_future_audit_time(self) -> None:
+        """Rating clocks cannot create ambiguous or future audit facts."""
+        ledger = seed_ledger()
+        adjustment = create_late_adjustment(
+            uuid4(),
+            uuid4(),
+            "correction",
+            "1.00",
+            "USD",
+            "provider:rating-clock",
+            "sha256:" + "e" * 64,
+            datetime(2026, 8, 17, 21, 0, tzinfo=UTC),
+            late_adjustment_id=uuid4(),
+        )
+        seed_adjustment_periods(ledger, adjustment)
+        ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        LateAdjustmentApplicationService(
+            ledger,
+            clock=lambda: datetime(2026, 8, 17, 22, 0, tzinfo=UTC),
+        ).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:alice",
+            authorization_reference="change:rating-clock",
+        )
+        for clock, message in (
+            (lambda: datetime(2026, 8, 17, 23, 0), "timezone-aware"),
+            (lambda: datetime.now(UTC) + timedelta(days=1), "not be in the future"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    LateAdjustmentRatingService(ledger, clock=clock).rate_late_adjustment(
+                        TENANT_ONE,
+                        adjustment.late_adjustment_id,
+                        rated_by="operator:alice",
+                        authorization_reference="change:rating-clock",
+                    )
+
     def test_memory_concurrent_applications_are_at_most_once(self) -> None:
         """Concurrent memory applications return one acceptance and replays."""
         ledger = seed_ledger()
@@ -989,6 +1027,8 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             replace(stored, adjustment_amount=Decimal("1" * 41)),
             replace(stored, rated_by=" "),
             replace(stored, authorization_reference=" "),
+            replace(stored, rated_at=datetime(2026, 8, 29, 1, 3, 3)),
+            replace(stored, rated_at=datetime.now(UTC) + timedelta(days=1)),
         ):
             with self.assertRaises(ValueError):
                 ledger.insert_late_adjustment_rating(invalid)

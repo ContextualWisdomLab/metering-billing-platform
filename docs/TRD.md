@@ -95,7 +95,8 @@ late_adjustment_id)` cursor and bounded limit; the PostgreSQL adapter performs
 one ordered tenant-scoped keyset query with `limit + 1`.
 Presentment uses one bulk application-existence and one bulk rating-existence
 lookup for the returned page, not one query per item.
-The application timestamp must be timezone-aware and not future-dated. The
+Application and rating timestamps must be timezone-aware and not future-dated.
+The service, both adapters, and migration `0053` enforce this boundary. The
 memory adapter serializes recording, application, and target-period lifecycle writes to
 preserve at-most-once behavior during concurrent application and close.
 

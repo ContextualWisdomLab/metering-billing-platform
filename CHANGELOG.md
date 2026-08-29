@@ -46,8 +46,10 @@
 - Issue #87 now records consumption of an applied late adjustment as a separate
   immutable rating fact in `0051`/`0053`. It preserves the original usage
   `rating_run`, copies the signed commercial delta, replays safely after target
-  closure, and advances presentment to `record_invoice_adjustment`; invoice-
-  adjustment composition remains an explicit downstream workflow (ADR 0135).
+  closure, and advances presentment to `record_invoice_adjustment`. Rating
+  audit timestamps must be timezone-aware and not future-dated at service,
+  adapter, and PostgreSQL boundaries; invoice-adjustment composition remains an
+  explicit downstream workflow (ADR 0135).
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

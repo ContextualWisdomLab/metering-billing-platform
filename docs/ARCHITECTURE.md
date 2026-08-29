@@ -81,13 +81,14 @@ then performs one bulk application-existence and one bulk rating-existence looku
 for the page. `LateAdjustmentRatingService` consumes the acknowledgement through
 the nested `/ratings` command and appends `late_adjustment_rating` only while the
 target remains open; a stored rating replays after closure. The exact signed delta
-is copied; no synthetic usage snapshot or ordinary `rating_run` is created.
+is copied; its audit timestamp is timezone-aware and not future-dated; no
+synthetic usage snapshot or ordinary `rating_run` is created.
 Presentment reports `record_invoice_adjustment` for the still-separate
 invoice-adjustment workflow.
 The memory adapter serializes recording, application, and period lifecycle writes so a
 concurrent application/close race cannot create a second acknowledgement or
-accept a new application for a closed target; application audit timestamps are
-timezone-aware and not future-dated.
+accept a new application for a closed target; application and rating audit
+timestamps are timezone-aware and not future-dated.
 
 ## Usage ingestion
 

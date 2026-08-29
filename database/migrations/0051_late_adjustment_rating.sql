@@ -68,6 +68,10 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    IF NEW.rated_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'late adjustment rating rated_at must not be in the future';
+    END IF;
+
     SELECT *
     INTO application
     FROM billing_core.late_adjustment_application

@@ -26,7 +26,7 @@ recheck the target's latest append-only status, while stored replays remain
 available after target close and preserve first-writer audit data. The memory
 adapter enforces the same period state and tenant/order checks, serializes
 recording/application/rating/close races, and validates aware non-future
-application audit timestamps. Presentment uses one bulk application-existence
+application and rating audit timestamps. Presentment uses one bulk application-existence
 and one bulk rating-existence lookup per bounded page. Full local PostgreSQL
 integration, repository-contract, and 100% statement/branch coverage checks
 pass on this snapshot. Invoice-adjustment composition, provider settlement
