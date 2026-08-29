@@ -303,6 +303,76 @@ class PostgresUsageLedger:
                 raise RuntimeError("billing period disappeared after persistence")
             return stored
 
+    def reconcile_billing_period(
+        self,
+        tenant_reference: str,
+        period_id: UUID,
+        *,
+        actor_reference: str,
+        authorization_reference: str,
+        reason: str,
+        transitioned_at: datetime,
+        transition_id: UUID | None = None,
+    ) -> BillingPeriod:
+        """Append ``reconciled`` only after the latest run has no open exceptions."""
+        with self.transaction():
+            with self._cursor() as cursor:
+                tenant_account_id = self._tenant_account_id_with_cursor(
+                    cursor, tenant_reference
+                )
+                period = self._fetch_billing_period(
+                    cursor,
+                    period_id,
+                    lock=True,
+                    tenant_account_id=tenant_account_id,
+                )
+                if period is None:
+                    raise KeyError(period_id)
+                if period.status != BillingPeriodStatus.SOFT_CLOSED:
+                    raise ValueError("period must be soft_closed before reconciliation")
+                cursor.execute(
+                    """
+                    SELECT run.blocking_exception_count,
+                           COUNT(exception.exception_code) AS exception_count,
+                           COUNT(exception.exception_code) FILTER (
+                               WHERE NOT EXISTS (
+                                   SELECT 1
+                                   FROM billing_core.reconciliation_resolution AS resolution
+                                   WHERE resolution.reconciliation_line_id = exception.reconciliation_line_id
+                                     AND resolution.exception_code = exception.exception_code
+                               )
+                           ) AS unresolved_exception_count
+                    FROM billing_core.reconciliation_run AS run
+                    LEFT JOIN billing_core.reconciliation_run_line AS run_line
+                      ON run_line.run_id = run.run_id
+                    LEFT JOIN billing_core.reconciliation_exception AS exception
+                      ON exception.reconciliation_line_id = run_line.reconciliation_line_id
+                    WHERE run.tenant_account_id = %s
+                      AND run.period_id = %s
+                    GROUP BY run.run_id, run.blocking_exception_count, run.completed_at
+                    ORDER BY run.completed_at DESC, run.run_id DESC
+                    LIMIT 1
+                    """,
+                    (tenant_account_id, period_id),
+                )
+                run = cursor.fetchone()
+                if run is None:
+                    raise ValueError("a completed reconciliation run is required")
+                blocking_count, exception_count, unresolved_count = map(int, run)
+                if blocking_count != exception_count:
+                    raise ValueError("reconciliation run exception summary is inconsistent")
+                if unresolved_count:
+                    raise ValueError("blocking reconciliation exceptions remain unresolved")
+            reconciled = period.advance(
+                BillingPeriodStatus.RECONCILED,
+                actor_reference=actor_reference,
+                authorization_reference=authorization_reference,
+                reason=reason,
+                transitioned_at=transitioned_at,
+                transition_id=transition_id,
+            )
+            return self.insert_billing_period(reconciled)
+
     def list_billing_periods(self, tenant_reference: str) -> tuple[BillingPeriod, ...]:
         """Return period aggregates for one registered tenant only."""
         with self._cursor() as cursor:

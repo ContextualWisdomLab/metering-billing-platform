@@ -16,6 +16,7 @@ from uuid import uuid4
 import psycopg
 
 from metering_billing import (
+    BillingPeriodStatus,
     CollectionCaseService,
     CollectionCaseSettlementService,
     CollectionDisputePresentmentService,
@@ -903,6 +904,148 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                         self.connection.execute(statement, parameters)
         with self.assertRaises(KeyError):
             self.ledger.list_reconciliation_lines("urn:cwl:missing_tenant")
+
+    def test_reconcile_period_requires_a_complete_latest_run(self) -> None:
+        """Advance a soft-closed period only when every latest-run exception is resolved."""
+        period = create_billing_period(
+            TENANT_ONE,
+            CATALOG_START.date(),
+            (CATALOG_START + timedelta(days=31)).date(),
+            opened_by="operator:finance_001",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(period)
+        with self.assertRaises(KeyError):
+            self.ledger.reconcile_billing_period(
+                TENANT_TWO,
+                period.period_id,
+                actor_reference="operator:finance_002",
+                authorization_reference="approval:period_001",
+                reason="reconcile period",
+                transitioned_at=CATALOG_START + timedelta(hours=1),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.reconcile_billing_period(
+                TENANT_ONE,
+                period.period_id,
+                actor_reference="operator:finance_002",
+                authorization_reference="approval:period_001",
+                reason="reconcile period",
+                transitioned_at=CATALOG_START + timedelta(hours=1),
+            )
+        soft_closed = period.advance(
+            "soft_closed",
+            actor_reference="operator:finance_002",
+            authorization_reference="approval:period_001",
+            reason="close usage window",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+            transition_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(soft_closed)
+        with self.assertRaises(ValueError):
+            self.ledger.reconcile_billing_period(
+                TENANT_ONE,
+                period.period_id,
+                actor_reference="operator:finance_003",
+                authorization_reference="approval:period_002",
+                reason="reconcile period",
+                transitioned_at=CATALOG_START + timedelta(hours=2),
+            )
+        matched = assess_reconciliation_line(
+            period.period_id,
+            "provider:account_001",
+            "USD",
+            "10",
+            "10",
+            "10",
+            assessed_at=CATALOG_START + timedelta(hours=2),
+            reconciliation_line_id=uuid4(),
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        exception = assess_reconciliation_line(
+            period.period_id,
+            "provider:account_001",
+            "USD",
+            "10",
+            "9",
+            "9",
+            assessed_at=CATALOG_START + timedelta(hours=2),
+            reconciliation_line_id=uuid4(),
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        self.ledger.insert_reconciliation_line(TENANT_ONE, matched)
+        self.ledger.insert_reconciliation_line(TENANT_ONE, exception)
+        run = ReconciliationRun(
+            run_id=uuid4(),
+            period_id=period.period_id,
+            started_at=CATALOG_START + timedelta(hours=3),
+            completed_at=CATALOG_START + timedelta(hours=4),
+            reconciliation_line_ids=(matched.reconciliation_line_id, exception.reconciliation_line_id),
+            blocking_exception_count=1,
+        )
+        self.ledger.insert_reconciliation_run(TENANT_ONE, run)
+        with self.assertRaises(ValueError):
+            self.ledger.reconcile_billing_period(
+                TENANT_ONE,
+                period.period_id,
+                actor_reference="operator:finance_003",
+                authorization_reference="approval:period_002",
+                reason="reconcile period",
+                transitioned_at=CATALOG_START + timedelta(hours=5),
+            )
+        inconsistent_run = replace(
+            run,
+            run_id=uuid4(),
+            completed_at=CATALOG_START + timedelta(hours=5),
+            blocking_exception_count=2,
+        )
+        self.ledger.insert_reconciliation_run(TENANT_ONE, inconsistent_run)
+        with self.assertRaises(ValueError):
+            self.ledger.reconcile_billing_period(
+                TENANT_ONE,
+                period.period_id,
+                actor_reference="operator:finance_003",
+                authorization_reference="approval:period_002",
+                reason="reconcile period",
+                transitioned_at=CATALOG_START + timedelta(hours=6),
+            )
+        resolution = ReconciliationResolution(
+            resolution_id=uuid4(),
+            reconciliation_line_id=exception.reconciliation_line_id,
+            exception_code=ReconciliationExceptionCode.PRICE_MISMATCH,
+            resolution_status=ReconciliationResolutionStatus.RESOLVED,
+            owner_reference="operator:finance_003",
+            resolution_reason="provider amount accepted",
+            evidence_reference="urn:cwl:evidence:period-gate-001",
+            maker_reference="operator:finance_003",
+            checker_reference="operator:finance_004",
+            resolved_at=CATALOG_START + timedelta(hours=5),
+        )
+        self.ledger.insert_reconciliation_resolution(TENANT_ONE, resolution)
+        valid_run = replace(
+            run,
+            run_id=uuid4(),
+            completed_at=CATALOG_START + timedelta(hours=7),
+        )
+        self.ledger.insert_reconciliation_run(TENANT_ONE, valid_run)
+        reconciled = self.ledger.reconcile_billing_period(
+            TENANT_ONE,
+            period.period_id,
+            actor_reference="operator:finance_003",
+            authorization_reference="approval:period_002",
+            reason="all blocking exceptions resolved",
+            transitioned_at=CATALOG_START + timedelta(hours=8),
+            transition_id=uuid4(),
+        )
+        self.assertEqual(reconciled.status, BillingPeriodStatus.RECONCILED)
+        self.assertEqual(
+            self.ledger.get_billing_period(TENANT_ONE, period.period_id), reconciled
+        )
 
     def test_migration_runner_is_idempotent_and_detects_drift(self) -> None:
         """The runner records checksums and refuses a changed applied migration."""

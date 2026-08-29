@@ -234,6 +234,12 @@ an explicit `as_of` instant, UTC calendar days, and fixed current / 1-30 / 31-60
 / 61-90 / 90+ buckets. PostgreSQL returns it through the existing tenant- and
 period-scoped line reads; age is never stored or used to mutate the exception.
 
+The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
+transition only for the latest completed run of that period. Its exception
+summary must equal the run's persisted exception rows, and every exception must
+have at least one resolved or waived resolution. The run and resolution facts
+remain immutable; the validation and transition append share one transaction.
+
 ## Tenant-API-credential identity
 
 A stored tenant API credential is identified by `tenant_api_credential_id` and is unique on `credential_secret_hash`.  Internal primary key is `tenant_api_credential_id`.  The hash is `hmac-sha256:` plus HMAC-SHA256(pepper, secret).  The plaintext secret is never stored.  `credential_label` is two-or-more-word `snake_case`.  Status is `active` or `revoked`.  A second issue of the same tenant, label, and contract version inserts a new row with a new secret.  Revocation updates `credential_status` and `revoked_at` on the same row and does not delete history.

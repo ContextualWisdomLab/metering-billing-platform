@@ -155,6 +155,7 @@ REQUIRED_FILES = (
     "docs/adr/0128-reconciliation-evidence.md",
     "docs/adr/0129-reconciliation-run.md",
     "docs/adr/0130-reconciliation-exception-aging.md",
+    "docs/adr/0131-reconciliation-period-gate.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
