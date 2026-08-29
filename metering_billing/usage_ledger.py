@@ -3071,6 +3071,19 @@ class MemoryUsageLedger:
             ):
                 raise ValueError("late adjustment application identity cannot change")
             return existing
+        adjustment = self.late_adjustments.get(application.late_adjustment_id)
+        if (
+            adjustment is None
+            or self.late_adjustment_tenant_index.get(application.late_adjustment_id)
+            != application.tenant_account_id
+        ):
+            raise ValueError("late adjustment application source is missing")
+        if (
+            application.target_period_id != adjustment.target_period_id
+            or application.adjustment_amount != adjustment.adjustment_amount
+            or application.currency_code != adjustment.currency_code
+        ):
+            raise ValueError("late adjustment application does not match source")
         tenant_reference = next(
             (
                 tenant.tenant_reference

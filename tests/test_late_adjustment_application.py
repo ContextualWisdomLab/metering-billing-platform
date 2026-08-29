@@ -169,6 +169,35 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             ledger.insert_late_adjustment_application(stored)
+        missing_source = replace(adjustment, late_adjustment_id=uuid4(), source_reference="provider:application-missing-source", source_payload_hash="sha256:" + "b" * 64)
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_application(
+                replace(stored, late_adjustment_application_id=uuid4(), late_adjustment_id=missing_source.late_adjustment_id)
+            )
+        cross_tenant_source = replace(adjustment, late_adjustment_id=uuid4(), source_reference="provider:application-cross-tenant", source_payload_hash="sha256:" + "c" * 64)
+        ledger.insert_late_adjustment(TENANT_TWO, cross_tenant_source)
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_application(
+                replace(stored, late_adjustment_application_id=uuid4(), late_adjustment_id=cross_tenant_source.late_adjustment_id)
+            )
+        target_mismatch_source = replace(adjustment, late_adjustment_id=uuid4(), source_reference="provider:application-target-mismatch", source_payload_hash="sha256:" + "d" * 64)
+        ledger.insert_late_adjustment(TENANT_ONE, target_mismatch_source)
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_application(
+                replace(stored, late_adjustment_application_id=uuid4(), late_adjustment_id=target_mismatch_source.late_adjustment_id, target_period_id=uuid4())
+            )
+        amount_mismatch_source = replace(adjustment, late_adjustment_id=uuid4(), source_reference="provider:application-amount-mismatch", source_payload_hash="sha256:" + "e" * 64)
+        ledger.insert_late_adjustment(TENANT_ONE, amount_mismatch_source)
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_application(
+                replace(stored, late_adjustment_application_id=uuid4(), late_adjustment_id=amount_mismatch_source.late_adjustment_id, adjustment_amount=Decimal("9.0"))
+            )
+        currency_mismatch_source = replace(adjustment, late_adjustment_id=uuid4(), currency_code="EUR", source_reference="provider:application-currency-mismatch", source_payload_hash="sha256:" + "f" * 64)
+        ledger.insert_late_adjustment(TENANT_ONE, currency_mismatch_source)
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment_application(
+                replace(stored, late_adjustment_application_id=uuid4(), late_adjustment_id=currency_mismatch_source.late_adjustment_id)
+            )
         for field in (
             "late_adjustment_application_id",
             "late_adjustment_id",
@@ -560,7 +589,6 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
         source_mismatch_adjustment = replace(
             adjustment,
             late_adjustment_id=uuid4(),
-            adjustment_amount=Decimal("6.0"),
             source_reference="provider:rating-source-mismatch",
             source_payload_hash="sha256:" + "f" * 64,
         )
@@ -571,6 +599,9 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             late_adjustment_id=source_mismatch_adjustment.late_adjustment_id,
         )
         ledger.insert_late_adjustment_application(source_mismatch_application)
+        ledger.late_adjustments[source_mismatch_adjustment.late_adjustment_id] = replace(
+            source_mismatch_adjustment, adjustment_amount=Decimal("6.0")
+        )
         with self.assertRaises(ValueError):
             ledger.insert_late_adjustment_rating(
                 replace(
