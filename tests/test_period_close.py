@@ -19,6 +19,8 @@ from metering_billing import (
     ReconciliationExceptionCode,
     ReconciliationLine,
     ReconciliationLineStatus,
+    ReconciliationResolution,
+    ReconciliationResolutionStatus,
     assess_reconciliation_line,
     convert_currency_amount,
     create_billing_period,
@@ -27,6 +29,7 @@ from metering_billing import (
     validate_fx_conversion,
     validate_fx_rate,
     validate_reconciliation_line,
+    validate_reconciliation_resolution,
 )
 
 
@@ -581,6 +584,39 @@ class ReconciliationTests(unittest.TestCase):
                 status=ReconciliationLineStatus.EXCEPTION,
                 provider_currency_code="EUR",
             )
+
+    def test_reconciliation_resolution_requires_distinct_maker_checker(self) -> None:
+        """A resolution carries owner, reason, evidence, and two approvers."""
+        resolution = ReconciliationResolution(
+            resolution_id=uuid4(),
+            reconciliation_line_id=PERIOD_ID,
+            exception_code=ReconciliationExceptionCode.PRICE_MISMATCH,
+            resolution_status=ReconciliationResolutionStatus.RESOLVED,
+            owner_reference="operator:finance_001",
+            resolution_reason="corrected provider quantity",
+            evidence_reference="urn:cwl:evidence:correction-001",
+            maker_reference="operator:finance_001",
+            checker_reference="operator:finance_002",
+            resolved_at=OPENED_AT,
+        )
+        self.assertEqual(validate_reconciliation_resolution(resolution.as_contract_dict()), ())
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(
+                resolution,
+                maker_reference="operator:finance_002",
+                checker_reference="operator:finance_002",
+            )
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(resolution, resolution_id="not-a-uuid")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(resolution, exception_code="bad")  # type: ignore[arg-type]
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(resolution, resolution_status="bad")  # type: ignore[arg-type]
+        invalid = resolution.as_contract_dict()
+        invalid["maker_reference"] = invalid["checker_reference"]
+        self.assertTrue(validate_reconciliation_resolution(invalid))
+        invalid["resolution_status"] = "bad"
+        self.assertTrue(validate_reconciliation_resolution(invalid))
 
 
 if __name__ == "__main__":  # pragma: no cover

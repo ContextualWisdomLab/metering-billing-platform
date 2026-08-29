@@ -54,6 +54,7 @@ from metering_billing import (
     WebhookDeliveryService,
     WebhookSubscriptionService,
     format_exact_decimal,
+    validate_reconciliation_resolution,
 )
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_dispute import compute_dispute_payload_hash
@@ -95,6 +96,8 @@ from metering_billing.issued_invoice_void import (
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.period_close import (
     ReconciliationExceptionCode,
+    ReconciliationResolution,
+    ReconciliationResolutionStatus,
     assess_reconciliation_line,
     convert_currency_amount,
     create_billing_period,
@@ -190,8 +193,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 40:
-            raise AssertionError(f"expected 40 migrations, got {len(applied)}")
+        if len(applied) != 41:
+            raise AssertionError(f"expected 41 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -203,6 +206,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.reconciliation_resolution,
                 billing_core.reconciliation_exception,
                 billing_core.reconciliation_line,
                 billing_core.fx_conversion,
@@ -554,6 +558,38 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 ReconciliationExceptionCode.PRICE_MISMATCH,
             },
         )
+        resolution = ReconciliationResolution(
+            resolution_id=uuid4(),
+            reconciliation_line_id=exception.reconciliation_line_id,
+            exception_code=ReconciliationExceptionCode.CURRENCY_MISMATCH,
+            resolution_status=ReconciliationResolutionStatus.WAIVED,
+            owner_reference="operator:finance_008",
+            resolution_reason="provider contract is authoritative for this payout",
+            evidence_reference="urn:cwl:evidence:provider-payout-001",
+            maker_reference="operator:finance_008",
+            checker_reference="operator:finance_009",
+            resolved_at=CATALOG_START + timedelta(minutes=6),
+        )
+        self.assertEqual(validate_reconciliation_resolution(resolution.as_contract_dict()), ())
+        self.assertEqual(self.ledger.insert_reconciliation_resolution(resolution), resolution)
+        self.assertEqual(self.ledger.insert_reconciliation_resolution(resolution), resolution)
+        self.assertEqual(self.ledger.get_reconciliation_resolution(resolution.resolution_id), resolution)
+        self.assertIsNone(self.ledger.get_reconciliation_resolution(uuid4()))
+        self.assertEqual(
+            self.ledger.list_reconciliation_resolutions(
+                TENANT_ONE, reconciliation_line_id=exception.reconciliation_line_id
+            ),
+            (resolution,),
+        )
+        self.assertEqual(self.ledger.list_reconciliation_resolutions(TENANT_TWO), ())
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_resolution(
+                replace(resolution, resolution_reason="rewrite")
+            )
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_resolution(
+                replace(resolution, resolution_id=uuid4(), reconciliation_line_id=matched.reconciliation_line_id)
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_line(
                 replace(matched, provider_account_reference="provider:other")

@@ -22,6 +22,7 @@ BILLING_PERIOD_CONTRACT_VERSION = 1
 FX_RATE_CONTRACT_VERSION = 1
 FX_CONVERSION_CONTRACT_VERSION = 1
 RECONCILIATION_LINE_CONTRACT_VERSION = 1
+RECONCILIATION_RESOLUTION_CONTRACT_VERSION = 1
 ROUNDING_MODE = "ROUND_HALF_UP"
 
 _CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
@@ -54,6 +55,13 @@ class ReconciliationLineStatus(StrEnum):
 
     MATCHED = "matched"
     EXCEPTION = "exception"
+
+
+class ReconciliationResolutionStatus(StrEnum):
+    """Terminal disposition for one maker-checker exception resolution."""
+
+    RESOLVED = "resolved"
+    WAIVED = "waived"
 
 
 class ReconciliationExceptionCode(StrEnum):
@@ -576,6 +584,68 @@ class ReconciliationException:
         return {
             "exception_code": self.exception_code.value,
             "next_action": self.next_action,
+        }
+
+
+@dataclass(frozen=True)
+class ReconciliationResolution:
+    """Immutable maker-checker disposition for one reconciliation exception."""
+
+    resolution_id: UUID
+    reconciliation_line_id: UUID
+    exception_code: ReconciliationExceptionCode
+    resolution_status: ReconciliationResolutionStatus
+    owner_reference: str
+    resolution_reason: str
+    evidence_reference: str
+    maker_reference: str
+    checker_reference: str
+    resolved_at: datetime
+    reconciliation_resolution_contract_version: int = (
+        RECONCILIATION_RESOLUTION_CONTRACT_VERSION
+    )
+
+    def __post_init__(self) -> None:
+        """Require an explicit exception disposition and distinct approvers."""
+        if not isinstance(self.resolution_id, UUID) or not isinstance(
+            self.reconciliation_line_id, UUID
+        ):
+            raise PeriodCloseValidationError("resolution identifiers must be UUIDs")
+        try:
+            exception_code = ReconciliationExceptionCode(self.exception_code)
+            resolution_status = ReconciliationResolutionStatus(self.resolution_status)
+        except ValueError as error:
+            raise PeriodCloseValidationError(
+                "reconciliation resolution code or status is unsupported"
+            ) from error
+        object.__setattr__(self, "exception_code", exception_code)
+        object.__setattr__(self, "resolution_status", resolution_status)
+        for field_name in (
+            "owner_reference",
+            "resolution_reason",
+            "evidence_reference",
+            "maker_reference",
+            "checker_reference",
+        ):
+            _reference(getattr(self, field_name), field_name)
+        if self.maker_reference == self.checker_reference:
+            raise PeriodCloseValidationError("maker and checker references must differ")
+        _aware_datetime(self.resolved_at, "resolved_at")
+
+    def as_contract_dict(self) -> dict[str, object]:
+        """Return the complete maker-checker disposition evidence."""
+        return {
+            "reconciliation_resolution_contract_version": self.reconciliation_resolution_contract_version,
+            "resolution_id": str(self.resolution_id),
+            "reconciliation_line_id": str(self.reconciliation_line_id),
+            "exception_code": self.exception_code.value,
+            "resolution_status": self.resolution_status.value,
+            "owner_reference": self.owner_reference,
+            "resolution_reason": self.resolution_reason,
+            "evidence_reference": self.evidence_reference,
+            "maker_reference": self.maker_reference,
+            "checker_reference": self.checker_reference,
+            "resolved_at": _format_datetime(self.resolved_at),
         }
 
 

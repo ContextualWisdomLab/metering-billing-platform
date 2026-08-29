@@ -277,6 +277,7 @@ BILLING_PERIOD_SCHEMA_NAME = "billing-period.schema.json"
 FX_RATE_SCHEMA_NAME = "fx-rate.schema.json"
 FX_CONVERSION_SCHEMA_NAME = "fx-conversion.schema.json"
 RECONCILIATION_LINE_SCHEMA_NAME = "reconciliation-line.schema.json"
+RECONCILIATION_RESOLUTION_SCHEMA_NAME = "reconciliation-resolution.schema.json"
 
 
 def default_schemas_directory() -> Path:
@@ -365,6 +366,18 @@ def validate_reconciliation_line(
     if errors or not isinstance(line, Mapping):
         return tuple(errors)
     errors.extend(_reconciliation_line_semantic_errors(line))
+    return tuple(errors)
+
+
+def validate_reconciliation_resolution(
+    resolution: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one immutable maker-checker exception resolution."""
+    schema = load_json_schema(RECONCILIATION_RESOLUTION_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, resolution))
+    if errors or not isinstance(resolution, Mapping):
+        return tuple(errors)
+    errors.extend(_reconciliation_resolution_semantic_errors(resolution))
     return tuple(errors)
 
 
@@ -502,6 +515,31 @@ def _reconciliation_line_semantic_errors(line: Mapping[str, Any]) -> tuple[str, 
         )
 
     return _semantic_error(build)
+
+
+def _reconciliation_resolution_semantic_errors(
+    resolution: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Apply maker-checker and evidence invariants after schema validation."""
+    from metering_billing.period_close import ReconciliationResolution
+
+    return _semantic_error(
+        lambda: ReconciliationResolution(
+            resolution_id=_contract_uuid(resolution["resolution_id"]),
+            reconciliation_line_id=_contract_uuid(resolution["reconciliation_line_id"]),
+            exception_code=resolution["exception_code"],
+            resolution_status=resolution["resolution_status"],
+            owner_reference=resolution["owner_reference"],
+            resolution_reason=resolution["resolution_reason"],
+            evidence_reference=resolution["evidence_reference"],
+            maker_reference=resolution["maker_reference"],
+            checker_reference=resolution["checker_reference"],
+            resolved_at=_contract_datetime(resolution["resolved_at"]),
+            reconciliation_resolution_contract_version=resolution[
+                "reconciliation_resolution_contract_version"
+            ],
+        )
+    )
 
 
 def validate_usage_event(

@@ -38,6 +38,7 @@ from metering_billing.period_close import (
     FxRate,
     ReconciliationException,
     ReconciliationLine,
+    ReconciliationResolution,
 )
 from metering_billing.usage_ledger import (
     CURRENCY_CODE_PATTERN,
@@ -509,6 +510,98 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
         return tuple(line for line in lines if line is not None)
+
+    def get_reconciliation_resolution(
+        self, resolution_id: UUID
+    ) -> ReconciliationResolution | None:
+        """Return one immutable maker-checker resolution."""
+        with self._cursor() as cursor:
+            return self._fetch_reconciliation_resolution(cursor, resolution_id)
+
+    def insert_reconciliation_resolution(
+        self, resolution: ReconciliationResolution
+    ) -> ReconciliationResolution:
+        """Persist one exception resolution without replacing prior approvals."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM billing_core.reconciliation_exception
+                WHERE reconciliation_line_id = %s AND exception_code = %s
+                """,
+                (resolution.reconciliation_line_id, resolution.exception_code.value),
+            )
+            if cursor.fetchone() is None:
+                raise KeyError(resolution.exception_code.value)
+            cursor.execute(
+                """
+                INSERT INTO billing_core.reconciliation_resolution
+                    (resolution_id, reconciliation_line_id, exception_code,
+                     resolution_status, owner_reference, resolution_reason,
+                     evidence_reference, maker_reference, checker_reference,
+                     resolved_at, reconciliation_resolution_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (resolution_id) DO NOTHING
+                """,
+                (
+                    resolution.resolution_id,
+                    resolution.reconciliation_line_id,
+                    resolution.exception_code.value,
+                    resolution.resolution_status.value,
+                    resolution.owner_reference,
+                    resolution.resolution_reason,
+                    resolution.evidence_reference,
+                    resolution.maker_reference,
+                    resolution.checker_reference,
+                    resolution.resolved_at,
+                    resolution.reconciliation_resolution_contract_version,
+                ),
+            )
+            stored = self._fetch_reconciliation_resolution(cursor, resolution.resolution_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation resolution insert did not return a row")
+            if stored.as_contract_dict() != resolution.as_contract_dict():
+                raise ValueError("reconciliation resolution identity cannot change")
+            return stored
+
+    def list_reconciliation_resolutions(
+        self,
+        tenant_reference: str,
+        reconciliation_line_id: UUID | None = None,
+    ) -> tuple[ReconciliationResolution, ...]:
+        """Return resolution history for one tenant, optionally one line."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            if reconciliation_line_id is None:
+                cursor.execute(
+                    """
+                    SELECT resolution_id
+                    FROM billing_core.reconciliation_resolution AS resolution
+                    JOIN billing_core.reconciliation_line AS line
+                      ON line.reconciliation_line_id = resolution.reconciliation_line_id
+                    WHERE line.tenant_account_id = %s
+                    ORDER BY resolution.resolved_at, resolution.resolution_id
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT resolution_id
+                    FROM billing_core.reconciliation_resolution AS resolution
+                    JOIN billing_core.reconciliation_line AS line
+                      ON line.reconciliation_line_id = resolution.reconciliation_line_id
+                    WHERE line.tenant_account_id = %s
+                      AND resolution.reconciliation_line_id = %s
+                    ORDER BY resolution.resolved_at, resolution.resolution_id
+                    """,
+                    (tenant_account_id, reconciliation_line_id),
+                )
+            resolutions = tuple(
+                self._fetch_reconciliation_resolution(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(resolution for resolution in resolutions if resolution is not None)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Insert or return one tenant authority row."""
@@ -6166,6 +6259,39 @@ class PostgresUsageLedger:
             exceptions=exceptions,
             assessed_at=row[15],
             reconciliation_line_contract_version=row[16],
+        )
+
+    @staticmethod
+    def _fetch_reconciliation_resolution(
+        cursor: Any, resolution_id: UUID
+    ) -> ReconciliationResolution | None:
+        """Hydrate one immutable maker-checker resolution."""
+        cursor.execute(
+            """
+            SELECT resolution_id, reconciliation_line_id, exception_code,
+                   resolution_status, owner_reference, resolution_reason,
+                   evidence_reference, maker_reference, checker_reference,
+                   resolved_at, reconciliation_resolution_contract_version
+            FROM billing_core.reconciliation_resolution
+            WHERE resolution_id = %s
+            """,
+            (resolution_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return ReconciliationResolution(
+            resolution_id=UUID(str(row[0])),
+            reconciliation_line_id=UUID(str(row[1])),
+            exception_code=row[2],
+            resolution_status=row[3],
+            owner_reference=row[4],
+            resolution_reason=row[5],
+            evidence_reference=row[6],
+            maker_reference=row[7],
+            checker_reference=row[8],
+            resolved_at=row[9],
+            reconciliation_resolution_contract_version=row[10],
         )
 
     def _find_event(self, query: str, parameters: tuple[Any, ...]) -> StoredUsageEvent | None:

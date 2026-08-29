@@ -16,6 +16,12 @@
 
 ### Added
 
+- Issue #87 now records immutable reconciliation exception resolutions in
+  PostgreSQL. Each resolution retains owner, reason, evidence, resolved or
+  waived status, and distinct maker/checker references, and can reference only
+  an exception on the same persisted line. It does not rewrite amounts or
+  declare a period reconciled; run-level completeness and aging remain later
+  work (ADR 0127).
 - Issue #87 now has a durable PostgreSQL period-close slice: normalized
   billing-period and append-only transition rows, exact FX rate/conversion
   snapshots, and tenant-scoped reconciliation lines with normalized exception
