@@ -377,6 +377,15 @@ class ConnectionPoolTests(unittest.TestCase):
         finally:
             business_ledger.close()
 
+    def test_ledger_leases_retire_operational_failures(self) -> None:
+        """Operational failures retire the broken pooled session."""
+        sessions: list[ConnectionPoolTests.Session] = []
+
+        def factory() -> ConnectionPoolTests.Session:
+            session = self.Session()
+            sessions.append(session)
+            return session
+
         failure_ledger = PostgresUsageLedger.connect(
             "unused", pool_size=1, connection_factory=factory
         )
