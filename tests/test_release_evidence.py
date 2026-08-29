@@ -11,8 +11,11 @@ from unittest import mock
 
 from scripts.release_evidence import (
     ReleaseEvidenceError,
+    _checked_out_artifact,
     _load_manifest,
+    _sha256,
     _tracked_paths,
+    _worktree_root,
     build_manifest,
     create_manifest,
     main,
@@ -33,7 +36,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             self.assertEqual(
                 create_manifest(ROOT, "0.3.0-rc.1", manifest_path), manifest_path
             )
-            verify_manifest(ROOT, manifest_path)
+            verify_manifest(ROOT, manifest_path, "0.3.0-rc.1")
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["release_version"], "0.3.0-rc.1")
             self.assertTrue(manifest["artifacts"])
@@ -46,8 +49,9 @@ class ReleaseEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ReleaseEvidenceError, "already exists"):
                 create_manifest(ROOT, "0.3.0", manifest_path)
             manifest_path.unlink()
-            with self.assertRaisesRegex(ReleaseEvidenceError, "semantic"):
-                build_manifest(ROOT, "release-latest", manifest_path)
+            for invalid_version in ("release-latest", "1.0.0-01"):
+                with self.assertRaisesRegex(ReleaseEvidenceError, "semantic"):
+                    build_manifest(ROOT, invalid_version, manifest_path)
 
     def test_git_identity_and_inventory_reject_ambiguous_values(self) -> None:
         """Evidence refuses abbreviated commits and unsafe Git paths."""
@@ -62,6 +66,62 @@ class ReleaseEvidenceTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ReleaseEvidenceError, "unsafe release path"):
                     _tracked_paths(ROOT)
+
+    def test_manifest_rejects_dirty_or_partial_checkout(self) -> None:
+        """Evidence binds to a clean repository root and stable HEAD."""
+        with self.assertRaisesRegex(ReleaseEvidenceError, "worktree root"):
+            build_manifest(ROOT / "scripts", "0.3.0", ROOT / "manifest.json")
+        with mock.patch("scripts.release_evidence._worktree_root", return_value=ROOT), mock.patch(
+            "scripts.release_evidence._source_commit", return_value="a" * 40
+        ), mock.patch(
+            "scripts.release_evidence._run_git", return_value=" M tracked.py\n"
+        ):
+            with self.assertRaisesRegex(ReleaseEvidenceError, "clean checkout"):
+                build_manifest(ROOT, "0.3.0", ROOT / "manifest.json")
+        with mock.patch("scripts.release_evidence._worktree_root", return_value=ROOT), mock.patch(
+            "scripts.release_evidence._source_commit", side_effect=("a" * 40, "b" * 40)
+        ):
+            with self.assertRaisesRegex(ReleaseEvidenceError, "HEAD changed"):
+                build_manifest(ROOT, "0.3.0", ROOT / "manifest.json")
+        with mock.patch(
+            "scripts.release_evidence._run_git", return_value=""
+        ):
+            with self.assertRaisesRegex(ReleaseEvidenceError, "Git worktree root"):
+                _worktree_root(ROOT)
+
+    def test_manifest_rejects_symlinks_and_unreadable_bytes(self) -> None:
+        """Evidence never follows a symlink or leaks a filesystem error."""
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory) / "checkout"
+            directory.mkdir()
+            outside = Path(temporary_directory) / "outside.txt"
+            outside.write_text("outside", encoding="utf-8")
+            (directory / "link.txt").symlink_to(outside)
+            with self.assertRaisesRegex(ReleaseEvidenceError, "symlinked"):
+                _checked_out_artifact(directory, "link.txt")
+            with self.assertRaisesRegex(ReleaseEvidenceError, "unreadable"):
+                _sha256(directory / "missing.txt")
+
+    def test_manifest_creation_is_exclusive_and_sanitizes_write_errors(self) -> None:
+        """A racing writer or filesystem failure cannot overwrite evidence."""
+        manifest = {
+            "release_evidence_contract_version": 1,
+            "release_version": "0.3.0",
+            "source_commit": "a" * 40,
+            "artifacts": [{"path": "README.md", "sha256": "0" * 64}],
+        }
+        with TemporaryDirectory() as temporary_directory:
+            manifest_path = Path(temporary_directory) / "manifest.json"
+            with mock.patch(
+                "scripts.release_evidence.build_manifest", return_value=manifest
+            ), mock.patch.object(Path, "open", side_effect=FileExistsError):
+                with self.assertRaisesRegex(ReleaseEvidenceError, "already exists"):
+                    create_manifest(ROOT, "0.3.0", manifest_path)
+            with mock.patch(
+                "scripts.release_evidence.build_manifest", return_value=manifest
+            ), mock.patch.object(Path, "open", side_effect=OSError("secret path")):
+                with self.assertRaisesRegex(ReleaseEvidenceError, "could not be written"):
+                    create_manifest(ROOT, "0.3.0", manifest_path)
 
     def test_manifest_requires_a_tracked_artifact_and_excludes_its_own_path(self) -> None:
         """Empty indexes fail and an in-repository manifest is self-excluding."""
@@ -81,6 +141,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             root = Path(temporary_directory)
             manifest_path = root / "manifest.json"
             expected = {
+                "release_version": "0.3.0",
                 "source_commit": "a" * 40,
                 "artifacts": [{"path": "README.md", "sha256": "0" * 64}],
             }
@@ -91,11 +152,13 @@ class ReleaseEvidenceTests(unittest.TestCase):
             ), mock.patch(
                 "scripts.release_evidence._tracked_paths",
                 return_value=("manifest.json",),
-            ):
-                with self.assertRaisesRegex(
-                    ReleaseEvidenceError, "missing tracked artifact: README.md"
-                ):
-                    verify_manifest(root, manifest_path)
+            ), mock.patch(
+                "scripts.release_evidence._worktree_root", return_value=root
+            ), mock.patch("scripts.release_evidence._require_clean_checkout"):
+                with self.assertRaises(ReleaseEvidenceError) as error:
+                    verify_manifest(root, manifest_path, "0.3.0")
+                self.assertIn("missing tracked artifact: README.md", str(error.exception))
+                self.assertIn("missing artifact bytes: README.md", str(error.exception))
 
     def test_manifest_detects_commit_inventory_and_hash_changes(self) -> None:
         """Changed release identity, inventory, and bytes all fail closed."""
@@ -108,13 +171,13 @@ class ReleaseEvidenceTests(unittest.TestCase):
             tampered["source_commit"] = "0" * 40
             manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
             with self.assertRaisesRegex(ReleaseEvidenceError, "source commit"):
-                verify_manifest(ROOT, manifest_path)
+                verify_manifest(ROOT, manifest_path, "0.3.0")
 
             tampered = dict(manifest)
             tampered["artifacts"] = manifest["artifacts"][1:]
             manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
             with self.assertRaisesRegex(ReleaseEvidenceError, "unexpected tracked"):
-                verify_manifest(ROOT, manifest_path)
+                verify_manifest(ROOT, manifest_path, "0.3.0")
 
             tampered = dict(manifest)
             tampered["artifacts"] = [
@@ -122,7 +185,12 @@ class ReleaseEvidenceTests(unittest.TestCase):
             ] + manifest["artifacts"][1:]
             manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
             with self.assertRaisesRegex(ReleaseEvidenceError, "hash mismatch"):
-                verify_manifest(ROOT, manifest_path)
+                verify_manifest(ROOT, manifest_path, "0.3.0")
+
+            tampered = dict(manifest, release_version="0.3.1")
+            manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+            with self.assertRaisesRegex(ReleaseEvidenceError, "release version"):
+                verify_manifest(ROOT, manifest_path, "0.3.0")
 
     def test_manifest_structure_errors_fail_closed(self) -> None:
         """Malformed JSON and artifact metadata cannot become release evidence."""
@@ -153,6 +221,18 @@ class ReleaseEvidenceTests(unittest.TestCase):
                     ),
                     "source commit is invalid",
                 ),
+                (
+                    json.dumps(
+                        {
+                            "release_evidence_contract_version": 1,
+                            "release_version": "0.3.0",
+                            "source_commit": "0" * 40,
+                            "artifacts": [{"path": "README.md", "sha256": "0" * 64}],
+                            "extra": True,
+                        }
+                    ),
+                    "manifest fields are invalid",
+                ),
             ):
                 manifest_path.write_text(value, encoding="utf-8")
                 with self.assertRaisesRegex(ReleaseEvidenceError, message):
@@ -175,6 +255,10 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 ([{"path": "../parent", "sha256": "0" * 64}], "path is invalid"),
                 ([{"path": "", "sha256": "0" * 64}], "path is invalid"),
                 ([{"path": 1, "sha256": "0" * 64}], "path is invalid"),
+                (
+                    [{"path": "README.md", "sha256": "0" * 64, "extra": True}],
+                    "artifact fields are invalid",
+                ),
                 (
                     [
                         {"path": "README.md", "sha256": "0" * 64},
@@ -230,6 +314,8 @@ class ReleaseEvidenceTests(unittest.TestCase):
                         str(ROOT),
                         "--manifest",
                         str(manifest_path),
+                        "--release-version",
+                        "0.3.0",
                     )
                 ),
                 0,
@@ -242,6 +328,8 @@ class ReleaseEvidenceTests(unittest.TestCase):
                         str(ROOT),
                         "--manifest",
                         str(manifest_path) + ".missing",
+                        "--release-version",
+                        "0.3.0",
                     )
                 ),
                 2,

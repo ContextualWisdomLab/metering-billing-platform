@@ -24,15 +24,18 @@ uv run python scripts/release_evidence.py manifest \
   --output /secure/release-evidence/source-manifest.json
 uv run python scripts/release_evidence.py verify \
   --root . \
+  --release-version 0.3.0-rc.1 \
   --manifest /secure/release-evidence/source-manifest.json
 ```
 
-Creation refuses to overwrite an existing manifest. Verification fails closed
-when HEAD changes, a tracked file is missing or added, a manifest path or hash
-is malformed, or any current artifact bytes differ. Preserve the manifest,
-exact source SHA, command exit statuses, and the release ticket together; do
-not place credentials, DSNs, customer data, prompts, responses, or provider
-payloads in the evidence directory.
+Creation refuses to overwrite an existing manifest. Creation and verification
+fail closed on a non-root or dirty worktree, including untracked files; on
+HEAD changes, missing or added tracked files, symlinked artifacts, malformed
+manifest paths or hashes, or differing artifact bytes. Verification also
+requires the requested release version to match the manifest. Preserve the
+manifest, exact source SHA, command exit statuses, and the release ticket
+together; do not place credentials, DSNs, customer data, prompts, responses,
+or provider payloads in the evidence directory.
 
 ## Required release receipts
 

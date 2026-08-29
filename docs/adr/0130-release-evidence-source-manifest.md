@@ -11,9 +11,13 @@ release identity.
 
 Add a standard-library `scripts/release_evidence.py` command that records the
 full Git `HEAD`, semantic release version, every tracked-file path, and its
-SHA-256 digest. Verification recomputes the current inventory and bytes and
+SHA-256 digest. Creation and verification require the configured path to be
+the complete, clean Git worktree root, reject symlinked artifacts, and check
+the checkout before and after hashing. Verification recomputes the current
+inventory and bytes, binds to an explicitly requested release version, and
 fails closed on a changed commit, missing/extra file, malformed manifest, or
-hash mismatch. The command refuses to overwrite an existing manifest.
+hash mismatch. The command refuses to overwrite an existing manifest even
+when another writer races the destination check.
 
 The manifest has a versioned JSON Schema. It deliberately does not claim SPDX
 SBOM, SLSA provenance, signatures, install/upgrade evidence, backup/restore

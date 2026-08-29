@@ -8,7 +8,7 @@
   "required": ["release_evidence_contract_version", "release_version", "source_commit", "artifacts"],
   "properties": {
     "release_evidence_contract_version": {"type": "integer", "const": 1},
-    "release_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"},
+    "release_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"},
     "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "artifacts": {
       "type": "array",
@@ -18,7 +18,7 @@
         "additionalProperties": false,
         "required": ["path", "sha256"],
         "properties": {
-          "path": {"type": "string", "minLength": 1, "pattern": "^[^/].*"},
+          "path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+"},
           "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         }
       }
