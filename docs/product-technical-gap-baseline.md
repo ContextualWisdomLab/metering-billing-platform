@@ -14,8 +14,9 @@ into the follow-up branch `feat/late-adjustment-invoice-intent-20260830`.
 PR #173 remains open with no qualifying independent approval; mergeability and
 local checks are not merge evidence. PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174)
 is the separate stacked review for the next immutable invoice-intent
-composition slice; its implementation commit is
-`5ef90218bf7660e0a4e6d29c8ee6ea0c87b42fa9`.
+composition slice; its initial implementation commit is
+`5ef90218bf7660e0a4e6d29c8ee6ea0c87b42fa9`, with review-fix commit
+`4201a55` on the current working head.
 
 The implemented #87 path now covers PostgreSQL migrations
 `0048`/`0049`/`0050`/`0051`/`0052`/`0053`/`0054`/`0055`, the `LateAdjustment`,
