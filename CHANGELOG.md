@@ -16,6 +16,9 @@
 
 ### Added
 
+- Issue #87 now protects the previously applied reconciliation-fact migration
+  checksum: later PostgreSQL immutability triggers for periods, FX snapshots,
+  and exceptions are delivered by forward-only migration 0047.
 - Issue #87 now persists completed reconciliation runs with ordered,
   tenant-and-period-safe line membership and a blocking-exception summary.
   Runs are replay-safe immutable envelopes; calculation, resolution gates, and
