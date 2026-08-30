@@ -7,7 +7,7 @@ import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest import mock
+import unittest.mock as mock
 
 from scripts.release_evidence import (
     ReleaseEvidenceError,
