@@ -1361,7 +1361,7 @@ def create_http_app(
                 )
                 status_code = (
                     404
-                    if reason in {"tenant_not_found", "late_adjustment_not_found"}
+                    if reason == "late_adjustment_not_found"
                     else _status_for_result(result)
                 )
                 return _send_json(start_response, status_code, result.as_contract_dict())
