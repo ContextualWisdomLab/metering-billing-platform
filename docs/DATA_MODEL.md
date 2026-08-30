@@ -226,7 +226,10 @@ yet; run-level evidence completeness remains a follow-up.
 period. Its normalized child rows preserve ordered reconciliation-line
 membership and PostgreSQL requires every member to belong to the same tenant
 and period. The stored exception count is a run summary; this slice does not
-calculate it, resolve exceptions, or advance the period status.
+calculate it, resolve exceptions, or advance the period status. PostgreSQL
+rejects updates and deletes for the run, line membership, and the underlying
+reconciliation facts; later immutability additions are forward-only migrations
+so applied migration checksums remain stable.
 
 `reconciliation-exception-aging` is a read-only projection of each persisted
 line exception. It uses the immutable line `assessed_at` as the source instant,
@@ -240,7 +243,7 @@ amount, currency, source reference, source payload hash, and contract version.
 Its tenant-scoped source reference is the stable replay key; the source/target,
 kind, hash, and contract version also have a unique payload identity. Identical
 retries remain durable even when an opaque ID is regenerated, while changed
-payloads fail closed. Composite foreign keys and migrations `0048`/`0049` triggers
+payloads fail closed. Composite foreign keys and migrations `0049`/`0050` triggers
 require an adequately closed source, an open target beginning no earlier than
 the source end, and immutable rows. The fact does not rewrite usage, rating,
 or source period history and does not itself create a journal, tax document, or
@@ -258,8 +261,8 @@ returns the first writer's immutable audit fields. The application row has
 composite source/target foreign keys and immutable update/delete triggers; it
 does not mutate the late adjustment. The memory reference adapter stores the
 same billing-period aggregate and enforces source/target tenant, lifecycle, and
-ordering invariants before storing a late-adjustment fact. Migration `0051`
-rechecks concurrent application replays after the source lock and rejects future
+ordering invariants before storing a late-adjustment fact. Migrations `0052`/`0053`
+recheck concurrent application replays after the source lock and reject future
 application audit timestamps.
 The list read passes the decoded cursor and `limit + 1` to the ledger, and
 PostgreSQL evaluates one tenant-scoped ordered keyset query so the page never
@@ -268,12 +271,13 @@ loaded with one bulk lookup each for the bounded page.
 Application audit timestamps are timezone-aware and not future-dated. The
 memory adapter serializes recording, application, and target-period lifecycle writes while
 preserving the same replay identity.
+Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 `LateAdjustmentRatingService` consumes that application and stores one
 append-only `late_adjustment_rating` per tenant and late-adjustment ID. It copies
 the application target, signed amount, and currency and adds the rating actor,
 authorization reference, and instant. Rating instants must be timezone-aware
-and not future-dated. Migrations `0051` and `0053` protect the
+and not future-dated. Migrations `0054` and `0055` protect the
 application/source/target links, exact-value equality, replay identity, current
 target openness for first ratings, and update/delete immutability. Migration
 `0053` preserves already-stored rating replays after target closure. This is a rating-consumption fact, not a synthetic
@@ -293,28 +297,28 @@ Migration `0057` adds one shared `BEFORE INSERT` trigger to collection cases,
 tax assessments, credit adjustments, and journal proposals. It locks the
 tenant-scoped invoice draft and rejects a new downstream row when an
 immutable `late_adjustment_invoice_adjustment` already exists. Migration
-`0058` adds the reverse composition trigger: it takes the same lock and rejects
+`0060` adds the reverse composition trigger: it takes the same lock and rejects
 direct composition after a downstream fact while allowing an existing
 composition identity to replay. These are the database counterparts to the
 service guards and make ordering safe for direct PostgreSQL persistence and
-concurrent writers. Migration `0059` fails closed if a legacy version-1
+concurrent writers. Migration `0061` fails closed if a legacy version-1
 composition lacks billing-account evidence; otherwise it upgrades only the
 contract metadata to version 2 and adds an exact-version check constraint.
 Application and direct PostgreSQL writes use the same version-2 constant.
-Migration `0060` rejects composition amounts that cannot round-trip through
+Migration `0062` rejects composition amounts that cannot round-trip through
 `numeric(38,12)`, validates late-adjustment issued lines against their
 composition draft/amount/payer, and lets a post-issue collection row copy only
 the frozen issued inclusive total.
-Migration `0061` adds deferred PostgreSQL checks requiring every composition
+Migration `0063` adds deferred PostgreSQL checks requiring every composition
 linked to an issued draft to have one matching late-adjustment line and to be
 included in the issued exclusive total; the check takes the invoice-draft lock
 before reading the composition set.
-Migration `0062` adds database immutability triggers for issued invoices and
+Migration `0064` adds database immutability triggers for issued invoices and
 issued lines and removes the `line_type` default, so direct issued-line writes
 must provide the explicit version-2 type.
-Migration `0063` requires contract version 2 for new issued-invoice headers
+Migration `0065` requires contract version 2 for new issued-invoice headers
 while leaving historical v1 rows readable.
-Migration `0064` rejects future composition audit timestamps at the direct
+Migration `0066` rejects future composition audit timestamps at the direct
 PostgreSQL boundary without rewriting historical rows.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued

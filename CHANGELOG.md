@@ -17,11 +17,11 @@
 ### Added
 
 - Issue #87 now records immutable closed-period late usage, correction, and
-  reversal facts in PostgreSQL migration `0048`. Source periods are not
+  reversal facts in PostgreSQL migration `0049`. Source periods are not
   rewritten; target-period ordering, tenant identity, exact signed amounts,
   stable source-reference replay, replay conflicts, and update/delete
   immutability are enforced (ADR 0132).
-- Migration `0049` keeps duplicate late-adjustment replays idempotent after a
+- Migration `0050` keeps duplicate late-adjustment replays idempotent after a
   target period closes, allowing PostgreSQL conflict handling to return the
   stored immutable fact without weakening validation for new facts.
 - Issue #87 now presents stored late-adjustment evidence through tenant-scoped
@@ -30,16 +30,17 @@
   post the fact (ADR 0133). The read contract now passes the decoded cursor and
   bounded `limit + 1` to each ledger; PostgreSQL resolves one tenant-scoped
   keyset query and hydrates only that bounded page, followed by one bulk
-  application-existence lookup rather than one lookup per item.
+  application-existence lookup rather than one lookup per item. Migration `0051`
+  indexes the tenant/recorded-at/ID order.
 - Issue #87 now records a tenant-scoped immutable late-adjustment application
-  acknowledgement in migrations `0050`/`0051`. The nested command is replay-safe,
+  acknowledgement in migrations `0052`/`0053`. The nested command is replay-safe,
   preserves the signed source amount/target/currency, and advances presentment
   to `rate_late_adjustment`; first application locks and rechecks that the
   target is open, while stored applications replay after closure with the first
   writer's audit data (ADR 0134). The memory adapter enforces the same lifecycle
   and validates timezone-aware, non-future application timestamps.
 - Issue #87 now records the consumption of an applied late adjustment as a
-  separate immutable rating fact in migrations `0051`/`0053`; they guard first
+  separate immutable rating fact in migrations `0054`/`0055`; they guard first
   rating against a target period that closed after recording while preserving
   replays. It preserves the original usage `rating_run`, replays safely, and
   leaves invoice-adjustment composition and downstream invoice issuance as
@@ -47,7 +48,7 @@
   future-dated at service, adapter, and PostgreSQL boundaries (ADR 0135).
 - Issue #87 now composes a rated late adjustment into an unissued invoice draft
   through the tenant-scoped immutable `late_adjustment_invoice_adjustment`
-  fact and migration `0054`. Matching signed amount/currency/evidence,
+  fact and migration `0056`. Matching signed amount/currency/evidence,
   cross-tenant links, replay identity, and the issued-draft boundary are
   enforced; existing drafts and issued invoice snapshots are never rewritten
   (ADR 0136).
@@ -55,7 +56,7 @@
   adjustment compositions under a draft lock. Each signed delta is frozen as a
   `late_adjustment` issued line and included in exact untaxed totals, payload
   hashing, replay, PostgreSQL persistence, and invoice presentment through
-  migrations `0055` and `0056`. The v2 issued-invoice contracts require
+  migrations `0057` and `0058`. The v2 issued-invoice contracts require
   typed usage/late-adjustment lines, preserve the selected billing-account
   identity, and reject precision loss. Existing tax assessments reject with
   `late_adjustment_tax_reassessment_required` until reassessment exists; no
@@ -63,11 +64,11 @@
   invented.
 - Issue #87 now rejects collection, tax-assessment, journal-proposal, and
   credit-adjustment writes after a late-adjustment composition under the shared
-  invoice-draft lock. PostgreSQL migration `0057` enforces the same ordering
+  invoice-draft lock. PostgreSQL migration `0059` enforces the same ordering
   for direct inserts, the new `invoice_draft_has_late_adjustment` rejection
   contract is returned as HTTP 422, and composition contracts emit version 2.
 - Issue #87 now closes the reverse direct-persistence ordering in migration
-  `0058`: a composition insert locks its tenant-scoped draft and rejects an
+  `0060`: a composition insert locks its tenant-scoped draft and rejects an
   existing collection, tax, journal, or credit fact while preserving identity
   replays. Memory and PostgreSQL direct inserts now require the same single
   billing-account evidence. Issuance sums large Decimal values without context
@@ -75,27 +76,30 @@
   composition identity conflict to its documented rejection code. Historical
   stored v1 issued invoices remain readable through the v2 presentment envelope.
 - Issue #87 now makes late-adjustment composition version 2 an enforced contract:
-  migration `0059` fails closed on legacy composition rows without billing-account
+  migration `0061` fails closed on legacy composition rows without billing-account
   evidence, upgrades compatible version metadata, and adds a PostgreSQL check;
   application and direct-memory persistence reject other versions. Bulk exact
   invoice sums expand their local decimal context by operand count.
+- Issue #87 now preserves applied reconciliation-fact migration checksums:
+  period, FX, and exception immutability triggers are delivered by migration
+  `0047` before the FX snapshot trigger in migration `0048`.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).
-- Issue #87 now hardens the late-adjustment boundary in migration `0060`:
+- Issue #87 now hardens the late-adjustment boundary in migration `0062`:
   direct composition amounts must round-trip through `numeric(38,12)`, direct
   issued adjustment lines must match composition draft/amount/payer evidence,
   and post-issue collection uses only the frozen issued inclusive total.
-- Issue #87 now adds deferred migration `0061` checks so direct issued headers
+- Issue #87 now adds deferred migration `0063` checks so direct issued headers
   cannot omit linked adjustment lines or freeze an exclusive total without every
   signed composition; the check takes the shared invoice-draft lock before
   comparing the composition set.
 - Issue #87 now makes issued-invoice snapshots and lines immutable at the
-  PostgreSQL boundary in migration `0062`, and removes the `line_type` default
+  PostgreSQL boundary in migration `0064`, and removes the `line_type` default
   so direct issued-line inserts must declare their contract type explicitly.
-- Issue #87 now makes migration `0063` reject new direct issued-invoice headers
+- Issue #87 now makes migration `0065` reject new direct issued-invoice headers
   with a contract version other than 2 without rewriting historical v1 rows.
-- Issue #87 now makes migration `0064` reject future first-write composition
+- Issue #87 now makes migration `0066` reject future first-write composition
   timestamps while preserving immutable composition replays.
 - Issue #87 now validates composition audit timestamps as timezone-aware and
   non-future instants, uses one bounded composition-existence lookup for late-

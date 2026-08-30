@@ -56,7 +56,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 ## Period-close adjustment boundary
 
 `LateAdjustment` is the separate correction path for facts arriving after a
-source period closes. Migrations `0048`/`0049` store and protect a signed
+source period closes. Migrations `0049`/`0050` store and protect a signed
 exact-decimal amount,
 closed adjustment kind, source payload hash, and source/target period links.
 The source must be at least `soft_closed`, the target must be `open` and start
@@ -92,24 +92,24 @@ journal, tax, or credit downstream facts. Composition and collection,
 tax-assessment, journal-proposal, and credit-adjustment writes share the
 invoice-draft lock. After a composition is stored, those downstream writes
 return `invoice_draft_has_late_adjustment` without persisting; migrations
-`0057`, `0058`, `0060`, `0061`, and `0062` enforce both orderings and issued-invoice
+`0059`, `0060`, `0062`, `0063`, and `0064` enforce both orderings and issued-invoice
 completeness for direct PostgreSQL inserts while
 allowing an existing composition replay. Issuance preserves exact totals before
 storage validation, expands the local decimal context for bulk exact sums, and
-rejects more than 10,000 projected lines. Migration `0059` fails closed on legacy
+rejects more than 10,000 projected lines. Migration `0061` fails closed on legacy
 composition rows without payer evidence, upgrades compatible version metadata,
-and enforces composition contract version 2 in PostgreSQL. Migration `0060`
+and enforces composition contract version 2 in PostgreSQL. Migration `0062`
 rejects composition precision loss, validates direct issued-line draft/amount/
 payer equality, and lets collection start after issuance from the frozen total.
-Migration `0061` defers the completeness check until all direct issued lines are
+Migration `0063` defers the completeness check until all direct issued lines are
 inserted and takes the shared invoice-draft lock before comparing facts,
 rejecting omitted compositions or stale signed totals.
-Migration `0062` repeats issued-invoice snapshot and line immutability for direct
+Migration `0064` repeats issued-invoice snapshot and line immutability for direct
 PostgreSQL UPDATE/DELETE and removes the `line_type` default so direct lines must
 declare their type explicitly.
-Migration `0063` rejects new direct issued snapshots whose contract version is
+Migration `0065` rejects new direct issued snapshots whose contract version is
 not 2 without rewriting historical v1 rows.
-Migration `0064` rejects future first-write composition timestamps while
+Migration `0066` rejects future first-write composition timestamps while
 preserving replay of an existing immutable composition.
 Presentment then reports `issue_invoice`. `IssuedInvoiceService` locks the
 draft, consumes all linked composition facts exactly once, and freezes each as
@@ -125,6 +125,7 @@ The memory adapter serializes recording, application, rating, and period
 lifecycle writes so concurrent application/close or rating/close races cannot
 create a second acknowledgement or accept a new fact for a closed target;
 application and rating audit timestamps are timezone-aware and not future-dated.
+Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 ## Usage ingestion
 

@@ -43,8 +43,8 @@ future-dated at the service, repository, and PostgreSQL boundaries.
   collection workflow has no zero-value action.
 - Once composition exists, collection, tax, journal, and credit writes reject
   with `invoice_draft_has_late_adjustment` under the same invoice-draft lock;
-  migration `0057` enforces this ordering for direct PostgreSQL inserts.
-  Migration `0058` also locks the draft before rejecting a direct composition
+  migration `0059` enforces this ordering for direct PostgreSQL inserts.
+  Migration `0060` also locks the draft before rejecting a direct composition
   after an existing downstream fact, while allowing an existing composition
   identity to replay. Issuance preserves exact representable totals and rejects
   more than 10,000 projected lines.
@@ -53,17 +53,17 @@ future-dated at the service, repository, and PostgreSQL boundaries.
   compatible version metadata, and then enforces the version in PostgreSQL.
   Historical v1 issued-invoice snapshots remain readable because presentment
   upgrades only the response envelope.
-- Migration `0060` rejects amounts that cannot be represented by
+- Migration `0062` rejects amounts that cannot be represented by
   `numeric(38,12)`, validates direct issued-line draft/amount/payer equality,
   and permits post-issue collection only from the frozen inclusive total.
-- Migration `0061` uses deferred PostgreSQL checks to require every linked
+- Migration `0063` uses deferred PostgreSQL checks to require every linked
   composition to appear once in issued lines and in the frozen exclusive total;
   the check takes the shared invoice-draft lock before comparing facts.
-- Migration `0062` enforces issued-invoice snapshot and line immutability at the
+- Migration `0064` enforces issued-invoice snapshot and line immutability at the
   database boundary and removes the issued-line `line_type` default.
-- Migration `0063` requires contract version 2 for new direct issued-invoice
+- Migration `0065` requires contract version 2 for new direct issued-invoice
   headers while leaving historical v1 snapshots readable and unchanged.
-- Migration `0064` rejects future first-write composition timestamps while
+- Migration `0066` rejects future first-write composition timestamps while
   preserving replay of an existing immutable composition.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not

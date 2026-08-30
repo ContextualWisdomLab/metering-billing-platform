@@ -8,60 +8,35 @@
 
 ## Current working snapshot (2026-08-30)
 
-The #87 work is stacked from integration head
-`121a2cf22e4209057c3f9016ad91da687a75f110` on branch
-`feat/late-adjustment-invoice-intent-20260830`; it incorporates the current
-#173 application/rating guarantees while PR #173 remains the base review.
-PR #173 remains open with no qualifying independent approval; mergeability and
-local checks are not merge evidence. PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174)
-is the separate stacked review for the next immutable invoice-intent
-composition slice; its initial implementation commit is
-`5ef90218bf7660e0a4e6d29c8ee6ea0c87b42fa9`, with review-fix commit
-`4201a55`; the implementation review-fix commits are
-`1c0e824`, `32693becf9cbaf4a8d09b2e1c47ad639a5f64289`, and
-`0d58ddcbeea2c3c2d3424346df12f6e9afab6325`, and
-`837db28`, and
-`bd06e17`, and
-`dd1f18f759668f572fcda4849855ac2c82c07cf3`, followed by integration commit
-`3c7c276da10366d124295937391e9de23e0cc9b3` and the import-cleanup fix
-`c4bac13`, parent timestamp fix `0607113`, integration commit
-`317e05bc30983167557a33e86f26ff1028f7a1a1`, and boundary fix commit
-`121a2cf22e4209057c3f9016ad91da687a75f110`.
+The current #87 work is stacked through PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174),
+with rating/application parent PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173).
+The implementation snapshot will be updated to the post-merge integration SHA;
+both PRs remain open pending hosted checks and a qualifying independent approval.
+Local pass status is not merge evidence.
 
-The implemented #87 path now covers PostgreSQL migrations
-`0048`/`0049`/`0050`/`0051`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062`/`0063`/`0064`, the `LateAdjustment`,
-application, rating-consumption, and invoice-adjustment contracts,
-tenant-scoped presentment reads, and durable application/rating/composition
-facts for late usage, correction, and reversal evidence. Composition now
-captures the single billing account, rejects drafts already captured by
-collection/journal/tax/credit downstream facts, blocks new downstream
-collection/journal/tax/credit writes after composition under the shared draft
-lock, and rejects amounts that would
-round in issued-invoice storage. Issuance consumes linked compositions under
-the draft lock as signed invoice lines, rejects zero or negative resulting
-totals, rejects stale tax assessments pending reassessment, preserves large exact
-totals before storage validation, and rejects a projected issued invoice above
-10,000 lines. Direct composition persistence after downstream capture is blocked
-by migration `0058`, enforces composition contract version 2 through migration
-`0059`, `0060`, `0061`, `0062`, `0063`, `0064`, and historical v1 issued invoices remain readable through
-the v2 presentment and issuance-replay envelopes; migration `0061` serializes
-direct issuance checks on the shared draft lock; post-issue collection uses the
-frozen adjusted total, direct issued persistence cannot omit linked lines, and
-issued snapshots/lines cannot be mutated or rely on an implicit line type; new
-direct issued headers cannot use an unsupported contract version, and direct
-composition writes cannot persist future audit timestamps.
-The source period
-must be at least `soft_closed`; the target must be `open` and start no earlier
-than the source end; composition requires a rated adjustment and an unissued
-same-tenant, same-currency invoice draft. Targeted real-PostgreSQL, full
-repository contract, and full 100% statement/branch coverage tests pass on the
-working branch (788 tests, 19,143 statements, and 6,564 branches). Composition
-and rating audit timestamps are timezone-aware and not future-dated at every
-write boundary; historical invoice replay preserves one source-scoped outbox
-fact, and late-adjustment list presentment uses bounded bulk composition lookup.
-Recalculation from source usage and rate-card versions,
-provider settlement ingestion, FOCUS 1.4 export, tax/legal invoice treatment,
-and statutory accounting remain open gaps.
+This follow-up adds PostgreSQL migrations `0047` through `0066`, the
+`LateAdjustment`, application, rating-consumption, and invoice-adjustment
+contracts, tenant-scoped presentment reads, bounded recorded-at/ID keyset
+pagination, and durable application/rating/composition facts for late usage,
+correction, and reversal evidence. The source period must be at least
+`soft_closed`; the target must be `open` and start no earlier than the source
+end. New application, rating, and composition facts lock and recheck the
+target's latest append-only status, while stored replays remain available after
+target close and preserve first-writer audit data. Composition captures one
+tenant-scoped billing account, rejects drafts already captured by collection,
+journal, tax, or credit facts, and blocks those downstream writes under the
+shared draft lock. Issuance consumes linked compositions as signed invoice
+lines, rejects stale tax and non-positive totals, preserves exact totals before
+storage validation, and rejects projected invoices above 10,000 lines.
+Migrations `0059`/`0060` enforce downstream write ordering, `0061`/`0062`/
+`0063`/`0064`/`0065`/`0066` enforce composition version, precision,
+completeness, immutability, new-header, and audit-time boundaries, and
+historical v1 issued invoices remain readable through the v2 envelopes.
+The source period is never rewritten; composition requires a rated adjustment
+and an unissued same-tenant, same-currency invoice draft. Full integration
+coverage will be recorded after this stacked merge completes. Recalculation from
+source usage and rate-card versions, provider settlement ingestion, FOCUS 1.4
+export, tax/legal invoice treatment, and statutory accounting remain open gaps.
 
 ## Executive decision
 

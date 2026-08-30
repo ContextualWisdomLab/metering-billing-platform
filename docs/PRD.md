@@ -48,20 +48,19 @@ contextual-orchestrator usage
   stored fact. A changed amount, source reference, hash, or other identity
   field fails closed; the source period, rating facts, reconciliation facts,
   and period transitions are never rewritten.
-- PostgreSQL migrations `0048`/`0049` enforce tenant-scoped foreign keys,
+- PostgreSQL migrations `0049`/`0050` enforce tenant-scoped foreign keys,
   lifecycle ordering, target openness, replay conflict handling, and
-  update/delete immutability. Migrations `0050`/`0051` also require the target
-  to still be open when first applying the fact while preserving replays;
-  migrations `0051`/`0053` protect the separate rating-consumption fact.
-  Migrations `0054`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062`/`0063`/`0064` protect composition evidence,
+  update/delete immutability; migration `0051` supplies the matching keyset
+  index; migrations `0052`/`0053` enforce application source equality, target
+  locking, replay rechecks, and audit-time bounds; migrations `0054`/`0055`
+  protect the separate rating-consumption fact. Migrations
+  `0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062`/`0063`/`0064`/`0065`/`0066` protect composition evidence,
   selected billing-account identity, the same-draft downstream write boundary
   in either write order, the version-2 contract invariant, issued-invoice
   snapshot/line immutability, the new-header version boundary, and composition
   audit-time bounds.
-  application source equality, target locking, replay rechecks, and audit-time
-  bounds. Application,
-  re-rating, provider settlement, FOCUS export, tax documents, and statutory
-  posting remain separate workflows.
+  Application, re-rating, provider settlement, FOCUS export, tax documents, and
+  statutory posting remain separate workflows.
 
 ## Late-adjustment-presentment acceptance
 
@@ -143,21 +142,21 @@ contextual-orchestrator usage
 - Composition and every downstream collection, tax, journal, or credit write
   serialize on the invoice-draft lock. Once a composition exists, a new
   downstream write is rejected with `invoice_draft_has_late_adjustment` and
-  does not create a stale fact; PostgreSQL migrations `0057`, `0058`, `0060`, `0061`, `0062`, `0063`, and `0064` enforce
+  does not create a stale fact; PostgreSQL migrations `0059`, `0060`, `0062`, `0063`, `0064`, `0065`, and `0066` enforce
   both write orders for direct persistence too. A direct composition insert is
   rejected after an existing collection, tax, journal, or credit fact, while
   an existing composition remains replayable. Issued invoices reject more than
   10,000 projected lines and preserve exact representable totals before the
   `numeric(38,12)` check. Migration `0059` upgrades legacy composition metadata
   only when payer evidence is present, fails closed otherwise, and then enforces
-  version 2. Migration `0060` prevents direct precision loss, binds issued
+  version 2. Migration `0062` prevents direct precision loss, binds issued
   adjustment lines to their composition evidence, and permits collection only
-  from the frozen issued total. Migration `0061` requires every linked
+  from the frozen issued total. Migration `0063` requires every linked
   composition to have a matching issued line and included signed total.
-  Migration `0062` makes issued snapshots and lines immutable to direct database
+  Migration `0064` makes issued snapshots and lines immutable to direct database
   UPDATE/DELETE and removes the issued-line `line_type` default. Migration
-  `0063` requires version 2 for new direct issued headers without rewriting
-  historical v1 snapshots. Migration `0064` rejects future first-write
+  `0065` requires version 2 for new direct issued headers without rewriting
+  historical v1 snapshots. Migration `0066` rejects future first-write
   composition timestamps while preserving existing replays.
   All three write routes return HTTP 422 for rejected
   command results, including missing tenant or source records.

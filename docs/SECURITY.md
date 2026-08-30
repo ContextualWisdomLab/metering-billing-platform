@@ -66,23 +66,23 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
   `invoice_draft_has_downstream_records`
 - New collection, journal, tax-assessment, or credit writes before issuance after
   composition: `invoice_draft_has_late_adjustment`; the draft lock and
-  PostgreSQL migrations `0057`/`0058` prevent stale downstream capture.
-  Migration `0059` fails closed on legacy compositions without payer evidence,
+  PostgreSQL migrations `0059`/`0060` prevent stale downstream capture.
+  Migration `0061` fails closed on legacy compositions without payer evidence,
   upgrades compatible version metadata, and enforces composition contract
   version 2. After issuance, collection is allowed only against the frozen
   issued currency and inclusive total; other downstream writes remain blocked.
 - Direct PostgreSQL issued lines must match their composition's draft, signed
   amount, absolute unit price, and billing-account reference. Composition
-  amounts that would round in `numeric(38,12)` are rejected by migration `0060`.
-  Migration `0061` rejects direct issued headers that omit linked composition
+  amounts that would round in `numeric(38,12)` are rejected by migration `0062`.
+  Migration `0063` rejects direct issued headers that omit linked composition
   lines or freeze a total that excludes a signed adjustment, after taking the
   shared invoice-draft lock.
-- Migration `0062` rejects direct UPDATE/DELETE of issued-invoice snapshots and
+- Migration `0064` rejects direct UPDATE/DELETE of issued-invoice snapshots and
   lines and removes the issued-line `line_type` default so a direct insert cannot
   silently become a usage line.
-- Migration `0063` rejects new direct issued-invoice headers with a contract
+- Migration `0065` rejects new direct issued-invoice headers with a contract
   version other than 2; historical v1 snapshots are not rewritten.
-- Migration `0064` rejects future first-write composition timestamps while
+- Migration `0066` rejects future first-write composition timestamps while
   allowing immutable identity replays.
 - Composition or direct persistence with a contract version other than 2 is
   rejected; stored v1 issued-invoice snapshots are upgraded only at the

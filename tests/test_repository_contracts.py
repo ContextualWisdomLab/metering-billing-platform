@@ -4805,7 +4805,7 @@ class RepositoryContractTests(unittest.TestCase):
     def test_fx_conversion_migration_pins_the_referenced_rate_snapshot(self) -> None:
         """Database inserts must retain the exact referenced FX rate evidence."""
         sql = (
-            ROOT / "database/migrations/0047_fx_conversion_rate_integrity.sql"
+            ROOT / "database/migrations/0048_fx_conversion_rate_integrity.sql"
         ).read_text(encoding="utf-8")
         for expected_fragment in (
             "CREATE OR REPLACE FUNCTION billing_core.validate_fx_conversion_snapshot()",
@@ -4822,7 +4822,7 @@ class RepositoryContractTests(unittest.TestCase):
         self,
     ) -> None:
         """The correction table binds both periods and rejects source rewrites."""
-        sql = (ROOT / "database/migrations/0048_late_adjustment.sql").read_text(
+        sql = (ROOT / "database/migrations/0049_late_adjustment.sql").read_text(
             encoding="utf-8"
         )
         for expected_fragment in (
@@ -4842,7 +4842,7 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
         replay_sql = (
-            ROOT / "database/migrations/0049_late_adjustment_replay.sql"
+            ROOT / "database/migrations/0050_late_adjustment_replay.sql"
         ).read_text(encoding="utf-8")
         for expected_fragment in (
             "CREATE OR REPLACE FUNCTION billing_core.validate_late_adjustment_periods()",
@@ -4851,6 +4851,17 @@ class RepositoryContractTests(unittest.TestCase):
             "existing.source_payload_hash = NEW.source_payload_hash",
         ):
             self.assertIn(expected_fragment, replay_sql)
+
+    def test_late_adjustment_keyset_migration_matches_read_order(self) -> None:
+        """The pagination index covers tenant, cursor timestamp, and ID order."""
+        sql = (
+            ROOT / "database/migrations/0051_late_adjustment_keyset_index.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CREATE INDEX late_adjustment_keyset_idx", sql)
+        self.assertIn(
+            "tenant_account_id,\n        recorded_at,\n        late_adjustment_id",
+            sql,
+        )
 
     def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
         """The offline validator covers required, type, reference, and one-of rules."""

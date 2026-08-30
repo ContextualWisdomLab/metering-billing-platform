@@ -742,6 +742,7 @@ class LateAdjustmentApplicationTests(unittest.TestCase):
             adjustment,
             late_adjustment_id=uuid4(),
             source_reference="provider:application-target-state-second",
+            source_payload_hash="sha256:" + "e" * 64,
         )
         ledger.insert_late_adjustment(TENANT_ONE, second_adjustment)
         closed_target = target.advance(

@@ -22,5 +22,5 @@ without changing the projection boundary.
   closed reconciliation fact.
 - Resolution status and maker-checker history remain separate immutable facts.
 - Exception-specific occurrence timestamps and FOCUS export remain follow-up
-  work. Late-adjustment recording is covered separately by migration `0048`
+work. Late-adjustment recording is covered separately by migration `0049`
   and ADR 0132; aging does not apply or re-rate it.
