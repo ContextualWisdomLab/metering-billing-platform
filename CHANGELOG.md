@@ -17,11 +17,11 @@
 ### Added
 
 - Issue #87 now records immutable closed-period late usage, correction, and
-  reversal facts in PostgreSQL migration `0048`. Source periods are not
+  reversal facts in PostgreSQL migration `0049`. Source periods are not
   rewritten; target-period ordering, tenant identity, exact signed amounts,
   stable source-reference replay, replay conflicts, and update/delete
   immutability are enforced (ADR 0132).
-- Migration `0049` keeps duplicate late-adjustment replays idempotent after a
+- Migration `0050` keeps duplicate late-adjustment replays idempotent after a
   target period closes, allowing PostgreSQL conflict handling to return the
   stored immutable fact without weakening validation for new facts.
 - Issue #87 now presents stored late-adjustment evidence through tenant-scoped
@@ -30,9 +30,10 @@
   post the fact (ADR 0133). The read contract now passes the decoded cursor and
   bounded `limit + 1` to each ledger; PostgreSQL resolves one tenant-scoped
   keyset query and hydrates only that bounded page, followed by one bulk
-  application-existence lookup rather than one lookup per item.
+  application-existence lookup rather than one lookup per item. Migration `0051`
+  indexes the tenant/recorded-at/ID order.
 - Issue #87 now records a tenant-scoped immutable late-adjustment application
-  acknowledgement in migrations `0050`/`0051`. The nested command is replay-safe,
+  acknowledgement in migrations `0052`/`0053`. The nested command is replay-safe,
   preserves the signed source amount/target/currency, and advances presentment
   to `rate_late_adjustment`; first application still requires the target period
   to be open, while a stored application replays after that period closes and
@@ -44,12 +45,15 @@
   at-most-once behavior, and application audit timestamps must be timezone
   aware and not future-dated.
 - Issue #87 now records consumption of an applied late adjustment as a separate
-  immutable rating fact in `0051`/`0053`. It preserves the original usage
+  immutable rating fact in `0054`/`0055`. It preserves the original usage
   `rating_run`, copies the signed commercial delta, replays safely after target
   closure, and advances presentment to `record_invoice_adjustment`. Rating
   audit timestamps must be timezone-aware and not future-dated at service,
   adapter, and PostgreSQL boundaries; invoice-adjustment composition remains an
   explicit downstream workflow (ADR 0135).
+- Issue #87 now preserves applied reconciliation-fact migration checksums:
+  period, FX, and exception immutability triggers are delivered by migration
+  `0047` before the FX snapshot trigger in migration `0048`.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).

@@ -21,10 +21,10 @@ and currency from the application, records the rating actor and authorization,
 and is replay-safe on the tenant/source identity. The rating instant must be a
 timezone-aware, non-future audit timestamp at the service, repository, and
 PostgreSQL boundaries. A first rating requires an open target period; migration
-`0053` serializes that check with period transitions while preserving replays
+`0055` serializes that check with period transitions while preserving replays
 after closure. PostgreSQL protects the application, source, target, amount,
 currency, audit-time bound, and update/delete immutability with migrations
-`0051` and `0053`.
+`0054` and `0055`.
 
 The HTTP command is
 `POST /v1/late-adjustments/{late_adjustment_id}/ratings`. It returns

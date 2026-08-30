@@ -10,26 +10,26 @@
 
 The current #87 work is stacked through PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173),
 with application parent PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172).
-The exact local implementation snapshot is
-`9f94bc960401c765ce105632e49afb659f4696ed` on
-`feat/late-adjustment-rerate-20260829`; PRs #172 and #173 remain open pending
-hosted checks and a qualifying independent approval. Local pass status is not
-merge evidence.
+The implementation snapshots are parent `43d9594e737dc086a1158912c0849e7d133be725`
+and rerate `0607113953b5e80e97695f99bcc9b060884e39fa`; both PRs remain open
+pending hosted checks and a qualifying independent approval. Local pass status is
+not merge evidence.
 
-This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`/`0051`/`0053`, the
-`LateAdjustment`, application, and rating-consumption contracts, tenant-scoped
-presentment reads, bounded recorded-at/ID keyset pagination, and durable
-application/rating facts for late usage, correction, and reversal evidence. The
-source period must be at least `soft_closed`; the target must be `open` and
-start no earlier than the source end. New application and rating facts lock and
-recheck the target's latest append-only status, while stored replays remain
-available after target close and preserve first-writer audit data. The memory
-adapter enforces the same period state and tenant/order checks, serializes
-recording/application/rating/close races, and validates aware non-future
-application and rating audit timestamps. Presentment uses one bulk application-existence
-and one bulk rating-existence lookup per bounded page. Full local PostgreSQL
-integration, repository-contract, and 100% statement/branch coverage checks
-pass on this snapshot. Invoice-adjustment composition, provider settlement
+This follow-up adds PostgreSQL migrations `0049`/`0050`/`0051`/`0052`/`0053`/
+`0054`/`0055`, the `LateAdjustment`, application, and rating-consumption
+contracts, tenant-scoped presentment reads, bounded recorded-at/ID keyset
+pagination, and durable application/rating facts for late usage, correction, and
+reversal evidence. The source period must be at least `soft_closed`; the target
+must be `open` and start no earlier than the source end. New application and
+rating facts lock and recheck the target's latest append-only status, while
+stored replays remain available after target close and preserve first-writer
+audit data. The memory adapter enforces the same period state and tenant/order
+checks, serializes recording/application/rating/close races, and validates aware
+non-future application and rating audit timestamps. Presentment uses one bulk
+application-existence and one bulk rating-existence lookup per bounded page. Full
+local PostgreSQL integration, repository-contract, and 100% statement/branch
+coverage checks pass on this snapshot. Invoice-adjustment composition, provider
+settlement
 ingestion, FOCUS 1.4 export, and statutory accounting remain open gaps.
 
 ## Executive decision
