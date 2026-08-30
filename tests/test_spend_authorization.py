@@ -390,12 +390,18 @@ class SpendAuthorizationTests(unittest.TestCase):
             service.release_authorization(TENANT_ONE, authorization.spend_authorization_id, "0.2", "service-release", "cancelled").rejection_reason_code,
             "idempotency_key_conflict",
         )
-        self.assertEqual(
-            service.release_authorization(TENANT_ONE, authorization.spend_authorization_id, "1", "release-too-much", "cancelled").rejection_reason_code,
-            "release_amount_exceeded",
+        release_too_much = service.release_authorization(
+            TENANT_ONE, authorization.spend_authorization_id, "1", "release-too-much", "cancelled"
         )
+        self.assertEqual(release_too_much.rejection_reason_code, "release_amount_exceeded")
+        self.assertIsNone(release_too_much.mutation_id)
         full = request(key="full-request")
         assert full.authorization is not None
+        commit_too_much = service.commit_authorization(
+            TENANT_ONE, full.authorization.spend_authorization_id, "2", "commit-too-much", "usage"
+        )
+        self.assertEqual(commit_too_much.rejection_reason_code, "commitment_amount_exceeded")
+        self.assertIsNone(commit_too_much.mutation_id)
         self.assertEqual(
             service.commit_authorization(TENANT_ONE, full.authorization.spend_authorization_id, "1", "full-commit", "usage").authorization.authorization_status,
             "committed",

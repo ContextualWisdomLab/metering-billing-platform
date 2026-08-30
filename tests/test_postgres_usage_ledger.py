@@ -111,7 +111,6 @@ from metering_billing.usage_ledger import (
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
     StoredTenantApiCredential,
-    StoredUnappliedCash,
     StoredUnappliedCashApplication,
     StoredUnappliedCashRefund,
     StoredSpendBudget,
@@ -4116,7 +4115,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         second_case_amount = Decimal("20.00")
         leftover_apply_remaining = Decimal("19.999")
         exclusive_amount = Decimal("100.00")
-        tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
         credit_exclusive = Decimal("10.00")
         credit_tax = Decimal("1.00")
@@ -4819,8 +4817,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         exclusive_amount = Decimal("100.00")
         tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
-        credit_exclusive = Decimal("10.00")
-        credit_tax = Decimal("1.00")
         credit_voided_amount = Decimal("11.00")
         UsageIngestionService(self.ledger).ingest_usage_event(make_event())
         RateCardService(self.ledger).publish_rate_card(
@@ -5765,7 +5761,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
             PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
         ]
-        barrier = Barrier(2)
+        barrier = Barrier(2, timeout=30)
 
         def request(worker: PostgresUsageLedger):
             barrier.wait()
@@ -5780,10 +5776,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 deadline,
             )
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = tuple(pool.map(request, workers))
-        for worker in workers:
-            worker.close()
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = tuple(pool.map(request, workers))
+        finally:
+            for worker in workers:
+                worker.close()
         self.assertEqual(
             sorted(result.outcome_code.value for result in results),
             ["accepted", "duplicate_replay"],
@@ -5821,7 +5819,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
                 PostgresUsageLedger(psycopg.connect(POSTGRES_DSN), owns_connection=True),
             ]
-            barrier = Barrier(2)
+            barrier = Barrier(2, timeout=30)
 
             def request(item: tuple[int, str]):
                 index, actor = item
@@ -5837,10 +5835,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                     deadline,
                 )
 
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                results = tuple(pool.map(request, enumerate(actors)))
-            for worker in workers:
-                worker.close()
+            try:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = tuple(pool.map(request, enumerate(actors)))
+            finally:
+                for worker in workers:
+                    worker.close()
             return results
 
         reserved_conflict_results = run_pair(

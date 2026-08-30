@@ -380,7 +380,7 @@ class SpendAuthorizationService:
                     SpendAuthorizationOutcomeCode.REJECTED,
                     tenant_reference,
                     stored,
-                    stored.spend_authorization_id,
+                    mutation_id,
                     reason_code,
                 )
             return _result(
@@ -415,7 +415,7 @@ class SpendAuthorizationService:
                 SpendAuthorizationOutcomeCode.REJECTED,
                 tenant_reference,
                 stored,
-                stored.spend_authorization_id,
+                mutation_id,
                 "release_amount_exceeded",
             )
         return _result(
