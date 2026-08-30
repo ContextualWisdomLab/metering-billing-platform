@@ -4717,7 +4717,7 @@ class RepositoryContractTests(unittest.TestCase):
     def test_fx_conversion_migration_pins_the_referenced_rate_snapshot(self) -> None:
         """Database inserts must retain the exact referenced FX rate evidence."""
         sql = (
-            ROOT / "database/migrations/0047_fx_conversion_rate_integrity.sql"
+            ROOT / "database/migrations/0048_fx_conversion_rate_integrity.sql"
         ).read_text(encoding="utf-8")
         for expected_fragment in (
             "CREATE OR REPLACE FUNCTION billing_core.validate_fx_conversion_snapshot()",
@@ -4734,7 +4734,7 @@ class RepositoryContractTests(unittest.TestCase):
         self,
     ) -> None:
         """The correction table binds both periods and rejects source rewrites."""
-        sql = (ROOT / "database/migrations/0048_late_adjustment.sql").read_text(
+        sql = (ROOT / "database/migrations/0049_late_adjustment.sql").read_text(
             encoding="utf-8"
         )
         for expected_fragment in (
@@ -4754,7 +4754,7 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
         replay_sql = (
-            ROOT / "database/migrations/0049_late_adjustment_replay.sql"
+            ROOT / "database/migrations/0050_late_adjustment_replay.sql"
         ).read_text(encoding="utf-8")
         for expected_fragment in (
             "CREATE OR REPLACE FUNCTION billing_core.validate_late_adjustment_periods()",
