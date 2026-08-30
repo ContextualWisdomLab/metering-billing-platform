@@ -10,8 +10,8 @@
 
 The current #87 work is stacked through PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172),
 with parent PR [#171](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/171).
-The implementation snapshots are parent `cad00706d4da01029907b4add8649f81dcae6392`
-and application `4ea0943f4f5fffa87565af8d4e8f04b419003b10`; both PRs remain open
+The implementation snapshots are parent `b28e86503f3c01e946d56d7ba710c88622f8e6dc`
+and application `5562924ddd0ada32c73fb117d88f109747396141`; both PRs remain open
 pending hosted checks and a qualifying independent approval. Local pass status is
 not merge evidence.
 
