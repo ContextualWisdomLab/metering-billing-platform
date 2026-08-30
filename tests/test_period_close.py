@@ -529,6 +529,21 @@ class ReconciliationTests(unittest.TestCase):
         ).as_contract_dict()
         line["expected_cash_amount"] = "2"
         self.assertTrue(validate_reconciliation_line(line))
+        price_line = assess_reconciliation_line(
+            PERIOD_ID,
+            "provider_account:001",
+            "USD",
+            "1",
+            "1",
+            "1",
+            assessed_at=OPENED_AT,
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        ).as_contract_dict()
+        price_line["provider_actual_amount"] = "2"
+        price_line["expected_cash_amount"] = "2"
+        self.assertTrue(validate_reconciliation_line(price_line))
         self.assertTrue(validate_billing_period({}))
         self.assertTrue(validate_fx_rate([]))
         self.assertTrue(validate_fx_conversion({}))
@@ -547,6 +562,8 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaises(PeriodCloseValidationError):
             assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", provider_fee_amount="-1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
         with self.assertRaises(PeriodCloseValidationError):
+            assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", provider_fee_amount="-0", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
+        with self.assertRaises(PeriodCloseValidationError):
             assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", assessed_at=datetime(2026, 8, 1), internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
         matched = assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
         with self.assertRaises(PeriodCloseValidationError):
@@ -557,6 +574,26 @@ class ReconciliationTests(unittest.TestCase):
             replace(matched, expected_cash_amount=Decimal("2"))
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, status=ReconciliationLineStatus.EXCEPTION)
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(
+                matched,
+                exceptions=(ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect"),),
+                status=ReconciliationLineStatus.EXCEPTION,
+            )
+        price_line = assess_reconciliation_line(
+            PERIOD_ID,
+            "provider_account:001",
+            "USD",
+            "1",
+            "2",
+            "2",
+            assessed_at=OPENED_AT,
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(price_line, exceptions=price_line.exceptions + price_line.exceptions)
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, exceptions=[ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect")])  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):

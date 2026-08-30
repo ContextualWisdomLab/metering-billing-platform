@@ -34,7 +34,9 @@ arithmetic, reconciliation arithmetic, exception/status consistency, and
 contract decimal length limits cannot be bypassed by submitting a raw
 dictionary. Reconciliation requires internal, provider, and cash source
 currency evidence; a differing source currency must carry a typed
-`currency_mismatch` exception.
+`currency_mismatch` exception. Every reconciliation exception code is derived
+from the stored comparison, and non-negative deduction fields reject signed
+zero as well as negative values.
 
 ## Consequences
 
