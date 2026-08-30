@@ -226,7 +226,10 @@ yet; run-level evidence completeness remains a follow-up.
 period. Its normalized child rows preserve ordered reconciliation-line
 membership and PostgreSQL requires every member to belong to the same tenant
 and period. The stored exception count is a run summary; this slice does not
-calculate it, resolve exceptions, or advance the period status.
+calculate it, resolve exceptions, or advance the period status. PostgreSQL
+rejects updates and deletes for the run, line membership, and the underlying
+reconciliation facts; later immutability additions are forward-only migrations
+so applied migration checksums remain stable.
 
 `reconciliation-exception-aging` is a read-only projection of each persisted
 line exception. It uses the immutable line `assessed_at` as the source instant,
@@ -240,7 +243,7 @@ amount, currency, source reference, source payload hash, and contract version.
 Its tenant-scoped source reference is the stable replay key; the source/target,
 kind, hash, and contract version also have a unique payload identity. Identical
 retries remain durable even when an opaque ID is regenerated, while changed
-payloads fail closed. Composite foreign keys and migrations `0048`/`0049` triggers
+payloads fail closed. Composite foreign keys and migrations `0049`/`0050` triggers
 require an adequately closed source, an open target beginning no earlier than
 the source end, and immutable rows. The fact does not rewrite usage, rating,
 or source period history and does not itself create a journal, tax document, or
@@ -266,6 +269,7 @@ one bulk lookup for the bounded page.
 Application audit timestamps are timezone-aware and not future-dated. The
 memory adapter serializes recording, application, and target-period lifecycle writes while
 preserving the same replay identity.
+Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

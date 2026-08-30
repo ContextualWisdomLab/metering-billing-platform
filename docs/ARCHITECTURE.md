@@ -56,7 +56,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 ## Period-close adjustment boundary
 
 `LateAdjustment` is the separate correction path for facts arriving after a
-source period closes. Migrations `0048`/`0049` store and protect a signed
+source period closes. Migrations `0049`/`0050` store and protect a signed
 exact-decimal amount,
 closed adjustment kind, source payload hash, and source/target period links.
 The source must be at least `soft_closed`, the target must be `open` and start
@@ -82,6 +82,7 @@ The memory adapter serializes recording, application, and period lifecycle write
 concurrent application/close race cannot create a second acknowledgement or
 accept a new application for a closed target; application audit timestamps are
 timezone-aware and not future-dated.
+Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 ## Usage ingestion
 

@@ -179,6 +179,15 @@ class LateAdjustmentPresentmentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ledger.insert_late_adjustment(
                 TENANT_ONE,
+                replace(
+                    adjustment,
+                    late_adjustment_id=uuid4(),
+                    source_reference="provider:late_003_payload",
+                ),
+            )
+        with self.assertRaises(ValueError):
+            ledger.insert_late_adjustment(
+                TENANT_ONE,
                 make_adjustment(
                     source_reference=adjustment.source_reference,
                     recorded_at=adjustment.recorded_at,

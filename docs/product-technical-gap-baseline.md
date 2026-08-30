@@ -15,7 +15,7 @@ and application `4ea0943f4f5fffa87565af8d4e8f04b419003b10`; both PRs remain open
 pending hosted checks and a qualifying independent approval. Local pass status is
 not merge evidence.
 
-This follow-up adds PostgreSQL migrations `0048`/`0049`/`0050`/`0051`, the
+This follow-up adds PostgreSQL migrations `0049`/`0050`/`0051`/`0052`/`0053`, the
 `LateAdjustment` and application contracts, tenant-scoped presentment reads,
 bounded recorded-at/ID keyset pagination, and a durable application
 acknowledgement for late usage, correction, and reversal facts. The source period

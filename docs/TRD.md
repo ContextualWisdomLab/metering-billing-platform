@@ -57,7 +57,7 @@ provider is added. The broader commercial repository, production-default,
 readiness, recovery, HA, and telemetry requirements remain tracked by issue
 #84.
 
-Migrations `0048`/`0049` also store and protect the immutable `late_adjustment` fact. Its
+Migrations `0049`/`0050` also store and protect the immutable `late_adjustment` fact. Its
 tenant-scoped source reference is a stable replay key, while the source/target,
 kind, payload hash, and contract version form the payload identity; period
 foreign keys are protected by PostgreSQL checks and triggers. A source period
@@ -92,6 +92,7 @@ not one application query per item.
 The application timestamp must be timezone-aware and not future-dated. The
 memory adapter serializes recording, application, and target-period lifecycle writes to
 preserve at-most-once behavior during concurrent application and close.
+Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 ## Provider plane
 

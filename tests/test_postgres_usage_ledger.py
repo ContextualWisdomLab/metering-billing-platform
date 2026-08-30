@@ -206,8 +206,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 51:
-            raise AssertionError(f"expected 51 migrations, got {len(applied)}")
+        if len(applied) != 53:
+            raise AssertionError(f"expected 53 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -1062,6 +1062,22 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertIsNone(self.ledger.get_reconciliation_run(TENANT_ONE, uuid4()))
         self.assertIsNone(self.ledger.get_reconciliation_run(TENANT_TWO, run.run_id))
+        tenant_two_period = create_billing_period(
+            TENANT_TWO,
+            CATALOG_START.date(),
+            (CATALOG_START + timedelta(days=31)).date(),
+            opened_by="operator:finance_010",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.assertEqual(
+            self.ledger.insert_billing_period(tenant_two_period), tenant_two_period
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_run(
+                TENANT_TWO,
+                replace(run, period_id=tenant_two_period.period_id),
+            )
         self.assertEqual(self.ledger.list_reconciliation_runs(TENANT_TWO), ())
         self.assertEqual(
             self.ledger.list_reconciliation_runs(
@@ -1218,6 +1234,36 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_line(TENANT_ONE, missing_period_line)
+        extra_line = replace(
+            expanded_exception,
+            reconciliation_line_id=uuid4(),
+            assessed_at=CATALOG_START + timedelta(minutes=5),
+        )
+        self.assertEqual(
+            self.ledger.insert_reconciliation_line(TENANT_ONE, extra_line), extra_line
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_run(
+                TENANT_ONE,
+                replace(
+                    empty_run,
+                    reconciliation_line_ids=(extra_line.reconciliation_line_id,),
+                ),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_run(
+                TENANT_ONE,
+                replace(
+                    run,
+                    reconciliation_line_ids=run.reconciliation_line_ids
+                    + (extra_line.reconciliation_line_id,),
+                ),
+            )
+        self.assertEqual(
+            self.ledger.get_reconciliation_run(TENANT_ONE, empty_run.run_id),
+            empty_run,
+        )
+        self.assertEqual(self.ledger.get_reconciliation_run(TENANT_ONE, run.run_id), run)
         immutable_mutations = (
             (
                 "UPDATE billing_core.billing_period_transition "
@@ -1718,6 +1764,31 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 adjustment.late_adjustment_id,
             )
         )
+    def test_late_adjustment_keyset_query_uses_ordered_index(self) -> None:
+        """The bounded PostgreSQL read can use its tenant/cursor index directly."""
+        tenant_account_id = self.ledger.require_tenant(
+            TENANT_ONE
+        ).tenant_account_id
+        with self.connection.transaction():
+            self.connection.execute("SET LOCAL enable_seqscan = off")
+            plan = self.connection.execute(
+                """
+                EXPLAIN (COSTS OFF)
+                SELECT late_adjustment_id, source_period_id, target_period_id,
+                       adjustment_kind, adjustment_amount, currency_code,
+                       source_reference, source_payload_hash, recorded_at,
+                       late_adjustment_contract_version
+                FROM billing_core.late_adjustment
+                WHERE tenant_account_id = %s
+                  AND (recorded_at, late_adjustment_id) > (%s, %s)
+                ORDER BY recorded_at, late_adjustment_id
+                LIMIT %s
+                """,
+                (tenant_account_id, CATALOG_START, uuid4(), 51),
+            ).fetchall()
+        plan_text = "\n".join(row[0] for row in plan)
+        self.assertIn("late_adjustment_keyset_idx", plan_text)
+        self.assertNotIn("Sort", plan_text)
 
     def test_reconcile_period_requires_a_complete_latest_run(self) -> None:
         """Advance a soft-closed period only when every latest-run exception is resolved."""
