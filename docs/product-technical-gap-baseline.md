@@ -10,9 +10,10 @@
 
 The current #87 work is stacked through PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174),
 with rating/application parent PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173).
-The implementation snapshot will be updated to the post-merge integration SHA;
-both PRs remain open pending hosted checks and a qualifying independent approval.
-Local pass status is not merge evidence.
+The implementation snapshot is integration commit
+`30f6a3c25acfc2a1e258d570904ef22691e88f5d`; both PRs remain open pending hosted
+checks and a qualifying independent approval. Local pass status is not merge
+evidence.
 
 This follow-up adds PostgreSQL migrations `0047` through `0066`, the
 `LateAdjustment`, application, rating-consumption, and invoice-adjustment
@@ -33,8 +34,9 @@ Migrations `0059`/`0060` enforce downstream write ordering, `0061`/`0062`/
 completeness, immutability, new-header, and audit-time boundaries, and
 historical v1 issued invoices remain readable through the v2 envelopes.
 The source period is never rewritten; composition requires a rated adjustment
-and an unissued same-tenant, same-currency invoice draft. Full integration
-coverage will be recorded after this stacked merge completes. Recalculation from
+and an unissued same-tenant, same-currency invoice draft. The full real-
+PostgreSQL suite passes with 790 tests, 19,474 statements, and 6,748 branches
+at 100% statement/branch coverage. Recalculation from
 source usage and rate-card versions, provider settlement ingestion, FOCUS 1.4
 export, tax/legal invoice treatment, and statutory accounting remain open gaps.
 
