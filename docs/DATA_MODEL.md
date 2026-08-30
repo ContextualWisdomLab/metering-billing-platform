@@ -250,12 +250,26 @@ or source period history and does not itself create a journal, tax document, or
 FOCUS export.
 
 `LateAdjustmentPresentmentService` projects that fact as a tenant-scoped item
-or recorded-at/ID keyset page. Presentment exposes `apply_late_adjustment` as
-the next operator action; it stores no application snapshot and does not mutate
-the late adjustment. The list read passes the decoded cursor and `limit + 1` to
-the ledger, and PostgreSQL evaluates one tenant-scoped ordered keyset query so
-the page never scans or hydrates the complete history. Migration `0051` supplies
-the matching tenant/recorded-at/ID index.
+or recorded-at/ID keyset page. `LateAdjustmentApplicationService` stores one
+append-only `late_adjustment_application` per tenant and late-adjustment ID,
+including the equal target period, signed exact amount, currency, actor,
+authorization reference, and application instant. Presentment exposes
+`apply_late_adjustment` before that row exists and `rate_late_adjustment`
+afterward. A new application locks and rechecks the target period's latest
+append-only status and requires `open`; replay bypasses that new-fact guard and
+returns the first writer's immutable audit fields. The application row has
+composite source/target foreign keys and immutable update/delete triggers; it
+does not mutate the late adjustment. The memory reference adapter stores the
+same billing-period aggregate and enforces source/target tenant, lifecycle, and
+ordering invariants before storing a late-adjustment fact.
+The list read passes the decoded cursor and `limit + 1` to the ledger, and
+PostgreSQL evaluates one tenant-scoped ordered keyset query so the page never
+scans or hydrates the complete history; application existence is loaded with
+one bulk lookup for the bounded page.
+Application audit timestamps are timezone-aware and not future-dated. The
+memory adapter serializes recording, application, and target-period lifecycle writes while
+preserving the same replay identity.
+Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

@@ -50,9 +50,10 @@ contextual-orchestrator usage
   and period transitions are never rewritten.
 - PostgreSQL migrations `0049`/`0050` enforce tenant-scoped foreign keys,
   lifecycle ordering, target openness, replay conflict handling, and
-  update/delete immutability. Application,
-  re-rating, provider settlement, FOCUS export, tax documents, and statutory
-  posting remain separate workflows.
+  update/delete immutability; migrations `0052`/`0053` enforce application
+  source equality, target locking, replay rechecks, and audit-time bounds.
+  Application, re-rating, provider settlement, FOCUS export, tax documents,
+  and statutory posting remain separate workflows.
 
 ## Late-adjustment-presentment acceptance
 
@@ -71,8 +72,35 @@ contextual-orchestrator usage
   journal or webhook, call a provider, or create a tax/statutory document.
 - The ledger read receives the decoded cursor and `page_limit + 1`; PostgreSQL
   evaluates the tenant-scoped recorded-at/ID keyset predicate in one ordered
-  query so `next_cursor` is derived only from a bounded result. Migration `0051`
-  supplies the matching index.
+  query so `next_cursor` is derived only from a bounded result, then performs
+  one bulk application-existence lookup for that page.
+
+## Late-adjustment-application acceptance
+
+- `POST /v1/late-adjustments/{late_adjustment_id}/applications` requires
+  non-empty `applied_by` and `authorization_reference` audit references.
+- The application is an append-only, tenant-scoped fact whose target period,
+  signed exact amount, and currency must equal the stored late adjustment.
+  Identity is `(tenant_account_id, late_adjustment_id)`; replay returns the
+  same application as `duplicate_replay` without a second row. The first
+  application requires the current target period to remain `open`; a stored
+  application remains replayable after the target closes and returns its first
+  writer's audit references and timestamp.
+- `applied_at` is timezone-aware and not future-dated. Memory application and
+  target-period lifecycle writes serialize so concurrent requests preserve
+  at-most-once application identity.
+- After application, late-adjustment item/list presentment reports
+  `rate_late_adjustment`; before application it reports
+  `apply_late_adjustment`. Unknown or cross-tenant facts return 404 and invalid
+  audit references return 422.
+- The memory reference ledger enforces the same source/target period existence,
+  tenant, lifecycle, and ordering invariants as PostgreSQL. A missing target or
+  non-open target rejects with `target_period_not_found` or
+  `target_period_not_open` and HTTP 422; an already-stored application still
+  replays after target closure.
+- This slice does not re-rate, mutate a period or usage fact, create a tax or
+  journal document, settle a provider, export FOCUS, or emit a webhook. Those
+  remain explicit downstream workflows.
 
 ## Tax-assessment acceptance
 

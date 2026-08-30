@@ -71,11 +71,28 @@ posting is inferred here.
 snapshot table. `GET /v1/late-adjustments/{late_adjustment_id}` and
 `GET /v1/late-adjustments` are tenant-scoped read-only routes returning the
 closed presentment contract and recorded-at/ID keyset pagination. The next
-operator action is `apply_late_adjustment`; the read does not apply, re-rate,
-post, call a provider, or create a tax document. The list repository contract
-accepts a decoded `(recorded_at, late_adjustment_id)` cursor and bounded limit;
-the PostgreSQL adapter performs one ordered tenant-scoped keyset query with
-`limit + 1`; migration `0051` indexes that tenant/cursor order.
+operator action is `apply_late_adjustment` until
+`LateAdjustmentApplicationService` records one immutable application through
+`POST /v1/late-adjustments/{late_adjustment_id}/applications`; thereafter it
+is `rate_late_adjustment`. The application requires actor and authorization
+references, preserves the source target/exact signed amount/currency, locks and
+rechecks that the target period is still `open` for a new application, and is
+replay-safe. A stored application replays after the target closes and retains
+its first-writer audit data. Neither command applies a rating, mutates a
+period, posts a journal, calls a provider, or creates a tax document.
+The memory reference adapter stores billing periods and applies the same
+source/target lifecycle and ordering checks as PostgreSQL; target lifecycle
+rejections remain stable `target_period_not_found` or `target_period_not_open`
+422 results.
+The list repository contract accepts a decoded `(recorded_at,
+late_adjustment_id)` cursor and bounded limit; the PostgreSQL adapter performs
+one ordered tenant-scoped keyset query with `limit + 1`.
+Presentment uses one bulk application-existence lookup for the returned page,
+not one application query per item.
+The application timestamp must be timezone-aware and not future-dated. The
+memory adapter serializes recording, application, and target-period lifecycle writes to
+preserve at-most-once behavior during concurrent application and close.
+Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 ## Provider plane
 

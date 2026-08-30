@@ -21,11 +21,12 @@ LATE_ADJUSTMENT_PRESENTMENT_CONTRACT_VERSION = 1
 DEFAULT_PAGE_LIMIT = 50
 MAXIMUM_PAGE_LIMIT = 100
 OPERATOR_ACTION_APPLY = "apply_late_adjustment"
+OPERATOR_ACTION_RATE = "rate_late_adjustment"
 
 
-def next_operator_action() -> str:
-    """Return the downstream application action for recorded evidence."""
-    return OPERATOR_ACTION_APPLY
+def next_operator_action(*, applied: bool = False) -> str:
+    """Return the next action for recorded evidence."""
+    return OPERATOR_ACTION_RATE if applied else OPERATOR_ACTION_APPLY
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,14 @@ class LateAdjustmentPresentmentService:
         )
         if adjustment is None:
             raise LateAdjustmentPresentmentQueryError("late_adjustment_not_found")
-        return self._project_adjustment(tenant.tenant_reference, adjustment)
+        return self._project_adjustment(
+            tenant.tenant_reference,
+            adjustment,
+            applied=self.ledger.find_late_adjustment_application(
+                tenant.tenant_account_id, adjustment.late_adjustment_id
+            )
+            is not None,
+        )
 
     def list_late_adjustments(
         self,
@@ -132,9 +140,17 @@ class LateAdjustmentPresentmentService:
         if len(stored_rows) > limit:
             last = page_rows[-1]
             next_cursor = _encode_page_cursor(last.recorded_at, last.late_adjustment_id)
+        application_ids = self.ledger.find_late_adjustment_application_ids(
+            tenant.tenant_account_id,
+            tuple(adjustment.late_adjustment_id for adjustment in page_rows),
+        )
         return LateAdjustmentPresentmentPage(
             late_adjustments=tuple(
-                self._project_adjustment(tenant.tenant_reference, adjustment)
+                self._project_adjustment(
+                    tenant.tenant_reference,
+                    adjustment,
+                    applied=adjustment.late_adjustment_id in application_ids,
+                )
                 for adjustment in page_rows
             ),
             next_cursor=next_cursor,
@@ -150,7 +166,7 @@ class LateAdjustmentPresentmentService:
 
     @staticmethod
     def _project_adjustment(
-        tenant_reference: str, adjustment: LateAdjustment
+        tenant_reference: str, adjustment: LateAdjustment, *, applied: bool = False
     ) -> LateAdjustmentPresentmentResult:
         """Project only persisted commercial evidence."""
         return LateAdjustmentPresentmentResult(
@@ -164,7 +180,7 @@ class LateAdjustmentPresentmentService:
             source_reference=adjustment.source_reference,
             source_payload_hash=adjustment.source_payload_hash,
             recorded_at=adjustment.recorded_at,
-            next_operator_action=next_operator_action(),
+            next_operator_action=next_operator_action(applied=applied),
         )
 
 

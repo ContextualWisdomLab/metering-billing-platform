@@ -131,9 +131,11 @@ def known_event_batch() -> tuple[dict[str, object], dict[str, object], dict[str,
     )
 
 
-def seed_ledger() -> MemoryUsageLedger:
+def seed_ledger(
+    ledger_type: type[MemoryUsageLedger] = MemoryUsageLedger,
+) -> MemoryUsageLedger:
     """Register two isolated tenants with attribution and one billable meter."""
-    ledger = MemoryUsageLedger()
+    ledger = ledger_type()
     ledger.register_tenant(TENANT_ONE)
     ledger.register_tenant(TENANT_TWO)
     ledger.register_billing_account(TENANT_ONE, ACCOUNT_ONE)

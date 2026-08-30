@@ -29,8 +29,21 @@
   `apply_late_adjustment` next action. Presentment does not apply, re-rate, or
   post the fact (ADR 0133). The read contract now passes the decoded cursor and
   bounded `limit + 1` to each ledger; PostgreSQL resolves one tenant-scoped
-  keyset query and hydrates only that bounded page. Migration `0051` indexes
-  the tenant/recorded-at/ID order.
+  keyset query and hydrates only that bounded page, followed by one bulk
+  application-existence lookup rather than one lookup per item. Migration `0051`
+  indexes the tenant/recorded-at/ID order.
+- Issue #87 now records a tenant-scoped immutable late-adjustment application
+  acknowledgement in migrations `0052`/`0053`. The nested command is replay-safe,
+  preserves the signed source amount/target/currency, and advances presentment
+  to `rate_late_adjustment`; first application still requires the target period
+  to be open, while a stored application replays after that period closes and
+  retains the first writer's audit data (ADR 0134). The memory reference ledger
+  now stores the same billing-period lifecycle and rejects missing,
+  cross-tenant, open-source, closed-target, or incorrectly ordered late facts;
+  target lifecycle rejections publish stable HTTP 422 contract results.
+  The memory adapter serializes recording, application, and period lifecycle writes for
+  at-most-once behavior, and application audit timestamps must be timezone
+  aware and not future-dated.
 - Issue #87 now preserves applied reconciliation-fact migration checksums:
   period, FX, and exception immutability triggers are delivered by migration
   `0047` before the FX snapshot trigger in migration `0048`.

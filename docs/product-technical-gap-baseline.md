@@ -8,21 +8,27 @@
 
 ## Current working snapshot (2026-08-30)
 
-The current #87 work is stacked through PR [#171](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/171).
-Its implementation snapshot is commit `36bc3f2ad0a9ba298695812fc2c96831b1a1c2e6`
-on `feat/late-adjustment-application-20260829`. PR #171 remains open pending
-hosted checks and a qualifying independent approval; local pass status is not
-merge evidence.
+The current #87 work is stacked through PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172),
+with parent PR [#171](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/171).
+The implementation snapshots are parent `b28e86503f3c01e946d56d7ba710c88622f8e6dc`
+and application `5562924ddd0ada32c73fb117d88f109747396141`; both PRs remain open
+pending hosted checks and a qualifying independent approval. Local pass status is
+not merge evidence.
 
-This follow-up adds PostgreSQL migrations `0049`/`0050`, the `LateAdjustment`
-contract, and tenant-scoped presentment reads for durable late usage, correction,
-and reversal facts. The source period must be at least `soft_closed`; the target
-must be `open` and start no earlier than the source end. The memory adapter now
-enforces the same period state and tenant/order checks, while PostgreSQL list
-reads use one bounded tenant-scoped keyset query. Full local PostgreSQL,
-repository-contract, and 100% statement/branch coverage checks pass on this
-branch. Applying or re-rating the fact, provider settlement ingestion, FOCUS
-1.4 export, and statutory accounting remain open gaps.
+This follow-up adds PostgreSQL migrations `0049`/`0050`/`0051`/`0052`/`0053`, the
+`LateAdjustment` and application contracts, tenant-scoped presentment reads,
+bounded recorded-at/ID keyset pagination, and a durable application
+acknowledgement for late usage, correction, and reversal facts. The source period
+must be at least `soft_closed`; the target must be `open` and start no earlier
+than the source end. A new application rechecks and locks the target's latest
+append-only status, while a stored application remains replayable after target
+close and preserves its first writer audit data. The memory adapter enforces the
+same period state and tenant/order checks, serializes recording/application/close races,
+and validates aware non-future audit timestamps. Presentment uses one bulk
+application-existence lookup per bounded page. Full local PostgreSQL,
+repository-contract, and 100% statement/branch coverage checks pass on the
+respective branches. Applying or re-rating the fact, provider settlement
+ingestion, FOCUS 1.4 export, and statutory accounting remain open gaps.
 
 ## Executive decision
 

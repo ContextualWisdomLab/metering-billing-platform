@@ -66,6 +66,7 @@ from metering_billing.contracts import (
     BILLING_PERIOD_SCHEMA_NAME,
     LATE_ADJUSTMENT_SCHEMA_NAME,
     LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME,
+    LATE_ADJUSTMENT_APPLICATION_SCHEMA_NAME,
     COLLECTION_CASE_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_SCHEMA_NAME,
     RATE_CARD_SCHEMA_NAME,
@@ -192,6 +193,7 @@ from metering_billing.contracts import (
     validate_billing_period,
     validate_late_adjustment,
     validate_late_adjustment_presentment,
+    validate_late_adjustment_application,
     validate_fx_rate,
     validate_fx_conversion,
     validate_reconciliation_line,
@@ -268,6 +270,8 @@ from metering_billing.errors import (
     CreditNoteApplicationOutcomeCode,
     CreditNoteApplicationPresentmentQueryError,
     CreditNoteApplicationRejectionReasonCode,
+    LateAdjustmentApplicationOutcomeCode,
+    LateAdjustmentApplicationRejectionReasonCode,
     IssuedInvoiceOutcomeCode,
     IssuedInvoicePresentmentQueryError,
     IssuedInvoiceRejectionReasonCode,
@@ -327,6 +331,10 @@ from metering_billing.issued_credit_note_void_presentment import (
     IssuedCreditNoteVoidPresentmentService,
 )
 from metering_billing.credit_note_application import CreditNoteApplicationService
+from metering_billing.late_adjustment_application import (
+    LateAdjustmentApplicationResult,
+    LateAdjustmentApplicationService,
+)
 from metering_billing.credit_note_application_presentment import (
     CreditNoteApplicationPresentmentService,
 )
@@ -446,6 +454,7 @@ __all__ = (
     "BILLING_PERIOD_SCHEMA_NAME",
     "LATE_ADJUSTMENT_SCHEMA_NAME",
     "LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
+    "LATE_ADJUSTMENT_APPLICATION_SCHEMA_NAME",
     "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
@@ -717,6 +726,11 @@ __all__ = (
     "validate_billing_period",
     "validate_late_adjustment",
     "validate_late_adjustment_presentment",
+    "validate_late_adjustment_application",
+    "LateAdjustmentApplicationOutcomeCode",
+    "LateAdjustmentApplicationRejectionReasonCode",
+    "LateAdjustmentApplicationResult",
+    "LateAdjustmentApplicationService",
     "validate_collection_aging_presentment",
     "validate_collection_case",
     "validate_collection_case_presentment",
