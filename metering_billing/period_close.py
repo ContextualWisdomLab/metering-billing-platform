@@ -878,17 +878,26 @@ class ReconciliationLine:
             raise PeriodCloseValidationError("exceptions must contain immutable reconciliation exceptions")
         if (status == ReconciliationLineStatus.MATCHED) != (not self.exceptions):
             raise PeriodCloseValidationError("reconciliation status must match exception presence")
+        if status == ReconciliationLineStatus.MATCHED and (
+            self.internal_expected_amount != self.provider_actual_amount
+            or self.cash_actual_amount != self.expected_cash_amount
+        ):
+            raise PeriodCloseValidationError(
+                "matched reconciliation line amounts must agree"
+            )
         exception_codes = tuple(exception.exception_code for exception in self.exceptions)
         if len(set(exception_codes)) != len(exception_codes):
             raise PeriodCloseValidationError("reconciliation exception codes must be unique")
         _aware_datetime(self.assessed_at, "assessed_at")
-        currency_mismatch = False
-        for field_name, value in (
-            ("internal_currency_code", self.internal_currency_code),
-            ("provider_currency_code", self.provider_currency_code),
-            ("cash_currency_code", self.cash_currency_code),
-        ):
-            currency_mismatch = currency_mismatch or _currency(value, field_name) != self.currency_code
+        compared_currencies = tuple(
+            _currency(value, field_name)
+            for field_name, value in (
+                ("internal_currency_code", self.internal_currency_code),
+                ("provider_currency_code", self.provider_currency_code),
+                ("cash_currency_code", self.cash_currency_code),
+            )
+        )
+        currency_mismatch = any(code != self.currency_code for code in compared_currencies)
         has_currency_exception = any(
             exception.exception_code == ReconciliationExceptionCode.CURRENCY_MISMATCH
             for exception in self.exceptions
@@ -955,10 +964,12 @@ def assess_reconciliation_line(
         ("provider_currency_code", provider_currency_code),
         ("cash_currency_code", cash_currency_code),
     )
-    for field_name, source_currency in compared_currencies:
-        if _currency(source_currency, field_name) != currency_code:
-            exception_codes.append(ReconciliationExceptionCode.CURRENCY_MISMATCH)
-            break
+    normalized_currencies = tuple(
+        _currency(source_currency, field_name)
+        for field_name, source_currency in compared_currencies
+    )
+    if any(source_currency != currency_code for source_currency in normalized_currencies):
+        exception_codes.append(ReconciliationExceptionCode.CURRENCY_MISMATCH)
     if internal != provider:
         exception_codes.append(ReconciliationExceptionCode.PRICE_MISMATCH)
     if cash != expected_cash:

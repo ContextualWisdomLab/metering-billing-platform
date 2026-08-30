@@ -731,6 +731,14 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, expected_cash_amount=Decimal("2"))
         with self.assertRaises(PeriodCloseValidationError):
+            replace(
+                matched,
+                internal_expected_amount=Decimal("100"),
+                provider_actual_amount=Decimal("99"),
+                cash_actual_amount=Decimal("99"),
+                expected_cash_amount=Decimal("99"),
+            )
+        with self.assertRaises(PeriodCloseValidationError):
             replace(matched, status=ReconciliationLineStatus.EXCEPTION)
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, exceptions=[ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect")])  # type: ignore[arg-type]
@@ -759,6 +767,8 @@ class ReconciliationTests(unittest.TestCase):
             ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "")
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, internal_currency_code="usd")
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(matched, internal_currency_code="EUR", provider_currency_code="usd")
         with self.assertRaises(PeriodCloseValidationError):
             replace(
                 matched,

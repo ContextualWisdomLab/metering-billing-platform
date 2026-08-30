@@ -700,7 +700,7 @@ def _validate_array(
         errors.append(f"{path}: array items must be unique")
     item_schema = schema.get("items")
     if isinstance(item_schema, (Mapping, bool)):
-        for index, item in enumerate(instance):
+        for index, item in enumerate(instance[len(prefix_items) :], start=len(prefix_items)):
             errors.extend(_validate_node(root_schema, item_schema, item, f"{path}[{index}]"))
     return errors
 

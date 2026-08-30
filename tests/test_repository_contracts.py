@@ -97,6 +97,19 @@ class RepositoryContractTests(unittest.TestCase):
             ("$[0]: schema is false",),
         )
 
+    def test_prefix_items_are_not_revalidated_by_items(self) -> None:
+        """Draft 2020-12 applies tuple prefixes before the remaining items schema."""
+        schema = {
+            "type": "array",
+            "prefixItems": [{"type": "string"}],
+            "items": {"type": "integer"},
+        }
+        self.assertEqual(validate_schema_instance(schema, ["id", 1]), ())
+        self.assertEqual(
+            validate_schema_instance(schema, ["id", "not-an-integer"]),
+            ("$[1]: expected integer",),
+        )
+
     def test_schema_ref_siblings_are_validated(self) -> None:
         """Draft 2020-12 constraints beside a local reference remain effective."""
         schema = {
