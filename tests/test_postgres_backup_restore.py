@@ -219,6 +219,16 @@ class PostgresBackupRestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(backup.BackupRestoreError, "manifest already exists"):
                 backup.create_backup("dbname=source", self.root / "other.dump", manifest_path)
 
+        fifo_path = self.root / "fifo.dump"
+        fifo_manifest = self.root / "fifo.dump.manifest.json"
+        os.mkfifo(fifo_path)
+        fifo_manifest.write_text(
+            json.dumps(backup._manifest(fifo_path, "0" * 64, self.counts)),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(backup.BackupRestoreError, "unavailable"):
+            backup.create_backup("dbname=source", fifo_path, fifo_manifest)
+
     def test_create_failures_clean_up_temp_file(self) -> None:
         """Database and finalization failures do not leave owned temporary files."""
         backup_path = self.root / "billing.dump"

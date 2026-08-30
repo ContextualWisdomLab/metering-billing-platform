@@ -312,6 +312,7 @@ def create_backup(
     _require_safe_path(manifest)
     if backup_path.exists():
         if manifest.exists():
+            _require_safe_path(backup_path, must_exist=True)
             payload = _load_manifest(manifest, backup_path)
             if _sha256(backup_path) != payload["backup_sha256"]:
                 raise BackupRestoreError("existing backup artifact digest does not match its manifest")
