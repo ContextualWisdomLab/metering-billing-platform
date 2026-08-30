@@ -21,6 +21,8 @@ values, and database checks for currency, status, arithmetic, and rounding
 contracts. Maker-checker authorization is persisted as the separate ADR 0127
 resolution slice; late adjustments, FOCUS 1.4 export, provider settlement
 ingestion, and HTTP presentment remain later #87 slices.
+Migration 0042 also rejects whitespace-only operational references at the
+database boundary, keeping direct SQL writers aligned with domain hydration.
 
 ## Consequences
 

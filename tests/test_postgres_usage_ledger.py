@@ -193,8 +193,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 41:
-            raise AssertionError(f"expected 41 migrations, got {len(applied)}")
+        if len(applied) != 42:
+            raise AssertionError(f"expected 42 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -438,8 +438,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             transition_id=uuid4(),
         )
         self.assertEqual(self.ledger.insert_billing_period(hard_closed), hard_closed)
-        self.assertEqual(self.ledger.get_billing_period(period.period_id), hard_closed)
-        self.assertIsNone(self.ledger.get_billing_period(uuid4()))
+        self.assertEqual(self.ledger.get_billing_period(TENANT_ONE, period.period_id), hard_closed)
+        self.assertIsNone(self.ledger.get_billing_period(TENANT_ONE, uuid4()))
+        self.assertIsNone(self.ledger.get_billing_period(TENANT_TWO, period.period_id))
         second_period = create_billing_period(
             TENANT_ONE,
             CATALOG_START.date(),
@@ -540,7 +541,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.insert_reconciliation_line(matched), matched)
         self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
         self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
-        self.assertIsNone(self.ledger.get_reconciliation_line(uuid4()))
+        self.assertIsNone(self.ledger.get_reconciliation_line(TENANT_ONE, uuid4()))
+        self.assertIsNone(
+            self.ledger.get_reconciliation_line(TENANT_TWO, matched.reconciliation_line_id)
+        )
         self.assertEqual(
             {line.reconciliation_line_id for line in self.ledger.list_reconciliation_lines(TENANT_ONE)},
             {matched.reconciliation_line_id, exception.reconciliation_line_id},
@@ -552,7 +556,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (matched, exception),
         )
         self.assertEqual(
-            {item.exception_code for item in self.ledger.get_reconciliation_line(exception.reconciliation_line_id).exceptions},
+            {
+                item.exception_code
+                for item in self.ledger.get_reconciliation_line(
+                    TENANT_ONE, exception.reconciliation_line_id
+                ).exceptions
+            },
             {
                 ReconciliationExceptionCode.CURRENCY_MISMATCH,
                 ReconciliationExceptionCode.PRICE_MISMATCH,
@@ -573,8 +582,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(validate_reconciliation_resolution(resolution.as_contract_dict()), ())
         self.assertEqual(self.ledger.insert_reconciliation_resolution(resolution), resolution)
         self.assertEqual(self.ledger.insert_reconciliation_resolution(resolution), resolution)
-        self.assertEqual(self.ledger.get_reconciliation_resolution(resolution.resolution_id), resolution)
-        self.assertIsNone(self.ledger.get_reconciliation_resolution(uuid4()))
+        self.assertEqual(
+            self.ledger.get_reconciliation_resolution(TENANT_ONE, resolution.resolution_id),
+            resolution,
+        )
+        self.assertIsNone(self.ledger.get_reconciliation_resolution(TENANT_ONE, uuid4()))
+        self.assertIsNone(
+            self.ledger.get_reconciliation_resolution(TENANT_TWO, resolution.resolution_id)
+        )
         self.assertEqual(
             self.ledger.list_reconciliation_resolutions(
                 TENANT_ONE, reconciliation_line_id=exception.reconciliation_line_id
@@ -594,6 +609,33 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.insert_reconciliation_line(
                 replace(matched, provider_account_reference="provider:other")
             )
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            try:
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.reconciliation_resolution
+                        (resolution_id, reconciliation_line_id, exception_code,
+                         resolution_status, owner_reference, resolution_reason,
+                         evidence_reference, maker_reference, checker_reference,
+                         resolved_at, reconciliation_resolution_contract_version)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        exception.reconciliation_line_id,
+                        ReconciliationExceptionCode.PRICE_MISMATCH.value,
+                        ReconciliationResolutionStatus.WAIVED.value,
+                        " ",
+                        "valid reason",
+                        "urn:cwl:evidence:direct-001",
+                        "operator:finance_010",
+                        "operator:finance_011",
+                        CATALOG_START + timedelta(minutes=7),
+                        1,
+                    ),
+                )
+            finally:
+                self.connection.rollback()
         missing_period_line = assess_reconciliation_line(
             uuid4(),
             "provider:account_001",
