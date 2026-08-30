@@ -63,11 +63,14 @@ class SpendAuthorizationTests(unittest.TestCase):
         self.assertIsNotNone(first.authorization)
         authorization_id = first.authorization.spend_authorization_id
         self.assertEqual(validate_spend_authorization(first.as_contract_dict()), ())
+        replay_service = SpendAuthorizationService(
+            ledger, clock=lambda: NOW + timedelta(seconds=1)
+        )
 
         committed = service.commit_authorization(
             TENANT_ONE, authorization_id, "20.00", "commit-1", "usage-1"
         )
-        committed_replay = service.commit_authorization(
+        committed_replay = replay_service.commit_authorization(
             TENANT_ONE, authorization_id, "20.00", "commit-1", "usage-1"
         )
         self.assertEqual(committed.authorization.committed_amount, Decimal("20.00"))
@@ -81,7 +84,7 @@ class SpendAuthorizationTests(unittest.TestCase):
         released = service.release_authorization(
             TENANT_ONE, authorization_id, "50.00", "release-1", "cancelled"
         )
-        released_replay = service.release_authorization(
+        released_replay = replay_service.release_authorization(
             TENANT_ONE, authorization_id, "50.00", "release-1", "cancelled"
         )
         self.assertEqual(
