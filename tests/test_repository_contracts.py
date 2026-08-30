@@ -4478,7 +4478,7 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_fx_conversion_migration_pins_the_referenced_rate_snapshot(self) -> None:
         """Database inserts must retain the exact referenced FX rate evidence."""
-        sql = (ROOT / "database/migrations/0047_fx_conversion_rate_integrity.sql").read_text(
+        sql = (ROOT / "database/migrations/0048_fx_conversion_rate_integrity.sql").read_text(
             encoding="utf-8"
         )
         for expected_fragment in (

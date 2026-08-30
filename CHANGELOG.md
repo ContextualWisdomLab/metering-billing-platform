@@ -16,6 +16,9 @@
 
 ### Added
 
+- Issue #87 now preserves applied reconciliation-fact migration checksums:
+  period, FX, and exception immutability triggers are delivered by migration
+  0047 before the FX snapshot trigger in migration 0048.
 - Issue #87 now enforces the immutable FX conversion snapshot contract in
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).
