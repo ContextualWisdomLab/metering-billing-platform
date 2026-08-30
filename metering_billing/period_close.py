@@ -132,7 +132,7 @@ def _signed_decimal(value: Any, field_name: str) -> Decimal:
 def _non_negative_decimal(value: Any, field_name: str) -> Decimal:
     """Parse an exact decimal that cannot represent a negative cost component."""
     parsed = _signed_decimal(value, field_name)
-    if parsed < 0:
+    if parsed.is_signed():
         raise PeriodCloseValidationError(f"{field_name} must not be negative")
     return parsed
 
@@ -190,6 +190,47 @@ def _expected_cash_amount(
     with localcontext() as context:
         context.prec = max(28, integer_digits + fractional_digits + 2)
         return provider - fee - withheld - reserve
+
+
+def _reconciliation_exception_codes(
+    currency_code: str,
+    internal_expected_amount: Decimal,
+    provider_actual_amount: Decimal,
+    cash_actual_amount: Decimal,
+    provider_fee_amount: Decimal,
+    withheld_tax_amount: Decimal,
+    reserve_amount: Decimal,
+    expected_cash_amount: Decimal,
+    internal_currency_code: str,
+    provider_currency_code: str,
+    cash_currency_code: str,
+) -> tuple[ReconciliationExceptionCode, ...]:
+    """Derive the complete deterministic exception vocabulary for one line."""
+    exception_codes: list[ReconciliationExceptionCode] = []
+    for field_name, source_currency in (
+        ("internal_currency_code", internal_currency_code),
+        ("provider_currency_code", provider_currency_code),
+        ("cash_currency_code", cash_currency_code),
+    ):
+        if _currency(source_currency, field_name) != currency_code:
+            exception_codes.append(ReconciliationExceptionCode.CURRENCY_MISMATCH)
+            break
+    if internal_expected_amount != provider_actual_amount:
+        exception_codes.append(ReconciliationExceptionCode.PRICE_MISMATCH)
+    if cash_actual_amount != expected_cash_amount:
+        exception_codes.append(
+            ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH
+            if provider_fee_amount > 0
+            and cash_actual_amount
+            == _expected_cash_amount(
+                provider_actual_amount,
+                Decimal("0"),
+                withheld_tax_amount,
+                reserve_amount,
+            )
+            else ReconciliationExceptionCode.SETTLEMENT_MISMATCH
+        )
+    return tuple(exception_codes)
 
 
 @dataclass(frozen=True)
@@ -674,20 +715,23 @@ class ReconciliationLine:
         if (status == ReconciliationLineStatus.MATCHED) != (not self.exceptions):
             raise PeriodCloseValidationError("reconciliation status must match exception presence")
         _aware_datetime(self.assessed_at, "assessed_at")
-        currency_mismatch = False
-        for field_name, value in (
-            ("internal_currency_code", self.internal_currency_code),
-            ("provider_currency_code", self.provider_currency_code),
-            ("cash_currency_code", self.cash_currency_code),
-        ):
-            currency_mismatch = currency_mismatch or _currency(value, field_name) != self.currency_code
-        has_currency_exception = any(
-            exception.exception_code == ReconciliationExceptionCode.CURRENCY_MISMATCH
-            for exception in self.exceptions
+        expected_exception_codes = _reconciliation_exception_codes(
+            self.currency_code,
+            self.internal_expected_amount,
+            self.provider_actual_amount,
+            self.cash_actual_amount,
+            self.provider_fee_amount,
+            self.withheld_tax_amount,
+            self.reserve_amount,
+            expected_cash,
+            self.internal_currency_code,
+            self.provider_currency_code,
+            self.cash_currency_code,
         )
-        if currency_mismatch != has_currency_exception:
+        actual_exception_codes = tuple(exception.exception_code for exception in self.exceptions)
+        if actual_exception_codes != expected_exception_codes:
             raise PeriodCloseValidationError(
-                "currency mismatch evidence must match currency_mismatch exception"
+                "reconciliation exceptions must match comparison evidence"
             )
 
     def as_contract_dict(self) -> dict[str, object]:
@@ -741,26 +785,21 @@ def assess_reconciliation_line(
     withheld = _non_negative_decimal(withheld_tax_amount, "withheld_tax_amount")
     reserve = _non_negative_decimal(reserve_amount, "reserve_amount")
     expected_cash = _expected_cash_amount(provider, fee, withheld, reserve)
-    exception_codes: list[ReconciliationExceptionCode] = []
-    compared_currencies = (
-        ("internal_currency_code", internal_currency_code),
-        ("provider_currency_code", provider_currency_code),
-        ("cash_currency_code", cash_currency_code),
+    exception_codes = _reconciliation_exception_codes(
+        currency_code,
+        internal,
+        provider,
+        cash,
+        fee,
+        withheld,
+        reserve,
+        expected_cash,
+        internal_currency_code,
+        provider_currency_code,
+        cash_currency_code,
     )
-    for field_name, source_currency in compared_currencies:
-        if _currency(source_currency, field_name) != currency_code:
-            exception_codes.append(ReconciliationExceptionCode.CURRENCY_MISMATCH)
-            break
-    if internal != provider:
-        exception_codes.append(ReconciliationExceptionCode.PRICE_MISMATCH)
-    if cash != expected_cash:
-        exception_codes.append(
-            ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH
-            if fee > 0 and cash == _expected_cash_amount(provider, Decimal("0"), withheld, reserve)
-            else ReconciliationExceptionCode.SETTLEMENT_MISMATCH
-        )
     exceptions = tuple(
-        ReconciliationException(code, _NEXT_ACTIONS[code]) for code in dict.fromkeys(exception_codes)
+        ReconciliationException(code, _NEXT_ACTIONS[code]) for code in exception_codes
     )
     return ReconciliationLine(
         reconciliation_line_id=uuid4() if reconciliation_line_id is None else reconciliation_line_id,

@@ -609,6 +609,8 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaises(PeriodCloseValidationError):
             assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", provider_fee_amount="-1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
         with self.assertRaises(PeriodCloseValidationError):
+            assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", provider_fee_amount="-0", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
+        with self.assertRaises(PeriodCloseValidationError):
             assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", assessed_at=datetime(2026, 8, 1), internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
         matched = assess_reconciliation_line(PERIOD_ID, "provider_account:001", "USD", "1", "1", "1", assessed_at=OPENED_AT, internal_currency_code="USD", provider_currency_code="USD", cash_currency_code="USD")
         with self.assertRaises(PeriodCloseValidationError):
@@ -621,6 +623,9 @@ class ReconciliationTests(unittest.TestCase):
             replace(matched, status=ReconciliationLineStatus.EXCEPTION)
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, exceptions=[ReconciliationException(ReconciliationExceptionCode.PRICE_MISMATCH, "inspect")])  # type: ignore[arg-type]
+        invalid_match = matched.as_contract_dict()
+        invalid_match["internal_expected_amount"] = "2"
+        self.assertTrue(validate_reconciliation_line(invalid_match))
         with self.assertRaises(PeriodCloseValidationError):
             replace(matched, exceptions=(object(),), status=ReconciliationLineStatus.EXCEPTION)  # type: ignore[arg-type]
         with self.assertRaises(PeriodCloseValidationError):
@@ -643,6 +648,20 @@ class ReconciliationTests(unittest.TestCase):
                 status=ReconciliationLineStatus.EXCEPTION,
                 provider_currency_code="EUR",
             )
+        price_line = assess_reconciliation_line(
+            PERIOD_ID,
+            "provider_account:001",
+            "USD",
+            "1",
+            "2",
+            "2",
+            assessed_at=OPENED_AT,
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        with self.assertRaises(PeriodCloseValidationError):
+            replace(price_line, exceptions=price_line.exceptions + price_line.exceptions)
 
 
 if __name__ == "__main__":  # pragma: no cover
