@@ -296,8 +296,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 62:
-            raise AssertionError(f"expected 62 migrations, got {len(applied)}")
+        if len(applied) != 63:
+            raise AssertionError(f"expected 63 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13924,6 +13924,62 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         finally:
             composition_connection.rollback()
             composition_connection.close()
+        self.assertIsNone(
+            self.ledger.find_issued_invoice(
+                tenant.tenant_account_id, draft.invoice_draft_id
+            )
+        )
+
+    def test_postgres_direct_issued_invoice_rejects_unsupported_contract_versions(
+        self,
+    ) -> None:
+        """New issued snapshots must use contract version 2."""
+        accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_contract_version",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+
+        for version in (1, 3):
+            with self.subTest(version=version):
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    with self.connection.transaction():
+                        self.connection.execute(
+                            """
+                            INSERT INTO billing_core.issued_invoice
+                                (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                                 issued_invoice_contract_version, rating_run_id,
+                                 usage_snapshot_hash, source_payload_hash, currency_code,
+                                 tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                                 issued_invoice_status, issued_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                            """,
+                            (
+                                uuid4(),
+                                tenant.tenant_account_id,
+                                draft.invoice_draft_id,
+                                version,
+                                stored_draft.rating_run_id,
+                                stored_draft.usage_snapshot_hash,
+                                "sha256:" + ("b" * 64),
+                                stored_draft.currency_code,
+                                stored_draft.drafted_total_amount,
+                                stored_draft.drafted_total_amount,
+                                CATALOG_START,
+                            ),
+                        )
         self.assertIsNone(
             self.ledger.find_issued_invoice(
                 tenant.tenant_account_id, draft.invoice_draft_id

@@ -312,6 +312,8 @@ before reading the composition set.
 Migration `0062` adds database immutability triggers for issued invoices and
 issued lines and removes the `line_type` default, so direct issued-line writes
 must provide the explicit version-2 type.
+Migration `0063` requires contract version 2 for new issued-invoice headers
+while leaving historical v1 rows readable.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a

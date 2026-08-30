@@ -124,7 +124,9 @@ issued snapshot. Migration `0061` defers issued-invoice completeness checks
 until the header and all lines are present, requiring every linked composition
 and signed amount to be represented. Migration `0062` enforces issued-invoice
 snapshot and line immutability for direct PostgreSQL UPDATE/DELETE and removes
-the `line_type` default from issued lines. Neither command mutates a period,
+the `line_type` default from issued lines. Migration `0063` requires version 2
+on new direct issued-invoice headers while preserving historical v1 snapshots.
+Neither command mutates a period,
 posts a journal, calls a provider, or creates a tax document. The memory
 reference adapter stores billing periods and applies the same source/target
 lifecycle and ordering checks as PostgreSQL; target lifecycle rejections remain

@@ -307,6 +307,7 @@ REQUIRED_FILES = (
     "database/migrations/0060_harden_late_adjustment_invoice_boundaries.sql",
     "database/migrations/0061_require_issued_invoice_composition_completeness.sql",
     "database/migrations/0062_immutable_typed_issued_invoice_rows.sql",
+    "database/migrations/0063_require_new_issued_invoice_contract_v2.sql",
     "schemas/late-adjustment-application.schema.json",
     "schemas/late-adjustment-rating.schema.json",
     "metering_billing/__init__.py",

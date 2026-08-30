@@ -61,6 +61,8 @@ future-dated at the service, repository, and PostgreSQL boundaries.
   the check takes the shared invoice-draft lock before comparing facts.
 - Migration `0062` enforces issued-invoice snapshot and line immutability at the
   database boundary and removes the issued-line `line_type` default.
+- Migration `0063` requires contract version 2 for new direct issued-invoice
+  headers while leaving historical v1 snapshots readable and unchanged.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not
   part of the replay identity. Historical stored v1 invoices remain readable

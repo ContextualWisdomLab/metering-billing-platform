@@ -93,6 +93,8 @@
 - Issue #87 now makes issued-invoice snapshots and lines immutable at the
   PostgreSQL boundary in migration `0062`, and removes the `line_type` default
   so direct issued-line inserts must declare their contract type explicitly.
+- Issue #87 now makes migration `0063` reject new direct issued-invoice headers
+  with a contract version other than 2 without rewriting historical v1 rows.
 - Issue #87 now validates composition audit timestamps as timezone-aware and
   non-future instants, uses one bounded composition-existence lookup for late-
   adjustment list presentment, and preserves one `invoice.issued` outbox fact
