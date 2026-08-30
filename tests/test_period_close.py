@@ -301,6 +301,38 @@ class BillingPeriodTests(unittest.TestCase):
         with self.assertRaises(PeriodCloseValidationError):
             replace(make_period(), status=BillingPeriodStatus.SOFT_CLOSED, transitions=(valid,))
 
+    def test_contract_versions_are_positive_non_boolean_in_all_facts(self) -> None:
+        """Every published period-close fact rejects invalid contract versions."""
+        facts = (
+            (make_period, "period_contract_version", validate_billing_period),
+            (make_rate, "fx_rate_contract_version", validate_fx_rate),
+            (lambda: convert_currency_amount("1", "USD", 2, make_rate()), "fx_conversion_contract_version", validate_fx_conversion),
+            (
+                lambda: assess_reconciliation_line(
+                    PERIOD_ID,
+                    "provider_account:001",
+                    "USD",
+                    "1",
+                    "1",
+                    "1",
+                    assessed_at=OPENED_AT,
+                    internal_currency_code="USD",
+                    provider_currency_code="USD",
+                    cash_currency_code="USD",
+                ),
+                "reconciliation_line_contract_version",
+                validate_reconciliation_line,
+            ),
+        )
+        for build, field_name, validator in facts:
+            fact = build()
+            for invalid in (0, -1, True):
+                with self.assertRaises(PeriodCloseValidationError):
+                    replace(fact, **{field_name: invalid})
+                document = fact.as_contract_dict()
+                document[field_name] = invalid
+                self.assertTrue(validator(document))
+
 
 class FxContractTests(unittest.TestCase):
     """Verify exact rates, frozen conversions, and minor-unit behavior."""
@@ -358,6 +390,36 @@ class FxContractTests(unittest.TestCase):
         conversion = convert_currency_amount(source, "USD", 0, rate)
         self.assertEqual(conversion.quote_amount, expected)
         self.assertEqual(validate_fx_conversion(conversion.as_contract_dict()), ())
+
+    def test_exponent_form_amounts_keep_integer_precision(self) -> None:
+        """Exponent-form values retain exact published-scale arithmetic."""
+        rate = create_fx_rate(
+            "provider:fx_exponent",
+            FxRateType.PROVIDER,
+            "USD",
+            "EUR",
+            Decimal("1"),
+            0,
+            OPENED_AT,
+            OPENED_AT,
+        )
+        conversion = convert_currency_amount(Decimal("1E+38"), "USD", 0, rate)
+        self.assertEqual(conversion.quote_amount, Decimal("1E+38"))
+        cash = Decimal("9" * 38)
+        line = assess_reconciliation_line(
+            PERIOD_ID,
+            "provider_account:001",
+            "USD",
+            Decimal("1E+38"),
+            Decimal("1E+38"),
+            cash,
+            provider_fee_amount=Decimal("1"),
+            assessed_at=OPENED_AT,
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        self.assertEqual(line.expected_cash_amount, cash)
 
     def test_rate_and_conversion_reject_bad_inputs(self) -> None:
         """No float, invalid currency, zero rate, or under-specified precision crosses the boundary."""

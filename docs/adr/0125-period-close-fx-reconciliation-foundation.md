@@ -35,6 +35,9 @@ contract decimal length limits cannot be bypassed by submitting a raw
 dictionary. Reconciliation requires internal, provider, and cash source
 currency evidence; a differing source currency must carry a typed
 `currency_mismatch` exception.
+Every reconciliation exception code is derived from the stored comparison, and
+non-negative deduction fields reject signed zero as well as negative values.
+Contract versions are positive integers rather than unchecked metadata.
 
 ## Consequences
 

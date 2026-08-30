@@ -144,6 +144,13 @@ def _minor_units(value: Any) -> int:
     return value
 
 
+def _contract_version(value: Any, field_name: str) -> int:
+    """Require a positive integer contract version, excluding boolean values."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PeriodCloseValidationError(f"{field_name} must be a positive integer")
+    return value
+
+
 def _rate_scale(value: Decimal) -> int:
     """Return the number of fractional digits represented by an exact rate."""
     return max(0, -value.as_tuple().exponent)
@@ -160,8 +167,16 @@ def _convert_exact_amount(source: Decimal, rate: Decimal, minor_units: int) -> D
     """Multiply without context rounding before applying the target currency scale."""
     quantum = Decimal(1).scaleb(-minor_units)
     coefficient_digits = len(source.as_tuple().digits) + len(rate.as_tuple().digits)
+    integer_digits = max(0, source.adjusted() + 1) + max(0, rate.adjusted() + 1)
+    fractional_digits = max(0, -source.as_tuple().exponent) + max(
+        0, -rate.as_tuple().exponent
+    )
     with localcontext() as context:
-        context.prec = max(28, coefficient_digits + minor_units + 2)
+        context.prec = max(
+            28,
+            coefficient_digits,
+            integer_digits + fractional_digits + minor_units + 2,
+        )
         return (source * rate).quantize(quantum, rounding=ROUND_HALF_UP)
 
 
@@ -169,15 +184,11 @@ def _expected_cash_amount(
     provider: Decimal, fee: Decimal, withheld: Decimal, reserve: Decimal
 ) -> Decimal:
     """Subtract independent deductions without context rounding at the contract limit."""
+    values = (provider, fee, withheld, reserve)
+    integer_digits = max(max(0, value.adjusted() + 1) for value in values)
+    fractional_digits = max(max(0, -value.as_tuple().exponent) for value in values)
     with localcontext() as context:
-        context.prec = max(
-            28,
-            len(provider.as_tuple().digits)
-            + len(fee.as_tuple().digits)
-            + len(withheld.as_tuple().digits)
-            + len(reserve.as_tuple().digits)
-            + 2,
-        )
+        context.prec = max(28, integer_digits + fractional_digits + 2)
         return provider - fee - withheld - reserve
 
 
@@ -244,6 +255,7 @@ class BillingPeriod:
         """Validate dates, identity, and a contiguous forward-only history."""
         if not isinstance(self.period_id, UUID):
             raise PeriodCloseValidationError("period_id must be a UUID")
+        _contract_version(self.period_contract_version, "period_contract_version")
         _tenant_reference(self.tenant_reference)
         if (
             not isinstance(self.period_start, date)
@@ -374,6 +386,7 @@ class FxRate:
         """Validate exact rate metadata and preserve the supplied versioned value."""
         if not isinstance(self.fx_rate_id, UUID):
             raise PeriodCloseValidationError("fx_rate_id must be a UUID")
+        _contract_version(self.fx_rate_contract_version, "fx_rate_contract_version")
         _reference(self.rate_source, "rate_source")
         try:
             rate_type = FxRateType(self.rate_type)
@@ -461,6 +474,10 @@ class FxConversion:
         """Validate a conversion result without recalculating or mutating it."""
         if not isinstance(self.fx_conversion_id, UUID) or not isinstance(self.fx_rate_id, UUID):
             raise PeriodCloseValidationError("FX conversion identifiers must be UUIDs")
+        _contract_version(
+            self.fx_conversion_contract_version,
+            "fx_conversion_contract_version",
+        )
         object.__setattr__(
             self,
             "source_amount",
@@ -606,6 +623,10 @@ class ReconciliationLine:
         """Validate exact amounts and the deterministic status/exception invariant."""
         if not isinstance(self.reconciliation_line_id, UUID) or not isinstance(self.period_id, UUID):
             raise PeriodCloseValidationError("reconciliation identifiers must be UUIDs")
+        _contract_version(
+            self.reconciliation_line_contract_version,
+            "reconciliation_line_contract_version",
+        )
         _reference(self.provider_account_reference, "provider_account_reference")
         _currency(self.currency_code)
         for field_name in (
