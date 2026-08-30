@@ -434,8 +434,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             transition_id=uuid4(),
         )
         self.assertEqual(self.ledger.insert_billing_period(hard_closed), hard_closed)
-        self.assertEqual(self.ledger.get_billing_period(period.period_id), hard_closed)
-        self.assertIsNone(self.ledger.get_billing_period(uuid4()))
+        self.assertEqual(self.ledger.get_billing_period(TENANT_ONE, period.period_id), hard_closed)
+        self.assertIsNone(self.ledger.get_billing_period(TENANT_ONE, uuid4()))
+        self.assertIsNone(self.ledger.get_billing_period(TENANT_TWO, period.period_id))
         second_period = create_billing_period(
             TENANT_ONE,
             CATALOG_START.date(),
@@ -536,7 +537,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.insert_reconciliation_line(matched), matched)
         self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
         self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
-        self.assertIsNone(self.ledger.get_reconciliation_line(uuid4()))
+        self.assertIsNone(self.ledger.get_reconciliation_line(TENANT_ONE, uuid4()))
+        self.assertIsNone(
+            self.ledger.get_reconciliation_line(TENANT_TWO, matched.reconciliation_line_id)
+        )
         self.assertEqual(
             {line.reconciliation_line_id for line in self.ledger.list_reconciliation_lines(TENANT_ONE)},
             {matched.reconciliation_line_id, exception.reconciliation_line_id},
@@ -548,7 +552,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (matched, exception),
         )
         self.assertEqual(
-            {item.exception_code for item in self.ledger.get_reconciliation_line(exception.reconciliation_line_id).exceptions},
+            {
+                item.exception_code
+                for item in self.ledger.get_reconciliation_line(
+                    TENANT_ONE, exception.reconciliation_line_id
+                ).exceptions
+            },
             {
                 ReconciliationExceptionCode.CURRENCY_MISMATCH,
                 ReconciliationExceptionCode.PRICE_MISMATCH,

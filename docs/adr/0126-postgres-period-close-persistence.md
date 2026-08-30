@@ -20,6 +20,8 @@ opaque identifiers, composite tenant foreign keys, exact PostgreSQL `numeric`
 values, and database checks for currency, status, arithmetic, and rounding
 contracts. Maker-checker authorization, late adjustments, FOCUS 1.4 export,
 provider settlement ingestion, and HTTP presentment remain later #87 slices.
+Period and reconciliation-line reads require the tenant reference as part of
+the lookup, preserving the same tenant boundary for direct opaque-ID access.
 
 ## Consequences
 
