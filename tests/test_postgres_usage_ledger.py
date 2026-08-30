@@ -202,8 +202,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 46:
-            raise AssertionError(f"expected 46 migrations, got {len(applied)}")
+        if len(applied) != 47:
+            raise AssertionError(f"expected 47 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -669,6 +669,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.get_reconciliation_run(TENANT_ONE, run.run_id), run)
         self.assertIsNone(self.ledger.get_reconciliation_run(TENANT_ONE, uuid4()))
         self.assertIsNone(self.ledger.get_reconciliation_run(TENANT_TWO, run.run_id))
+        tenant_two_period = create_billing_period(
+            TENANT_TWO,
+            CATALOG_START.date(),
+            (CATALOG_START + timedelta(days=31)).date(),
+            opened_by="operator:finance_010",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.assertEqual(self.ledger.insert_billing_period(tenant_two_period), tenant_two_period)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_run(
+                TENANT_TWO,
+                replace(run, period_id=tenant_two_period.period_id),
+            )
         self.assertEqual(self.ledger.list_reconciliation_runs(TENANT_TWO), ())
         self.assertEqual(
             self.ledger.list_reconciliation_runs(TENANT_ONE, period_id=period.period_id),
@@ -803,6 +817,28 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_line(TENANT_ONE, missing_period_line)
+        extra_line = replace(
+            expanded_exception,
+            reconciliation_line_id=uuid4(),
+            assessed_at=CATALOG_START + timedelta(minutes=5),
+        )
+        self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, extra_line), extra_line)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_run(
+                TENANT_ONE,
+                replace(empty_run, reconciliation_line_ids=(extra_line.reconciliation_line_id,)),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_run(
+                TENANT_ONE,
+                replace(
+                    run,
+                    reconciliation_line_ids=run.reconciliation_line_ids
+                    + (extra_line.reconciliation_line_id,),
+                ),
+            )
+        self.assertEqual(self.ledger.get_reconciliation_run(TENANT_ONE, empty_run.run_id), empty_run)
+        self.assertEqual(self.ledger.get_reconciliation_run(TENANT_ONE, run.run_id), run)
         immutable_mutations = (
             (
                 "UPDATE billing_core.billing_period_transition "

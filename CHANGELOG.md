@@ -16,6 +16,9 @@
 
 ### Added
 
+- Issue #87 now protects the previously applied reconciliation-fact migration
+  checksum: later PostgreSQL immutability triggers for periods, FX snapshots,
+  and exceptions are delivered by forward-only migration 0047.
 - Issue #87 now exposes tenant-scoped reconciliation-exception aging derived
   from immutable line assessment timestamps. Explicit UTC calendar-day buckets
   preserve `current`, 1-30, 31-60, 61-90, and 90+ boundaries without adding a
