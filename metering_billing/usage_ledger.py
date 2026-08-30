@@ -996,6 +996,9 @@ class MemoryUsageLedger:
     late_adjustment_source_index: dict[tuple[UUID, str], UUID] = field(
         default_factory=dict
     )
+    late_adjustment_payload_index: dict[
+        tuple[UUID, UUID, UUID, str, str, int], UUID
+    ] = field(default_factory=dict)
     spend_budgets: dict[UUID, StoredSpendBudget] = field(default_factory=dict)
     spend_budget_index: dict[
         tuple[UUID, UUID, datetime, datetime, str, str, int], UUID
@@ -2965,6 +2968,17 @@ class MemoryUsageLedger:
             if existing_contract != incoming_contract:
                 raise ValueError("late adjustment identity cannot change")
             return existing
+        payload_key = (
+            tenant.tenant_account_id,
+            adjustment.source_period_id,
+            adjustment.target_period_id,
+            adjustment.adjustment_kind.value,
+            adjustment.source_payload_hash,
+            adjustment.late_adjustment_contract_version,
+        )
+        existing_id = self.late_adjustment_payload_index.get(payload_key)
+        if existing_id is not None:
+            raise ValueError("late adjustment identity cannot change")
         if adjustment.late_adjustment_id in self.late_adjustments:
             raise ValueError("late adjustment identity conflicts with another tenant")
         source = self.get_billing_period(tenant_reference, adjustment.source_period_id)
@@ -2986,6 +3000,7 @@ class MemoryUsageLedger:
         self.late_adjustment_source_index[
             (tenant.tenant_account_id, adjustment.source_reference)
         ] = adjustment.late_adjustment_id
+        self.late_adjustment_payload_index[payload_key] = adjustment.late_adjustment_id
         return adjustment
 
     def insert_credit_adjustment(

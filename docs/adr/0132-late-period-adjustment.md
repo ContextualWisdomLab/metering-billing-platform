@@ -31,7 +31,7 @@ contract_version)`. An identical retry, including one with a regenerated
 opaque ID, returns the stored fact; a changed payload is a conflict.
 
 The Python contract validates exact money; both the memory adapter and PostgreSQL
-migrations `0048`/`0049` enforce tenant-scoped foreign keys, lifecycle/order
+migrations `0049`/`0050` enforce tenant-scoped foreign keys, lifecycle/order
 checks, the idempotency key, and UPDATE/DELETE rejection with row triggers.
 PostgreSQL documents that a
 `BEFORE` row trigger runs before the row operation and may reject it (PostgreSQL

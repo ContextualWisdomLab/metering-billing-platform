@@ -56,7 +56,7 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 ## Period-close adjustment boundary
 
 `LateAdjustment` is the separate correction path for facts arriving after a
-source period closes. Migrations `0048`/`0049` store and protect a signed
+source period closes. Migrations `0049`/`0050` store and protect a signed
 exact-decimal amount,
 closed adjustment kind, source payload hash, and source/target period links.
 The source must be at least `soft_closed`, the target must be `open` and start
@@ -66,7 +66,8 @@ FOCUS export, and statutory accounting remain downstream capabilities.
 `LateAdjustmentPresentmentService` exposes the fact through tenant-scoped
 item/list reads and reports `apply_late_adjustment` without applying it. List
 reads pass the decoded cursor and `limit + 1` to the ledger; PostgreSQL applies
-the tenant-scoped keyset predicate and hydrates only those bounded rows.
+the tenant-scoped keyset predicate and hydrates only those bounded rows. Migration
+`0051` supplies the matching index.
 
 ## Usage ingestion
 

@@ -1024,6 +1024,7 @@ class PostgresUsageLedger:
                      blocking_exception_count, reconciliation_run_contract_version)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (run_id) DO NOTHING
+                RETURNING run_id
                 """,
                 (
                     run.run_id,
@@ -1035,52 +1036,67 @@ class PostgresUsageLedger:
                     run.reconciliation_run_contract_version,
                 ),
             )
-            for line_number, reconciliation_line_id in enumerate(
-                run.reconciliation_line_ids, start=1
-            ):
+            inserted = cursor.fetchone() is not None
+            if not inserted:
                 cursor.execute(
                     """
-                    SELECT 1
-                    FROM billing_core.reconciliation_line
-                    WHERE tenant_account_id = %s
-                      AND period_id = %s
-                      AND reconciliation_line_id = %s
+                    SELECT tenant_account_id
+                    FROM billing_core.reconciliation_run
+                    WHERE run_id = %s
+                    FOR UPDATE
                     """,
-                    (tenant_account_id, run.period_id, reconciliation_line_id),
+                    (run.run_id,),
                 )
-                if cursor.fetchone() is None:
-                    raise KeyError(reconciliation_line_id)
-                cursor.execute(
-                    """
-                    INSERT INTO billing_core.reconciliation_run_line
-                        (run_id, tenant_account_id, period_id, line_number,
-                         reconciliation_line_id)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (run_id, line_number) DO NOTHING
-                    """,
-                    (
-                        run.run_id,
+                parent = cursor.fetchone()
+                if parent is None or UUID(str(parent[0])) != tenant_account_id:
+                    raise ValueError("reconciliation run identity cannot change")
+            else:
+                for line_number, reconciliation_line_id in enumerate(
+                    run.reconciliation_line_ids, start=1
+                ):
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM billing_core.reconciliation_line
+                        WHERE tenant_account_id = %s
+                          AND period_id = %s
+                          AND reconciliation_line_id = %s
+                        """,
+                        (tenant_account_id, run.period_id, reconciliation_line_id),
+                    )
+                    if cursor.fetchone() is None:
+                        raise KeyError(reconciliation_line_id)
+                    cursor.execute(
+                        """
+                        INSERT INTO billing_core.reconciliation_run_line
+                            (run_id, tenant_account_id, period_id, line_number,
+                             reconciliation_line_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (run_id, line_number) DO NOTHING
+                        """,
+                        (
+                            run.run_id,
+                            tenant_account_id,
+                            run.period_id,
+                            line_number,
+                            reconciliation_line_id,
+                        ),
+                    )
+                    cursor.execute(
+                        """
+                        SELECT tenant_account_id, period_id, reconciliation_line_id
+                        FROM billing_core.reconciliation_run_line
+                        WHERE run_id = %s AND line_number = %s
+                        """,
+                        (run.run_id, line_number),
+                    )
+                    row = cursor.fetchone()
+                    if row != (
                         tenant_account_id,
                         run.period_id,
-                        line_number,
                         reconciliation_line_id,
-                    ),
-                )
-                cursor.execute(
-                    """
-                    SELECT tenant_account_id, period_id, reconciliation_line_id
-                    FROM billing_core.reconciliation_run_line
-                    WHERE run_id = %s AND line_number = %s
-                    """,
-                    (run.run_id, line_number),
-                )
-                row = cursor.fetchone()
-                if row != (
-                    tenant_account_id,
-                    run.period_id,
-                    reconciliation_line_id,
-                ):  # pragma: no cover - protected by composite identity constraints
-                    raise ValueError("reconciliation run line identity cannot change")
+                    ):  # pragma: no cover - protected by composite identity constraints
+                        raise ValueError("reconciliation run line identity cannot change")
             stored = self._fetch_reconciliation_run(
                 cursor, run.run_id, tenant_account_id=tenant_account_id
             )

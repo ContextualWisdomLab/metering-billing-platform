@@ -48,7 +48,7 @@ contextual-orchestrator usage
   stored fact. A changed amount, source reference, hash, or other identity
   field fails closed; the source period, rating facts, reconciliation facts,
   and period transitions are never rewritten.
-- PostgreSQL migrations `0048`/`0049` enforce tenant-scoped foreign keys,
+- PostgreSQL migrations `0049`/`0050` enforce tenant-scoped foreign keys,
   lifecycle ordering, target openness, replay conflict handling, and
   update/delete immutability. Application,
   re-rating, provider settlement, FOCUS export, tax documents, and statutory
@@ -71,7 +71,8 @@ contextual-orchestrator usage
   journal or webhook, call a provider, or create a tax/statutory document.
 - The ledger read receives the decoded cursor and `page_limit + 1`; PostgreSQL
   evaluates the tenant-scoped recorded-at/ID keyset predicate in one ordered
-  query so `next_cursor` is derived only from a bounded result.
+  query so `next_cursor` is derived only from a bounded result. Migration `0051`
+  supplies the matching index.
 
 ## Tax-assessment acceptance
 

@@ -14,7 +14,7 @@ on `feat/late-adjustment-application-20260829`. PR #171 remains open pending
 hosted checks and a qualifying independent approval; local pass status is not
 merge evidence.
 
-This follow-up adds PostgreSQL migrations `0048`/`0049`, the `LateAdjustment`
+This follow-up adds PostgreSQL migrations `0049`/`0050`, the `LateAdjustment`
 contract, and tenant-scoped presentment reads for durable late usage, correction,
 and reversal facts. The source period must be at least `soft_closed`; the target
 must be `open` and start no earlier than the source end. The memory adapter now
