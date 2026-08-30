@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from threading import Barrier
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -1535,6 +1536,41 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             0,
         )
+
+    def test_migration_runner_upgrades_merge_base_without_drift_or_duplicates(
+        self,
+    ) -> None:
+        """A database with the pre-adjustment history upgrades on the same schema."""
+        migration_directory = Path(ROOT) / "database" / "migrations"
+        late_adjustment_migrations = {
+            "0049_late_adjustment.sql",
+            "0050_late_adjustment_replay.sql",
+        }
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            merge_base_directory = root / "merge-base-migrations"
+            head_directory = root / "head-migrations"
+            merge_base_directory.mkdir()
+            head_directory.mkdir()
+            for migration_path in migration_directory.glob("*.sql"):
+                shutil.copy2(migration_path, head_directory / migration_path.name)
+                if migration_path.name not in late_adjustment_migrations:
+                    shutil.copy2(migration_path, merge_base_directory / migration_path.name)
+
+            self.connection.execute(f"DROP TABLE IF EXISTS {MIGRATION_HISTORY_TABLE}")
+            self.connection.execute("DROP SCHEMA IF EXISTS billing_core CASCADE")
+            self.connection.commit()
+            try:
+                self.assertEqual(len(apply_migrations(self.connection, merge_base_directory)), 48)
+                self.assertEqual(
+                    apply_migrations(self.connection, head_directory),
+                    ("0049_late_adjustment.sql", "0050_late_adjustment_replay.sql"),
+                )
+            finally:
+                self.connection.execute(f"DROP TABLE IF EXISTS {MIGRATION_HISTORY_TABLE}")
+                self.connection.execute("DROP SCHEMA IF EXISTS billing_core CASCADE")
+                self.connection.commit()
+                apply_migrations(self.connection, migration_directory)
 
     def test_migration_runner_rejects_bad_plans(self) -> None:
         """Migration names and transaction wrappers are explicit contracts."""
