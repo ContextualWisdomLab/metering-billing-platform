@@ -11,6 +11,10 @@ from uuid import uuid4
 from metering_billing import (
     BillingPeriodStatus,
     LateAdjustmentPresentmentService,
+    ReconciliationRun,
+    ReconciliationResolution,
+    ReconciliationResolutionStatus,
+    assess_reconciliation_line,
     create_billing_period,
     create_http_app,
     create_late_adjustment,
@@ -299,6 +303,114 @@ class LateAdjustmentPresentmentTests(unittest.TestCase):
                     transitions=(replace(source.transitions[0], reason="rewrite"),),
                 )
             )
+
+    def test_memory_reconciliation_requires_the_gated_command(self) -> None:
+        """Memory period writes cannot bypass the reconciliation evidence gate."""
+        ledger = seed_ledger()
+        direct_period = create_billing_period(
+            TENANT_ONE,
+            date(2026, 7, 1),
+            date(2026, 8, 1),
+            opened_by="operator:direct",
+            opened_at=RECORDED_AT,
+            period_id=uuid4(),
+        )
+        reconciled_direct = direct_period.advance(
+            BillingPeriodStatus.SOFT_CLOSED,
+            actor_reference="operator:direct",
+            authorization_reference="change:direct",
+            reason="close period",
+            transitioned_at=RECORDED_AT,
+        ).advance(
+            BillingPeriodStatus.RECONCILED,
+            actor_reference="operator:direct",
+            authorization_reference="change:direct",
+            reason="direct transition",
+            transitioned_at=RECORDED_AT,
+        )
+        with self.assertRaisesRegex(ValueError, "require reconcile_billing_period"):
+            ledger.insert_billing_period(reconciled_direct)
+
+        period = create_billing_period(
+            TENANT_ONE,
+            date(2026, 8, 1),
+            date(2026, 9, 1),
+            opened_by="operator:period",
+            opened_at=RECORDED_AT,
+            period_id=uuid4(),
+        ).advance(
+            BillingPeriodStatus.SOFT_CLOSED,
+            actor_reference="operator:period",
+            authorization_reference="change:period",
+            reason="close period",
+            transitioned_at=RECORDED_AT,
+        )
+        ledger.insert_billing_period(period)
+        line = assess_reconciliation_line(
+            period.period_id,
+            "provider:payout_001",
+            "USD",
+            "11.00",
+            "10.00",
+            "10.00",
+            assessed_at=RECORDED_AT,
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        run = ReconciliationRun(
+            run_id=uuid4(),
+            period_id=period.period_id,
+            started_at=RECORDED_AT,
+            completed_at=RECORDED_AT,
+            reconciliation_line_ids=(line.reconciliation_line_id,),
+            blocking_exception_count=1,
+        )
+        with self.assertRaisesRegex(ValueError, "require reconcile_billing_period"):
+            ledger.insert_billing_period(
+                period.advance(
+                    BillingPeriodStatus.RECONCILED,
+                    actor_reference="operator:period",
+                    authorization_reference="approval:period",
+                    reason="ordinary append",
+                    transitioned_at=RECORDED_AT,
+                )
+            )
+        ledger.insert_reconciliation_line(TENANT_ONE, line)
+        ledger.insert_reconciliation_run(TENANT_ONE, run)
+        with self.assertRaisesRegex(ValueError, "remain unresolved"):
+            ledger.reconcile_billing_period(
+                TENANT_ONE,
+                period.period_id,
+                actor_reference="operator:period",
+                authorization_reference="approval:period",
+                reason="unresolved exception",
+                transitioned_at=RECORDED_AT,
+            )
+        ledger.insert_reconciliation_resolution(
+            TENANT_ONE,
+            ReconciliationResolution(
+                resolution_id=uuid4(),
+                reconciliation_line_id=line.reconciliation_line_id,
+                exception_code=line.exceptions[0].exception_code,
+                resolution_status=ReconciliationResolutionStatus.RESOLVED,
+                owner_reference="operator:owner",
+                resolution_reason="approved provider correction",
+                evidence_reference="evidence:reconciliation_001",
+                maker_reference="operator:maker",
+                checker_reference="operator:checker",
+                resolved_at=RECORDED_AT,
+            ),
+        )
+        reconciled = ledger.reconcile_billing_period(
+            TENANT_ONE,
+            period.period_id,
+            actor_reference="operator:period",
+            authorization_reference="approval:period",
+            reason="all reconciliation lines matched",
+            transitioned_at=RECORDED_AT,
+        )
+        self.assertEqual(reconciled.status, BillingPeriodStatus.RECONCILED)
 
     def test_invalid_query_inputs_and_http_errors_fail_closed(self) -> None:
         """Invalid cursors, bounds, tenants, and methods never expose evidence."""

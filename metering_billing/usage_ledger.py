@@ -30,6 +30,10 @@ from metering_billing.period_close import (
     BillingPeriod,
     BillingPeriodStatus,
     LateAdjustment,
+    ReconciliationLine,
+    ReconciliationResolution,
+    ReconciliationResolutionStatus,
+    ReconciliationRun,
 )
 
 CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error"})
@@ -991,6 +995,11 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     billing_periods: dict[UUID, BillingPeriod] = field(default_factory=dict)
+    reconciliation_lines: dict[UUID, ReconciliationLine] = field(default_factory=dict)
+    reconciliation_runs: dict[UUID, ReconciliationRun] = field(default_factory=dict)
+    reconciliation_resolutions: dict[UUID, ReconciliationResolution] = field(
+        default_factory=dict
+    )
     late_adjustments: dict[UUID, LateAdjustment] = field(default_factory=dict)
     late_adjustment_tenant_index: dict[UUID, UUID] = field(default_factory=dict)
     late_adjustment_source_index: dict[tuple[UUID, str], UUID] = field(
@@ -2890,6 +2899,12 @@ class MemoryUsageLedger:
 
     def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
         """Store one period and append only new lifecycle transitions."""
+        return self._insert_billing_period(period, allow_reconciled=False)
+
+    def _insert_billing_period(
+        self, period: BillingPeriod, *, allow_reconciled: bool
+    ) -> BillingPeriod:
+        """Store a period while keeping reconciliation behind its gated command."""
         self.require_tenant(period.tenant_reference)
         existing = self.billing_periods.get(period.period_id)
         if existing is not None:
@@ -2904,8 +2919,134 @@ class MemoryUsageLedger:
                 raise ValueError("billing period identity cannot change after persistence")
             if period.transitions[: len(existing.transitions)] != existing.transitions:
                 raise ValueError("billing period transition history cannot be rewritten")
+            new_transitions = period.transitions[len(existing.transitions) :]
+        else:
+            new_transitions = period.transitions
+        if not allow_reconciled and any(
+            transition.to_status == BillingPeriodStatus.RECONCILED
+            for transition in new_transitions
+        ):
+            raise ValueError("reconciled periods require reconcile_billing_period")
         self.billing_periods[period.period_id] = period
         return period
+
+    def insert_reconciliation_line(
+        self, tenant_reference: str, line: ReconciliationLine
+    ) -> ReconciliationLine:
+        """Store one immutable reconciliation line for a tenant period."""
+        tenant = self.require_tenant(tenant_reference)
+        period = self.billing_periods.get(line.period_id)
+        if period is None or period.tenant_reference != tenant.tenant_reference:
+            raise KeyError(line.period_id)
+        if period.status in {
+            BillingPeriodStatus.RECONCILED,
+            BillingPeriodStatus.INVOICED,
+            BillingPeriodStatus.HARD_CLOSED,
+        }:
+            raise ValueError("reconciliation lines cannot be added after period reconciliation")
+        existing = self.reconciliation_lines.get(line.reconciliation_line_id)
+        if existing is not None and existing.as_contract_dict() != line.as_contract_dict():
+            raise ValueError("reconciliation line identity cannot change after persistence")
+        self.reconciliation_lines[line.reconciliation_line_id] = line
+        return line
+
+    def insert_reconciliation_run(
+        self, tenant_reference: str, run: ReconciliationRun
+    ) -> ReconciliationRun:
+        """Store one immutable completed run and its ordered line membership."""
+        tenant = self.require_tenant(tenant_reference)
+        period = self.billing_periods.get(run.period_id)
+        if period is None or period.tenant_reference != tenant.tenant_reference:
+            raise KeyError(run.period_id)
+        for line_id in run.reconciliation_line_ids:
+            line = self.reconciliation_lines.get(line_id)
+            if line is None or line.period_id != run.period_id:
+                raise KeyError(line_id)
+        existing = self.reconciliation_runs.get(run.run_id)
+        if existing is not None and existing.as_contract_dict() != run.as_contract_dict():
+            raise ValueError("reconciliation run identity cannot change")
+        self.reconciliation_runs[run.run_id] = run
+        return run
+
+    def insert_reconciliation_resolution(
+        self, tenant_reference: str, resolution: ReconciliationResolution
+    ) -> ReconciliationResolution:
+        """Store one immutable maker-checker resolution for a line exception."""
+        tenant = self.require_tenant(tenant_reference)
+        line = self.reconciliation_lines.get(resolution.reconciliation_line_id)
+        period = None if line is None else self.billing_periods.get(line.period_id)
+        if period is None or period.tenant_reference != tenant.tenant_reference:
+            raise KeyError(resolution.reconciliation_line_id)
+        if not any(
+            exception.exception_code == resolution.exception_code
+            for exception in line.exceptions
+        ):
+            raise KeyError(resolution.exception_code.value)
+        existing = self.reconciliation_resolutions.get(resolution.resolution_id)
+        if existing is not None and existing.as_contract_dict() != resolution.as_contract_dict():
+            raise ValueError("reconciliation resolution identity cannot change")
+        self.reconciliation_resolutions[resolution.resolution_id] = resolution
+        return resolution
+
+    def reconcile_billing_period(
+        self,
+        tenant_reference: str,
+        period_id: UUID,
+        *,
+        actor_reference: str,
+        authorization_reference: str,
+        reason: str,
+        transitioned_at: datetime,
+        transition_id: UUID | None = None,
+    ) -> BillingPeriod:
+        """Append ``reconciled`` only after the latest stored run passes its gate."""
+        tenant = self.require_tenant(tenant_reference)
+        period = self.billing_periods.get(period_id)
+        if period is None or period.tenant_reference != tenant.tenant_reference:
+            raise KeyError(period_id)
+        if period.status != BillingPeriodStatus.SOFT_CLOSED:
+            raise ValueError("period must be soft_closed before reconciliation")
+        runs = [run for run in self.reconciliation_runs.values() if run.period_id == period_id]
+        if not runs:
+            raise ValueError("a completed reconciliation run is required")
+        run = max(runs, key=lambda candidate: (candidate.completed_at, candidate.run_id))
+        lines = [self.reconciliation_lines[line_id] for line_id in run.reconciliation_line_ids]
+        exception_count = sum(len(line.exceptions) for line in lines)
+        if run.blocking_exception_count != exception_count:
+            raise ValueError("reconciliation run exception summary is inconsistent")
+        period_line_count = sum(
+            1
+            for line in self.reconciliation_lines.values()
+            if line.period_id == period_id
+            and (
+                (line_period := self.billing_periods.get(line.period_id)) is not None
+                and line_period.tenant_reference == tenant.tenant_reference
+            )
+        )
+        if len(lines) != period_line_count:
+            raise ValueError("reconciliation run does not cover every period line")
+        resolved_statuses = {
+            ReconciliationResolutionStatus.RESOLVED,
+            ReconciliationResolutionStatus.WAIVED,
+        }
+        for line in lines:
+            for exception in line.exceptions:
+                if not any(
+                    resolution.reconciliation_line_id == line.reconciliation_line_id
+                    and resolution.exception_code == exception.exception_code
+                    and resolution.resolution_status in resolved_statuses
+                    for resolution in self.reconciliation_resolutions.values()
+                ):
+                    raise ValueError("blocking reconciliation exceptions remain unresolved")
+        reconciled = period.advance(
+            BillingPeriodStatus.RECONCILED,
+            actor_reference=actor_reference,
+            authorization_reference=authorization_reference,
+            reason=reason,
+            transitioned_at=transitioned_at,
+            transition_id=transition_id,
+        )
+        return self._insert_billing_period(reconciled, allow_reconciled=True)
 
     def get_late_adjustment(
         self, tenant_reference: str, late_adjustment_id: UUID
