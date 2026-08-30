@@ -226,7 +226,10 @@ yet; run-level evidence completeness remains a follow-up.
 period. Its normalized child rows preserve ordered reconciliation-line
 membership and PostgreSQL requires every member to belong to the same tenant
 and period. The stored exception count is a run summary; this slice does not
-calculate it, resolve exceptions, or advance the period status.
+calculate it, resolve exceptions, or advance the period status. PostgreSQL
+rejects updates and deletes for the run, line membership, and the underlying
+reconciliation facts; later immutability additions are forward-only migrations
+so applied migration checksums remain stable.
 
 `reconciliation-exception-aging` is a read-only projection of each persisted
 line exception. It uses the immutable line `assessed_at` as the source instant,

@@ -21,4 +21,7 @@ resolution evidence. Late-adjustment recording is separate migration `0048`
 
 - Reconciliation runs have durable replay and line-level drill-down identity.
 - A run cannot include a line from another tenant or period.
+- PostgreSQL rejects updates and deletes for completed runs and their line
+  membership; later immutability changes use forward-only migrations so an
+  already-applied migration checksum remains stable.
 - Run calculation, completeness gates, aging, and period reconciliation remain follow-up work.
