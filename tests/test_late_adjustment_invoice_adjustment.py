@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier
 import unittest
@@ -1047,10 +1047,23 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
             replace(candidate, billing_account_id=None),
             replace(candidate, recorded_by=" "),
             replace(candidate, authorization_reference=" "),
+            replace(candidate, recorded_at=datetime(2027, 1, 1, tzinfo=UTC)),
+            replace(candidate, recorded_at=datetime(2026, 8, 3)),
             replace(candidate, source_payload_hash="invalid"),
         ):
             with self.assertRaises(ValueError):
                 ledger.insert_late_adjustment_invoice_adjustment(bad)
+
+        with self.assertRaisesRegex(ValueError, "recorded_at.*future"):
+            LateAdjustmentInvoiceAdjustmentService(
+                ledger, clock=lambda: datetime.now(UTC) + timedelta(days=1)
+            ).record_invoice_adjustment(
+                TENANT_ONE,
+                adjustment.late_adjustment_id,
+                draft.invoice_draft_id,
+                recorded_by="operator:future",
+                authorization_reference="approval:future",
+            )
 
         class NonCanonicalDecimal(Decimal):
             """Exercise the defensive canonical-string check."""

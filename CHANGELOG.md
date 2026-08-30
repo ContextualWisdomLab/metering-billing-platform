@@ -88,10 +88,15 @@
   and post-issue collection uses only the frozen issued inclusive total.
 - Issue #87 now adds deferred migration `0061` checks so direct issued headers
   cannot omit linked adjustment lines or freeze an exclusive total without every
-  signed composition.
+  signed composition; the check takes the shared invoice-draft lock before
+  comparing the composition set.
 - Issue #87 now makes issued-invoice snapshots and lines immutable at the
   PostgreSQL boundary in migration `0062`, and removes the `line_type` default
   so direct issued-line inserts must declare their contract type explicitly.
+- Issue #87 now validates composition audit timestamps as timezone-aware and
+  non-future instants, uses one bounded composition-existence lookup for late-
+  adjustment list presentment, and preserves one `invoice.issued` outbox fact
+  when a historical v1 invoice is replayed through the current v2 envelope.
 - Issue #87 now gates the PostgreSQL `soft_closed` to `reconciled` transition
   on the latest completed run's exact period-line membership, exception count,
   and resolved-or-waived exception facts. Direct persistence cannot bypass the

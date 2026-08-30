@@ -103,6 +103,8 @@ presentment include the signed lines and billing account. Version 2 makes
 `line_type` required and enforces usage/late-adjustment line invariants. The
 draft and issued snapshot remain append-only; collection, journal, provider
 export, and statutory tax treatment remain downstream boundaries.
+Composition `recorded_at` is timezone-aware and not future-dated at the service,
+adapter, and PostgreSQL trigger boundaries.
 
 Composition and the collection, tax-assessment, journal-proposal, and
 credit-adjustment write paths take the same invoice-draft lock. After a
@@ -129,8 +131,8 @@ lifecycle and ordering checks as PostgreSQL; target lifecycle rejections remain
 stable `target_period_not_found` or `target_period_not_open` 422 results. The
 list repository contract accepts a decoded `(recorded_at, late_adjustment_id)`
 cursor and bounded limit; PostgreSQL performs one ordered tenant-scoped keyset
-query with `limit + 1`. Presentment uses one bulk application-existence and one
-bulk rating-existence lookup for the returned page. The memory adapter
+query with `limit + 1`. Presentment uses one bulk application-existence,
+rating-existence, and composition-existence lookup for the returned page. The memory adapter
 serializes recording, application, rating, and target-period lifecycle writes
 to preserve at-most-once behavior during concurrent application and close.
 

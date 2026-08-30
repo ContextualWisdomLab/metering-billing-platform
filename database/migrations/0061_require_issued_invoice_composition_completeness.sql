@@ -30,6 +30,12 @@ BEGIN
           AND issued_invoice_id = NEW.issued_invoice_id;
     END IF;
 
+    PERFORM 1
+    FROM billing_core.invoice_draft
+    WHERE tenant_account_id = tenant_id
+      AND invoice_draft_id = draft_id
+    FOR UPDATE;
+
     SELECT drafted_total_amount
     INTO drafted_total
     FROM billing_core.invoice_draft

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import os
-from threading import Barrier, Event
+from threading import Barrier, Event, Thread
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -689,6 +689,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(
             self.ledger.find_late_adjustment_rating_ids(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id, ()
+            ),
+            frozenset(),
+        )
+        self.assertEqual(
+            self.ledger.find_late_adjustment_invoice_adjusted_ids(
                 self.ledger.require_tenant(TENANT_ONE).tenant_account_id, ()
             ),
             frozenset(),
@@ -13251,6 +13257,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             rated_by="operator:finance",
             authorization_reference="approval:rate",
         )
+        with self.assertRaisesRegex(ValueError, "recorded_at.*future"):
+            LateAdjustmentInvoiceAdjustmentService(
+                self.ledger, clock=lambda: datetime.now(UTC) + timedelta(days=1)
+            ).record_invoice_adjustment(
+                TENANT_ONE,
+                late.late_adjustment_id,
+                draft.invoice_draft_id,
+                recorded_by="operator:future",
+                authorization_reference="approval:future",
+            )
         composition_service = LateAdjustmentInvoiceAdjustmentService(
             self.ledger,
             clock=lambda: CATALOG_START + timedelta(hours=3),
@@ -13272,6 +13288,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.late_adjustment_rating_id, rated.late_adjustment_rating_id)
+        with self.assertRaisesRegex(ValueError, "recorded_at.*future"):
+            self.ledger.insert_late_adjustment_invoice_adjustment(
+                replace(
+                    stored,
+                    late_adjustment_invoice_adjustment_id=uuid4(),
+                    recorded_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
         replay = composition_service.record_invoice_adjustment(
             TENANT_ONE,
             late.late_adjustment_id,
@@ -13772,6 +13796,134 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                         CATALOG_START,
                     ),
                 )
+        self.assertIsNone(
+            self.ledger.find_issued_invoice(
+                tenant.tenant_account_id, draft.invoice_draft_id
+            )
+        )
+
+    def test_postgres_issuance_waits_for_composition_draft_lock(self) -> None:
+        """A direct SQL writer serializes on the draft before issuance."""
+        adjustment, draft = prepare_postgres_late_adjustment(
+            self.ledger, "-0.002", "provider:composition-issuance-race", quantity="1841"
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+
+        composition_connection = psycopg.connect(POSTGRES_DSN)
+        composition_connection.execute("BEGIN")
+        composition_ledger = PostgresUsageLedger(composition_connection)
+        try:
+            composed = LateAdjustmentInvoiceAdjustmentService(
+                composition_ledger,
+                clock=lambda: CATALOG_START + timedelta(hours=3),
+            ).record_invoice_adjustment(
+                TENANT_ONE,
+                adjustment.late_adjustment_id,
+                draft.invoice_draft_id,
+                recorded_by="operator:race",
+                authorization_reference="approval:race",
+            )
+            self.assertEqual(composed.late_adjustment_invoice_adjustment_outcome_code.value, "accepted")
+            composition_connection.execute(
+                """
+                SELECT 1
+                FROM billing_core.invoice_draft
+                WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                FOR UPDATE
+                """,
+                (tenant.tenant_account_id, draft.invoice_draft_id),
+            )
+
+            issued_invoice_id = uuid4()
+            issue_started = Event()
+            issue_inserted = Event()
+            issue_succeeded = Event()
+            issue_pid: list[int] = []
+            issue_errors: list[BaseException] = []
+
+            def issue_directly() -> None:
+                try:
+                    with psycopg.connect(POSTGRES_DSN) as lock_connection:
+                        issue_pid.append(
+                            lock_connection.execute("SELECT pg_backend_pid()").fetchone()[0]
+                        )
+                        issue_started.set()
+                        lock_connection.execute(
+                            """
+                            SELECT 1
+                            FROM billing_core.invoice_draft
+                            WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                            FOR UPDATE
+                            """,
+                            (tenant.tenant_account_id, draft.invoice_draft_id),
+                        )
+                        lock_connection.commit()
+                    issue_inserted.set()
+                    with psycopg.connect(POSTGRES_DSN) as issue_connection:
+                        with issue_connection.transaction():
+                            issue_connection.execute(
+                                """
+                                INSERT INTO billing_core.issued_invoice
+                                    (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                                     issued_invoice_contract_version, rating_run_id,
+                                     usage_snapshot_hash, source_payload_hash, currency_code,
+                                     tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                                     issued_invoice_status, issued_at)
+                                VALUES (%s, %s, %s, 2, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                                """,
+                                (
+                                    issued_invoice_id,
+                                    tenant.tenant_account_id,
+                                    draft.invoice_draft_id,
+                                    stored_draft.rating_run_id,
+                                    stored_draft.usage_snapshot_hash,
+                                    "sha256:" + "c" * 64,
+                                    stored_draft.currency_code,
+                                    stored_draft.drafted_total_amount,
+                                    stored_draft.drafted_total_amount,
+                                    CATALOG_START,
+                                ),
+                            )
+                        issue_succeeded.set()
+                except BaseException as error:  # pragma: no cover - asserted below
+                    issue_errors.append(error)
+
+            issue_thread = Thread(target=issue_directly)
+            issue_thread.start()
+            self.assertTrue(issue_started.wait(5))
+
+            blockers: list[int] = []
+            for _ in range(100):
+                blockers = self.connection.execute(
+                    "SELECT pg_blocking_pids(%s)", (issue_pid[0],)
+                ).fetchone()[0]
+                if blockers:
+                    break
+                if issue_inserted.is_set():
+                    break
+                issue_inserted.wait(0.01)
+            self.assertTrue(blockers)
+            composition_connection.commit()
+            self.assertEqual(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM billing_core.late_adjustment_invoice_adjustment "
+                    "WHERE invoice_draft_id = %s",
+                    (draft.invoice_draft_id,),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertTrue(issue_inserted.wait(5))
+            issue_thread.join(5)
+            self.assertFalse(issue_thread.is_alive())
+            self.assertFalse(issue_succeeded.is_set())
+            self.assertEqual(len(issue_errors), 1)
+            self.assertIsInstance(issue_errors[0], psycopg.errors.RaiseException)
+            self.assertIn("missing late adjustment lines", str(issue_errors[0]))
+        finally:
+            composition_connection.rollback()
+            composition_connection.close()
         self.assertIsNone(
             self.ledger.find_issued_invoice(
                 tenant.tenant_account_id, draft.invoice_draft_id

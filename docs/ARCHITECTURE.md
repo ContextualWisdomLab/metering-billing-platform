@@ -102,7 +102,8 @@ and enforces composition contract version 2 in PostgreSQL. Migration `0060`
 rejects composition precision loss, validates direct issued-line draft/amount/
 payer equality, and lets collection start after issuance from the frozen total.
 Migration `0061` defers the completeness check until all direct issued lines are
-inserted, rejecting omitted compositions or stale signed totals.
+inserted and takes the shared invoice-draft lock before comparing facts,
+rejecting omitted compositions or stale signed totals.
 Migration `0062` repeats issued-invoice snapshot and line immutability for direct
 PostgreSQL UPDATE/DELETE and removes the `line_type` default so direct lines must
 declare their type explicitly.

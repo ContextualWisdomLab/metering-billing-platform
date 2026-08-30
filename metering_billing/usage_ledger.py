@@ -3161,6 +3161,18 @@ class MemoryUsageLedger:
             if stored_tenant_id == tenant_account_id and late_adjustment_id in requested
         )
 
+    def find_late_adjustment_invoice_adjusted_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return late-adjustment IDs composed into an invoice for one page."""
+        requested = set(late_adjustment_ids)
+        return frozenset(
+            composition.late_adjustment_id
+            for composition in self.late_adjustment_invoice_adjustments.values()
+            if composition.tenant_account_id == tenant_account_id
+            and composition.late_adjustment_id in requested
+        )
+
     def get_late_adjustment_application(
         self, late_adjustment_application_id: UUID
     ) -> StoredLateAdjustmentApplication | None:
@@ -3427,6 +3439,7 @@ class MemoryUsageLedger:
             )
         if composition.late_adjustment_invoice_adjustment_status != "recorded":
             raise ValueError("late adjustment invoice adjustment status must be recorded")
+        _validate_audit_timestamp(composition.recorded_at, "recorded_at")
         if CURRENCY_CODE_PATTERN.fullmatch(composition.currency_code) is None:
             raise ValueError("currency_code must be a three-letter ISO code")
         if (
@@ -4742,6 +4755,21 @@ class MemoryUsageLedger:
         if outbox_event_id is None:
             return None
         return self.webhook_outbox_events[outbox_event_id]
+
+    def find_webhook_outbox_event_by_source(
+        self, tenant_account_id: UUID, event_type_code: str, source_id: UUID
+    ) -> StoredWebhookOutboxEvent | None:
+        """Return the append-only event for one tenant-scoped commercial fact."""
+        return next(
+            (
+                outbox_event
+                for outbox_event in self.webhook_outbox_events.values()
+                if outbox_event.tenant_account_id == tenant_account_id
+                and outbox_event.event_type_code == event_type_code
+                and outbox_event.source_id == source_id
+            ),
+            None,
+        )
 
     def list_pending_webhook_outbox_events(
         self, tenant_account_id: UUID

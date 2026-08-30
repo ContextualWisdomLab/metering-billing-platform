@@ -42,7 +42,7 @@ from metering_billing.errors import (
 from metering_billing.issued_invoice import next_operator_action
 from metering_billing.issued_invoice_presentment import next_operator_action as presentment_action
 from metering_billing.usage_ledger import generate_record_id
-from metering_billing.webhook_outbox import EVENT_TYPE_INVOICE_ISSUED
+from metering_billing.webhook_outbox import EVENT_TYPE_INVOICE_ISSUED, enqueue_accepted_fact
 from test_collection_case import draft_known_morning
 from test_http_app import invoke_http
 from test_tax_assessment import HUNDRED, STANDARD_TAX_RATE, insert_commercial_draft
@@ -186,6 +186,30 @@ class IssuedInvoiceTests(unittest.TestCase):
         ledger.issued_invoices[issued.issued_invoice_id] = replace(
             stored, issued_invoice_contract_version=1
         )
+        historical_event = next(
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+        )
+        ledger.webhook_outbox_events.pop(historical_event.outbox_event_id)
+        ledger.webhook_outbox_identity_index.pop(
+            (
+                historical_event.tenant_account_id,
+                historical_event.event_type_code,
+                historical_event.source_id,
+                historical_event.payload_hash,
+            )
+        )
+        historical_data = json.loads(historical_event.payload_json)["data"]
+        historical_data["issued_invoice_contract_version"] = 1
+        enqueue_accepted_fact(
+            ledger,
+            TENANT_ONE,
+            EVENT_TYPE_INVOICE_ISSUED,
+            issued.issued_invoice_id,
+            historical_data,
+            historical_event.occurred_at,
+        )
         presented = IssuedInvoicePresentmentService(ledger).present_issued_invoice(
             TENANT_ONE, issued.issued_invoice_id
         )
@@ -199,6 +223,42 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(replayed.issued_invoice_outcome_code.value, "duplicate_replay")
         self.assertEqual(replayed.issued_invoice_contract_version, 2)
         self.assertEqual(validate_issued_invoice(replayed.as_contract_dict()), ())
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+                ]
+            ),
+            1,
+        )
+        replay_event = next(
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+        )
+        self.assertEqual(
+            json.loads(replay_event.payload_json)["data"][
+                "issued_invoice_contract_version"
+            ],
+            1,
+        )
+
+    def test_invoice_outbox_enqueue_fails_closed_if_tenant_disappears(self) -> None:
+        """A transient tenant-resolution miss never creates an outbox row."""
+        ledger, invoice_draft_id = draft_known_morning()
+        resolved = ledger.resolve_tenant(TENANT_ONE)
+        with mock.patch.object(
+            ledger,
+            "resolve_tenant",
+            side_effect=[resolved, (None, "tenant_not_found")],
+        ):
+            issued = IssuedInvoiceService(ledger, clock=lambda: ISSUED_MORNING).issue_invoice(
+                TENANT_ONE, invoice_draft_id
+            )
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        self.assertEqual(ledger.webhook_outbox_events, {})
 
     def test_taxed_draft_freezes_assessment_totals_and_optional_due_at(self) -> None:
         """A taxed draft copies exclusive/tax/inclusive and stores caller due_at."""

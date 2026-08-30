@@ -25,6 +25,7 @@ from metering_billing.usage_ledger import (
     LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION,
     MemoryUsageLedger,
     StoredLateAdjustmentInvoiceAdjustment,
+    _validate_audit_timestamp,
     generate_record_id,
 )
 
@@ -320,7 +321,7 @@ class LateAdjustmentInvoiceAdjustmentService:
             currency_code=rating.currency_code,
             recorded_by=recorded_by_text,
             authorization_reference=authorization_text,
-            recorded_at=self._clock(),
+            recorded_at=_validate_audit_timestamp(self._clock(), "recorded_at"),
             source_payload_hash=source_payload_hash,
             late_adjustment_invoice_adjustment_contract_version=(
                 LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION

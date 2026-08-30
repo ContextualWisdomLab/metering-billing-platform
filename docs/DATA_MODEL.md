@@ -280,7 +280,8 @@ target openness for first ratings, and update/delete immutability. Migration
 `rating_run`. `LateAdjustmentInvoiceAdjustmentService` then stores one
 tenant-scoped `late_adjustment_invoice_adjustment` per rated adjustment, linked
 to an unissued invoice draft and copying the signed exact delta, target period,
-application, rating, audit, source-hash, and single billing-account evidence. Migration `0054` protects
+application, rating, audit, source-hash, and single billing-account evidence.
+The composition audit instant is timezone-aware and not future-dated. Migration `0054` protects
 the tenant-scoped links, currency/evidence equality, replay identity, issued
 draft boundary, and update/delete immutability. It does not rewrite the draft,
 issue the invoice, calculate tax, or call a provider. Migration `0055` adds
@@ -306,7 +307,8 @@ composition draft/amount/payer, and lets a post-issue collection row copy only
 the frozen issued inclusive total.
 Migration `0061` adds deferred PostgreSQL checks requiring every composition
 linked to an issued draft to have one matching late-adjustment line and to be
-included in the issued exclusive total.
+included in the issued exclusive total; the check takes the invoice-draft lock
+before reading the composition set.
 Migration `0062` adds database immutability triggers for issued invoices and
 issued lines and removes the `line_type` default, so direct issued-line writes
 must provide the explicit version-2 type.

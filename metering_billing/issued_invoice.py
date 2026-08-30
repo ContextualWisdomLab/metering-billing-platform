@@ -500,6 +500,16 @@ def _enqueue_invoice_issued(
     """
     assert result.issued_invoice_id is not None
     assert result.issued_at is not None
+    tenant, tenant_error = ledger.resolve_tenant(tenant_reference)
+    if tenant_error is not None or tenant is None:
+        return
+    existing = ledger.find_webhook_outbox_event_by_source(
+        tenant.tenant_account_id,
+        EVENT_TYPE_INVOICE_ISSUED,
+        result.issued_invoice_id,
+    )
+    if existing is not None:
+        return
     enqueue_accepted_fact(
         ledger,
         tenant_reference,

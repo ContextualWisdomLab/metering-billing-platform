@@ -55,6 +55,9 @@ DECLARE
     rating billing_core.late_adjustment_rating%ROWTYPE;
     draft billing_core.invoice_draft%ROWTYPE;
 BEGIN
+    IF NEW.recorded_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'recorded_at must not be in the future';
+    END IF;
     IF EXISTS (
         SELECT 1
         FROM billing_core.late_adjustment_invoice_adjustment AS existing

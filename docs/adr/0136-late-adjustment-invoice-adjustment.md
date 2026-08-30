@@ -20,6 +20,8 @@ replays return the stored composition. A currency mismatch, cross-tenant draft,
 already-issued draft, downstream collection/journal/tax/credit fact, ambiguous
 billing account, or unrepresentable amount is rejected. Existing drafts and
 issued invoice snapshots are never overwritten.
+The composition audit instant is required to be timezone-aware and not
+future-dated at the service, repository, and PostgreSQL boundaries.
 
 ## Consequences
 
@@ -55,12 +57,16 @@ issued invoice snapshots are never overwritten.
   `numeric(38,12)`, validates direct issued-line draft/amount/payer equality,
   and permits post-issue collection only from the frozen inclusive total.
 - Migration `0061` uses deferred PostgreSQL checks to require every linked
-  composition to appear once in issued lines and in the frozen exclusive total.
+  composition to appear once in issued lines and in the frozen exclusive total;
+  the check takes the shared invoice-draft lock before comparing facts.
 - Migration `0062` enforces issued-invoice snapshot and line immutability at the
   database boundary and removes the issued-line `line_type` default.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not
   part of the replay identity. Historical stored v1 invoices remain readable
   because presentment upgrades only the response envelope.
+- Historical v1 invoice replay keeps the existing `invoice.issued` outbox fact
+  by source identity; upgrading the current response envelope does not emit a
+  second webhook fact.
 - Collection, journal, provider export, and legal invoice authority remain
   separate downstream boundaries; this slice does not claim any of them.

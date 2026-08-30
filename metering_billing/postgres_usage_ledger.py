@@ -449,6 +449,25 @@ class PostgresUsageLedger:
             )
             return frozenset(UUID(str(row[0])) for row in cursor.fetchall())
 
+    def find_late_adjustment_invoice_adjusted_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return late-adjustment IDs composed into an invoice for one page."""
+        if not late_adjustment_ids:
+            return frozenset()
+        placeholders = ", ".join("%s" for _ in late_adjustment_ids)
+        with self._cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT late_adjustment_id
+                FROM billing_core.late_adjustment_invoice_adjustment
+                WHERE tenant_account_id = %s
+                  AND late_adjustment_id IN ({placeholders})
+                """,
+                (tenant_account_id, *late_adjustment_ids),
+            )
+            return frozenset(UUID(str(row[0])) for row in cursor.fetchall())
+
     def get_late_adjustment_application(
         self, late_adjustment_application_id: UUID
     ) -> StoredLateAdjustmentApplication | None:
@@ -886,6 +905,7 @@ class PostgresUsageLedger:
             raise ValueError("adjustment_amount must be a canonical exact decimal")
         if composition.late_adjustment_invoice_adjustment_status != "recorded":
             raise ValueError("late adjustment invoice adjustment status must be recorded")
+        _validate_audit_timestamp(composition.recorded_at, "recorded_at")
         for value, field_name in (
             (composition.recorded_by, "recorded_by"),
             (composition.authorization_reference, "authorization_reference"),
@@ -7481,6 +7501,30 @@ class PostgresUsageLedger:
                   AND payload_hash = %s
                 """,
                 (tenant_account_id, event_type_code, source_id, payload_hash),
+            )
+            row = cursor.fetchone()
+            return (
+                None
+                if row is None
+                else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
+            )
+
+    def find_webhook_outbox_event_by_source(
+        self, tenant_account_id: UUID, event_type_code: str, source_id: UUID
+    ) -> StoredWebhookOutboxEvent | None:
+        """Return the append-only event for one tenant-scoped commercial fact."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT outbox_event_id
+                FROM billing_core.webhook_outbox_event
+                WHERE tenant_account_id = %s
+                  AND event_type_code = %s
+                  AND source_id = %s
+                ORDER BY enqueued_at, outbox_event_id
+                LIMIT 1
+                """,
+                (tenant_account_id, event_type_code, source_id),
             )
             row = cursor.fetchone()
             return (

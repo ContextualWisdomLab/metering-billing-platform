@@ -75,7 +75,8 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
   amount, absolute unit price, and billing-account reference. Composition
   amounts that would round in `numeric(38,12)` are rejected by migration `0060`.
   Migration `0061` rejects direct issued headers that omit linked composition
-  lines or freeze a total that excludes a signed adjustment.
+  lines or freeze a total that excludes a signed adjustment, after taking the
+  shared invoice-draft lock.
 - Migration `0062` rejects direct UPDATE/DELETE of issued-invoice snapshots and
   lines and removes the issued-line `line_type` default so a direct insert cannot
   silently become a usage line.
