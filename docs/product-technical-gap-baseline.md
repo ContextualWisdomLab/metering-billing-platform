@@ -29,7 +29,7 @@ composition slice; its initial implementation commit is
 `121a2cf22e4209057c3f9016ad91da687a75f110`.
 
 The implemented #87 path now covers PostgreSQL migrations
-`0048`/`0049`/`0050`/`0051`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062`/`0063`, the `LateAdjustment`,
+`0048`/`0049`/`0050`/`0051`/`0053`/`0054`/`0055`/`0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062`/`0063`/`0064`, the `LateAdjustment`,
 application, rating-consumption, and invoice-adjustment contracts,
 tenant-scoped presentment reads, and durable application/rating/composition
 facts for late usage, correction, and reversal evidence. Composition now
@@ -43,18 +43,19 @@ totals, rejects stale tax assessments pending reassessment, preserves large exac
 totals before storage validation, and rejects a projected issued invoice above
 10,000 lines. Direct composition persistence after downstream capture is blocked
 by migration `0058`, enforces composition contract version 2 through migration
-`0059`, `0060`, `0061`, `0062`, `0063`, and historical v1 issued invoices remain readable through
+`0059`, `0060`, `0061`, `0062`, `0063`, `0064`, and historical v1 issued invoices remain readable through
 the v2 presentment and issuance-replay envelopes; migration `0061` serializes
 direct issuance checks on the shared draft lock; post-issue collection uses the
 frozen adjusted total, direct issued persistence cannot omit linked lines, and
 issued snapshots/lines cannot be mutated or rely on an implicit line type; new
-direct issued headers cannot use an unsupported contract version.
+direct issued headers cannot use an unsupported contract version, and direct
+composition writes cannot persist future audit timestamps.
 The source period
 must be at least `soft_closed`; the target must be `open` and start no earlier
 than the source end; composition requires a rated adjustment and an unissued
 same-tenant, same-currency invoice draft. Targeted real-PostgreSQL, full
 repository contract, and full 100% statement/branch coverage tests pass on the
-working branch (786 tests, 19,097 statements, and 6,528 branches). Composition
+working branch (788 tests, 19,143 statements, and 6,564 branches). Composition
 and rating audit timestamps are timezone-aware and not future-dated at every
 write boundary; historical invoice replay preserves one source-scoped outbox
 fact, and late-adjustment list presentment uses bounded bulk composition lookup.

@@ -109,6 +109,8 @@ PostgreSQL UPDATE/DELETE and removes the `line_type` default so direct lines mus
 declare their type explicitly.
 Migration `0063` rejects new direct issued snapshots whose contract version is
 not 2 without rewriting historical v1 rows.
+Migration `0064` rejects future first-write composition timestamps while
+preserving replay of an existing immutable composition.
 Presentment then reports `issue_invoice`. `IssuedInvoiceService` locks the
 draft, consumes all linked composition facts exactly once, and freezes each as
 a signed `late_adjustment` issued-invoice line while adjusting the untaxed

@@ -314,6 +314,8 @@ issued lines and removes the `line_type` default, so direct issued-line writes
 must provide the explicit version-2 type.
 Migration `0063` requires contract version 2 for new issued-invoice headers
 while leaving historical v1 rows readable.
+Migration `0064` rejects future composition audit timestamps at the direct
+PostgreSQL boundary without rewriting historical rows.
 `IssuedInvoiceService`
 locks the draft before consuming these facts and adjusts an untaxed issued
 total exactly. If a tax assessment already exists, issuance rejects until a

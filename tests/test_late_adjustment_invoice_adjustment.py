@@ -36,6 +36,7 @@ from metering_billing import (
 from metering_billing.errors import ExactDecimalError
 from metering_billing.exact_decimal import issued_invoice_amount_exceeds_storage_precision
 from metering_billing.issued_invoice import (
+    _build_issued_lines,
     _format_signed_decimal,
     _project_draft_lines,
     _tax_amounts,
@@ -49,6 +50,7 @@ from metering_billing.usage_ledger import (
     StoredJournalProposal,
     StoredJournalProposalLine,
     StoredLateAdjustmentInvoiceAdjustment,
+    StoredIssuedInvoice,
     StoredTaxAssessment,
 )
 from metering_billing.late_adjustment_invoice_adjustment import (
@@ -243,6 +245,100 @@ class LateAdjustmentInvoiceAdjustmentTests(unittest.TestCase):
                 )
                 self.assertEqual(replay.issued_invoice_id, issued.issued_invoice_id)
                 self.assertEqual(len(replay.issued_invoice_lines), len(issued.issued_invoice_lines))
+
+    def test_memory_direct_issued_invoice_enforces_composition_completeness(self) -> None:
+        """Direct memory persistence cannot omit, forge, or mis-total compositions."""
+        ledger, adjustment, draft = prepare_invoice_adjustment("-0.002")
+        composed = LateAdjustmentInvoiceAdjustmentService(ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        tenant = ledger.require_tenant(TENANT_ONE)
+        stored_draft = ledger.get_invoice_draft(draft.invoice_draft_id)
+        stored_composition = ledger.get_late_adjustment_invoice_adjustment(
+            composed.late_adjustment_invoice_adjustment_id
+        )
+        assert stored_draft is not None
+        assert stored_composition is not None
+        expected_exclusive = stored_draft.drafted_total_amount + stored_composition.adjustment_amount
+
+        def candidate(
+            lines_factory=None,
+            *,
+            invoice_draft_id=draft.invoice_draft_id,
+            tax_exclusive_amount=expected_exclusive,
+            contract_version=2,
+        ):
+            issued_invoice_id = uuid4()
+            lines = _build_issued_lines(
+                issued_invoice_id, stored_draft, (stored_composition,)
+            )
+            if lines_factory is not None:
+                lines = lines_factory(lines)
+            return (
+                StoredIssuedInvoice(
+                    issued_invoice_id=issued_invoice_id,
+                    tenant_account_id=tenant.tenant_account_id,
+                    invoice_draft_id=invoice_draft_id,
+                    issued_invoice_contract_version=contract_version,
+                    rating_run_id=stored_draft.rating_run_id,
+                    usage_snapshot_hash=stored_draft.usage_snapshot_hash,
+                    source_payload_hash="sha256:" + "c" * 64,
+                    currency_code=stored_draft.currency_code,
+                    tax_exclusive_amount=tax_exclusive_amount,
+                    tax_amount=Decimal("0"),
+                    tax_inclusive_amount=tax_exclusive_amount,
+                    issued_invoice_status="issued",
+                    issued_at=datetime(2026, 8, 3, tzinfo=UTC),
+                    due_at=None,
+                    issued_invoice_lines=lines,
+                ),
+                lines,
+            )
+
+        invalid_candidates = (
+            candidate(contract_version=1),
+            candidate(invoice_draft_id=uuid4()),
+            candidate(lambda lines: lines[:1]),
+            candidate(lambda lines: (replace(lines[1], tenant_account_id=uuid4()), lines[0])),
+            candidate(lambda lines: (replace(lines[1], issued_invoice_id=uuid4()), lines[0])),
+            candidate(lambda lines: (replace(lines[0], late_adjustment_invoice_adjustment_id=stored_composition.late_adjustment_invoice_adjustment_id), lines[1])),
+            candidate(lambda lines: (replace(lines[1], late_adjustment_invoice_adjustment_id=None), lines[0])),
+            candidate(lambda lines: (replace(lines[1], late_adjustment_invoice_adjustment_id=uuid4()), lines[0])),
+            candidate(lambda lines: (replace(lines[1], billing_account_reference="urn:cwl:forged"), lines[0])),
+            candidate(lambda lines: (replace(lines[1], line_total_amount=Decimal("-0.003")), lines[0])),
+            candidate(lambda lines: (replace(lines[1], unit_price_amount=Decimal("0.003")), lines[0])),
+            candidate(lambda lines: (replace(lines[1], rated_quantity=Decimal("2")), lines[0])),
+            candidate(lambda lines: (replace(lines[0], line_total_amount=Decimal("-1")), lines[1])),
+            candidate(lambda lines: lines + (replace(lines[0], line_type="other", issued_invoice_line_id=uuid4()),)),
+            candidate(tax_exclusive_amount=stored_draft.drafted_total_amount),
+        )
+        for invalid, lines in invalid_candidates:
+            with self.assertRaises(ValueError):
+                ledger.insert_issued_invoice(invalid, lines)
+
+        second_composition = replace(
+            stored_composition,
+            late_adjustment_invoice_adjustment_id=uuid4(),
+            adjustment_amount=Decimal("0.002"),
+        )
+        def duplicate_line_factory(lines):
+            return lines + (replace(lines[1], issued_invoice_line_id=uuid4()),)
+
+        duplicate_candidate, duplicate_lines = candidate(
+            duplicate_line_factory,
+            tax_exclusive_amount=expected_exclusive + second_composition.adjustment_amount,
+        )
+        with mock.patch.object(
+            ledger,
+            "list_late_adjustment_invoice_adjustments_for_draft",
+            return_value=(stored_composition, second_composition),
+        ):
+            with self.assertRaisesRegex(ValueError, "do not match compositions"):
+                ledger.insert_issued_invoice(duplicate_candidate, duplicate_lines)
 
     def test_issued_adjustment_uses_frozen_total_for_collection(self) -> None:
         """An adjusted issued snapshot can enter collection at its frozen total."""

@@ -63,6 +63,8 @@ future-dated at the service, repository, and PostgreSQL boundaries.
   database boundary and removes the issued-line `line_type` default.
 - Migration `0063` requires contract version 2 for new direct issued-invoice
   headers while leaving historical v1 snapshots readable and unchanged.
+- Migration `0064` rejects future first-write composition timestamps while
+  preserving replay of an existing immutable composition.
 - Issued-invoice and presentment line envelopes are contract version 2. Audit
   actor, authorization, and timestamp remain first-write evidence and are not
   part of the replay identity. Historical stored v1 invoices remain readable

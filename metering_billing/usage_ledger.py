@@ -2029,6 +2029,7 @@ class MemoryUsageLedger:
         identity_key = (issued_invoice.tenant_account_id, issued_invoice.invoice_draft_id)
         if identity_key in self.issued_invoice_index:
             raise ValueError("issued invoices are immutable and cannot be replaced")
+        self._validate_issued_invoice_composition(issued_invoice, issued_invoice_lines)
         persisted = StoredIssuedInvoice(
             issued_invoice_id=issued_invoice.issued_invoice_id,
             tenant_account_id=issued_invoice.tenant_account_id,
@@ -2050,6 +2051,67 @@ class MemoryUsageLedger:
         self.issued_invoice_index[identity_key] = persisted.issued_invoice_id
         self.issued_invoice_lines.extend(issued_invoice_lines)
         return persisted
+
+    def _validate_issued_invoice_composition(
+        self,
+        issued_invoice: StoredIssuedInvoice,
+        issued_invoice_lines: tuple[StoredIssuedInvoiceLine, ...],
+    ) -> None:
+        """Keep direct memory persistence aligned with PostgreSQL composition checks."""
+        if issued_invoice.issued_invoice_contract_version != 2:
+            raise ValueError("new issued invoice contract version must be 2")
+        draft = self.get_invoice_draft(issued_invoice.invoice_draft_id)
+        if draft is None or draft.tenant_account_id != issued_invoice.tenant_account_id:
+            raise ValueError("issued invoice draft is missing")
+        compositions = self.list_late_adjustment_invoice_adjustments_for_draft(
+            issued_invoice.tenant_account_id, issued_invoice.invoice_draft_id
+        )
+        composition_by_id = {
+            composition.late_adjustment_invoice_adjustment_id: composition
+            for composition in compositions
+        }
+        adjustment_lines = tuple(
+            line for line in issued_invoice_lines if line.line_type == "late_adjustment"
+        )
+        if len(adjustment_lines) != len(compositions):
+            raise ValueError("issued invoice is missing late adjustment lines")
+        line_composition_ids: set[UUID] = set()
+        for line in issued_invoice_lines:
+            if line.tenant_account_id != issued_invoice.tenant_account_id:
+                raise ValueError("issued invoice line tenant does not match invoice")
+            if line.issued_invoice_id != issued_invoice.issued_invoice_id:
+                raise ValueError("issued invoice line does not match invoice")
+            if line.line_type == "usage":
+                if line.late_adjustment_invoice_adjustment_id is not None:
+                    raise ValueError("usage line cannot carry composition evidence")
+                if line.line_total_amount < 0:
+                    raise ValueError("usage line total must be non-negative")
+                continue
+            if line.line_type != "late_adjustment":
+                raise ValueError("issued invoice line type is unsupported")
+            composition_id = line.late_adjustment_invoice_adjustment_id
+            if composition_id is None:
+                raise ValueError("late adjustment line is missing composition evidence")
+            composition = composition_by_id.get(composition_id)
+            if composition is None:
+                raise ValueError("issued invoice composition evidence is unknown")
+            line_composition_ids.add(composition_id)
+            if line.billing_account_reference != composition.billing_account_reference:
+                raise ValueError("late adjustment line billing account does not match composition")
+            if line.line_total_amount != composition.adjustment_amount:
+                raise ValueError("late adjustment line total does not match composition")
+            if line.unit_price_amount != composition.adjustment_amount.copy_abs():
+                raise ValueError("late adjustment line unit price does not match composition")
+            if line.rated_quantity != Decimal("1"):
+                raise ValueError("late adjustment line quantity must be one")
+        if line_composition_ids != set(composition_by_id):
+            raise ValueError("issued invoice composition lines do not match compositions")
+        expected_exclusive = sum_exact_decimals(
+            draft.drafted_total_amount,
+            *(composition.adjustment_amount for composition in compositions),
+        )
+        if issued_invoice.tax_exclusive_amount != expected_exclusive:
+            raise ValueError("issued invoice total does not include late adjustments")
 
     def find_issued_credit_note(
         self, tenant_account_id: UUID, credit_adjustment_id: UUID

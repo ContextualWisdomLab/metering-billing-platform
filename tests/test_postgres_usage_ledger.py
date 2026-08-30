@@ -296,8 +296,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 63:
-            raise AssertionError(f"expected 63 migrations, got {len(applied)}")
+        if len(applied) != 64:
+            raise AssertionError(f"expected 64 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -13630,6 +13630,64 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                         "approval:test",
                         CATALOG_START,
                         "sha256:" + "e" * 64,
+                        2,
+                        "recorded",
+                        line.billing_account_id,
+                        line.billing_account_reference,
+                    ),
+                )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.late_adjustment_invoice_adjustment "
+                "WHERE invoice_draft_id = %s",
+                (draft.invoice_draft_id,),
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_postgres_direct_composition_rejects_future_recorded_at(self) -> None:
+        """Raw composition inserts cannot persist a future audit timestamp."""
+        adjustment, draft = prepare_postgres_late_adjustment(
+            self.ledger, "0.002", "provider:direct-future-composition"
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        rating = self.ledger.find_late_adjustment_rating(
+            tenant.tenant_account_id, adjustment.late_adjustment_id
+        )
+        assert stored_draft is not None
+        assert rating is not None
+        line = stored_draft.invoice_draft_lines[0]
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_invoice_adjustment
+                        (late_adjustment_invoice_adjustment_id, tenant_account_id,
+                         late_adjustment_rating_id, late_adjustment_application_id,
+                         late_adjustment_id, invoice_draft_id, target_period_id,
+                         adjustment_amount, currency_code, recorded_by,
+                         authorization_reference, recorded_at, source_payload_hash,
+                         late_adjustment_invoice_adjustment_contract_version,
+                         late_adjustment_invoice_adjustment_status, billing_account_id,
+                         billing_account_reference)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        tenant.tenant_account_id,
+                        rating.late_adjustment_rating_id,
+                        rating.late_adjustment_application_id,
+                        rating.late_adjustment_id,
+                        draft.invoice_draft_id,
+                        rating.target_period_id,
+                        rating.adjustment_amount,
+                        rating.currency_code,
+                        "operator:future",
+                        "approval:future",
+                        datetime.now(UTC) + timedelta(days=1),
+                        "sha256:" + "f" * 64,
                         2,
                         "recorded",
                         line.billing_account_id,
