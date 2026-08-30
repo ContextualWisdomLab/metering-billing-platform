@@ -34,7 +34,9 @@ journal, tax unwind, or webhook.
 from metering_billing.ais_outbox_drain import AisOutboxDrainService
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
-from metering_billing.account_statement_presentment import AccountStatementPresentmentService
+from metering_billing.account_statement_presentment import (
+    AccountStatementPresentmentService,
+)
 from metering_billing.rated_spend_presentment import RatedSpendPresentmentService
 from metering_billing.spend_budget import SpendBudgetService
 from metering_billing.spend_budget_presentment import SpendBudgetPresentmentService
@@ -51,13 +53,18 @@ from metering_billing.spend_budget_approaching_signal import (
 from metering_billing.spend_budget_approaching_signal_presentment import (
     SpendBudgetApproachingSignalPresentmentService,
 )
-from metering_billing.collection_aging_presentment import CollectionAgingPresentmentService
-from metering_billing.collection_case_presentment import CollectionCasePresentmentService
+from metering_billing.collection_aging_presentment import (
+    CollectionAgingPresentmentService,
+)
+from metering_billing.collection_case_presentment import (
+    CollectionCasePresentmentService,
+)
 from metering_billing.dunning_event_presentment import DunningEventPresentmentService
 from metering_billing.contracts import (
     ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME,
     ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME,
     BILLING_PERIOD_SCHEMA_NAME,
+    LATE_ADJUSTMENT_SCHEMA_NAME,
     COLLECTION_CASE_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_SCHEMA_NAME,
     RATE_CARD_SCHEMA_NAME,
@@ -182,6 +189,7 @@ from metering_billing.contracts import (
     validate_webhook_subscription,
     validate_journal_proposal,
     validate_billing_period,
+    validate_late_adjustment,
     validate_fx_rate,
     validate_fx_conversion,
     validate_reconciliation_line,
@@ -308,7 +316,9 @@ from metering_billing.http_app import create_http_app
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.invoice_presentment import InvoicePresentmentService
 from metering_billing.issued_credit_note import IssuedCreditNoteService
-from metering_billing.issued_credit_note_presentment import IssuedCreditNotePresentmentService
+from metering_billing.issued_credit_note_presentment import (
+    IssuedCreditNotePresentmentService,
+)
 from metering_billing.issued_credit_note_void import IssuedCreditNoteVoidService
 from metering_billing.issued_credit_note_void_presentment import (
     IssuedCreditNoteVoidPresentmentService,
@@ -353,8 +363,13 @@ from metering_billing.tenant_api_credential import TenantApiCredentialService
 from metering_billing.tenant_api_credential_presentment import (
     TenantApiCredentialPresentmentService,
 )
-from metering_billing.webhook_outbox import WebhookDeliveryService, WebhookSubscriptionService
-from metering_billing.webhook_delivery_presentment import WebhookDeliveryPresentmentService
+from metering_billing.webhook_outbox import (
+    WebhookDeliveryService,
+    WebhookSubscriptionService,
+)
+from metering_billing.webhook_delivery_presentment import (
+    WebhookDeliveryPresentmentService,
+)
 from metering_billing.webhook_outbox_event_presentment import (
     WebhookOutboxEventPresentmentService,
 )
@@ -364,7 +379,9 @@ from metering_billing.webhook_subscription_presentment import (
 from metering_billing.payload_integrity import compute_source_payload_hash
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
-from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
+from metering_billing.credit_adjustment_presentment import (
+    CreditAdjustmentPresentmentService,
+)
 from metering_billing.rate_card_presentment import RateCardPresentmentService
 from metering_billing.usage_event_presentment import UsageEventPresentmentService
 from metering_billing.rating_run_presentment import RatingRunPresentmentService
@@ -372,7 +389,9 @@ from metering_billing.tax_assessment_presentment import TaxAssessmentPresentment
 from metering_billing.posting_receipt_observation_presentment import (
     PostingReceiptObservationPresentmentService,
 )
-from metering_billing.payment_receipt_presentment import PaymentReceiptPresentmentService
+from metering_billing.payment_receipt_presentment import (
+    PaymentReceiptPresentmentService,
+)
 from metering_billing.payment_settlement import PaymentSettlementService
 from metering_billing.period_close import (
     BillingPeriod,
@@ -381,6 +400,8 @@ from metering_billing.period_close import (
     FxConversion,
     FxRate,
     FxRateType,
+    LateAdjustment,
+    LateAdjustmentKind,
     ReconciliationException,
     ReconciliationExceptionAging,
     ReconciliationExceptionAgingBucket,
@@ -396,8 +417,12 @@ from metering_billing.period_close import (
     convert_currency_amount,
     create_billing_period,
     create_fx_rate,
+    create_late_adjustment,
 )
-from metering_billing.posting_receipt import AisPostingReceiptClient, PostingReceiptPullService
+from metering_billing.posting_receipt import (
+    AisPostingReceiptClient,
+    PostingReceiptPullService,
+)
 from metering_billing.time_window import TimeWindow, parse_iso8601_datetime
 from metering_billing.usage_ingestion import UsageIngestionService
 from metering_billing.usage_ledger import MemoryUsageLedger
@@ -411,6 +436,7 @@ __all__ = (
     "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
     "BILLING_PERIOD_SCHEMA_NAME",
+    "LATE_ADJUSTMENT_SCHEMA_NAME",
     "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
@@ -478,6 +504,8 @@ __all__ = (
     "BillingPeriod",
     "BillingPeriodStatus",
     "BillingPeriodTransition",
+    "LateAdjustment",
+    "LateAdjustmentKind",
     "CollectionAgingPresentmentQueryError",
     "CollectionAgingPresentmentService",
     "CollectionCaseOutcomeCode",
@@ -662,6 +690,7 @@ __all__ = (
     "convert_currency_amount",
     "create_billing_period",
     "create_fx_rate",
+    "create_late_adjustment",
     "create_http_app",
     "default_consumed_schemas_directory",
     "default_schemas_directory",
@@ -673,6 +702,7 @@ __all__ = (
     "validate_ais_outbox_drain",
     "validate_billing_account_budget_status_presentment",
     "validate_billing_period",
+    "validate_late_adjustment",
     "validate_collection_aging_presentment",
     "validate_collection_case",
     "validate_collection_case_presentment",

@@ -7,7 +7,7 @@ from threading import Barrier
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -112,6 +112,7 @@ from metering_billing.period_close import (
     convert_currency_amount,
     create_billing_period,
     create_fx_rate,
+    create_late_adjustment,
 )
 from metering_billing.rate_card import RateCardService
 from metering_billing.spend_budget import compute_spend_budget_payload_hash
@@ -203,8 +204,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 48:
-            raise AssertionError(f"expected 48 migrations, got {len(applied)}")
+        if len(applied) != 50:
+            raise AssertionError(f"expected 50 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -216,6 +217,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.late_adjustment,
                 billing_core.reconciliation_run_line,
                 billing_core.reconciliation_run,
                 billing_core.reconciliation_evidence,
@@ -283,7 +285,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.register_billing_principal(
                 tenant, principal, "github_workflow", CATALOG_START
             )
-            self.ledger.register_credential_record(tenant, credential, "api_key", credential)
+            self.ledger.register_credential_record(
+                tenant, credential, "api_key", credential
+            )
             self.ledger.register_credential_assignment(
                 tenant, credential, principal, account, CATALOG_START
             )
@@ -303,7 +307,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         tenant = self.ledger.register_tenant(TENANT_ONE)
         self.assertEqual(self.ledger.register_tenant(TENANT_ONE), tenant)
         account = self.ledger.register_billing_account(TENANT_ONE, ACCOUNT_ONE)
-        self.assertEqual(self.ledger.register_billing_account(TENANT_ONE, ACCOUNT_ONE), account)
+        self.assertEqual(
+            self.ledger.register_billing_account(TENANT_ONE, ACCOUNT_ONE), account
+        )
         principal = self.ledger.register_billing_principal(
             TENANT_ONE, PRINCIPAL_ONE, "github_workflow", CATALOG_START
         )
@@ -320,9 +326,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             CATALOG_START + timedelta(days=1),
         )
         self.assertEqual(
-            self.ledger.resolve_billing_principal(
-                tenant, PRINCIPAL_ONE, CATALOG_START
-            )[0],
+            self.ledger.resolve_billing_principal(tenant, PRINCIPAL_ONE, CATALOG_START)[
+                0
+            ],
             principal,
         )
         credential = self.ledger.register_credential_record(
@@ -344,11 +350,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             RejectionReasonCode.ATTRIBUTION_TENANT_MISMATCH,
         )
         self.assertEqual(
-            self.ledger.resolve_billing_principal(tenant, PRINCIPAL_TWO, CATALOG_START)[1],
+            self.ledger.resolve_billing_principal(tenant, PRINCIPAL_TWO, CATALOG_START)[
+                1
+            ],
             RejectionReasonCode.ATTRIBUTION_TENANT_MISMATCH,
         )
         self.assertEqual(
-            self.ledger.resolve_billing_account(tenant, "urn:cwl:tenant_001:missing_account")[1],
+            self.ledger.resolve_billing_account(
+                tenant, "urn:cwl:tenant_001:missing_account"
+            )[1],
             RejectionReasonCode.BILLING_ACCOUNT_NOT_FOUND,
         )
         self.ledger.register_billing_account(
@@ -393,9 +403,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             RejectionReasonCode.CREDENTIAL_NOT_FOUND,
         )
         unassigned = "urn:cwl:tenant_001:credential_record:unassigned"
-        self.ledger.register_credential_record(tenant.tenant_reference, unassigned, "api_key", unassigned)
+        self.ledger.register_credential_record(
+            tenant.tenant_reference, unassigned, "api_key", unassigned
+        )
         self.assertEqual(
-            self.ledger.resolve_credential(tenant, unassigned, principal, account, CATALOG_START)[1],
+            self.ledger.resolve_credential(
+                tenant, unassigned, principal, account, CATALOG_START
+            )[1],
             RejectionReasonCode.CREDENTIAL_NOT_ASSIGNED,
         )
         with self.assertRaises(KeyError):
@@ -483,7 +497,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             transition_id=uuid4(),
         )
         self.assertEqual(self.ledger.insert_billing_period(hard_closed), hard_closed)
-        self.assertEqual(self.ledger.get_billing_period(TENANT_ONE, period.period_id), hard_closed)
+        self.assertEqual(
+            self.ledger.get_billing_period(TENANT_ONE, period.period_id), hard_closed
+        )
         self.assertIsNone(self.ledger.get_billing_period(TENANT_ONE, uuid4()))
         self.assertIsNone(self.ledger.get_billing_period(TENANT_TWO, period.period_id))
         second_period = create_billing_period(
@@ -512,8 +528,262 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                     transitions=(
                         replace(hard_closed.transitions[0], reason="rewrite"),
                         *hard_closed.transitions[1:],
-                    )
+                    ),
                 )
+            )
+
+        target_period = create_billing_period(
+            TENANT_ONE,
+            CATALOG_START.date() + timedelta(days=31),
+            CATALOG_START.date() + timedelta(days=61),
+            opened_by="operator:finance_008",
+            opened_at=CATALOG_START + timedelta(hours=4),
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(target_period)
+        adjustment = create_late_adjustment(
+            period.period_id,
+            target_period.period_id,
+            "late_usage",
+            "12.3400",
+            "USD",
+            "provider:event_001",
+            "sha256:" + "a" * 64,
+            CATALOG_START + timedelta(hours=4),
+            late_adjustment_id=uuid4(),
+        )
+        self.assertEqual(
+            self.ledger.insert_late_adjustment(TENANT_ONE, adjustment), adjustment
+        )
+        self.assertEqual(
+            self.ledger.insert_late_adjustment(TENANT_ONE, adjustment), adjustment
+        )
+        self.assertEqual(
+            self.ledger.get_late_adjustment(TENANT_ONE, adjustment.late_adjustment_id),
+            adjustment,
+        )
+        self.assertIsNone(
+            self.ledger.get_late_adjustment(TENANT_TWO, adjustment.late_adjustment_id)
+        )
+        self.assertIsNone(self.ledger.get_late_adjustment(TENANT_ONE, uuid4()))
+        self.assertEqual(self.ledger.list_late_adjustments(TENANT_ONE), (adjustment,))
+        self.assertEqual(self.ledger.list_late_adjustments(TENANT_TWO), ())
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE, replace(adjustment, adjustment_amount=Decimal("12.35"))
+            )
+        self.assertEqual(
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE, replace(adjustment, late_adjustment_id=uuid4())
+            ),
+            adjustment,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE,
+                replace(
+                    adjustment,
+                    late_adjustment_id=uuid4(),
+                    source_payload_hash="sha256:" + "e" * 64,
+                ),
+            )
+        alternate_source = create_billing_period(
+            TENANT_ONE,
+            CATALOG_START.date() - timedelta(days=31),
+            CATALOG_START.date(),
+            opened_by="operator:finance_014",
+            opened_at=CATALOG_START + timedelta(hours=4),
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_014",
+            authorization_reference="approval:period_008",
+            reason="close alternate source",
+            transitioned_at=CATALOG_START + timedelta(hours=8),
+        )
+        self.ledger.insert_billing_period(alternate_source)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE,
+                replace(
+                    adjustment,
+                    source_period_id=alternate_source.period_id,
+                    source_reference="provider:event_other",
+                ),
+            )
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    "UPDATE billing_core.late_adjustment SET source_reference = %s "
+                    "WHERE late_adjustment_id = %s",
+                    ("provider:event_changed", adjustment.late_adjustment_id),
+                )
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    "DELETE FROM billing_core.late_adjustment WHERE late_adjustment_id = %s",
+                    (adjustment.late_adjustment_id,),
+                )
+        for invalid_amount, source_reference, payload_hash in (
+            ("NaN", "provider:event_nan", "sha256:" + "f" * 64),
+            ("1" * 41, "provider:event_oversized", "sha256:" + "1" * 64),
+        ):
+            with self.assertRaises(psycopg.errors.CheckViolation):
+                with self.connection.transaction():
+                    self.connection.execute(
+                        """
+                        INSERT INTO billing_core.late_adjustment
+                            (late_adjustment_id, tenant_account_id, source_period_id,
+                             target_period_id, adjustment_kind, adjustment_amount,
+                             currency_code, source_reference, source_payload_hash,
+                             recorded_at, late_adjustment_contract_version)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            uuid4(),
+                            self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                            period.period_id,
+                            target_period.period_id,
+                            "correction",
+                            invalid_amount,
+                            "USD",
+                            source_reference,
+                            payload_hash,
+                            CATALOG_START + timedelta(hours=4),
+                            1,
+                        ),
+                    )
+
+        closed_target_period = target_period.advance(
+            "soft_closed",
+            actor_reference="operator:finance_016",
+            authorization_reference="approval:period_010",
+            reason="close adjustment target",
+            transitioned_at=CATALOG_START + timedelta(hours=9),
+        )
+        self.ledger.insert_billing_period(closed_target_period)
+        self.assertEqual(
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE, replace(adjustment, late_adjustment_id=uuid4())
+            ),
+            adjustment,
+        )
+
+        open_source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 10, 1),
+            date(2026, 11, 1),
+            opened_by="operator:finance_009",
+            opened_at=CATALOG_START + timedelta(hours=5),
+            period_id=uuid4(),
+        )
+        open_target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 11, 1),
+            date(2026, 12, 1),
+            opened_by="operator:finance_010",
+            opened_at=CATALOG_START + timedelta(hours=5),
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(open_source)
+        self.ledger.insert_billing_period(open_target)
+        with self.connection.transaction():
+            self.connection.execute(
+                """
+                INSERT INTO billing_core.billing_period_transition
+                    (transition_id, tenant_account_id, period_id, transition_number,
+                     from_status, to_status, actor_reference, authorization_reference,
+                     transition_reason, transitioned_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    uuid4(),
+                    self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                    open_source.period_id,
+                    1,
+                    "soft_closed",
+                    "reconciled",
+                    "operator:finance_015",
+                    "approval:period_009",
+                    "malformed direct history",
+                    CATALOG_START + timedelta(hours=5),
+                ),
+            )
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE,
+                create_late_adjustment(
+                    open_source.period_id,
+                    open_target.period_id,
+                    "correction",
+                    "1",
+                    "USD",
+                    "provider:event_open",
+                    "sha256:" + "b" * 64,
+                    CATALOG_START + timedelta(hours=5),
+                ),
+            )
+
+        closed_target = open_target.advance(
+            "soft_closed",
+            actor_reference="operator:finance_011",
+            authorization_reference="approval:period_006",
+            reason="close target",
+            transitioned_at=CATALOG_START + timedelta(hours=6),
+        )
+        self.ledger.insert_billing_period(closed_target)
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE,
+                create_late_adjustment(
+                    period.period_id,
+                    closed_target.period_id,
+                    "correction",
+                    "1",
+                    "USD",
+                    "provider:event_closed_target",
+                    "sha256:" + "c" * 64,
+                    CATALOG_START + timedelta(hours=6),
+                ),
+            )
+
+        overlap_source = create_billing_period(
+            TENANT_ONE,
+            date(2027, 1, 1),
+            date(2027, 2, 1),
+            opened_by="operator:finance_012",
+            opened_at=CATALOG_START + timedelta(hours=7),
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_012",
+            authorization_reference="approval:period_007",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=8),
+        )
+        overlap_target = create_billing_period(
+            TENANT_ONE,
+            date(2027, 1, 15),
+            date(2027, 2, 15),
+            opened_by="operator:finance_013",
+            opened_at=CATALOG_START + timedelta(hours=7),
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(overlap_source)
+        self.ledger.insert_billing_period(overlap_target)
+        with self.assertRaises(psycopg.errors.RaiseException):
+            self.ledger.insert_late_adjustment(
+                TENANT_ONE,
+                create_late_adjustment(
+                    overlap_source.period_id,
+                    overlap_target.period_id,
+                    "reversal",
+                    "-1",
+                    "USD",
+                    "provider:event_overlap",
+                    "sha256:" + "d" * 64,
+                    CATALOG_START + timedelta(hours=8),
+                ),
             )
 
         rate = create_fx_rate(
@@ -543,7 +813,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(self.ledger.insert_fx_conversion(conversion), conversion)
         self.assertIsNone(self.ledger.get_fx_conversion(uuid4()))
-        self.assertEqual(self.ledger.get_fx_conversion(conversion.fx_conversion_id), conversion)
+        self.assertEqual(
+            self.ledger.get_fx_conversion(conversion.fx_conversion_id), conversion
+        )
         with self.assertRaises(psycopg.errors.RaiseException):
             with self.connection.transaction():
                 self.connection.execute(
@@ -611,9 +883,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_line(TENANT_TWO, matched)
-        self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, matched), matched)
-        self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, exception), exception)
-        self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, exception), exception)
+        self.assertEqual(
+            self.ledger.insert_reconciliation_line(TENANT_ONE, matched), matched
+        )
+        self.assertEqual(
+            self.ledger.insert_reconciliation_line(TENANT_ONE, exception), exception
+        )
+        self.assertEqual(
+            self.ledger.insert_reconciliation_line(TENANT_ONE, exception), exception
+        )
         changed_exception_list = replace(
             exception,
             exceptions=exception.exceptions
@@ -627,7 +905,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_line(TENANT_ONE, changed_exception_list)
         self.assertEqual(
-            self.ledger.get_reconciliation_line(TENANT_ONE, exception.reconciliation_line_id),
+            self.ledger.get_reconciliation_line(
+                TENANT_ONE, exception.reconciliation_line_id
+            ),
             exception,
         )
         expanded_exception = ReconciliationLine(
@@ -656,7 +936,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             reconciliation_line_contract_version=1,
         )
         self.assertEqual(
-            self.ledger.insert_reconciliation_line(TENANT_ONE, expanded_exception), expanded_exception
+            self.ledger.insert_reconciliation_line(TENANT_ONE, expanded_exception),
+            expanded_exception,
         )
         self.assertEqual(
             self.ledger.get_reconciliation_line(
@@ -674,11 +955,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             captured_by="operator:finance_001",
             captured_at=CATALOG_START + timedelta(minutes=4, seconds=2),
         )
-        self.assertEqual(validate_reconciliation_evidence(evidence.as_contract_dict()), ())
+        self.assertEqual(
+            validate_reconciliation_evidence(evidence.as_contract_dict()), ()
+        )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_evidence(TENANT_TWO, evidence)
-        self.assertEqual(self.ledger.insert_reconciliation_evidence(TENANT_ONE, evidence), evidence)
-        self.assertEqual(self.ledger.insert_reconciliation_evidence(TENANT_ONE, evidence), evidence)
+        self.assertEqual(
+            self.ledger.insert_reconciliation_evidence(TENANT_ONE, evidence), evidence
+        )
+        self.assertEqual(
+            self.ledger.insert_reconciliation_evidence(TENANT_ONE, evidence), evidence
+        )
         self.assertEqual(
             self.ledger.get_reconciliation_evidence(TENANT_ONE, evidence.evidence_id),
             evidence,
@@ -689,7 +976,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(
             self.ledger.list_reconciliation_evidence(
-                TENANT_ONE, reconciliation_line_id=expanded_exception.reconciliation_line_id
+                TENANT_ONE,
+                reconciliation_line_id=expanded_exception.reconciliation_line_id,
             ),
             (evidence,),
         )
@@ -697,7 +985,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_evidence(
                 TENANT_ONE,
-                replace(evidence, evidence_reference="urn:cwl:evidence:rewrite")
+                replace(evidence, evidence_reference="urn:cwl:evidence:rewrite"),
             )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_evidence(
@@ -706,7 +994,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                     evidence,
                     evidence_id=uuid4(),
                     exception_code=ReconciliationExceptionCode.REFUND_MISMATCH,
-                )
+                ),
             )
         run = ReconciliationRun(
             run_id=uuid4(),
@@ -725,7 +1013,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.insert_reconciliation_run(TENANT_TWO, run)
         self.assertEqual(self.ledger.insert_reconciliation_run(TENANT_ONE, run), run)
         self.assertEqual(self.ledger.insert_reconciliation_run(TENANT_ONE, run), run)
-        self.assertEqual(self.ledger.get_reconciliation_run(TENANT_ONE, run.run_id), run)
+        self.assertEqual(
+            self.ledger.get_reconciliation_run(TENANT_ONE, run.run_id), run
+        )
         self.assertIsNone(self.ledger.get_reconciliation_run(TENANT_ONE, uuid4()))
         self.assertIsNone(self.ledger.get_reconciliation_run(TENANT_TWO, run.run_id))
         tenant_two_period = create_billing_period(
@@ -736,7 +1026,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             opened_at=CATALOG_START,
             period_id=uuid4(),
         )
-        self.assertEqual(self.ledger.insert_billing_period(tenant_two_period), tenant_two_period)
+        self.assertEqual(
+            self.ledger.insert_billing_period(tenant_two_period), tenant_two_period
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_run(
                 TENANT_TWO,
@@ -744,7 +1036,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         self.assertEqual(self.ledger.list_reconciliation_runs(TENANT_TWO), ())
         self.assertEqual(
-            self.ledger.list_reconciliation_runs(TENANT_ONE, period_id=period.period_id),
+            self.ledger.list_reconciliation_runs(
+                TENANT_ONE, period_id=period.period_id
+            ),
             (run, empty_run),
         )
         empty_run = ReconciliationRun(
@@ -755,25 +1049,28 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             reconciliation_line_ids=(),
             blocking_exception_count=0,
         )
-        self.assertEqual(self.ledger.insert_reconciliation_run(TENANT_ONE, empty_run), empty_run)
+        self.assertEqual(
+            self.ledger.insert_reconciliation_run(TENANT_ONE, empty_run), empty_run
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_run(
-                TENANT_ONE,
-                replace(run, blocking_exception_count=4)
+                TENANT_ONE, replace(run, blocking_exception_count=4)
             )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_run(
                 TENANT_ONE,
-                replace(run, run_id=uuid4(), reconciliation_line_ids=(uuid4(),))
+                replace(run, run_id=uuid4(), reconciliation_line_ids=(uuid4(),)),
             )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_run(
-                TENANT_ONE,
-                replace(run, run_id=uuid4(), period_id=uuid4())
+                TENANT_ONE, replace(run, run_id=uuid4(), period_id=uuid4())
             )
         self.assertIsNone(self.ledger.get_reconciliation_line(TENANT_ONE, uuid4()))
         self.assertEqual(
-            {line.reconciliation_line_id for line in self.ledger.list_reconciliation_lines(TENANT_ONE)},
+            {
+                line.reconciliation_line_id
+                for line in self.ledger.list_reconciliation_lines(TENANT_ONE)
+            },
             {
                 matched.reconciliation_line_id,
                 exception.reconciliation_line_id,
@@ -826,18 +1123,32 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             checker_reference="operator:finance_009",
             resolved_at=CATALOG_START + timedelta(minutes=6),
         )
-        self.assertEqual(validate_reconciliation_resolution(resolution.as_contract_dict()), ())
+        self.assertEqual(
+            validate_reconciliation_resolution(resolution.as_contract_dict()), ()
+        )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_resolution(TENANT_TWO, resolution)
-        self.assertEqual(self.ledger.insert_reconciliation_resolution(TENANT_ONE, resolution), resolution)
-        self.assertEqual(self.ledger.insert_reconciliation_resolution(TENANT_ONE, resolution), resolution)
         self.assertEqual(
-            self.ledger.get_reconciliation_resolution(TENANT_ONE, resolution.resolution_id),
+            self.ledger.insert_reconciliation_resolution(TENANT_ONE, resolution),
             resolution,
         )
-        self.assertIsNone(self.ledger.get_reconciliation_resolution(TENANT_ONE, uuid4()))
+        self.assertEqual(
+            self.ledger.insert_reconciliation_resolution(TENANT_ONE, resolution),
+            resolution,
+        )
+        self.assertEqual(
+            self.ledger.get_reconciliation_resolution(
+                TENANT_ONE, resolution.resolution_id
+            ),
+            resolution,
+        )
         self.assertIsNone(
-            self.ledger.get_reconciliation_resolution(TENANT_TWO, resolution.resolution_id)
+            self.ledger.get_reconciliation_resolution(TENANT_ONE, uuid4())
+        )
+        self.assertIsNone(
+            self.ledger.get_reconciliation_resolution(
+                TENANT_TWO, resolution.resolution_id
+            )
         )
         self.assertEqual(
             self.ledger.list_reconciliation_resolutions(
@@ -848,18 +1159,21 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.list_reconciliation_resolutions(TENANT_TWO), ())
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_resolution(
-                TENANT_ONE,
-                replace(resolution, resolution_reason="rewrite")
+                TENANT_ONE, replace(resolution, resolution_reason="rewrite")
             )
         with self.assertRaises(KeyError):
             self.ledger.insert_reconciliation_resolution(
                 TENANT_ONE,
-                replace(resolution, resolution_id=uuid4(), reconciliation_line_id=matched.reconciliation_line_id)
+                replace(
+                    resolution,
+                    resolution_id=uuid4(),
+                    reconciliation_line_id=matched.reconciliation_line_id,
+                ),
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_line(
                 TENANT_ONE,
-                replace(matched, provider_account_reference="provider:other")
+                replace(matched, provider_account_reference="provider:other"),
             )
         missing_period_line = assess_reconciliation_line(
             uuid4(),
@@ -881,11 +1195,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             reconciliation_line_id=uuid4(),
             assessed_at=CATALOG_START + timedelta(minutes=5),
         )
-        self.assertEqual(self.ledger.insert_reconciliation_line(TENANT_ONE, extra_line), extra_line)
+        self.assertEqual(
+            self.ledger.insert_reconciliation_line(TENANT_ONE, extra_line), extra_line
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_run(
                 TENANT_ONE,
-                replace(empty_run, reconciliation_line_ids=(extra_line.reconciliation_line_id,)),
+                replace(
+                    empty_run,
+                    reconciliation_line_ids=(extra_line.reconciliation_line_id,),
+                ),
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_reconciliation_run(
@@ -896,7 +1215,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                     + (extra_line.reconciliation_line_id,),
                 ),
             )
-        self.assertEqual(self.ledger.get_reconciliation_run(TENANT_ONE, empty_run.run_id), empty_run)
+        self.assertEqual(
+            self.ledger.get_reconciliation_run(TENANT_ONE, empty_run.run_id),
+            empty_run,
+        )
         self.assertEqual(self.ledger.get_reconciliation_run(TENANT_ONE, run.run_id), run)
         immutable_mutations = (
             (
@@ -1079,7 +1401,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             period_id=period.period_id,
             started_at=CATALOG_START + timedelta(hours=3),
             completed_at=CATALOG_START + timedelta(hours=4),
-            reconciliation_line_ids=(matched.reconciliation_line_id, exception.reconciliation_line_id),
+            reconciliation_line_ids=(
+                matched.reconciliation_line_id,
+                exception.reconciliation_line_id,
+            ),
             blocking_exception_count=2,
         )
         self.ledger.insert_reconciliation_run(TENANT_ONE, run)
@@ -1205,7 +1530,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.connection.commit()
         self.assertEqual(
-            migrate_main(["--dsn", POSTGRES_DSN, "--migrations", str(migration_directory)]),
+            migrate_main(
+                ["--dsn", POSTGRES_DSN, "--migrations", str(migration_directory)]
+            ),
             0,
         )
 
@@ -1300,7 +1627,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(meter, self.meter)
 
-    def test_tenant_api_credentials_are_durable_tenant_scoped_and_revocable(self) -> None:
+    def test_tenant_api_credentials_are_durable_tenant_scoped_and_revocable(
+        self,
+    ) -> None:
         """Issue-once secrets survive reload and authorized reads stay tenant-scoped."""
         service = TenantApiCredentialService(self.ledger)
         first = service.issue_credential(TENANT_ONE, "operator_key")
@@ -1313,21 +1642,29 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 TENANT_ONE, "cwlak_not_a_stored_secret"
             )
 
-        stored_first = self.ledger.get_tenant_api_credential(first.tenant_api_credential_id)
+        stored_first = self.ledger.get_tenant_api_credential(
+            first.tenant_api_credential_id
+        )
         assert stored_first is not None
         self.assertEqual(stored_first.credential_status, "active")
         self.assertIsNone(stored_first.revoked_at)
         self.assertIsNone(self.ledger.get_tenant_api_credential(uuid4()))
-        self.assertIsNone(self.ledger.find_tenant_api_credential_by_hash("hmac-sha256:" + "0" * 64))
+        self.assertIsNone(
+            self.ledger.find_tenant_api_credential_by_hash("hmac-sha256:" + "0" * 64)
+        )
         self.assertEqual(
-            self.ledger.find_tenant_api_credential_by_hash(stored_first.credential_secret_hash),
+            self.ledger.find_tenant_api_credential_by_hash(
+                stored_first.credential_secret_hash
+            ),
             stored_first,
         )
 
         tenant_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
         other_tenant_id = self.ledger.require_tenant(TENANT_TWO).tenant_account_id
         self.assertEqual(self.ledger.list_tenant_api_credentials(other_tenant_id), ())
-        self.assertEqual(self.ledger.list_tenant_api_credentials(tenant_id), (stored_first,))
+        self.assertEqual(
+            self.ledger.list_tenant_api_credentials(tenant_id), (stored_first,)
+        )
         self.assertEqual(
             self.ledger.list_active_tenant_api_credentials(tenant_id), (stored_first,)
         )
@@ -1350,9 +1687,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             return StoredTenantApiCredential(**base)  # type: ignore[arg-type]
 
         with self.assertRaises(ValueError):
-            self.ledger.insert_tenant_api_credential(make_stored(credential_status="expired"))
+            self.ledger.insert_tenant_api_credential(
+                make_stored(credential_status="expired")
+            )
         with self.assertRaises(ValueError):
-            self.ledger.insert_tenant_api_credential(make_stored(credential_secret_hash="plaintext"))
+            self.ledger.insert_tenant_api_credential(
+                make_stored(credential_secret_hash="plaintext")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_tenant_api_credential(
                 make_stored(credential_secret_hash=stored_first.credential_secret_hash)
@@ -1380,7 +1721,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             self.ledger.list_tenant_api_credentials(tenant_id), (direct, revoked)
         )
-        self.assertEqual(self.ledger.list_active_tenant_api_credentials(tenant_id), (direct,))
+        self.assertEqual(
+            self.ledger.list_active_tenant_api_credentials(tenant_id), (direct,)
+        )
 
     def test_threaded_requests_serialize_on_one_connection_safely(self) -> None:
         """Concurrent web-tier workers never interleave one connection's transactions."""
@@ -1440,7 +1783,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertNotEqual(first_card.rate_card_id, second_card.rate_card_id)
         tenant_one_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
         self.assertEqual(len(self.ledger.list_rate_cards(tenant_one_id)), 1)
-        first_version = self.ledger.get_rate_card_version(first_card.rate_card_version_id)
+        first_version = self.ledger.get_rate_card_version(
+            first_card.rate_card_version_id
+        )
         self.assertIsNotNone(first_version)
         assert first_version is not None
         self.assertEqual(
@@ -1465,7 +1810,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.list_rate_card_versions(tenant_one_id, first_card.rate_card_id),
             (first_version,),
         )
-        self.assertEqual(self.ledger.insert_rate_card_version(first_version), first_version)
+        self.assertEqual(
+            self.ledger.insert_rate_card_version(first_version), first_version
+        )
         stored_card = self.ledger.get_rate_card(first_card.rate_card_id)
         self.assertIsNotNone(stored_card)
         assert stored_card is not None
@@ -1474,7 +1821,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.ledger.transaction():
             with self.ledger.transaction():
                 pass
-        self.assertIsNone(self.ledger.find_meter_quality_rule(self.meter.meter_definition_id, "missing"))
+        self.assertIsNone(
+            self.ledger.find_meter_quality_rule(
+                self.meter.meter_definition_id, "missing"
+            )
+        )
         with self.assertRaises(KeyError):
             self.ledger.billing_account_reference_for(uuid4())
         window = TimeWindow(
@@ -1505,39 +1856,72 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             stored,
         )
-        self.assertEqual(self.ledger.insert_rating_run(stored, stored.rating_lines), stored)
+        self.assertEqual(
+            self.ledger.insert_rating_run(stored, stored.rating_lines), stored
+        )
         self.assertEqual(stored.rate_card_id, first_card.rate_card_id)
         self.assertEqual(stored.rating_lines[0].billing_account_reference, ACCOUNT_ONE)
         self.assertEqual(stored.rating_lines[0].meter_code, "gen_ai_output_token")
-        self.assertEqual(self.ledger.find_rate_card_line(first_card.rate_card_version_id, "missing"), None)
-        self.assertEqual(len(self.ledger.list_rating_runs(self.ledger.require_tenant(TENANT_ONE).tenant_account_id)), 1)
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        self.assertEqual(
+            self.ledger.find_rate_card_line(first_card.rate_card_version_id, "missing"),
+            None,
+        )
+        self.assertEqual(
+            len(
+                self.ledger.list_rating_runs(
+                    self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+                )
+            ),
+            1,
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         self.assertEqual(draft.invoice_draft_outcome_code.value, "accepted")
-        draft_replay = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        self.assertEqual(draft_replay.invoice_draft_outcome_code.value, "duplicate_replay")
+        draft_replay = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        self.assertEqual(
+            draft_replay.invoice_draft_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(draft_replay.invoice_draft_id, draft.invoice_draft_id)
         self.assertEqual(draft.drafted_total_amount, Decimal("0.003620"))
         stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
         self.assertIsNotNone(stored_draft)
         assert stored_draft is not None
         self.assertEqual(
-            self.ledger.insert_invoice_draft(stored_draft, stored_draft.invoice_draft_lines),
+            self.ledger.insert_invoice_draft(
+                stored_draft, stored_draft.invoice_draft_lines
+            ),
             stored_draft,
         )
-        self.assertEqual(stored_draft.invoice_draft_lines[0].billing_account_reference, ACCOUNT_ONE)
         self.assertEqual(
-            InvoiceDraftService(self.ledger).draft_invoice(TENANT_TWO, rating.rating_run_id).invoice_draft_outcome_code.value,
+            stored_draft.invoice_draft_lines[0].billing_account_reference, ACCOUNT_ONE
+        )
+        self.assertEqual(
+            InvoiceDraftService(self.ledger)
+            .draft_invoice(TENANT_TWO, rating.rating_run_id)
+            .invoice_draft_outcome_code.value,
             "rejected",
         )
-        self.assertEqual(len(self.ledger.list_invoice_drafts(self.ledger.require_tenant(TENANT_ONE).tenant_account_id)), 1)
-        issued = IssuedInvoiceService(self.ledger, clock=lambda: datetime(2026, 8, 17, tzinfo=UTC)).issue_invoice(
-            TENANT_ONE, draft.invoice_draft_id, "2026-08-31T00:00:00Z"
+        self.assertEqual(
+            len(
+                self.ledger.list_invoice_drafts(
+                    self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+                )
+            ),
+            1,
         )
+        issued = IssuedInvoiceService(
+            self.ledger, clock=lambda: datetime(2026, 8, 17, tzinfo=UTC)
+        ).issue_invoice(TENANT_ONE, draft.invoice_draft_id, "2026-08-31T00:00:00Z")
         self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
         issued_replay = IssuedInvoiceService(self.ledger).issue_invoice(
             TENANT_ONE, draft.invoice_draft_id, "2026-09-30T00:00:00Z"
         )
-        self.assertEqual(issued_replay.issued_invoice_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            issued_replay.issued_invoice_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(issued_replay.issued_invoice_id, issued.issued_invoice_id)
         self.assertEqual(issued.tax_inclusive_amount, Decimal("0.003620"))
         stored_issued = self.ledger.get_issued_invoice(issued.issued_invoice_id)
@@ -1556,43 +1940,74 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger.insert_issued_invoice(
                 replace(stored_issued, invoice_draft_id=uuid4()), ()
             )
-        self.assertEqual(stored_issued.issued_invoice_lines[0].billing_account_reference, ACCOUNT_ONE)
+        self.assertEqual(
+            stored_issued.issued_invoice_lines[0].billing_account_reference, ACCOUNT_ONE
+        )
         outbox_events = self.ledger.list_webhook_outbox_events_for_tenant(tenant_one_id)
         self.assertEqual(len(outbox_events), 1)
-        self.assertEqual(self.ledger.get_webhook_outbox_event(outbox_events[0].outbox_event_id), outbox_events[0])
-        self.assertEqual(self.ledger.list_pending_webhook_outbox_events(tenant_one_id), outbox_events)
-        self.assertEqual(self.ledger.insert_webhook_outbox_event(outbox_events[0]), outbox_events[0])
+        self.assertEqual(
+            self.ledger.get_webhook_outbox_event(outbox_events[0].outbox_event_id),
+            outbox_events[0],
+        )
+        self.assertEqual(
+            self.ledger.list_pending_webhook_outbox_events(tenant_one_id), outbox_events
+        )
+        self.assertEqual(
+            self.ledger.insert_webhook_outbox_event(outbox_events[0]), outbox_events[0]
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_webhook_outbox_event(
                 replace(outbox_events[0], payload_hash="sha256:" + "2" * 64)
             )
         self.assertEqual(
-            IssuedInvoiceService(self.ledger).issue_invoice(TENANT_TWO, draft.invoice_draft_id).issued_invoice_outcome_code.value,
+            IssuedInvoiceService(self.ledger)
+            .issue_invoice(TENANT_TWO, draft.invoice_draft_id)
+            .issued_invoice_outcome_code.value,
             "rejected",
         )
 
     def test_issued_invoice_reads_a_durable_tax_snapshot(self) -> None:
         """Issued totals use the same tenant-scoped PostgreSQL tax snapshot."""
         ingest = UsageIngestionService(self.ledger)
-        self.assertEqual(ingest.ingest_usage_event(make_event()).ingestion_outcome_code.value, "accepted")
+        self.assertEqual(
+            ingest.ingest_usage_event(make_event()).ingestion_outcome_code.value,
+            "accepted",
+        )
         RateCardService(self.ledger).publish_rate_card(
             TENANT_ONE,
             "cwl_standard",
             "USD",
-            ({"metric_code": "gen_ai_output_token", "unit_amount": "2", "currency_code": "USD"},),
+            (
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "2",
+                    "currency_code": "USD",
+                },
+            ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE,
-            TimeWindow(datetime(2026, 8, 16, 10, tzinfo=UTC), datetime(2026, 8, 16, 12, tzinfo=UTC)),
+            TimeWindow(
+                datetime(2026, 8, 16, 10, tzinfo=UTC),
+                datetime(2026, 8, 16, 12, tzinfo=UTC),
+            ),
             1,
             rate_card_code="cwl_standard",
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         tenant_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
-        tax_rate = TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.1")
+        tax_rate = TaxRateService(self.ledger).publish_tax_rate(
+            TENANT_ONE, "vat", "0.1"
+        )
         self.assertEqual(tax_rate.tax_rate_outcome_code.value, "accepted")
-        tax_rate_replay = TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.1")
-        self.assertEqual(tax_rate_replay.tax_rate_outcome_code.value, "duplicate_replay")
+        tax_rate_replay = TaxRateService(self.ledger).publish_tax_rate(
+            TENANT_ONE, "vat", "0.1"
+        )
+        self.assertEqual(
+            tax_rate_replay.tax_rate_outcome_code.value, "duplicate_replay"
+        )
         schedule = self.ledger.find_tax_rate_schedule(tenant_id, "vat")
         self.assertIsNotNone(schedule)
         assert schedule is not None
@@ -1600,7 +2015,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.insert_tax_rate_schedule(replace(schedule, tax_code="gst"))
         self.assertEqual(self.ledger.list_tax_rate_schedules(tenant_id), (schedule,))
-        self.assertEqual(self.ledger.get_tax_rate_schedule(schedule.tax_rate_schedule_id), schedule)
+        self.assertEqual(
+            self.ledger.get_tax_rate_schedule(schedule.tax_rate_schedule_id), schedule
+        )
         version = self.ledger.get_tax_rate_version(tax_rate.tax_rate_version_id)
         self.assertIsNotNone(version)
         assert version is not None
@@ -1613,9 +2030,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             version,
         )
-        self.assertEqual(self.ledger.find_tax_rate_version(tenant_id, 1, "vat"), version)
+        self.assertEqual(
+            self.ledger.find_tax_rate_version(tenant_id, 1, "vat"), version
+        )
         self.assertIsNone(self.ledger.find_tax_rate_version(tenant_id, 9))
-        self.assertEqual(self.ledger.next_tax_rate_version_number(tenant_id, schedule.tax_rate_schedule_id), 2)
+        self.assertEqual(
+            self.ledger.next_tax_rate_version_number(
+                tenant_id, schedule.tax_rate_schedule_id
+            ),
+            2,
+        )
         self.assertEqual(self.ledger.insert_tax_rate_version(version), version)
         with self.assertRaises(ValueError):
             self.ledger.insert_tax_rate_version(
@@ -1623,7 +2047,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         self.assertEqual(self.ledger.list_tax_rate_versions(tenant_id), (version,))
         self.assertEqual(
-            self.ledger.list_tax_rate_versions(tenant_id, schedule.tax_rate_schedule_id),
+            self.ledger.list_tax_rate_versions(
+                tenant_id, schedule.tax_rate_schedule_id
+            ),
             (version,),
         )
         assessment = TaxAssessmentService(self.ledger).assess_tax(
@@ -1633,18 +2059,29 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assessment_replay = TaxAssessmentService(self.ledger).assess_tax(
             TENANT_ONE, draft.invoice_draft_id, version.tax_rate_version_id
         )
-        self.assertEqual(assessment_replay.tax_assessment_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            assessment_replay.tax_assessment_outcome_code.value, "duplicate_replay"
+        )
         stored_assessment = self.ledger.get_tax_assessment(assessment.tax_assessment_id)
         self.assertIsNotNone(stored_assessment)
         assert stored_assessment is not None
-        self.assertEqual(self.ledger.insert_tax_assessment(stored_assessment), stored_assessment)
+        self.assertEqual(
+            self.ledger.insert_tax_assessment(stored_assessment), stored_assessment
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_tax_assessment(
                 replace(stored_assessment, source_payload_hash="sha256:" + "2" * 64)
             )
-        self.assertEqual(self.ledger.find_tax_assessment_for_draft(tenant_id, draft.invoice_draft_id), stored_assessment)
+        self.assertEqual(
+            self.ledger.find_tax_assessment_for_draft(
+                tenant_id, draft.invoice_draft_id
+            ),
+            stored_assessment,
+        )
         self.assertEqual(self.ledger.list_tax_assessments(), (stored_assessment,))
-        self.assertEqual(self.ledger.list_tax_assessments(tenant_id), (stored_assessment,))
+        self.assertEqual(
+            self.ledger.list_tax_assessments(tenant_id), (stored_assessment,)
+        )
         self.assertEqual(
             self.ledger.find_tax_assessment(
                 tenant_id,
@@ -1675,30 +2112,51 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(len(self.ledger.list_usage_events()), 1)
         self.assertEqual(len(self.ledger.list_ingestion_receipts()), 2)
         self.assertEqual(
-            len(self.ledger.list_ingestion_receipts(self.ledger.require_tenant(TENANT_ONE).tenant_account_id)),
+            len(
+                self.ledger.list_ingestion_receipts(
+                    self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+                )
+            ),
             2,
         )
         stored = self.ledger.get_usage_event(accepted.usage_event_id)
         self.assertIsNotNone(stored)
         self.assertEqual(len(stored.measurements), 1)
-        self.assertEqual(len(self.ledger.stored_usage_set(self.ledger.require_tenant(TENANT_ONE).tenant_account_id)), 1)
         self.assertEqual(
-            len(self.ledger.list_usage_events(self.ledger.require_tenant(TENANT_TWO).tenant_account_id)),
+            len(
+                self.ledger.stored_usage_set(
+                    self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+                )
+            ),
+            1,
+        )
+        self.assertEqual(
+            len(
+                self.ledger.list_usage_events(
+                    self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+                )
+            ),
             0,
         )
         self.assertIsNone(self.ledger.get_usage_event(uuid4()))
-        self.assertEqual(self.ledger.list_usage_events_in_window(
-            self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
-            datetime(2026, 8, 16, tzinfo=UTC),
-            datetime(2026, 8, 17, tzinfo=UTC),
-        )[0].usage_event_id, accepted.usage_event_id)
+        self.assertEqual(
+            self.ledger.list_usage_events_in_window(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                datetime(2026, 8, 16, tzinfo=UTC),
+                datetime(2026, 8, 17, tzinfo=UTC),
+            )[0].usage_event_id,
+            accepted.usage_event_id,
+        )
 
     def test_service_conflict_reasons_are_deterministic(self) -> None:
         """Source, payload, and producer identities reject different facts."""
         service = UsageIngestionService(self.ledger)
         first = service.ingest_usage_event(make_event())
         source_conflict = service.ingest_usage_event(
-            make_event(operation_code="changed", source_event_key="workflow_381:step_04:attempt_01")
+            make_event(
+                operation_code="changed",
+                source_event_key="workflow_381:step_04:attempt_01",
+            )
         )
         payload_conflict = service.ingest_usage_event(
             make_event(source_event_key="different:source:key")
@@ -1711,9 +2169,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         )
         self.assertEqual(first.ingestion_outcome_code.value, "accepted")
-        self.assertEqual(source_conflict.rejection_reason_code, RejectionReasonCode.SOURCE_EVENT_CONFLICT)
-        self.assertEqual(payload_conflict.rejection_reason_code, RejectionReasonCode.PAYLOAD_HASH_CONFLICT)
-        self.assertEqual(producer_conflict.rejection_reason_code, RejectionReasonCode.PRODUCER_EVENT_CONFLICT)
+        self.assertEqual(
+            source_conflict.rejection_reason_code,
+            RejectionReasonCode.SOURCE_EVENT_CONFLICT,
+        )
+        self.assertEqual(
+            payload_conflict.rejection_reason_code,
+            RejectionReasonCode.PAYLOAD_HASH_CONFLICT,
+        )
+        self.assertEqual(
+            producer_conflict.rejection_reason_code,
+            RejectionReasonCode.PRODUCER_EVENT_CONFLICT,
+        )
 
     def test_direct_database_conflicts_are_classified(self) -> None:
         """The insert path classifies a race even when pre-checks did not observe it."""
@@ -1726,7 +2193,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertTrue(replay_error.exception.duplicate_replay)
         with self.assertRaises(UsageEventConflict) as source_error:
             self.ledger.insert_usage_event(
-                replace(stored, usage_event_id=uuid4(), event_payload_hash="sha256:" + "a" * 64)
+                replace(
+                    stored,
+                    usage_event_id=uuid4(),
+                    event_payload_hash="sha256:" + "a" * 64,
+                )
             )
         self.assertEqual(
             source_error.exception.rejection_reason_code,
@@ -1734,7 +2205,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(UsageEventConflict) as payload_error:
             self.ledger.insert_usage_event(
-                replace(stored, usage_event_id=uuid4(), source_event_key="payload:direct", producer_event_id=uuid4())
+                replace(
+                    stored,
+                    usage_event_id=uuid4(),
+                    source_event_key="payload:direct",
+                    producer_event_id=uuid4(),
+                )
             )
         self.assertEqual(
             payload_error.exception.rejection_reason_code,
@@ -1800,13 +2276,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         class BarrierLedger(PostgresUsageLedger):
             def find_by_source_event_key(self, tenant_account_id, source_event_key):
-                result = super().find_by_source_event_key(tenant_account_id, source_event_key)
+                result = super().find_by_source_event_key(
+                    tenant_account_id, source_event_key
+                )
                 barrier.wait()
                 return result
 
         def ingest_once(_: int) -> str:
             with psycopg.connect(POSTGRES_DSN) as connection:
-                receipt = UsageIngestionService(BarrierLedger(connection)).ingest_usage_event(event)
+                receipt = UsageIngestionService(
+                    BarrierLedger(connection)
+                ).ingest_usage_event(event)
                 return receipt.ingestion_outcome_code.value
 
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1834,7 +2314,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         class BarrierLedger(PostgresUsageLedger):
             def find_by_source_event_key(self, tenant_account_id, source_event_key):
-                result = super().find_by_source_event_key(tenant_account_id, source_event_key)
+                result = super().find_by_source_event_key(
+                    tenant_account_id, source_event_key
+                )
                 barrier.wait()
                 return result
 
@@ -1853,7 +2335,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         def ingest_once(event):
             with psycopg.connect(POSTGRES_DSN) as connection:
-                return UsageIngestionService(BarrierLedger(connection)).ingest_usage_event(event)
+                return UsageIngestionService(
+                    BarrierLedger(connection)
+                ).ingest_usage_event(event)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             receipts = list(pool.map(ingest_once, events))
@@ -1861,8 +2345,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             sorted(receipt.ingestion_outcome_code.value for receipt in receipts),
             ["accepted", "rejected"],
         )
-        rejected = next(receipt for receipt in receipts if receipt.ingestion_outcome_code.value == "rejected")
-        self.assertEqual(rejected.rejection_reason_code, RejectionReasonCode.SOURCE_EVENT_CONFLICT)
+        rejected = next(
+            receipt
+            for receipt in receipts
+            if receipt.ingestion_outcome_code.value == "rejected"
+        )
+        self.assertEqual(
+            rejected.rejection_reason_code, RejectionReasonCode.SOURCE_EVENT_CONFLICT
+        )
 
     def test_collection_and_payment_intent_projection_are_durable(self) -> None:
         """Persist the next buyer-visible collection and payment-intent slice."""
@@ -1871,7 +2361,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             TENANT_ONE,
             "cwl_standard",
             "USD",
-            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},),
+            (
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
+            ),
         )
         self.assertIsNotNone(card.rate_card_version_id)
         rating = UsageRatingService(self.ledger).rate_usage_window(
@@ -1883,39 +2379,59 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
             rate_card_code="cwl_standard",
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        case = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        case = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(case.collection_case_outcome_code.value, "accepted")
         assert case.collection_case_id is not None
         stored_case = self.ledger.get_collection_case(case.collection_case_id)
         self.assertIsNotNone(stored_case)
         assert stored_case is not None
         tenant_id = stored_case.tenant_account_id
-        self.assertEqual(self.ledger.find_collection_case(tenant_id, draft.invoice_draft_id), stored_case)
+        self.assertEqual(
+            self.ledger.find_collection_case(tenant_id, draft.invoice_draft_id),
+            stored_case,
+        )
         self.assertEqual(self.ledger.list_collection_cases(tenant_id), (stored_case,))
-        self.assertEqual(self.ledger.insert_collection_case(
-            replace(stored_case, collection_case_id=uuid4())
-        ), stored_case)
+        self.assertEqual(
+            self.ledger.insert_collection_case(
+                replace(stored_case, collection_case_id=uuid4())
+            ),
+            stored_case,
+        )
         replay_case = CollectionCaseService(self.ledger).open_collection_case(
             TENANT_ONE, draft.invoice_draft_id
         )
-        self.assertEqual(replay_case.collection_case_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            replay_case.collection_case_outcome_code.value, "duplicate_replay"
+        )
         self.assertIsNone(self.ledger.get_collection_case(uuid4()))
         self.assertIsNone(self.ledger.find_collection_case(tenant_id, uuid4()))
 
-        dunning = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).record_dunning_event(
-            TENANT_ONE, case.collection_case_id, "first_notice"
-        )
+        dunning = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).record_dunning_event(TENANT_ONE, case.collection_case_id, "first_notice")
         self.assertEqual(len(dunning.dunning_events), 1)
-        stored_dunning = self.ledger.get_collection_dunning_event(dunning.dunning_events[0].dunning_event_id)
+        stored_dunning = self.ledger.get_collection_dunning_event(
+            dunning.dunning_events[0].dunning_event_id
+        )
         self.assertIsNotNone(stored_dunning)
         assert stored_dunning is not None
-        self.assertEqual(self.ledger.list_collection_dunning_events(case.collection_case_id), (stored_dunning,))
-        self.assertEqual(self.ledger.list_collection_dunning_events_for_tenant(tenant_id), (stored_dunning,))
         self.assertEqual(
-            self.ledger.find_collection_dunning_event(case.collection_case_id, "first_notice"),
+            self.ledger.list_collection_dunning_events(case.collection_case_id),
+            (stored_dunning,),
+        )
+        self.assertEqual(
+            self.ledger.list_collection_dunning_events_for_tenant(tenant_id),
+            (stored_dunning,),
+        )
+        self.assertEqual(
+            self.ledger.find_collection_dunning_event(
+                case.collection_case_id, "first_notice"
+            ),
             stored_dunning,
         )
         self.assertEqual(
@@ -1930,17 +2446,25 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_collection_dunning_event(
-                replace(stored_dunning, dunning_event_number=0, dunning_notice_code="overdue_notice")
+                replace(
+                    stored_dunning,
+                    dunning_event_number=0,
+                    dunning_notice_code="overdue_notice",
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_collection_dunning_event(
-                replace(stored_dunning, collection_case_id=uuid4(), dunning_notice_code="overdue_notice")
+                replace(
+                    stored_dunning,
+                    collection_case_id=uuid4(),
+                    dunning_notice_code="overdue_notice",
+                )
             )
         self.assertIsNone(self.ledger.get_collection_dunning_event(uuid4()))
 
-        intent = PaymentIntentService(self.ledger, clock=lambda: CATALOG_START).project_payment_intent(
-            TENANT_ONE, case.collection_case_id
-        )
+        intent = PaymentIntentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).project_payment_intent(TENANT_ONE, case.collection_case_id)
         self.assertEqual(intent.payment_intent_outcome_code.value, "accepted")
         assert intent.payment_intent_id is not None
         stored_intent = self.ledger.get_payment_intent(intent.payment_intent_id)
@@ -1963,24 +2487,45 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored_intent,
         )
         self.assertEqual(
-            PaymentIntentService(self.ledger).project_payment_intent(
-                TENANT_ONE, case.collection_case_id
-            ).payment_intent_outcome_code.value,
+            PaymentIntentService(self.ledger)
+            .project_payment_intent(TENANT_ONE, case.collection_case_id)
+            .payment_intent_outcome_code.value,
             "duplicate_replay",
         )
         self.assertIsNone(self.ledger.get_payment_intent(uuid4()))
-        self.assertIsNone(self.ledger.find_payment_intent(tenant_id, uuid4(), "sha256:" + "0" * 64, 1))
+        self.assertIsNone(
+            self.ledger.find_payment_intent(tenant_id, uuid4(), "sha256:" + "0" * 64, 1)
+        )
         with self.assertRaises(ValueError):
-            self.ledger.insert_collection_case(replace(stored_case, collection_case_status="settled"))
+            self.ledger.insert_collection_case(
+                replace(stored_case, collection_case_status="settled")
+            )
         with self.assertRaises(ValueError):
-            self.ledger.insert_collection_case(replace(stored_case, collection_case_id=uuid4(), outstanding_amount=Decimal("0")))
+            self.ledger.insert_collection_case(
+                replace(
+                    stored_case,
+                    collection_case_id=uuid4(),
+                    outstanding_amount=Decimal("0"),
+                )
+            )
         with self.assertRaises(ValueError):
-            self.ledger.insert_payment_intent(replace(stored_intent, payment_intent_status="captured"))
+            self.ledger.insert_payment_intent(
+                replace(stored_intent, payment_intent_status="captured")
+            )
         with self.assertRaises(ValueError):
-            self.ledger.insert_payment_intent(replace(stored_intent, payment_intent_id=uuid4(), payment_amount=Decimal("0")))
+            self.ledger.insert_payment_intent(
+                replace(
+                    stored_intent,
+                    payment_intent_id=uuid4(),
+                    payment_amount=Decimal("0"),
+                )
+            )
         cancelled = self.ledger.cancel_stored_payment_intent(intent.payment_intent_id)
         self.assertEqual(cancelled.payment_intent_status, "cancelled")
-        self.assertEqual(self.ledger.cancel_stored_payment_intent(intent.payment_intent_id), cancelled)
+        self.assertEqual(
+            self.ledger.cancel_stored_payment_intent(intent.payment_intent_id),
+            cancelled,
+        )
         with self.assertRaises(ValueError):
             self.ledger.cancel_stored_payment_intent(uuid4())
         rejected_intent = self.ledger.insert_payment_intent(
@@ -2001,14 +2546,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.connection.commit()
         with self.assertRaises(ValueError):
-            self.ledger.apply_collection_settlement(case.collection_case_id, Decimal("1"))
+            self.ledger.apply_collection_settlement(
+                case.collection_case_id, Decimal("1")
+            )
         self.connection.execute(
             "UPDATE billing_core.collection_case SET collection_case_status = 'voided', outstanding_amount = 0 WHERE collection_case_id = %s",
             (case.collection_case_id,),
         )
         self.connection.commit()
         with self.assertRaises(ValueError):
-            self.ledger.apply_collection_settlement(case.collection_case_id, Decimal("1"))
+            self.ledger.apply_collection_settlement(
+                case.collection_case_id, Decimal("1")
+            )
         self.connection.execute(
             "UPDATE billing_core.collection_case SET collection_case_status = 'open', outstanding_amount = %s WHERE collection_case_id = %s",
             (stored_case.outstanding_amount, case.collection_case_id),
@@ -2020,9 +2569,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(settled.collection_case_status, "settled")
         self.assertEqual(settled.outstanding_amount, Decimal("0.000000000000"))
         with self.assertRaises(ValueError):
-            self.ledger.apply_collection_settlement(case.collection_case_id, Decimal("1"))
+            self.ledger.apply_collection_settlement(
+                case.collection_case_id, Decimal("1")
+            )
         with self.assertRaises(ValueError):
-            self.ledger.apply_collection_settlement(case.collection_case_id, Decimal("0"))
+            self.ledger.apply_collection_settlement(
+                case.collection_case_id, Decimal("0")
+            )
 
     def test_payment_receipt_and_cash_journal_are_durable(self) -> None:
         """Persist a receipt, atomic collection settlement, and cash proposal."""
@@ -2032,7 +2585,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         self.assertIsNotNone(card.rate_card_version_id)
@@ -2045,16 +2602,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
             rate_card_code="cwl_standard",
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        case = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        case = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         assert case.collection_case_id is not None
-        intent = PaymentIntentService(self.ledger, clock=lambda: CATALOG_START).project_payment_intent(
-            TENANT_ONE, case.collection_case_id
-        )
+        intent = PaymentIntentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).project_payment_intent(TENANT_ONE, case.collection_case_id)
         assert intent.payment_intent_id is not None
-        amount = self.ledger.get_collection_case(case.collection_case_id).outstanding_amount / Decimal("2")
+        amount = self.ledger.get_collection_case(
+            case.collection_case_id
+        ).outstanding_amount / Decimal("2")
         settlement = PaymentSettlementService(self.ledger, clock=lambda: CATALOG_START)
         accepted = settlement.record_payment_receipt(
             TENANT_ONE, intent.payment_intent_id, amount
@@ -2064,7 +2625,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         receipt = self.ledger.get_payment_receipt(accepted.payment_receipt_id)
         self.assertIsNotNone(receipt)
         assert receipt is not None
-        self.assertEqual(self.ledger.list_payment_receipts(receipt.tenant_account_id), (receipt,))
+        self.assertEqual(
+            self.ledger.list_payment_receipts(receipt.tenant_account_id), (receipt,)
+        )
         self.assertEqual(
             self.ledger.find_payment_receipt(
                 receipt.tenant_account_id,
@@ -2085,9 +2648,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         proposal = proposals[0]
         self.assertEqual(proposal.payment_receipt_id, receipt.payment_receipt_id)
         self.assertEqual(len(proposal.proposal_lines), 2)
-        self.assertEqual(proposal.proposal_lines[0].debit_amount, receipt.received_amount)
-        self.assertEqual(proposal.proposal_lines[1].credit_amount, receipt.received_amount)
-        self.assertEqual(self.ledger.get_journal_proposal(proposal.journal_proposal_id), proposal)
+        self.assertEqual(
+            proposal.proposal_lines[0].debit_amount, receipt.received_amount
+        )
+        self.assertEqual(
+            proposal.proposal_lines[1].credit_amount, receipt.received_amount
+        )
+        self.assertEqual(
+            self.ledger.get_journal_proposal(proposal.journal_proposal_id), proposal
+        )
         self.assertEqual(
             self.ledger.find_journal_proposal_for_receipt(
                 receipt.tenant_account_id,
@@ -2098,15 +2667,21 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             proposal,
         )
         self.assertEqual(
-            AccountingExportService(self.ledger).propose_cash_journal(
-                TENANT_ONE, receipt.payment_receipt_id
-            ).journal_proposal_outcome_code.value,
+            AccountingExportService(self.ledger)
+            .propose_cash_journal(TENANT_ONE, receipt.payment_receipt_id)
+            .journal_proposal_outcome_code.value,
             "duplicate_replay",
         )
-        replay = settlement.record_payment_receipt(TENANT_ONE, intent.payment_intent_id, amount)
-        self.assertEqual(replay.payment_settlement_outcome_code.value, "duplicate_replay")
+        replay = settlement.record_payment_receipt(
+            TENANT_ONE, intent.payment_intent_id, amount
+        )
+        self.assertEqual(
+            replay.payment_settlement_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(replay.payment_receipt_id, receipt.payment_receipt_id)
-        self.assertEqual(self.ledger.list_payment_receipts(receipt.tenant_account_id), (receipt,))
+        self.assertEqual(
+            self.ledger.list_payment_receipts(receipt.tenant_account_id), (receipt,)
+        )
 
         class ExistingReceiptLedger(PostgresUsageLedger):
             """Force the repository insert path used after a concurrent identity race."""
@@ -2117,7 +2692,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         race_replay = PaymentSettlementService(
             ExistingReceiptLedger(self.connection), clock=lambda: CATALOG_START
         ).record_payment_receipt(TENANT_ONE, intent.payment_intent_id, amount)
-        self.assertEqual(race_replay.payment_settlement_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            race_replay.payment_settlement_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(race_replay.payment_receipt_id, receipt.payment_receipt_id)
 
         class MissingCaseReceiptLedger(ExistingReceiptLedger):
@@ -2136,10 +2713,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         missing_case_replay = PaymentSettlementService(
             MissingCaseReceiptLedger(self.connection), clock=lambda: CATALOG_START
         ).record_payment_receipt(TENANT_ONE, intent.payment_intent_id, amount)
-        self.assertEqual(missing_case_replay.payment_settlement_outcome_code.value, "rejected")
+        self.assertEqual(
+            missing_case_replay.payment_settlement_outcome_code.value, "rejected"
+        )
 
         self.assertEqual(
-            self.ledger.insert_journal_proposal(proposal, proposal.proposal_lines), proposal
+            self.ledger.insert_journal_proposal(proposal, proposal.proposal_lines),
+            proposal,
         )
         with self.assertRaises(ValueError):
             self.ledger.insert_payment_receipt(
@@ -2159,33 +2739,45 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
                 proposal,
-                (replace(proposal.proposal_lines[0], journal_proposal_id=uuid4()),
-                 proposal.proposal_lines[1]),
-            )
-        with self.assertRaises(ValueError):
-            self.ledger.insert_journal_proposal(
-                proposal,
-                (replace(proposal.proposal_lines[0], tenant_account_id=uuid4()),
-                 proposal.proposal_lines[1]),
-            )
-        with self.assertRaises(ValueError):
-            self.ledger.insert_journal_proposal(
-                proposal,
-                (replace(proposal.proposal_lines[0], credit_amount=Decimal("1")),
-                 proposal.proposal_lines[1]),
-            )
-        with self.assertRaises(ValueError):
-            self.ledger.insert_journal_proposal(
-                proposal,
-                (replace(proposal.proposal_lines[0], debit_amount=Decimal("1")),
-                 proposal.proposal_lines[1]),
+                (
+                    replace(proposal.proposal_lines[0], journal_proposal_id=uuid4()),
+                    proposal.proposal_lines[1],
+                ),
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
                 proposal,
                 (
-                    replace(proposal.proposal_lines[0], debit_amount=Decimal("0.0000001")),
-                    replace(proposal.proposal_lines[1], credit_amount=Decimal("0.0000001")),
+                    replace(proposal.proposal_lines[0], tenant_account_id=uuid4()),
+                    proposal.proposal_lines[1],
+                ),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (
+                    replace(proposal.proposal_lines[0], credit_amount=Decimal("1")),
+                    proposal.proposal_lines[1],
+                ),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (
+                    replace(proposal.proposal_lines[0], debit_amount=Decimal("1")),
+                    proposal.proposal_lines[1],
+                ),
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_journal_proposal(
+                proposal,
+                (
+                    replace(
+                        proposal.proposal_lines[0], debit_amount=Decimal("0.0000001")
+                    ),
+                    replace(
+                        proposal.proposal_lines[1], credit_amount=Decimal("0.0000001")
+                    ),
                 ),
             )
         with self.assertRaises(ValueError):
@@ -2193,14 +2785,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 proposal,
                 (
                     replace(proposal.proposal_lines[0], debit_amount=Decimal("10")),
-                    replace(proposal.proposal_lines[1], credit_amount=Decimal("10.0000001")),
+                    replace(
+                        proposal.proposal_lines[1], credit_amount=Decimal("10.0000001")
+                    ),
                 ),
             )
 
         with self.assertRaises(ValueError):
-            self.ledger.insert_payment_receipt(replace(receipt, payment_receipt_status="captured"))
+            self.ledger.insert_payment_receipt(
+                replace(receipt, payment_receipt_status="captured")
+            )
         with self.assertRaises(ValueError):
-            self.ledger.insert_payment_receipt(replace(receipt, received_amount=Decimal("0")))
+            self.ledger.insert_payment_receipt(
+                replace(receipt, received_amount=Decimal("0"))
+            )
         self.assertIsNone(self.ledger.get_payment_receipt(uuid4()))
         self.assertIsNone(self.ledger.get_journal_proposal(uuid4()))
 
@@ -2212,7 +2810,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         self.assertIsNotNone(card.rate_card_version_id)
@@ -2225,15 +2827,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
             rate_card_code="cwl_standard",
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        case = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        case = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         assert case.collection_case_id is not None
         stored_case = self.ledger.get_collection_case(case.collection_case_id)
         assert stored_case is not None
         amount = stored_case.outstanding_amount / Decimal("2")
-        credit = CreditAdjustmentService(self.ledger, clock=lambda: CATALOG_START).record_credit_adjustment(
+        credit = CreditAdjustmentService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).record_credit_adjustment(
             TENANT_ONE, draft.invoice_draft_id, amount, "goodwill"
         )
         self.assertEqual(credit.credit_adjustment_outcome_code.value, "accepted")
@@ -2245,7 +2851,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(stored.credit_amount, amount)
         self.assertEqual(stored.tax_exclusive_amount, amount)
         self.assertEqual(stored.tax_amount, Decimal("0"))
-        self.assertEqual(self.ledger.list_credit_adjustments(stored.tenant_account_id), (stored,))
+        self.assertEqual(
+            self.ledger.list_credit_adjustments(stored.tenant_account_id), (stored,)
+        )
         self.assertEqual(
             self.ledger.find_credit_adjustment(
                 stored.tenant_account_id,
@@ -2279,10 +2887,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         replay = CreditAdjustmentService(self.ledger).record_credit_adjustment(
             TENANT_ONE, draft.invoice_draft_id, amount, "goodwill"
         )
-        self.assertEqual(replay.credit_adjustment_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            replay.credit_adjustment_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(replay.credit_adjustment_id, stored.credit_adjustment_id)
         self.assertEqual(
-            self.ledger.insert_journal_proposal(proposal, proposal.proposal_lines), proposal
+            self.ledger.insert_journal_proposal(proposal, proposal.proposal_lines),
+            proposal,
         )
 
         class ExistingCreditLedger(PostgresUsageLedger):
@@ -2293,8 +2904,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         race_replay = CreditAdjustmentService(
             ExistingCreditLedger(self.connection), clock=lambda: CATALOG_START
-        ).record_credit_adjustment(TENANT_ONE, draft.invoice_draft_id, amount, "goodwill")
-        self.assertEqual(race_replay.credit_adjustment_outcome_code.value, "duplicate_replay")
+        ).record_credit_adjustment(
+            TENANT_ONE, draft.invoice_draft_id, amount, "goodwill"
+        )
+        self.assertEqual(
+            race_replay.credit_adjustment_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(race_replay.credit_adjustment_id, stored.credit_adjustment_id)
 
         class MissingCreditProposalLedger(ExistingCreditLedger):
@@ -2305,8 +2920,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         missing_proposal = CreditAdjustmentService(
             MissingCreditProposalLedger(self.connection), clock=lambda: CATALOG_START
-        ).record_credit_adjustment(TENANT_ONE, draft.invoice_draft_id, amount, "goodwill")
-        self.assertEqual(missing_proposal.credit_adjustment_outcome_code.value, "rejected")
+        ).record_credit_adjustment(
+            TENANT_ONE, draft.invoice_draft_id, amount, "goodwill"
+        )
+        self.assertEqual(
+            missing_proposal.credit_adjustment_outcome_code.value, "rejected"
+        )
 
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
@@ -2318,7 +2937,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 replace(stored, source_payload_hash="sha256:" + "4" * 64)
             )
         self.assertEqual(
-            self.ledger.insert_credit_adjustment(replace(stored, credit_adjustment_id=uuid4())),
+            self.ledger.insert_credit_adjustment(
+                replace(stored, credit_adjustment_id=uuid4())
+            ),
             stored,
         )
         with self.assertRaises(ValueError):
@@ -2327,7 +2948,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_credit_adjustment(
-                replace(stored, credit_amount=Decimal("0"), tax_exclusive_amount=Decimal("0"))
+                replace(
+                    stored,
+                    credit_amount=Decimal("0"),
+                    tax_exclusive_amount=Decimal("0"),
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_credit_adjustment(
@@ -2346,7 +2971,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         self.assertIsNotNone(card.rate_card_version_id)
@@ -2359,23 +2988,29 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
             rate_card_code="cwl_standard",
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         assert opened.collection_case_id is not None
         case = self.ledger.get_collection_case(opened.collection_case_id)
         assert case is not None
-        write_off = CollectionWriteOffService(self.ledger, clock=lambda: CATALOG_START).write_off_collection_case(
-            TENANT_ONE, case.collection_case_id
-        )
+        write_off = CollectionWriteOffService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).write_off_collection_case(TENANT_ONE, case.collection_case_id)
         self.assertEqual(write_off.collection_write_off_outcome_code.value, "accepted")
         assert write_off.collection_write_off_id is not None
-        stored_write_off = self.ledger.get_collection_write_off(write_off.collection_write_off_id)
+        stored_write_off = self.ledger.get_collection_write_off(
+            write_off.collection_write_off_id
+        )
         self.assertIsNotNone(stored_write_off)
         assert stored_write_off is not None
         self.assertEqual(
-            self.ledger.find_collection_write_off(case.tenant_account_id, case.collection_case_id),
+            self.ledger.find_collection_write_off(
+                case.tenant_account_id, case.collection_case_id
+            ),
             stored_write_off,
         )
         self.assertEqual(
@@ -2398,7 +3033,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         settled = CollectionCaseSettlementService(
             self.ledger, clock=lambda: CATALOG_START
         ).settle_collection_case(TENANT_ONE, case.collection_case_id)
-        self.assertEqual(settled.collection_case_settlement_outcome_code.value, "accepted")
+        self.assertEqual(
+            settled.collection_case_settlement_outcome_code.value, "accepted"
+        )
         assert settled.collection_case_settlement_id is not None
         stored_settlement = self.ledger.get_collection_case_settlement(
             settled.collection_case_settlement_id
@@ -2412,23 +3049,26 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored_settlement,
         )
         self.assertEqual(
-            self.ledger.list_collection_case_settlements_for_tenant(case.tenant_account_id),
+            self.ledger.list_collection_case_settlements_for_tenant(
+                case.tenant_account_id
+            ),
             (stored_settlement,),
         )
         self.assertEqual(
-            CollectionWriteOffService(self.ledger).write_off_collection_case(
-                TENANT_ONE, case.collection_case_id
-            ).collection_write_off_outcome_code.value,
+            CollectionWriteOffService(self.ledger)
+            .write_off_collection_case(TENANT_ONE, case.collection_case_id)
+            .collection_write_off_outcome_code.value,
             "duplicate_replay",
         )
         self.assertEqual(
-            CollectionCaseSettlementService(self.ledger).settle_collection_case(
-                TENANT_ONE, case.collection_case_id
-            ).collection_case_settlement_outcome_code.value,
+            CollectionCaseSettlementService(self.ledger)
+            .settle_collection_case(TENANT_ONE, case.collection_case_id)
+            .collection_case_settlement_outcome_code.value,
             "duplicate_replay",
         )
         self.assertEqual(
-            self.ledger.insert_collection_case_settlement(stored_settlement), stored_settlement
+            self.ledger.insert_collection_case_settlement(stored_settlement),
+            stored_settlement,
         )
         with self.assertRaises(ValueError):
             self.ledger.insert_collection_case_settlement(
@@ -2457,13 +3097,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 replace(stored_settlement, remaining_outstanding_amount=Decimal("1"))
             )
         with self.assertRaises(ValueError):
-            self.ledger.apply_collection_write_off(case.collection_case_id, Decimal("0"))
+            self.ledger.apply_collection_write_off(
+                case.collection_case_id, Decimal("0")
+            )
         with self.assertRaises(ValueError):
             self.ledger.apply_collection_write_off(uuid4(), Decimal("1"))
         with self.assertRaises(ValueError):
             self.ledger.mark_collection_case_settled(uuid4())
         with self.assertRaises(ValueError):
-            self.ledger.apply_collection_write_off(case.collection_case_id, Decimal("1"))
+            self.ledger.apply_collection_write_off(
+                case.collection_case_id, Decimal("1")
+            )
         self.assertEqual(
             self.ledger.mark_collection_case_settled(case.collection_case_id),
             self.ledger.get_collection_case(case.collection_case_id),
@@ -2475,7 +3119,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.connection.commit()
         with self.assertRaises(ValueError):
-            self.ledger.apply_collection_write_off(case.collection_case_id, Decimal("1"))
+            self.ledger.apply_collection_write_off(
+                case.collection_case_id, Decimal("1")
+            )
         self.connection.execute(
             "UPDATE billing_core.collection_case SET outstanding_amount = 1 "
             "WHERE collection_case_id = %s",
@@ -2510,19 +3156,27 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(opened.collection_case_outcome_code.value, "accepted")
         assert opened.collection_case_id is not None
-        remaining = self.ledger.get_collection_case(opened.collection_case_id).outstanding_amount
+        remaining = self.ledger.get_collection_case(
+            opened.collection_case_id
+        ).outstanding_amount
         self.assertGreater(remaining, leftover)
         self.assertNotEqual(remaining, KNOWN_MORNING_TOTAL)
         write_off = CollectionWriteOffService(
@@ -2530,7 +3184,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).write_off_collection_case(TENANT_ONE, opened.collection_case_id)
         self.assertEqual(write_off.collection_write_off_outcome_code.value, "accepted")
         assert write_off.collection_write_off_id is not None
-        stored_write_off = self.ledger.get_collection_write_off(write_off.collection_write_off_id)
+        stored_write_off = self.ledger.get_collection_write_off(
+            write_off.collection_write_off_id
+        )
         assert stored_write_off is not None
         self.assertEqual(stored_write_off.write_off_amount, remaining)
         self.assertNotEqual(stored_write_off.write_off_amount, KNOWN_MORNING_TOTAL)
@@ -2550,16 +3206,22 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
-        self.assertEqual(stored.collection_write_off_id, write_off.collection_write_off_id)
+        self.assertEqual(
+            stored.collection_write_off_id, write_off.collection_write_off_id
+        )
         self.assertEqual(stored.invoice_draft_id, draft.invoice_draft_id)
         self.assertEqual(stored.proposal_status, "validated")
         self.assertNotEqual(stored.proposal_status, "posted")
         self.assertEqual(stored.transaction_currency, "USD")
         self.assertEqual(len(stored.proposal_lines), 2)
-        self.assertEqual(stored.proposal_lines[0].account_role_code, "write_off_expense")
+        self.assertEqual(
+            stored.proposal_lines[0].account_role_code, "write_off_expense"
+        )
         self.assertEqual(stored.proposal_lines[0].debit_amount, remaining)
         self.assertEqual(stored.proposal_lines[0].credit_amount, Decimal("0"))
-        self.assertEqual(stored.proposal_lines[1].account_role_code, "accounts_receivable")
+        self.assertEqual(
+            stored.proposal_lines[1].account_role_code, "accounts_receivable"
+        )
         self.assertEqual(stored.proposal_lines[1].debit_amount, Decimal("0"))
         self.assertEqual(stored.proposal_lines[1].credit_amount, remaining)
         self.assertIsInstance(stored.proposal_lines[0].debit_amount, Decimal)
@@ -2571,7 +3233,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         self.assertIsNone(
-            self.ledger.find_journal_proposal_for_write_off(stored.tenant_account_id, uuid4())
+            self.ledger.find_journal_proposal_for_write_off(
+                stored.tenant_account_id, uuid4()
+            )
         )
         write_off_rows = tuple(
             proposal
@@ -2693,14 +3357,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         leftover_write_off = CollectionWriteOffService(
             self.ledger, clock=lambda: CATALOG_START
         ).write_off_collection_case(TENANT_ONE, leftover_opened.collection_case_id)
-        self.assertEqual(leftover_write_off.collection_write_off_outcome_code.value, "accepted")
+        self.assertEqual(
+            leftover_write_off.collection_write_off_outcome_code.value, "accepted"
+        )
         assert leftover_write_off.collection_write_off_id is not None
         leftover_stored_write_off = self.ledger.get_collection_write_off(
             leftover_write_off.collection_write_off_id
         )
         assert leftover_stored_write_off is not None
         self.assertEqual(leftover_stored_write_off.write_off_amount, leftover)
-        self.assertEqual(leftover_stored_write_off.remaining_outstanding_amount, Decimal("0"))
+        self.assertEqual(
+            leftover_stored_write_off.remaining_outstanding_amount, Decimal("0")
+        )
         self.assertIsNone(
             self.ledger.find_journal_proposal_for_write_off(
                 leftover_stored_write_off.tenant_account_id,
@@ -2786,10 +3454,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             2,
         )
 
-        self.assertEqual(self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored)
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
-                replace(stored, payment_receipt_id=None, credit_adjustment_id=None, collection_write_off_id=None),
+                replace(
+                    stored,
+                    payment_receipt_id=None,
+                    credit_adjustment_id=None,
+                    collection_write_off_id=None,
+                ),
                 stored.proposal_lines,
             )
         with self.assertRaises(ValueError):
@@ -2802,12 +3477,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         later = AccountingExportService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
-        ).propose_write_off_journal(TENANT_ONE, leftover_write_off.collection_write_off_id)
+        ).propose_write_off_journal(
+            TENANT_ONE, leftover_write_off.collection_write_off_id
+        )
         self.assertEqual(later.journal_proposal_outcome_code.value, "accepted")
         assert later.proposal_id is not None
         later_stored = self.ledger.get_journal_proposal(later.proposal_id)
         assert later_stored is not None
-        self.assertEqual(later_stored.collection_write_off_id, leftover_write_off.collection_write_off_id)
+        self.assertEqual(
+            later_stored.collection_write_off_id,
+            leftover_write_off.collection_write_off_id,
+        )
         self.assertEqual(later_stored.proposal_lines[0].debit_amount, leftover)
         self.assertEqual(
             self.connection.execute(
@@ -2826,7 +3506,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(presentment.proposal_id, stored.journal_proposal_id)
         self.assertEqual(presentment.proposal_status, "validated")
         self.assertEqual(presentment.proposal_lines[0].debit_amount, remaining)
-        self.assertEqual(presentment.collection_write_off_id, write_off.collection_write_off_id)
+        self.assertEqual(
+            presentment.collection_write_off_id, write_off.collection_write_off_id
+        )
         page = AccountingExportService(fresh).list_journal_proposals(TENANT_ONE)
         self.assertEqual(
             {
@@ -2849,13 +3531,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).get_journal_proposal(TENANT_ONE, stored.journal_proposal_id)
         self.assertEqual(reloaded_presentment.proposal_id, presentment.proposal_id)
         with self.assertRaises(JournalProposalQueryError) as missing_pin:
-            AccountingExportService(fresh).get_journal_proposal("", stored.journal_proposal_id)
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+            AccountingExportService(fresh).get_journal_proposal(
+                "", stored.journal_proposal_id
+            )
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(JournalProposalQueryError) as other_pin:
             AccountingExportService(fresh).get_journal_proposal(
                 TENANT_TWO, stored.journal_proposal_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "proposal_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "proposal_not_found"
+        )
 
         class BlindFindLedger(PostgresUsageLedger):
             """Force the repository insert path used after a concurrent identity race."""
@@ -2885,23 +3573,31 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(opened.collection_case_outcome_code.value, "accepted")
         assert opened.collection_case_id is not None
         intent = PaymentIntentService(
             self.ledger, clock=lambda: CATALOG_START
         ).project_payment_intent(TENANT_ONE, opened.collection_case_id)
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(opened.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            opened.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         remaining_before = received
@@ -2952,7 +3648,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         self.assertIsNone(
-            self.ledger.find_journal_proposal_for_unapplied_cash(stored.tenant_account_id, uuid4())
+            self.ledger.find_journal_proposal_for_unapplied_cash(
+                stored.tenant_account_id, uuid4()
+            )
         )
         leftover_rows = tuple(
             proposal
@@ -2989,7 +3687,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(still_parked.unapplied_cash_status, "parked")
         remaining_after = self.ledger.get_collection_case(opened.collection_case_id)
         assert remaining_after is not None
-        self.assertEqual(remaining_after.outstanding_amount, remaining_before - received)
+        self.assertEqual(
+            remaining_after.outstanding_amount, remaining_before - received
+        )
 
         replay = AccountingExportService(
             self.ledger, clock=lambda: proposed_at
@@ -3187,7 +3887,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             2,
         )
 
-        self.assertEqual(self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored)
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
                 replace(
@@ -3253,13 +3955,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).get_journal_proposal(TENANT_ONE, stored.journal_proposal_id)
         self.assertEqual(reloaded_presentment.proposal_id, presentment.proposal_id)
         with self.assertRaises(JournalProposalQueryError) as missing_pin:
-            AccountingExportService(fresh).get_journal_proposal("", stored.journal_proposal_id)
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+            AccountingExportService(fresh).get_journal_proposal(
+                "", stored.journal_proposal_id
+            )
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(JournalProposalQueryError) as other_pin:
             AccountingExportService(fresh).get_journal_proposal(
                 TENANT_TWO, stored.journal_proposal_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "proposal_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "proposal_not_found"
+        )
 
         class BlindFindLedger(PostgresUsageLedger):
             """Force the repository insert path used after a concurrent identity race."""
@@ -3291,23 +3999,31 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(opened.collection_case_outcome_code.value, "accepted")
         assert opened.collection_case_id is not None
         intent = PaymentIntentService(
             self.ledger, clock=lambda: CATALOG_START
         ).project_payment_intent(TENANT_ONE, opened.collection_case_id)
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(opened.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            opened.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         receipt = PaymentSettlementService(
@@ -3363,7 +4079,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_unapplied_cash(
             TENANT_ONE, parked.unapplied_cash_id, twenty_opened.collection_case_id
         )
-        self.assertEqual(applied.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            applied.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert applied.unapplied_cash_application_id is not None
         self.assertEqual(applied.remaining_outstanding_amount, leftover_apply_remaining)
         applied_case = self.ledger.get_collection_case(twenty_opened.collection_case_id)
@@ -3395,7 +4113,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(stored.proposal_lines[0].account_role_code, "unapplied_cash")
         self.assertEqual(stored.proposal_lines[0].debit_amount, leftover)
         self.assertEqual(stored.proposal_lines[0].credit_amount, Decimal("0"))
-        self.assertEqual(stored.proposal_lines[1].account_role_code, "accounts_receivable")
+        self.assertEqual(
+            stored.proposal_lines[1].account_role_code, "accounts_receivable"
+        )
         self.assertEqual(stored.proposal_lines[1].debit_amount, Decimal("0"))
         self.assertEqual(stored.proposal_lines[1].credit_amount, leftover)
         self.assertIsInstance(stored.proposal_lines[0].debit_amount, Decimal)
@@ -3445,7 +4165,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert still_applied is not None
         self.assertEqual(still_applied.applied_amount, leftover)
-        still_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        still_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert still_remaining is not None
         self.assertEqual(still_remaining.outstanding_amount, leftover_apply_remaining)
         self.assertEqual(still_remaining.collection_case_status, "open")
@@ -3482,13 +4204,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             1,
         )
-        replay_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        replay_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert replay_remaining is not None
         self.assertEqual(replay_remaining.outstanding_amount, leftover_apply_remaining)
 
-        rejected = AccountingExportService(self.ledger).propose_unapplied_cash_application_journal(
-            TENANT_ONE, uuid4()
-        )
+        rejected = AccountingExportService(
+            self.ledger
+        ).propose_unapplied_cash_application_journal(TENANT_ONE, uuid4())
         self.assertEqual(rejected.journal_proposal_outcome_code.value, "rejected")
         self.assertEqual(
             self.connection.execute(
@@ -3497,7 +4221,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
-        mismatch = AccountingExportService(self.ledger).propose_unapplied_cash_application_journal(
+        mismatch = AccountingExportService(
+            self.ledger
+        ).propose_unapplied_cash_application_journal(
             TENANT_TWO, applied.unapplied_cash_application_id
         )
         self.assertEqual(mismatch.journal_proposal_outcome_code.value, "rejected")
@@ -3587,7 +4313,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_unapplied_cash(
             TENANT_ONE, later_parked.unapplied_cash_id, later_target.collection_case_id
         )
-        self.assertEqual(later_applied.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            later_applied.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert later_applied.unapplied_cash_application_id is not None
         self.assertIsNone(
             self.ledger.find_journal_proposal_for_unapplied_cash_application(
@@ -3671,7 +4399,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_unapplied_cash(
             TENANT_ONE, crash_parked.unapplied_cash_id, crash_target.collection_case_id
         )
-        self.assertEqual(crash_applied.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            crash_applied.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert crash_applied.unapplied_cash_application_id is not None
         crash_composed = AccountingExportService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 22, 30, tzinfo=UTC)
@@ -3723,11 +4453,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             2,
         )
-        healed_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        healed_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert healed_remaining is not None
         self.assertEqual(healed_remaining.outstanding_amount, leftover_apply_remaining)
 
-        self.assertEqual(self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored)
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
                 replace(
@@ -3780,7 +4514,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(presentment.proposal_status, "validated")
         self.assertEqual(presentment.proposal_lines[0].debit_amount, leftover)
         self.assertEqual(
-            presentment.unapplied_cash_application_id, applied.unapplied_cash_application_id
+            presentment.unapplied_cash_application_id,
+            applied.unapplied_cash_application_id,
         )
         page = AccountingExportService(fresh).list_journal_proposals(TENANT_ONE)
         self.assertEqual(
@@ -3809,18 +4544,26 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert fresh_remaining is not None
         self.assertEqual(fresh_remaining.outstanding_amount, leftover_apply_remaining)
         with self.assertRaises(JournalProposalQueryError) as missing_pin:
-            AccountingExportService(fresh).get_journal_proposal("", stored.journal_proposal_id)
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+            AccountingExportService(fresh).get_journal_proposal(
+                "", stored.journal_proposal_id
+            )
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(JournalProposalQueryError) as other_pin:
             AccountingExportService(fresh).get_journal_proposal(
                 TENANT_TWO, stored.journal_proposal_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "proposal_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "proposal_not_found"
+        )
 
         class BlindFindLedger(PostgresUsageLedger):
             """Force the repository insert path used after a concurrent identity race."""
 
-            def find_journal_proposal_for_unapplied_cash_application(self, *args, **kwargs):
+            def find_journal_proposal_for_unapplied_cash_application(
+                self, *args, **kwargs
+            ):
                 return None
 
         raced = AccountingExportService(
@@ -3837,7 +4580,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             3,
         )
-        raced_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        raced_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert raced_remaining is not None
         self.assertEqual(raced_remaining.outstanding_amount, leftover_apply_remaining)
 
@@ -3852,23 +4597,31 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(opened.collection_case_outcome_code.value, "accepted")
         assert opened.collection_case_id is not None
         intent = PaymentIntentService(
             self.ledger, clock=lambda: CATALOG_START
         ).project_payment_intent(TENANT_ONE, opened.collection_case_id)
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(opened.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            opened.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         receipt = PaymentSettlementService(
@@ -3920,7 +4673,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_unapplied_cash(
             TENANT_ONE, parked.unapplied_cash_id, twenty_opened.collection_case_id
         )
-        self.assertEqual(applied.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            applied.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert applied.unapplied_cash_application_id is not None
         self.assertEqual(applied.remaining_outstanding_amount, leftover_apply_remaining)
         applied_case = self.ledger.get_collection_case(twenty_opened.collection_case_id)
@@ -3992,7 +4747,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
-        self.assertEqual(stored.unapplied_cash_refund_id, refunded.unapplied_cash_refund_id)
+        self.assertEqual(
+            stored.unapplied_cash_refund_id, refunded.unapplied_cash_refund_id
+        )
         self.assertEqual(stored.invoice_draft_id, refund_draft.invoice_draft_id)
         self.assertEqual(stored.proposal_status, "validated")
         self.assertNotEqual(stored.proposal_status, "posted")
@@ -4013,7 +4770,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         self.assertIsNone(
-            self.ledger.find_journal_proposal_for_refund(stored.tenant_account_id, uuid4())
+            self.ledger.find_journal_proposal_for_refund(
+                stored.tenant_account_id, uuid4()
+            )
         )
         refund_rows = tuple(
             proposal
@@ -4053,7 +4812,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert still_parked is not None
         self.assertEqual(still_parked.unapplied_amount, leftover)
         self.assertEqual(still_parked.unapplied_cash_status, "parked")
-        still_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        still_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert still_remaining is not None
         self.assertEqual(still_remaining.outstanding_amount, leftover_apply_remaining)
         self.assertEqual(still_remaining.collection_case_status, "open")
@@ -4084,7 +4845,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             1,
         )
-        replay_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        replay_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert replay_remaining is not None
         self.assertEqual(replay_remaining.outstanding_amount, leftover_apply_remaining)
 
@@ -4160,7 +4923,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         later_refunded = UnappliedCashRefundService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 21, 15, tzinfo=UTC)
         ).refund_unapplied_cash(TENANT_ONE, later_parked.unapplied_cash_id)
-        self.assertEqual(later_refunded.unapplied_cash_refund_outcome_code.value, "accepted")
+        self.assertEqual(
+            later_refunded.unapplied_cash_refund_outcome_code.value, "accepted"
+        )
         assert later_refunded.unapplied_cash_refund_id is not None
         self.assertIsNone(
             self.ledger.find_journal_proposal_for_refund(
@@ -4215,7 +4980,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         crash_refunded = UnappliedCashRefundService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 22, 15, tzinfo=UTC)
         ).refund_unapplied_cash(TENANT_ONE, crash_parked.unapplied_cash_id)
-        self.assertEqual(crash_refunded.unapplied_cash_refund_outcome_code.value, "accepted")
+        self.assertEqual(
+            crash_refunded.unapplied_cash_refund_outcome_code.value, "accepted"
+        )
         assert crash_refunded.unapplied_cash_refund_id is not None
         crash_composed = AccountingExportService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 22, 30, tzinfo=UTC)
@@ -4263,11 +5030,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             2,
         )
-        healed_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        healed_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert healed_remaining is not None
         self.assertEqual(healed_remaining.outstanding_amount, leftover_apply_remaining)
 
-        self.assertEqual(self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored)
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
                 replace(
@@ -4348,13 +5119,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert fresh_remaining is not None
         self.assertEqual(fresh_remaining.outstanding_amount, leftover_apply_remaining)
         with self.assertRaises(JournalProposalQueryError) as missing_pin:
-            AccountingExportService(fresh).get_journal_proposal("", stored.journal_proposal_id)
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+            AccountingExportService(fresh).get_journal_proposal(
+                "", stored.journal_proposal_id
+            )
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(JournalProposalQueryError) as other_pin:
             AccountingExportService(fresh).get_journal_proposal(
                 TENANT_TWO, stored.journal_proposal_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "proposal_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "proposal_not_found"
+        )
 
         class BlindFindLedger(PostgresUsageLedger):
             """Force the repository insert path used after a concurrent identity race."""
@@ -4374,7 +5151,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             3,
         )
-        raced_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        raced_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert raced_remaining is not None
         self.assertEqual(raced_remaining.outstanding_amount, leftover_apply_remaining)
 
@@ -4392,24 +5171,32 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
         self.assertNotEqual(rating.rated_total_amount, KNOWN_MORNING_TOTAL)
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(opened.collection_case_outcome_code.value, "accepted")
         assert opened.collection_case_id is not None
         intent = PaymentIntentService(
             self.ledger, clock=lambda: CATALOG_START
         ).project_payment_intent(TENANT_ONE, opened.collection_case_id)
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(opened.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            opened.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         receipt = PaymentSettlementService(
@@ -4461,7 +5248,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_unapplied_cash(
             TENANT_ONE, parked.unapplied_cash_id, twenty_opened.collection_case_id
         )
-        self.assertEqual(applied.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            applied.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert applied.unapplied_cash_application_id is not None
         self.assertEqual(applied.remaining_outstanding_amount, leftover_apply_remaining)
         applied_case = self.ledger.get_collection_case(twenty_opened.collection_case_id)
@@ -4493,7 +5282,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         taxed_draft = InvoiceDraftService(self.ledger).draft_invoice(
             TENANT_ONE, taxed_rating.rating_run_id
         )
-        tax_rate = TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.1")
+        tax_rate = TaxRateService(self.ledger).publish_tax_rate(
+            TENANT_ONE, "vat", "0.1"
+        )
         self.assertEqual(tax_rate.tax_rate_outcome_code.value, "accepted")
         assessed = TaxAssessmentService(self.ledger).assess_tax(
             TENANT_ONE, taxed_draft.invoice_draft_id, 1
@@ -4522,19 +5313,25 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         invoice_journal = AccountingExportService(
             self.ledger, clock=lambda: proposed_at
         ).propose_journal(TENANT_ONE, taxed_draft.invoice_draft_id)
-        self.assertEqual(invoice_journal.journal_proposal_outcome_code.value, "accepted")
+        self.assertEqual(
+            invoice_journal.journal_proposal_outcome_code.value, "accepted"
+        )
         assert invoice_journal.proposal_id is not None
         invoice_replay = AccountingExportService(
             self.ledger, clock=lambda: proposed_at
         ).propose_journal(TENANT_ONE, taxed_draft.invoice_draft_id)
-        self.assertEqual(invoice_replay.journal_proposal_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            invoice_replay.journal_proposal_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(invoice_replay.proposal_id, invoice_journal.proposal_id)
         accepted = AccountingExportService(
             self.ledger, clock=lambda: proposed_at
         ).propose_void_journal(TENANT_ONE, voided.issued_invoice_void_id)
         self.assertEqual(accepted.journal_proposal_outcome_code.value, "accepted")
         assert accepted.proposal_id is not None
-        self.assertEqual(accepted.reversed_journal_proposal_id, invoice_journal.proposal_id)
+        self.assertEqual(
+            accepted.reversed_journal_proposal_id, invoice_journal.proposal_id
+        )
         self.assertNotIn("journal_entry_id", accepted.as_contract_dict())
         stored = self.ledger.get_journal_proposal(accepted.proposal_id)
         self.assertIsNotNone(stored)
@@ -4552,7 +5349,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(stored.proposal_lines[1].account_role_code, "tax_payable")
         self.assertEqual(stored.proposal_lines[1].debit_amount, tax_amount)
         self.assertEqual(stored.proposal_lines[1].credit_amount, Decimal("0"))
-        self.assertEqual(stored.proposal_lines[2].account_role_code, "accounts_receivable")
+        self.assertEqual(
+            stored.proposal_lines[2].account_role_code, "accounts_receivable"
+        )
         self.assertEqual(stored.proposal_lines[2].debit_amount, Decimal("0"))
         self.assertEqual(stored.proposal_lines[2].credit_amount, voided_amount)
         self.assertIsInstance(stored.proposal_lines[0].debit_amount, Decimal)
@@ -4597,10 +5396,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             and event.source_id == stored.journal_proposal_id
         ]
         self.assertEqual(len(outbox_rows), 1)
-        still_voided = self.ledger.get_issued_invoice_void(voided.issued_invoice_void_id)
+        still_voided = self.ledger.get_issued_invoice_void(
+            voided.issued_invoice_void_id
+        )
         assert still_voided is not None
         self.assertEqual(still_voided.voided_amount, voided_amount)
-        still_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        still_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert still_remaining is not None
         self.assertEqual(still_remaining.outstanding_amount, leftover_apply_remaining)
         self.assertEqual(still_remaining.collection_case_status, "open")
@@ -4610,7 +5413,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).propose_void_journal(TENANT_ONE, voided.issued_invoice_void_id)
         self.assertEqual(replay.journal_proposal_outcome_code.value, "duplicate_replay")
         self.assertEqual(replay.proposal_id, stored.journal_proposal_id)
-        self.assertEqual(replay.reversed_journal_proposal_id, invoice_journal.proposal_id)
+        self.assertEqual(
+            replay.reversed_journal_proposal_id, invoice_journal.proposal_id
+        )
         self.assertEqual(replay.proposal_lines[0].debit_amount, exclusive_amount)
         self.assertEqual(replay.proposal_lines[1].debit_amount, tax_amount)
         self.assertEqual(replay.proposal_lines[2].credit_amount, voided_amount)
@@ -4634,7 +5439,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             1,
         )
-        replay_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        replay_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert replay_remaining is not None
         self.assertEqual(replay_remaining.outstanding_amount, leftover_apply_remaining)
         replay_void = self.ledger.get_issued_invoice_void(voided.issued_invoice_void_id)
@@ -4695,7 +5502,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         later_voided = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 20, 15, tzinfo=UTC)
         ).void_issued_invoice(TENANT_ONE, later_issued.issued_invoice_id)
-        self.assertEqual(later_voided.issued_invoice_void_outcome_code.value, "accepted")
+        self.assertEqual(
+            later_voided.issued_invoice_void_outcome_code.value, "accepted"
+        )
         assert later_voided.issued_invoice_void_id is not None
         self.assertIsNone(
             self.ledger.find_journal_proposal_for_issued_invoice_void(
@@ -4733,7 +5542,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         crash_voided = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 21, 15, tzinfo=UTC)
         ).void_issued_invoice(TENANT_ONE, crash_issued.issued_invoice_id)
-        self.assertEqual(crash_voided.issued_invoice_void_outcome_code.value, "accepted")
+        self.assertEqual(
+            crash_voided.issued_invoice_void_outcome_code.value, "accepted"
+        )
         assert crash_voided.issued_invoice_void_id is not None
         crash_composed = AccountingExportService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 21, 30, tzinfo=UTC)
@@ -4781,14 +5592,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             2,
         )
-        healed_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        healed_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert healed_remaining is not None
         self.assertEqual(healed_remaining.outstanding_amount, leftover_apply_remaining)
         healed_void = self.ledger.get_issued_invoice_void(voided.issued_invoice_void_id)
         assert healed_void is not None
         self.assertEqual(healed_void.voided_amount, voided_amount)
 
-        self.assertEqual(self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored)
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
                 replace(
@@ -4841,7 +5656,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(presentment.proposal_lines[0].debit_amount, exclusive_amount)
         self.assertEqual(presentment.proposal_lines[1].debit_amount, tax_amount)
         self.assertEqual(presentment.proposal_lines[2].credit_amount, voided_amount)
-        self.assertEqual(presentment.issued_invoice_void_id, voided.issued_invoice_void_id)
+        self.assertEqual(
+            presentment.issued_invoice_void_id, voided.issued_invoice_void_id
+        )
         self.assertNotIn("journal_entry_id", presentment.as_contract_dict())
         page = AccountingExportService(fresh).list_journal_proposals(TENANT_ONE)
         self.assertEqual(
@@ -4860,7 +5677,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             TENANT_ONE, later.proposal_id
         )
         self.assertEqual(
-            later_presentment.issued_invoice_void_id, later_voided.issued_invoice_void_id
+            later_presentment.issued_invoice_void_id,
+            later_voided.issued_invoice_void_id,
         )
         reloaded_presentment = AccountingExportService(
             PostgresUsageLedger(self.connection)
@@ -4877,13 +5695,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert fresh_void is not None
         self.assertEqual(fresh_void.voided_amount, voided_amount)
         with self.assertRaises(JournalProposalQueryError) as missing_pin:
-            AccountingExportService(fresh).get_journal_proposal("", stored.journal_proposal_id)
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+            AccountingExportService(fresh).get_journal_proposal(
+                "", stored.journal_proposal_id
+            )
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(JournalProposalQueryError) as other_pin:
             AccountingExportService(fresh).get_journal_proposal(
                 TENANT_TWO, stored.journal_proposal_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "proposal_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "proposal_not_found"
+        )
 
         class BlindFindLedger(PostgresUsageLedger):
             """Force the repository insert path used after a concurrent identity race."""
@@ -4896,7 +5720,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).propose_void_journal(TENANT_ONE, voided.issued_invoice_void_id)
         self.assertEqual(raced.journal_proposal_outcome_code.value, "accepted")
         self.assertEqual(raced.proposal_id, stored.journal_proposal_id)
-        self.assertEqual(raced.reversed_journal_proposal_id, invoice_journal.proposal_id)
+        self.assertEqual(
+            raced.reversed_journal_proposal_id, invoice_journal.proposal_id
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.journal_proposal "
@@ -4904,7 +5730,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             3,
         )
-        raced_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        raced_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert raced_remaining is not None
         self.assertEqual(raced_remaining.outstanding_amount, leftover_apply_remaining)
         raced_void = self.ledger.get_issued_invoice_void(voided.issued_invoice_void_id)
@@ -4927,24 +5755,32 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
         self.assertNotEqual(rating.rated_total_amount, KNOWN_MORNING_TOTAL)
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(opened.collection_case_outcome_code.value, "accepted")
         assert opened.collection_case_id is not None
         intent = PaymentIntentService(
             self.ledger, clock=lambda: CATALOG_START
         ).project_payment_intent(TENANT_ONE, opened.collection_case_id)
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(opened.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            opened.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         receipt = PaymentSettlementService(
@@ -4996,7 +5832,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_unapplied_cash(
             TENANT_ONE, parked.unapplied_cash_id, twenty_opened.collection_case_id
         )
-        self.assertEqual(applied.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            applied.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert applied.unapplied_cash_application_id is not None
         self.assertEqual(applied.remaining_outstanding_amount, leftover_apply_remaining)
         applied_case = self.ledger.get_collection_case(twenty_opened.collection_case_id)
@@ -5004,7 +5842,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(applied_case.outstanding_amount, leftover_apply_remaining)
         self.assertEqual(applied_case.collection_case_status, "open")
 
-        tax_rate = TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.1")
+        tax_rate = TaxRateService(self.ledger).publish_tax_rate(
+            TENANT_ONE, "vat", "0.1"
+        )
         self.assertEqual(tax_rate.tax_rate_outcome_code.value, "accepted")
         invoice_usage = make_event(
             event_id="019d7b92-1aa0-7a7f-b61c-962c0f4e061c",
@@ -5043,7 +5883,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         invoice_voided = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 18, 15, tzinfo=UTC)
         ).void_issued_invoice(TENANT_ONE, issued_invoice.issued_invoice_id)
-        self.assertEqual(invoice_voided.issued_invoice_void_outcome_code.value, "accepted")
+        self.assertEqual(
+            invoice_voided.issued_invoice_void_outcome_code.value, "accepted"
+        )
         assert invoice_voided.issued_invoice_void_id is not None
         stored_invoice_void = self.ledger.get_issued_invoice_void(
             invoice_voided.issued_invoice_void_id
@@ -5098,7 +5940,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).void_issued_credit_note(TENANT_ONE, issued_note.issued_credit_note_id)
         self.assertEqual(voided.issued_credit_note_void_outcome_code.value, "accepted")
         assert voided.issued_credit_note_void_id is not None
-        stored_void = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        stored_void = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert stored_void is not None
         self.assertEqual(stored_void.voided_amount, credit_voided_amount)
 
@@ -5113,11 +5957,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         credit_replay = AccountingExportService(
             self.ledger, clock=lambda: proposed_at
         ).propose_credit_journal(TENANT_ONE, credit.credit_adjustment_id)
-        self.assertEqual(credit_replay.journal_proposal_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            credit_replay.journal_proposal_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(credit_replay.proposal_id, credit.proposal_id)
         accepted = AccountingExportService(
             self.ledger, clock=lambda: proposed_at
-        ).propose_credit_note_void_journal(TENANT_ONE, voided.issued_credit_note_void_id)
+        ).propose_credit_note_void_journal(
+            TENANT_ONE, voided.issued_credit_note_void_id
+        )
         self.assertEqual(accepted.journal_proposal_outcome_code.value, "accepted")
         assert accepted.proposal_id is not None
         self.assertEqual(accepted.reversed_journal_proposal_id, credit.proposal_id)
@@ -5126,14 +5974,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
-        self.assertEqual(stored.issued_credit_note_void_id, voided.issued_credit_note_void_id)
+        self.assertEqual(
+            stored.issued_credit_note_void_id, voided.issued_credit_note_void_id
+        )
         self.assertEqual(stored.invoice_draft_id, credit_draft.invoice_draft_id)
         self.assertIsNone(stored.issued_invoice_void_id)
         self.assertEqual(stored.proposal_status, "validated")
         self.assertNotEqual(stored.proposal_status, "posted")
         self.assertEqual(stored.transaction_currency, "USD")
         self.assertEqual(len(stored.proposal_lines), 3)
-        self.assertEqual(stored.proposal_lines[0].account_role_code, "accounts_receivable")
+        self.assertEqual(
+            stored.proposal_lines[0].account_role_code, "accounts_receivable"
+        )
         self.assertEqual(stored.proposal_lines[0].debit_amount, credit_voided_amount)
         self.assertEqual(stored.proposal_lines[0].credit_amount, Decimal("0"))
         self.assertEqual(stored.proposal_lines[1].account_role_code, "usage_revenue")
@@ -5184,7 +6036,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             and event.source_id == stored.journal_proposal_id
         ]
         self.assertEqual(len(outbox_rows), 1)
-        still_voided = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        still_voided = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert still_voided is not None
         self.assertEqual(still_voided.voided_amount, credit_voided_amount)
         still_invoice_void = self.ledger.get_issued_invoice_void(
@@ -5192,14 +6046,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert still_invoice_void is not None
         self.assertEqual(still_invoice_void.voided_amount, invoice_voided_amount)
-        still_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        still_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert still_remaining is not None
         self.assertEqual(still_remaining.outstanding_amount, leftover_apply_remaining)
         self.assertEqual(still_remaining.collection_case_status, "open")
 
         replay = AccountingExportService(
             self.ledger, clock=lambda: proposed_at
-        ).propose_credit_note_void_journal(TENANT_ONE, voided.issued_credit_note_void_id)
+        ).propose_credit_note_void_journal(
+            TENANT_ONE, voided.issued_credit_note_void_id
+        )
         self.assertEqual(replay.journal_proposal_outcome_code.value, "duplicate_replay")
         self.assertEqual(replay.proposal_id, stored.journal_proposal_id)
         self.assertEqual(replay.reversed_journal_proposal_id, credit.proposal_id)
@@ -5226,10 +6084,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             1,
         )
-        replay_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        replay_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert replay_remaining is not None
         self.assertEqual(replay_remaining.outstanding_amount, leftover_apply_remaining)
-        replay_void = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        replay_void = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert replay_void is not None
         self.assertEqual(replay_void.voided_amount, credit_voided_amount)
         replay_invoice_void = self.ledger.get_issued_invoice_void(
@@ -5238,9 +6100,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert replay_invoice_void is not None
         self.assertEqual(replay_invoice_void.voided_amount, invoice_voided_amount)
 
-        rejected = AccountingExportService(self.ledger).propose_credit_note_void_journal(
-            TENANT_ONE, uuid4()
-        )
+        rejected = AccountingExportService(
+            self.ledger
+        ).propose_credit_note_void_journal(TENANT_ONE, uuid4())
         self.assertEqual(rejected.journal_proposal_outcome_code.value, "rejected")
         self.assertEqual(
             self.connection.execute(
@@ -5249,7 +6111,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
-        mismatch = AccountingExportService(self.ledger).propose_credit_note_void_journal(
+        mismatch = AccountingExportService(
+            self.ledger
+        ).propose_credit_note_void_journal(
             TENANT_TWO, voided.issued_credit_note_void_id
         )
         self.assertEqual(mismatch.journal_proposal_outcome_code.value, "rejected")
@@ -5299,7 +6163,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         later_voided = IssuedCreditNoteVoidService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 20, 30, tzinfo=UTC)
         ).void_issued_credit_note(TENANT_ONE, later_note.issued_credit_note_id)
-        self.assertEqual(later_voided.issued_credit_note_void_outcome_code.value, "accepted")
+        self.assertEqual(
+            later_voided.issued_credit_note_void_outcome_code.value, "accepted"
+        )
         assert later_voided.issued_credit_note_void_id is not None
         self.assertIsNone(
             self.ledger.find_journal_proposal_for_issued_credit_note_void(
@@ -5343,11 +6209,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         crash_voided = IssuedCreditNoteVoidService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 21, 30, tzinfo=UTC)
         ).void_issued_credit_note(TENANT_ONE, crash_note.issued_credit_note_id)
-        self.assertEqual(crash_voided.issued_credit_note_void_outcome_code.value, "accepted")
+        self.assertEqual(
+            crash_voided.issued_credit_note_void_outcome_code.value, "accepted"
+        )
         assert crash_voided.issued_credit_note_void_id is not None
         crash_composed = AccountingExportService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 21, 45, tzinfo=UTC)
-        ).propose_credit_note_void_journal(TENANT_ONE, crash_voided.issued_credit_note_void_id)
+        ).propose_credit_note_void_journal(
+            TENANT_ONE, crash_voided.issued_credit_note_void_id
+        )
         self.assertEqual(crash_composed.journal_proposal_outcome_code.value, "accepted")
         assert crash_composed.proposal_id is not None
         crash_stored = self.ledger.get_journal_proposal(crash_composed.proposal_id)
@@ -5369,7 +6239,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         healed = AccountingExportService(
             self.ledger, clock=lambda: proposed_at
-        ).propose_credit_note_void_journal(TENANT_ONE, crash_voided.issued_credit_note_void_id)
+        ).propose_credit_note_void_journal(
+            TENANT_ONE, crash_voided.issued_credit_note_void_id
+        )
         self.assertEqual(healed.journal_proposal_outcome_code.value, "duplicate_replay")
         self.assertEqual(healed.proposal_id, crash_stored.journal_proposal_id)
         self.assertEqual(
@@ -5391,10 +6263,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             2,
         )
-        healed_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        healed_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert healed_remaining is not None
         self.assertEqual(healed_remaining.outstanding_amount, leftover_apply_remaining)
-        healed_void = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        healed_void = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert healed_void is not None
         self.assertEqual(healed_void.voided_amount, credit_voided_amount)
         healed_invoice_void = self.ledger.get_issued_invoice_void(
@@ -5440,7 +6316,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         missing_voided = IssuedCreditNoteVoidService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 22, 30, tzinfo=UTC)
         ).void_issued_credit_note(TENANT_ONE, missing_note.issued_credit_note_id)
-        self.assertEqual(missing_voided.issued_credit_note_void_outcome_code.value, "accepted")
+        self.assertEqual(
+            missing_voided.issued_credit_note_void_outcome_code.value, "accepted"
+        )
         assert missing_voided.issued_credit_note_void_id is not None
         self.connection.execute(
             "DELETE FROM billing_core.journal_proposal_line "
@@ -5448,8 +6326,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (missing_credit.proposal_id,),
         )
         self.connection.execute(
-            "DELETE FROM billing_core.journal_proposal "
-            "WHERE journal_proposal_id = %s",
+            "DELETE FROM billing_core.journal_proposal WHERE journal_proposal_id = %s",
             (missing_credit.proposal_id,),
         )
         self.connection.commit()
@@ -5458,10 +6335,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 tenant.tenant_account_id, missing_credit.credit_adjustment_id
             )
         )
-        missing_original = AccountingExportService(self.ledger).propose_credit_note_void_journal(
+        missing_original = AccountingExportService(
+            self.ledger
+        ).propose_credit_note_void_journal(
             TENANT_ONE, missing_voided.issued_credit_note_void_id
         )
-        self.assertEqual(missing_original.journal_proposal_outcome_code.value, "rejected")
+        self.assertEqual(
+            missing_original.journal_proposal_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             missing_original.rejection_reason_code.value,
             JournalProposalRejectionReasonCode.CREDIT_JOURNAL_NOT_FOUND.value,
@@ -5474,7 +6355,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             2,
         )
 
-        self.assertEqual(self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored)
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
                 replace(
@@ -5500,7 +6383,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         later = AccountingExportService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 23, 0, tzinfo=UTC)
-        ).propose_credit_note_void_journal(TENANT_ONE, later_voided.issued_credit_note_void_id)
+        ).propose_credit_note_void_journal(
+            TENANT_ONE, later_voided.issued_credit_note_void_id
+        )
         self.assertEqual(later.journal_proposal_outcome_code.value, "accepted")
         assert later.proposal_id is not None
         later_stored = self.ledger.get_journal_proposal(later.proposal_id)
@@ -5526,10 +6411,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(presentment.proposal_id, stored.journal_proposal_id)
         self.assertEqual(presentment.proposal_status, "validated")
-        self.assertEqual(presentment.proposal_lines[0].debit_amount, credit_voided_amount)
+        self.assertEqual(
+            presentment.proposal_lines[0].debit_amount, credit_voided_amount
+        )
         self.assertEqual(presentment.proposal_lines[1].credit_amount, credit_exclusive)
         self.assertEqual(presentment.proposal_lines[2].credit_amount, credit_tax)
-        self.assertEqual(presentment.issued_credit_note_void_id, voided.issued_credit_note_void_id)
+        self.assertEqual(
+            presentment.issued_credit_note_void_id, voided.issued_credit_note_void_id
+        )
         self.assertNotIn("journal_entry_id", presentment.as_contract_dict())
         page = AccountingExportService(fresh).list_journal_proposals(TENANT_ONE)
         self.assertEqual(
@@ -5565,29 +6454,39 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert fresh_void is not None
         self.assertEqual(fresh_void.voided_amount, credit_voided_amount)
-        fresh_invoice_void = PostgresUsageLedger(self.connection).get_issued_invoice_void(
-            invoice_voided.issued_invoice_void_id
-        )
+        fresh_invoice_void = PostgresUsageLedger(
+            self.connection
+        ).get_issued_invoice_void(invoice_voided.issued_invoice_void_id)
         assert fresh_invoice_void is not None
         self.assertEqual(fresh_invoice_void.voided_amount, invoice_voided_amount)
         with self.assertRaises(JournalProposalQueryError) as missing_pin:
-            AccountingExportService(fresh).get_journal_proposal("", stored.journal_proposal_id)
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+            AccountingExportService(fresh).get_journal_proposal(
+                "", stored.journal_proposal_id
+            )
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(JournalProposalQueryError) as other_pin:
             AccountingExportService(fresh).get_journal_proposal(
                 TENANT_TWO, stored.journal_proposal_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "proposal_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "proposal_not_found"
+        )
 
         class BlindFindLedger(PostgresUsageLedger):
             """Force the repository insert path used after a concurrent identity race."""
 
-            def find_journal_proposal_for_issued_credit_note_void(self, *args, **kwargs):
+            def find_journal_proposal_for_issued_credit_note_void(
+                self, *args, **kwargs
+            ):
                 return None
 
         raced = AccountingExportService(
             BlindFindLedger(self.connection), clock=lambda: proposed_at
-        ).propose_credit_note_void_journal(TENANT_ONE, voided.issued_credit_note_void_id)
+        ).propose_credit_note_void_journal(
+            TENANT_ONE, voided.issued_credit_note_void_id
+        )
         self.assertEqual(raced.journal_proposal_outcome_code.value, "accepted")
         self.assertEqual(raced.proposal_id, stored.journal_proposal_id)
         self.assertEqual(raced.reversed_journal_proposal_id, credit.proposal_id)
@@ -5598,10 +6497,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             3,
         )
-        raced_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        raced_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert raced_remaining is not None
         self.assertEqual(raced_remaining.outstanding_amount, leftover_apply_remaining)
-        raced_void = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        raced_void = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert raced_void is not None
         self.assertEqual(raced_void.voided_amount, credit_voided_amount)
         raced_invoice_void = self.ledger.get_issued_invoice_void(
@@ -5626,24 +6529,32 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
         self.assertNotEqual(rating.rated_total_amount, KNOWN_MORNING_TOTAL)
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        opened = CollectionCaseService(self.ledger, clock=lambda: CATALOG_START).open_collection_case(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        opened = CollectionCaseService(
+            self.ledger, clock=lambda: CATALOG_START
+        ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(opened.collection_case_outcome_code.value, "accepted")
         assert opened.collection_case_id is not None
         intent = PaymentIntentService(
             self.ledger, clock=lambda: CATALOG_START
         ).project_payment_intent(TENANT_ONE, opened.collection_case_id)
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(opened.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            opened.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         receipt = PaymentSettlementService(
@@ -5695,7 +6606,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_unapplied_cash(
             TENANT_ONE, parked.unapplied_cash_id, twenty_opened.collection_case_id
         )
-        self.assertEqual(applied.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            applied.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert applied.unapplied_cash_application_id is not None
         self.assertEqual(applied.remaining_outstanding_amount, leftover_apply_remaining)
         applied_case = self.ledger.get_collection_case(twenty_opened.collection_case_id)
@@ -5748,13 +6661,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cash_replay = AccountingExportService(self.ledger).propose_cash_journal(
             TENANT_ONE, cash_receipt.payment_receipt_id
         )
-        self.assertEqual(cash_replay.journal_proposal_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            cash_replay.journal_proposal_outcome_code.value, "duplicate_replay"
+        )
         assert cash_replay.proposal_id is not None
         cash_journal = self.ledger.get_journal_proposal(cash_replay.proposal_id)
         assert cash_journal is not None
-        self.assertEqual(cash_journal.proposal_lines[0].debit_amount, cash_journal_debit)
+        self.assertEqual(
+            cash_journal.proposal_lines[0].debit_amount, cash_journal_debit
+        )
 
-        tax_rate = TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.1")
+        tax_rate = TaxRateService(self.ledger).publish_tax_rate(
+            TENANT_ONE, "vat", "0.1"
+        )
         self.assertEqual(tax_rate.tax_rate_outcome_code.value, "accepted")
         invoice_usage = make_event(
             event_id="019d7b92-1aa0-7a7f-b61c-962c0f4e0c1c",
@@ -5793,7 +6712,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         invoice_voided = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 18, 15, tzinfo=UTC)
         ).void_issued_invoice(TENANT_ONE, issued_invoice.issued_invoice_id)
-        self.assertEqual(invoice_voided.issued_invoice_void_outcome_code.value, "accepted")
+        self.assertEqual(
+            invoice_voided.issued_invoice_void_outcome_code.value, "accepted"
+        )
         assert invoice_voided.issued_invoice_void_id is not None
         stored_invoice_void = self.ledger.get_issued_invoice_void(
             invoice_voided.issued_invoice_void_id
@@ -5847,7 +6768,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).void_issued_credit_note(TENANT_ONE, issued_note.issued_credit_note_id)
         self.assertEqual(voided.issued_credit_note_void_outcome_code.value, "accepted")
         assert voided.issued_credit_note_void_id is not None
-        stored_void = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        stored_void = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert stored_void is not None
         self.assertEqual(stored_void.voided_amount, credit_voided_amount)
 
@@ -5875,7 +6798,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertNotEqual(stored.proposal_status, "posted")
         self.assertEqual(stored.transaction_currency, "USD")
         self.assertEqual(len(stored.proposal_lines), 3)
-        self.assertEqual(stored.proposal_lines[0].account_role_code, "accounts_receivable")
+        self.assertEqual(
+            stored.proposal_lines[0].account_role_code, "accounts_receivable"
+        )
         self.assertEqual(stored.proposal_lines[0].debit_amount, invoice_voided_amount)
         self.assertEqual(stored.proposal_lines[0].credit_amount, Decimal("0"))
         self.assertEqual(stored.proposal_lines[1].account_role_code, "usage_revenue")
@@ -5950,7 +6875,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             and event.source_id == stored.journal_proposal_id
         ]
         self.assertEqual(len(outbox_rows), 1)
-        still_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        still_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert still_remaining is not None
         self.assertEqual(still_remaining.outstanding_amount, leftover_apply_remaining)
         self.assertEqual(still_remaining.collection_case_status, "open")
@@ -5959,7 +6886,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert still_invoice_void is not None
         self.assertEqual(still_invoice_void.voided_amount, invoice_voided_amount)
-        still_voided = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        still_voided = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert still_voided is not None
         self.assertEqual(still_voided.voided_amount, credit_voided_amount)
         still_cash = self.ledger.get_journal_proposal(cash_journal.journal_proposal_id)
@@ -5994,7 +6923,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             1,
         )
-        replay_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        replay_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert replay_remaining is not None
         self.assertEqual(replay_remaining.outstanding_amount, leftover_apply_remaining)
         replay_invoice_void = self.ledger.get_issued_invoice_void(
@@ -6002,11 +6933,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert replay_invoice_void is not None
         self.assertEqual(replay_invoice_void.voided_amount, invoice_voided_amount)
-        replay_void = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        replay_void = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert replay_void is not None
         self.assertEqual(replay_void.voided_amount, credit_voided_amount)
 
-        rejected = AccountingExportService(self.ledger).propose_journal(TENANT_ONE, uuid4())
+        rejected = AccountingExportService(self.ledger).propose_journal(
+            TENANT_ONE, uuid4()
+        )
         self.assertEqual(rejected.journal_proposal_outcome_code.value, "rejected")
         self.assertEqual(
             self.connection.execute(
@@ -6125,7 +7060,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             2,
         )
-        healed_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        healed_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert healed_remaining is not None
         self.assertEqual(healed_remaining.outstanding_amount, leftover_apply_remaining)
         healed_invoice_void = self.ledger.get_issued_invoice_void(
@@ -6133,14 +7070,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert healed_invoice_void is not None
         self.assertEqual(healed_invoice_void.voided_amount, invoice_voided_amount)
-        healed_void = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        healed_void = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert healed_void is not None
         self.assertEqual(healed_void.voided_amount, credit_voided_amount)
         healed_cash = self.ledger.get_journal_proposal(cash_journal.journal_proposal_id)
         assert healed_cash is not None
         self.assertEqual(healed_cash.proposal_lines[0].debit_amount, cash_journal_debit)
 
-        self.assertEqual(self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored)
+        self.assertEqual(
+            self.ledger.insert_journal_proposal(stored, stored.proposal_lines), stored
+        )
         with self.assertRaises(ValueError):
             self.ledger.insert_journal_proposal(
                 replace(cash_journal, payment_receipt_id=None),
@@ -6161,8 +7102,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(later_stored.invoice_draft_id, later_draft.invoice_draft_id)
         self.assertIsNone(later_stored.issued_invoice_void_id)
         self.assertEqual(len(later_stored.proposal_lines), 2)
-        self.assertEqual(later_stored.proposal_lines[0].account_role_code, "accounts_receivable")
-        self.assertEqual(later_stored.proposal_lines[1].account_role_code, "usage_revenue")
+        self.assertEqual(
+            later_stored.proposal_lines[0].account_role_code, "accounts_receivable"
+        )
+        self.assertEqual(
+            later_stored.proposal_lines[1].account_role_code, "usage_revenue"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.journal_proposal "
@@ -6179,7 +7124,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(presentment.proposal_id, stored.journal_proposal_id)
         self.assertEqual(presentment.proposal_status, "validated")
-        self.assertEqual(presentment.proposal_lines[0].debit_amount, invoice_voided_amount)
+        self.assertEqual(
+            presentment.proposal_lines[0].debit_amount, invoice_voided_amount
+        )
         self.assertEqual(presentment.proposal_lines[1].credit_amount, exclusive_amount)
         self.assertEqual(presentment.proposal_lines[2].credit_amount, tax_amount)
         self.assertEqual(presentment.invoice_draft_id, invoice_draft.invoice_draft_id)
@@ -6207,7 +7154,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         later_presentment = AccountingExportService(fresh).get_journal_proposal(
             TENANT_ONE, later.proposal_id
         )
-        self.assertEqual(later_presentment.invoice_draft_id, later_draft.invoice_draft_id)
+        self.assertEqual(
+            later_presentment.invoice_draft_id, later_draft.invoice_draft_id
+        )
         reloaded_presentment = AccountingExportService(
             PostgresUsageLedger(self.connection)
         ).get_journal_proposal(TENANT_ONE, stored.journal_proposal_id)
@@ -6217,9 +7166,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert fresh_remaining is not None
         self.assertEqual(fresh_remaining.outstanding_amount, leftover_apply_remaining)
-        fresh_invoice_void = PostgresUsageLedger(self.connection).get_issued_invoice_void(
-            invoice_voided.issued_invoice_void_id
-        )
+        fresh_invoice_void = PostgresUsageLedger(
+            self.connection
+        ).get_issued_invoice_void(invoice_voided.issued_invoice_void_id)
         assert fresh_invoice_void is not None
         self.assertEqual(fresh_invoice_void.voided_amount, invoice_voided_amount)
         fresh_void = PostgresUsageLedger(self.connection).get_issued_credit_note_void(
@@ -6233,13 +7182,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert fresh_cash is not None
         self.assertEqual(fresh_cash.proposal_lines[0].debit_amount, cash_journal_debit)
         with self.assertRaises(JournalProposalQueryError) as missing_pin:
-            AccountingExportService(fresh).get_journal_proposal("", stored.journal_proposal_id)
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+            AccountingExportService(fresh).get_journal_proposal(
+                "", stored.journal_proposal_id
+            )
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(JournalProposalQueryError) as other_pin:
             AccountingExportService(fresh).get_journal_proposal(
                 TENANT_TWO, stored.journal_proposal_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "proposal_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "proposal_not_found"
+        )
 
         class BlindFindLedger(PostgresUsageLedger):
             """Force the repository insert path used after a concurrent identity race."""
@@ -6259,7 +7214,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             3,
         )
-        raced_remaining = self.ledger.get_collection_case(twenty_opened.collection_case_id)
+        raced_remaining = self.ledger.get_collection_case(
+            twenty_opened.collection_case_id
+        )
         assert raced_remaining is not None
         self.assertEqual(raced_remaining.outstanding_amount, leftover_apply_remaining)
         raced_invoice_void = self.ledger.get_issued_invoice_void(
@@ -6267,7 +7224,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert raced_invoice_void is not None
         self.assertEqual(raced_invoice_void.voided_amount, invoice_voided_amount)
-        raced_void = self.ledger.get_issued_credit_note_void(voided.issued_credit_note_void_id)
+        raced_void = self.ledger.get_issued_credit_note_void(
+            voided.issued_credit_note_void_id
+        )
         assert raced_void is not None
         self.assertEqual(raced_void.voided_amount, credit_voided_amount)
         raced_cash = self.ledger.get_journal_proposal(cash_journal.journal_proposal_id)
@@ -6291,10 +7250,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "https://hooks.example.test/cwl",
             (EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,),
         )
-        self.assertEqual(replay.webhook_subscription_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            replay.webhook_subscription_outcome_code.value, "duplicate_replay"
+        )
         self.assertIsNone(replay.webhook_secret)
         assert registered.webhook_subscription_id is not None
-        stored = self.ledger.get_webhook_subscription(registered.webhook_subscription_id)
+        stored = self.ledger.get_webhook_subscription(
+            registered.webhook_subscription_id
+        )
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertTrue(stored.webhook_secret_hash.startswith("hmac-sha256:"))
@@ -6304,10 +7267,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             (stored,),
         )
-        self.assertEqual(self.ledger.list_active_webhook_subscriptions(
-            self.ledger.register_tenant(TENANT_TWO).tenant_account_id,
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-        ), ())
+        self.assertEqual(
+            self.ledger.list_active_webhook_subscriptions(
+                self.ledger.register_tenant(TENANT_TWO).tenant_account_id,
+                EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+            ),
+            (),
+        )
 
         source_id = uuid4()
         outbox = enqueue_accepted_fact(
@@ -6320,13 +7286,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertIsNotNone(outbox)
         assert outbox is not None
-        self.assertEqual(self.ledger.get_webhook_outbox_event(outbox.outbox_event_id), outbox)
-        self.assertEqual(self.ledger.find_webhook_outbox_event(
-            stored.tenant_account_id,
-            outbox.event_type_code,
-            source_id,
-            outbox.payload_hash,
-        ), outbox)
+        self.assertEqual(
+            self.ledger.get_webhook_outbox_event(outbox.outbox_event_id), outbox
+        )
+        self.assertEqual(
+            self.ledger.find_webhook_outbox_event(
+                stored.tenant_account_id,
+                outbox.event_type_code,
+                source_id,
+                outbox.payload_hash,
+            ),
+            outbox,
+        )
         self.assertEqual(
             enqueue_accepted_fact(
                 self.ledger,
@@ -6345,28 +7316,37 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).deliver_due_events(TENANT_ONE)
         self.assertEqual(delivered.delivered_event_count, 1)
         self.assertEqual(delivered.attempted_delivery_count, 1)
-        self.assertEqual(self.ledger.list_pending_webhook_outbox_events(
-            stored.tenant_account_id
-        ), ())
-        delivered_row = self.ledger.mark_webhook_outbox_event_delivered(outbox.outbox_event_id)
+        self.assertEqual(
+            self.ledger.list_pending_webhook_outbox_events(stored.tenant_account_id), ()
+        )
+        delivered_row = self.ledger.mark_webhook_outbox_event_delivered(
+            outbox.outbox_event_id
+        )
         self.assertEqual(delivered_row.delivery_status, "delivered")
         attempts = self.ledger.list_webhook_delivery_attempts(
             outbox.outbox_event_id, registered.webhook_subscription_id
         )
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0].attempt_number, 1)
-        self.assertEqual(self.ledger.get_webhook_delivery_attempt(attempts[0].delivery_attempt_id), attempts[0])
         self.assertEqual(
-            self.ledger.list_webhook_delivery_attempts_for_tenant(stored.tenant_account_id),
+            self.ledger.get_webhook_delivery_attempt(attempts[0].delivery_attempt_id),
+            attempts[0],
+        )
+        self.assertEqual(
+            self.ledger.list_webhook_delivery_attempts_for_tenant(
+                stored.tenant_account_id
+            ),
             attempts,
         )
         self.assertIsNone(self.ledger.get_webhook_subscription(uuid4()))
-        self.assertIsNone(self.ledger.find_webhook_subscription(
-            stored.tenant_account_id,
-            "https://hooks.example.test/missing",
-            EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
-            1,
-        ))
+        self.assertIsNone(
+            self.ledger.find_webhook_subscription(
+                stored.tenant_account_id,
+                "https://hooks.example.test/missing",
+                EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,
+                1,
+            )
+        )
         self.assertIsNone(self.ledger.get_webhook_outbox_event(uuid4()))
         self.assertIsNone(self.ledger.get_webhook_delivery_attempt(uuid4()))
 
@@ -6395,14 +7375,24 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.mark_webhook_outbox_event_delivered(uuid4())
         with self.assertRaises(ValueError):
-            self.ledger.store_webhook_subscription_secret(registered.webhook_subscription_id, "")
-        with self.assertRaises(ValueError):
-            self.ledger.insert_webhook_subscription(
-                replace(stored, subscription_status="invalid", webhook_subscription_id=uuid4())
+            self.ledger.store_webhook_subscription_secret(
+                registered.webhook_subscription_id, ""
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_webhook_subscription(
-                replace(stored, webhook_secret_hash="invalid", webhook_subscription_id=uuid4())
+                replace(
+                    stored,
+                    subscription_status="invalid",
+                    webhook_subscription_id=uuid4(),
+                )
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_webhook_subscription(
+                replace(
+                    stored,
+                    webhook_secret_hash="invalid",
+                    webhook_subscription_id=uuid4(),
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_webhook_subscription(
@@ -6432,8 +7422,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.insert_webhook_delivery_attempt(
                 StoredWebhookDeliveryAttempt(
-                    uuid4(), uuid4(), registered.webhook_subscription_id, 1,
-                    500, None, "missing", CATALOG_START
+                    uuid4(),
+                    uuid4(),
+                    registered.webhook_subscription_id,
+                    1,
+                    500,
+                    None,
+                    "missing",
+                    CATALOG_START,
                 )
             )
 
@@ -6458,15 +7454,22 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "https://hooks.example.test/cwl",
             (EVENT_TYPE_JOURNAL_PROPOSAL_VALIDATED,),
         )
-        self.assertEqual(concurrent_replay.webhook_subscription_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            concurrent_replay.webhook_subscription_outcome_code.value,
+            "duplicate_replay",
+        )
 
     def test_published_spend_budget_is_durable(self) -> None:
         """Persist one published spend_budget and keep existing reads after restart."""
         tenant = self.ledger.require_tenant(TENANT_ONE)
-        account, account_error = self.ledger.resolve_billing_account(tenant, ACCOUNT_ONE)
+        account, account_error = self.ledger.resolve_billing_account(
+            tenant, ACCOUNT_ONE
+        )
         self.assertIsNone(account_error)
         assert account is not None
-        self.assertEqual(self.ledger.get_billing_account(account.billing_account_id), account)
+        self.assertEqual(
+            self.ledger.get_billing_account(account.billing_account_id), account
+        )
         self.assertIsNone(self.ledger.get_billing_account(uuid4()))
         published_at = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
         budget_amount = Decimal("100.00")
@@ -6476,7 +7479,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         UsageRatingService(self.ledger).rate_usage_window(
@@ -6520,7 +7527,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             stored,
         )
-        self.assertEqual(self.ledger.list_spend_budgets(stored.tenant_account_id), (stored,))
+        self.assertEqual(
+            self.ledger.list_spend_budgets(stored.tenant_account_id), (stored,)
+        )
         self.assertEqual(
             self.ledger.list_spend_budgets(
                 self.ledger.require_tenant(TENANT_TWO).tenant_account_id
@@ -6558,7 +7567,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(len(outbox_rows), 1)
         self.assertEqual(outbox_rows[0].source_id, stored.spend_budget_id)
 
-        replay = SpendBudgetService(self.ledger, clock=lambda: published_at).publish_spend_budget(
+        replay = SpendBudgetService(
+            self.ledger, clock=lambda: published_at
+        ).publish_spend_budget(
             TENANT_ONE,
             account.billing_account_id,
             "USD",
@@ -6568,7 +7579,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(replay.spend_budget_outcome_code.value, "duplicate_replay")
         self.assertEqual(replay.spend_budget_id, stored.spend_budget_id)
         self.assertEqual(
-            self.connection.execute("SELECT COUNT(*) FROM billing_core.spend_budget").fetchone()[0],
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.spend_budget"
+            ).fetchone()[0],
             1,
         )
         self.assertEqual(
@@ -6589,7 +7602,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(rejected.spend_budget_outcome_code.value, "rejected")
         self.assertEqual(
-            self.connection.execute("SELECT COUNT(*) FROM billing_core.spend_budget").fetchone()[0],
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.spend_budget"
+            ).fetchone()[0],
             1,
         )
         mismatch = SpendBudgetService(self.ledger).publish_spend_budget(
@@ -6601,7 +7616,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(mismatch.spend_budget_outcome_code.value, "rejected")
         self.assertEqual(
-            self.connection.execute("SELECT COUNT(*) FROM billing_core.spend_budget").fetchone()[0],
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.spend_budget"
+            ).fetchone()[0],
             1,
         )
 
@@ -6617,7 +7634,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(later.spend_budget_outcome_code.value, "accepted")
         self.assertNotEqual(later.spend_budget_id, stored.spend_budget_id)
         self.assertEqual(
-            self.connection.execute("SELECT COUNT(*) FROM billing_core.spend_budget").fetchone()[0],
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.spend_budget"
+            ).fetchone()[0],
             2,
         )
 
@@ -6664,7 +7683,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             MORNING_WINDOW,
         )
         self.assertEqual(healed.spend_budget_outcome_code.value, "duplicate_replay")
-        self.assertEqual(healed.spend_budget_id, inserted_without_outbox.spend_budget_id)
+        self.assertEqual(
+            healed.spend_budget_id, inserted_without_outbox.spend_budget_id
+        )
         self.assertEqual(
             len(
                 [
@@ -6687,15 +7708,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(presentment.budget_amount, budget_amount)
         self.assertEqual(presentment.spend_budget_status, "published")
         self.assertEqual(presentment.next_operator_action, "wait")
-        evaluation = SpendBudgetEvaluationPresentmentService(fresh).present_spend_budget_evaluation(
-            TENANT_ONE, stored.spend_budget_id
-        )
+        evaluation = SpendBudgetEvaluationPresentmentService(
+            fresh
+        ).present_spend_budget_evaluation(TENANT_ONE, stored.spend_budget_id)
         self.assertEqual(evaluation.budget_amount, budget_amount)
         self.assertEqual(evaluation.utilization_status, "under")
         self.assertEqual(evaluation.spend_budget_status, "published")
-        statuses = SpendBudgetEvaluationPresentmentService(fresh).list_billing_account_budget_statuses(
-            TENANT_ONE, account.billing_account_id
-        )
+        statuses = SpendBudgetEvaluationPresentmentService(
+            fresh
+        ).list_billing_account_budget_statuses(TENANT_ONE, account.billing_account_id)
         self.assertGreaterEqual(len(statuses.budget_statuses), 1)
         self.assertEqual(
             {row.spend_budget_id for row in statuses.budget_statuses},
@@ -6705,17 +7726,23 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 inserted_without_outbox.spend_budget_id,
             },
         )
-        self.assertEqual(statuses.budget_statuses[0].spend_budget_id, stored.spend_budget_id)
-        over_signal = SpendBudgetOverSignalService(fresh, clock=lambda: published_at).observe_spend_budget_over(
-            TENANT_ONE, stored.spend_budget_id
+        self.assertEqual(
+            statuses.budget_statuses[0].spend_budget_id, stored.spend_budget_id
         )
-        self.assertEqual(over_signal.spend_budget_over_signal_outcome_code.value, "accepted")
+        over_signal = SpendBudgetOverSignalService(
+            fresh, clock=lambda: published_at
+        ).observe_spend_budget_over(TENANT_ONE, stored.spend_budget_id)
+        self.assertEqual(
+            over_signal.spend_budget_over_signal_outcome_code.value, "accepted"
+        )
         self.assertEqual(over_signal.utilization_status, "under")
         self.assertEqual(
             len(
                 [
                     event
-                    for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+                    for event in fresh.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
                     if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_OVER
                 ]
             ),
@@ -6726,7 +7753,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).present_spend_budget_over_signal(TENANT_ONE, stored.spend_budget_id)
         self.assertEqual(under_observation.over_signal.utilization_status, "under")
         self.assertEqual(under_observation.webhook_outbox_events, ())
-        over_budget = SpendBudgetService(fresh, clock=lambda: published_at).publish_spend_budget(
+        over_budget = SpendBudgetService(
+            fresh, clock=lambda: published_at
+        ).publish_spend_budget(
             TENANT_ONE,
             account.billing_account_id,
             "USD",
@@ -6735,27 +7764,35 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(over_budget.spend_budget_outcome_code.value, "accepted")
         assert over_budget.spend_budget_id is not None
-        first_over = SpendBudgetOverSignalService(fresh, clock=lambda: published_at).observe_spend_budget_over(
-            TENANT_ONE, over_budget.spend_budget_id
+        first_over = SpendBudgetOverSignalService(
+            fresh, clock=lambda: published_at
+        ).observe_spend_budget_over(TENANT_ONE, over_budget.spend_budget_id)
+        self.assertEqual(
+            first_over.spend_budget_over_signal_outcome_code.value, "accepted"
         )
-        self.assertEqual(first_over.spend_budget_over_signal_outcome_code.value, "accepted")
         self.assertEqual(first_over.utilization_status, "over")
         over_events = [
             event
-            for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+            for event in fresh.list_webhook_outbox_events_for_tenant(
+                stored.tenant_account_id
+            )
             if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_OVER
         ]
         self.assertEqual(len(over_events), 1)
         self.assertEqual(over_events[0].source_id, over_budget.spend_budget_id)
-        replay_over = SpendBudgetOverSignalService(fresh, clock=lambda: published_at).observe_spend_budget_over(
-            TENANT_ONE, over_budget.spend_budget_id
+        replay_over = SpendBudgetOverSignalService(
+            fresh, clock=lambda: published_at
+        ).observe_spend_budget_over(TENANT_ONE, over_budget.spend_budget_id)
+        self.assertEqual(
+            replay_over.spend_budget_over_signal_outcome_code.value, "duplicate_replay"
         )
-        self.assertEqual(replay_over.spend_budget_over_signal_outcome_code.value, "duplicate_replay")
         self.assertEqual(
             len(
                 [
                     event
-                    for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+                    for event in fresh.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
                     if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_OVER
                 ]
             ),
@@ -6782,7 +7819,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             reloaded_observation.webhook_outbox_events[0].outbox_event_id,
             over_observation.webhook_outbox_events[0].outbox_event_id,
         )
-        at_budget = SpendBudgetService(fresh, clock=lambda: published_at).publish_spend_budget(
+        at_budget = SpendBudgetService(
+            fresh, clock=lambda: published_at
+        ).publish_spend_budget(
             TENANT_ONE,
             account.billing_account_id,
             "USD",
@@ -6795,12 +7834,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             fresh, clock=lambda: published_at
         ).observe_spend_budget_approaching(TENANT_ONE, at_budget.spend_budget_id)
         self.assertEqual(
-            first_approaching.spend_budget_approaching_signal_outcome_code.value, "accepted"
+            first_approaching.spend_budget_approaching_signal_outcome_code.value,
+            "accepted",
         )
         self.assertEqual(first_approaching.utilization_status, "at")
         approaching_events = [
             event
-            for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+            for event in fresh.list_webhook_outbox_events_for_tenant(
+                stored.tenant_account_id
+            )
             if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_APPROACHING
         ]
         self.assertEqual(len(approaching_events), 1)
@@ -6816,7 +7858,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             len(
                 [
                     event
-                    for event in fresh.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)
+                    for event in fresh.list_webhook_outbox_events_for_tenant(
+                        stored.tenant_account_id
+                    )
                     if event.event_type_code == EVENT_TYPE_SPEND_BUDGET_APPROACHING
                 ]
             ),
@@ -6832,7 +7876,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         approaching_observation = SpendBudgetApproachingSignalPresentmentService(
             fresh
         ).present_spend_budget_approaching_signal(TENANT_ONE, at_budget.spend_budget_id)
-        self.assertEqual(approaching_observation.approaching_signal.utilization_status, "at")
+        self.assertEqual(
+            approaching_observation.approaching_signal.utilization_status, "at"
+        )
         self.assertEqual(len(approaching_observation.webhook_outbox_events), 1)
         self.assertEqual(
             approaching_observation.webhook_outbox_events[0].event_type_code,
@@ -6842,9 +7888,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             approaching_observation.webhook_outbox_events[0].source_id,
             at_budget.spend_budget_id,
         )
-        reloaded_approaching_observation = SpendBudgetApproachingSignalPresentmentService(
-            PostgresUsageLedger(self.connection)
-        ).present_spend_budget_approaching_signal(TENANT_ONE, at_budget.spend_budget_id)
+        reloaded_approaching_observation = (
+            SpendBudgetApproachingSignalPresentmentService(
+                PostgresUsageLedger(self.connection)
+            ).present_spend_budget_approaching_signal(
+                TENANT_ONE, at_budget.spend_budget_id
+            )
+        )
         self.assertEqual(len(reloaded_approaching_observation.webhook_outbox_events), 1)
         self.assertEqual(
             reloaded_approaching_observation.webhook_outbox_events[0].outbox_event_id,
@@ -6862,12 +7912,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             SpendBudgetPresentmentService(fresh).present_spend_budget(
                 "", stored.spend_budget_id
             )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(SpendBudgetPresentmentQueryError) as other_pin:
             SpendBudgetPresentmentService(fresh).present_spend_budget(
                 TENANT_TWO, stored.spend_budget_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "spend_budget_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "spend_budget_not_found"
+        )
 
         self.assertEqual(self.ledger.insert_spend_budget(stored), stored)
         self.assertEqual(
@@ -6877,13 +7931,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.insert_spend_budget(replace(stored, currency_code="usd"))
         with self.assertRaises(ValueError):
-            self.ledger.insert_spend_budget(replace(stored, source_payload_hash="md5:abc"))
+            self.ledger.insert_spend_budget(
+                replace(stored, source_payload_hash="md5:abc")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_spend_budget(
                 replace(stored, budget_amount=Decimal("0"), spend_budget_id=uuid4())
             )
         with self.assertRaises(ValueError):
-            self.ledger.insert_spend_budget(replace(stored, spend_budget_status="posted"))
+            self.ledger.insert_spend_budget(
+                replace(stored, spend_budget_status="posted")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_spend_budget(
                 replace(
@@ -6921,13 +7979,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
         assert stored_draft is not None
         self.assertGreater(stored_draft.drafted_total_amount, Decimal("0.00175"))
@@ -7004,7 +8068,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         replay = IssuedCreditNoteService(
             self.ledger, clock=lambda: issued_at
         ).issue_credit_note(TENANT_ONE, credit.credit_adjustment_id)
-        self.assertEqual(replay.issued_credit_note_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            replay.issued_credit_note_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(replay.issued_credit_note_id, stored.issued_credit_note_id)
         self.assertEqual(
             self.connection.execute(
@@ -7025,7 +8091,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
 
-        rejected = IssuedCreditNoteService(self.ledger).issue_credit_note(TENANT_ONE, uuid4())
+        rejected = IssuedCreditNoteService(self.ledger).issue_credit_note(
+            TENANT_ONE, uuid4()
+        )
         self.assertEqual(rejected.issued_credit_note_outcome_code.value, "rejected")
         self.assertEqual(
             self.connection.execute(
@@ -7044,9 +8112,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
 
-        issued = IssuedInvoiceService(self.ledger, clock=lambda: issued_at).issue_invoice(
-            TENANT_ONE, draft.invoice_draft_id
-        )
+        issued = IssuedInvoiceService(
+            self.ledger, clock=lambda: issued_at
+        ).issue_invoice(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
         later_credit = CreditAdjustmentService(
             self.ledger, clock=lambda: CATALOG_START
@@ -7077,7 +8145,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(crash_credit.credit_adjustment_outcome_code.value, "accepted")
         assert crash_credit.credit_adjustment_id is not None
-        stored_crash_credit = self.ledger.get_credit_adjustment(crash_credit.credit_adjustment_id)
+        stored_crash_credit = self.ledger.get_credit_adjustment(
+            crash_credit.credit_adjustment_id
+        )
         assert stored_crash_credit is not None
         crash_hash = compute_issued_credit_note_payload_hash(
             {
@@ -7093,7 +8163,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "tax_exclusive_amount": format_exact_decimal(
                     stored_crash_credit.tax_exclusive_amount
                 ),
-                "tax_inclusive_amount": format_exact_decimal(stored_crash_credit.credit_amount),
+                "tax_inclusive_amount": format_exact_decimal(
+                    stored_crash_credit.credit_amount
+                ),
                 "issued_invoice_id": str(issued.issued_invoice_id),
             }
         )
@@ -7131,8 +8203,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         healed = IssuedCreditNoteService(
             self.ledger, clock=lambda: issued_at
         ).issue_credit_note(TENANT_ONE, crash_credit.credit_adjustment_id)
-        self.assertEqual(healed.issued_credit_note_outcome_code.value, "duplicate_replay")
-        self.assertEqual(healed.issued_credit_note_id, inserted_without_outbox.issued_credit_note_id)
+        self.assertEqual(
+            healed.issued_credit_note_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            healed.issued_credit_note_id, inserted_without_outbox.issued_credit_note_id
+        )
         self.assertEqual(
             len(
                 [
@@ -7149,14 +8225,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         fresh = PostgresUsageLedger(self.connection)
         reloaded = fresh.get_issued_credit_note(stored.issued_credit_note_id)
         self.assertEqual(reloaded, stored)
-        presentment = IssuedCreditNotePresentmentService(fresh).present_issued_credit_note(
-            TENANT_ONE, stored.issued_credit_note_id
-        )
+        presentment = IssuedCreditNotePresentmentService(
+            fresh
+        ).present_issued_credit_note(TENANT_ONE, stored.issued_credit_note_id)
         self.assertEqual(presentment.tax_inclusive_amount, first_credit_amount)
         self.assertEqual(presentment.issued_credit_note_status, "issued")
         self.assertEqual(presentment.next_operator_action, "wait")
         self.assertIsNone(presentment.issued_invoice_id)
-        page = IssuedCreditNotePresentmentService(fresh).list_issued_credit_notes(TENANT_ONE)
+        page = IssuedCreditNotePresentmentService(fresh).list_issued_credit_notes(
+            TENANT_ONE
+        )
         self.assertEqual(
             {row.issued_credit_note_id for row in page.issued_credit_notes},
             {
@@ -7165,47 +8243,64 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 inserted_without_outbox.issued_credit_note_id,
             },
         )
-        later_presentment = IssuedCreditNotePresentmentService(fresh).present_issued_credit_note(
-            TENANT_ONE, later.issued_credit_note_id
-        )
+        later_presentment = IssuedCreditNotePresentmentService(
+            fresh
+        ).present_issued_credit_note(TENANT_ONE, later.issued_credit_note_id)
         self.assertEqual(later_presentment.issued_invoice_id, issued.issued_invoice_id)
         reloaded_presentment = IssuedCreditNotePresentmentService(
             PostgresUsageLedger(self.connection)
         ).present_issued_credit_note(TENANT_ONE, stored.issued_credit_note_id)
         self.assertEqual(
-            reloaded_presentment.issued_credit_note_id, presentment.issued_credit_note_id
+            reloaded_presentment.issued_credit_note_id,
+            presentment.issued_credit_note_id,
         )
         with self.assertRaises(IssuedCreditNotePresentmentQueryError) as missing_pin:
             IssuedCreditNotePresentmentService(fresh).present_issued_credit_note(
                 "", stored.issued_credit_note_id
             )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(IssuedCreditNotePresentmentQueryError) as other_pin:
             IssuedCreditNotePresentmentService(fresh).present_issued_credit_note(
                 TENANT_TWO, stored.issued_credit_note_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "issued_credit_note_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "issued_credit_note_not_found"
+        )
 
         self.assertEqual(self.ledger.insert_issued_credit_note(stored), stored)
         self.assertEqual(
-            self.ledger.insert_issued_credit_note(replace(stored, issued_credit_note_id=uuid4())),
+            self.ledger.insert_issued_credit_note(
+                replace(stored, issued_credit_note_id=uuid4())
+            ),
             stored,
         )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_credit_note(replace(stored, currency_code="usd"))
         with self.assertRaises(ValueError):
-            self.ledger.insert_issued_credit_note(replace(stored, source_payload_hash="md5:abc"))
+            self.ledger.insert_issued_credit_note(
+                replace(stored, source_payload_hash="md5:abc")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_credit_note(
                 replace(stored, credit_adjustment_source_payload_hash="md5:abc")
             )
         with self.assertRaises(ValueError):
-            self.ledger.insert_issued_credit_note(replace(stored, issued_credit_note_status="posted"))
-        with self.assertRaises(ValueError):
-            self.ledger.insert_issued_credit_note(replace(stored, credit_reason_code="courtesy"))
+            self.ledger.insert_issued_credit_note(
+                replace(stored, issued_credit_note_status="posted")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_credit_note(
-                replace(stored, tax_inclusive_amount=Decimal("2.00"), issued_credit_note_id=uuid4())
+                replace(stored, credit_reason_code="courtesy")
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_issued_credit_note(
+                replace(
+                    stored,
+                    tax_inclusive_amount=Decimal("2.00"),
+                    issued_credit_note_id=uuid4(),
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_credit_note(
@@ -7226,7 +8321,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         raced = IssuedCreditNoteService(
             BlindFindLedger(self.connection), clock=lambda: issued_at
         ).issue_credit_note(TENANT_ONE, credit.credit_adjustment_id)
-        self.assertEqual(raced.issued_credit_note_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            raced.issued_credit_note_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(raced.issued_credit_note_id, stored.issued_credit_note_id)
 
     def test_issued_credit_note_void_is_durable(self) -> None:
@@ -7237,13 +8334,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         first_credit_amount = Decimal("0.001")
         later_credit_amount = Decimal("0.0005")
         crash_credit_amount = Decimal("0.00025")
@@ -7264,14 +8367,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         accepted = IssuedCreditNoteVoidService(
             self.ledger, clock=lambda: voided_at
         ).void_issued_credit_note(TENANT_ONE, issued_note.issued_credit_note_id)
-        self.assertEqual(accepted.issued_credit_note_void_outcome_code.value, "accepted")
+        self.assertEqual(
+            accepted.issued_credit_note_void_outcome_code.value, "accepted"
+        )
         assert accepted.issued_credit_note_void_id is not None
-        stored = self.ledger.get_issued_credit_note_void(accepted.issued_credit_note_void_id)
+        stored = self.ledger.get_issued_credit_note_void(
+            accepted.issued_credit_note_void_id
+        )
         self.assertIsNotNone(stored)
         assert stored is not None
         tenant = self.ledger.require_tenant(TENANT_ONE)
         self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
-        self.assertEqual(stored.issued_credit_note_id, issued_note.issued_credit_note_id)
+        self.assertEqual(
+            stored.issued_credit_note_id, issued_note.issued_credit_note_id
+        )
         self.assertEqual(stored.credit_adjustment_id, credit.credit_adjustment_id)
         self.assertEqual(stored.invoice_draft_id, draft.invoice_draft_id)
         self.assertIsNone(stored.issued_invoice_id)
@@ -7282,7 +8391,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(stored.source_payload_hash, accepted.source_payload_hash)
         self.assertIsInstance(stored.voided_amount, Decimal)
         self.assertNotIsInstance(stored.voided_amount, float)
-        reloaded_note = self.ledger.get_issued_credit_note(issued_note.issued_credit_note_id)
+        reloaded_note = self.ledger.get_issued_credit_note(
+            issued_note.issued_credit_note_id
+        )
         assert reloaded_note is not None
         self.assertEqual(reloaded_note.issued_credit_note_status, "issued")
         self.assertEqual(
@@ -7292,7 +8403,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         self.assertEqual(
-            self.ledger.list_issued_credit_note_voids_for_tenant(stored.tenant_account_id),
+            self.ledger.list_issued_credit_note_voids_for_tenant(
+                stored.tenant_account_id
+            ),
             (stored,),
         )
         self.assertEqual(
@@ -7329,8 +8442,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         replay = IssuedCreditNoteVoidService(
             self.ledger, clock=lambda: voided_at
         ).void_issued_credit_note(TENANT_ONE, issued_note.issued_credit_note_id)
-        self.assertEqual(replay.issued_credit_note_void_outcome_code.value, "duplicate_replay")
-        self.assertEqual(replay.issued_credit_note_void_id, stored.issued_credit_note_void_id)
+        self.assertEqual(
+            replay.issued_credit_note_void_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            replay.issued_credit_note_void_id, stored.issued_credit_note_void_id
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
@@ -7353,7 +8470,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         rejected = IssuedCreditNoteVoidService(self.ledger).void_issued_credit_note(
             TENANT_ONE, uuid4()
         )
-        self.assertEqual(rejected.issued_credit_note_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            rejected.issued_credit_note_void_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
@@ -7363,16 +8482,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         mismatch = IssuedCreditNoteVoidService(self.ledger).void_issued_credit_note(
             TENANT_TWO, issued_note.issued_credit_note_id
         )
-        self.assertEqual(mismatch.issued_credit_note_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            mismatch.issued_credit_note_void_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
             ).fetchone()[0],
             1,
         )
-        issued = IssuedInvoiceService(self.ledger, clock=lambda: issued_at).issue_invoice(
-            TENANT_ONE, draft.invoice_draft_id
-        )
+        issued = IssuedInvoiceService(
+            self.ledger, clock=lambda: issued_at
+        ).issue_invoice(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
         later_credit = CreditAdjustmentService(
             self.ledger, clock=lambda: CATALOG_START
@@ -7386,10 +8507,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).issue_credit_note(TENANT_ONE, later_credit.credit_adjustment_id)
         self.assertEqual(later_note.issued_credit_note_outcome_code.value, "accepted")
         assert later_note.issued_credit_note_id is not None
-        currency_mismatch = IssuedCreditNoteVoidService(self.ledger).void_issued_credit_note(
+        currency_mismatch = IssuedCreditNoteVoidService(
+            self.ledger
+        ).void_issued_credit_note(
             TENANT_ONE, later_note.issued_credit_note_id, currency_code="EUR"
         )
-        self.assertEqual(currency_mismatch.issued_credit_note_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            currency_mismatch.issued_credit_note_void_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.issued_credit_note_void"
@@ -7401,7 +8526,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).void_issued_credit_note(TENANT_ONE, later_note.issued_credit_note_id)
         self.assertEqual(later.issued_credit_note_void_outcome_code.value, "accepted")
         assert later.issued_credit_note_void_id is not None
-        later_stored = self.ledger.get_issued_credit_note_void(later.issued_credit_note_void_id)
+        later_stored = self.ledger.get_issued_credit_note_void(
+            later.issued_credit_note_void_id
+        )
         assert later_stored is not None
         self.assertEqual(later_stored.issued_invoice_id, issued.issued_invoice_id)
         self.assertEqual(later_stored.voided_amount, later_credit_amount)
@@ -7424,7 +8551,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).issue_credit_note(TENANT_ONE, crash_credit.credit_adjustment_id)
         self.assertEqual(crash_note.issued_credit_note_outcome_code.value, "accepted")
         assert crash_note.issued_credit_note_id is not None
-        stored_crash_note = self.ledger.get_issued_credit_note(crash_note.issued_credit_note_id)
+        stored_crash_note = self.ledger.get_issued_credit_note(
+            crash_note.issued_credit_note_id
+        )
         assert stored_crash_note is not None
         crash_hash = compute_issued_credit_note_void_payload_hash(
             {
@@ -7432,7 +8561,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "credit_adjustment_id": str(stored_crash_note.credit_adjustment_id),
                 "invoice_draft_id": str(stored_crash_note.invoice_draft_id),
                 "currency_code": stored_crash_note.currency_code,
-                "voided_amount": format_exact_decimal(stored_crash_note.tax_inclusive_amount),
+                "voided_amount": format_exact_decimal(
+                    stored_crash_note.tax_inclusive_amount
+                ),
                 "issued_credit_note_void_contract_version": 1,
             }
         )
@@ -7464,9 +8595,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         healed = IssuedCreditNoteVoidService(
             self.ledger, clock=lambda: voided_at
         ).void_issued_credit_note(TENANT_ONE, crash_note.issued_credit_note_id)
-        self.assertEqual(healed.issued_credit_note_void_outcome_code.value, "duplicate_replay")
         self.assertEqual(
-            healed.issued_credit_note_void_id, inserted_without_outbox.issued_credit_note_void_id
+            healed.issued_credit_note_void_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            healed.issued_credit_note_void_id,
+            inserted_without_outbox.issued_credit_note_void_id,
         )
         self.assertEqual(
             len(
@@ -7486,7 +8620,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).record_credit_adjustment(
             TENANT_ONE, draft.invoice_draft_id, Decimal("0.0001"), "goodwill"
         )
-        self.assertEqual(applied_credit.credit_adjustment_outcome_code.value, "accepted")
+        self.assertEqual(
+            applied_credit.credit_adjustment_outcome_code.value, "accepted"
+        )
         assert applied_credit.credit_adjustment_id is not None
         applied_note = IssuedCreditNoteService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 18, 0, tzinfo=UTC)
@@ -7527,10 +8663,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             tenant.tenant_account_id, applied_note.issued_credit_note_id
         )
         self.assertIsNotNone(applied)
-        already_applied = IssuedCreditNoteVoidService(self.ledger).void_issued_credit_note(
-            TENANT_ONE, applied_note.issued_credit_note_id
+        already_applied = IssuedCreditNoteVoidService(
+            self.ledger
+        ).void_issued_credit_note(TENANT_ONE, applied_note.issued_credit_note_id)
+        self.assertEqual(
+            already_applied.issued_credit_note_void_outcome_code.value, "rejected"
         )
-        self.assertEqual(already_applied.issued_credit_note_void_outcome_code.value, "rejected")
         self.assertEqual(
             already_applied.rejection_reason_code.value, "credit_note_already_applied"
         )
@@ -7544,16 +8682,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         fresh = PostgresUsageLedger(self.connection)
         reloaded = fresh.get_issued_credit_note_void(stored.issued_credit_note_void_id)
         self.assertEqual(reloaded, stored)
-        presentment = IssuedCreditNoteVoidPresentmentService(fresh).present_issued_credit_note_void(
-            TENANT_ONE, stored.issued_credit_note_void_id
-        )
+        presentment = IssuedCreditNoteVoidPresentmentService(
+            fresh
+        ).present_issued_credit_note_void(TENANT_ONE, stored.issued_credit_note_void_id)
         self.assertEqual(presentment.voided_amount, first_credit_amount)
         self.assertEqual(presentment.issued_credit_note_void_status, "recorded")
         self.assertEqual(presentment.next_operator_action, "wait")
         self.assertIsNone(presentment.issued_invoice_id)
-        page = IssuedCreditNoteVoidPresentmentService(fresh).list_issued_credit_note_voids(
-            TENANT_ONE
-        )
+        page = IssuedCreditNoteVoidPresentmentService(
+            fresh
+        ).list_issued_credit_note_voids(TENANT_ONE)
         self.assertEqual(
             {row.issued_credit_note_void_id for row in page.issued_credit_note_voids},
             {
@@ -7573,17 +8711,24 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             reloaded_presentment.issued_credit_note_void_id,
             presentment.issued_credit_note_void_id,
         )
-        with self.assertRaises(IssuedCreditNoteVoidPresentmentQueryError) as missing_pin:
-            IssuedCreditNoteVoidPresentmentService(fresh).present_issued_credit_note_void(
-                "", stored.issued_credit_note_void_id
-            )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(
+            IssuedCreditNoteVoidPresentmentQueryError
+        ) as missing_pin:
+            IssuedCreditNoteVoidPresentmentService(
+                fresh
+            ).present_issued_credit_note_void("", stored.issued_credit_note_void_id)
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(IssuedCreditNoteVoidPresentmentQueryError) as other_pin:
-            IssuedCreditNoteVoidPresentmentService(fresh).present_issued_credit_note_void(
+            IssuedCreditNoteVoidPresentmentService(
+                fresh
+            ).present_issued_credit_note_void(
                 TENANT_TWO, stored.issued_credit_note_void_id
             )
         self.assertEqual(
-            other_pin.exception.rejection_reason_code, "issued_credit_note_void_not_found"
+            other_pin.exception.rejection_reason_code,
+            "issued_credit_note_void_not_found",
         )
 
         self.assertEqual(self.ledger.insert_issued_credit_note_void(stored), stored)
@@ -7594,7 +8739,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         with self.assertRaises(ValueError):
-            self.ledger.insert_issued_credit_note_void(replace(stored, currency_code="usd"))
+            self.ledger.insert_issued_credit_note_void(
+                replace(stored, currency_code="usd")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_credit_note_void(
                 replace(stored, source_payload_hash="md5:abc")
@@ -7605,7 +8752,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_credit_note_void(
-                replace(stored, voided_amount=Decimal("0"), issued_credit_note_void_id=uuid4())
+                replace(
+                    stored,
+                    voided_amount=Decimal("0"),
+                    issued_credit_note_void_id=uuid4(),
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_credit_note_void(
@@ -7626,8 +8777,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         raced = IssuedCreditNoteVoidService(
             BlindFindLedger(self.connection), clock=lambda: voided_at
         ).void_issued_credit_note(TENANT_ONE, issued_note.issued_credit_note_id)
-        self.assertEqual(raced.issued_credit_note_void_outcome_code.value, "duplicate_replay")
-        self.assertEqual(raced.issued_credit_note_void_id, stored.issued_credit_note_void_id)
+        self.assertEqual(
+            raced.issued_credit_note_void_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            raced.issued_credit_note_void_id, stored.issued_credit_note_void_id
+        )
 
     def test_credit_note_application_is_durable(self) -> None:
         """Persist one credit_note_application and keep GET presentment after restart."""
@@ -7637,13 +8792,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
         assert stored_draft is not None
         self.assertGreater(stored_draft.drafted_total_amount, Decimal("0.00175"))
@@ -7690,7 +8851,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).issue_credit_note(TENANT_ONE, crash_credit.credit_adjustment_id)
         self.assertEqual(crash_note.issued_credit_note_outcome_code.value, "accepted")
         assert crash_note.issued_credit_note_id is not None
-        stored_crash_note = self.ledger.get_issued_credit_note(crash_note.issued_credit_note_id)
+        stored_crash_note = self.ledger.get_issued_credit_note(
+            crash_note.issued_credit_note_id
+        )
         assert stored_crash_note is not None
         void_credit = CreditAdjustmentService(
             self.ledger, clock=lambda: CATALOG_START
@@ -7709,21 +8872,29 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
         assert collection.collection_case_id is not None
-        self.assertEqual(collection.outstanding_amount, stored_draft.drafted_total_amount)
+        self.assertEqual(
+            collection.outstanding_amount, stored_draft.drafted_total_amount
+        )
         applied_at = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
         accepted = CreditNoteApplicationService(
             self.ledger, clock=lambda: applied_at
         ).apply_credit_note(
             TENANT_ONE, issued_note.issued_credit_note_id, collection.collection_case_id
         )
-        self.assertEqual(accepted.credit_note_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            accepted.credit_note_application_outcome_code.value, "accepted"
+        )
         assert accepted.credit_note_application_id is not None
-        stored = self.ledger.get_credit_note_application(accepted.credit_note_application_id)
+        stored = self.ledger.get_credit_note_application(
+            accepted.credit_note_application_id
+        )
         self.assertIsNotNone(stored)
         assert stored is not None
         tenant = self.ledger.require_tenant(TENANT_ONE)
         self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
-        self.assertEqual(stored.issued_credit_note_id, issued_note.issued_credit_note_id)
+        self.assertEqual(
+            stored.issued_credit_note_id, issued_note.issued_credit_note_id
+        )
         self.assertEqual(stored.collection_case_id, collection.collection_case_id)
         self.assertEqual(stored.invoice_draft_id, draft.invoice_draft_id)
         self.assertIsNone(stored.issued_invoice_id)
@@ -7737,7 +8908,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         remaining_after_first = stored_draft.drafted_total_amount - first_credit_amount
         self.assertEqual(accepted.remaining_outstanding_amount, remaining_after_first)
         self.assertEqual(
-            self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
+            self.ledger.get_collection_case(
+                collection.collection_case_id
+            ).outstanding_amount,
             remaining_after_first,
         )
         self.assertEqual(
@@ -7747,7 +8920,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         self.assertEqual(
-            self.ledger.list_credit_note_applications_for_tenant(stored.tenant_account_id),
+            self.ledger.list_credit_note_applications_for_tenant(
+                stored.tenant_account_id
+            ),
             (stored,),
         )
         self.assertEqual(
@@ -7781,8 +8956,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_credit_note(
             TENANT_ONE, issued_note.issued_credit_note_id, collection.collection_case_id
         )
-        self.assertEqual(replay.credit_note_application_outcome_code.value, "duplicate_replay")
-        self.assertEqual(replay.credit_note_application_id, stored.credit_note_application_id)
+        self.assertEqual(
+            replay.credit_note_application_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            replay.credit_note_application_id, stored.credit_note_application_id
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.credit_note_application"
@@ -7790,7 +8969,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
+            self.ledger.get_collection_case(
+                collection.collection_case_id
+            ).outstanding_amount,
             remaining_after_first,
         )
         self.assertEqual(
@@ -7809,7 +8990,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         rejected = CreditNoteApplicationService(self.ledger).apply_credit_note(
             TENANT_ONE, uuid4(), collection.collection_case_id
         )
-        self.assertEqual(rejected.credit_note_application_outcome_code.value, "rejected")
+        self.assertEqual(
+            rejected.credit_note_application_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.credit_note_application"
@@ -7819,7 +9002,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         mismatch = CreditNoteApplicationService(self.ledger).apply_credit_note(
             TENANT_TWO, issued_note.issued_credit_note_id, collection.collection_case_id
         )
-        self.assertEqual(mismatch.credit_note_application_outcome_code.value, "rejected")
+        self.assertEqual(
+            mismatch.credit_note_application_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.credit_note_application"
@@ -7834,7 +9019,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(later.credit_note_application_outcome_code.value, "accepted")
         assert later.credit_note_application_id is not None
-        later_stored = self.ledger.get_credit_note_application(later.credit_note_application_id)
+        later_stored = self.ledger.get_credit_note_application(
+            later.credit_note_application_id
+        )
         assert later_stored is not None
         self.assertEqual(later_stored.issued_invoice_id, issued.issued_invoice_id)
         self.assertEqual(later_stored.applied_amount, later_credit_amount)
@@ -7850,7 +9037,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "collection_case_id": str(collection.collection_case_id),
                 "credit_note_application_contract_version": 1,
                 "currency_code": stored_crash_note.currency_code,
-                "applied_amount": format_exact_decimal(stored_crash_note.tax_inclusive_amount),
+                "applied_amount": format_exact_decimal(
+                    stored_crash_note.tax_inclusive_amount
+                ),
                 "invoice_draft_id": str(stored_crash_note.invoice_draft_id),
                 "issued_credit_note_contract_version": (
                     stored_crash_note.issued_credit_note_contract_version
@@ -7893,9 +9082,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_credit_note(
             TENANT_ONE, crash_note.issued_credit_note_id, collection.collection_case_id
         )
-        self.assertEqual(healed.credit_note_application_outcome_code.value, "duplicate_replay")
         self.assertEqual(
-            healed.credit_note_application_id, inserted_without_outbox.credit_note_application_id
+            healed.credit_note_application_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            healed.credit_note_application_id,
+            inserted_without_outbox.credit_note_application_id,
         )
         self.assertEqual(
             len(
@@ -7917,7 +9109,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         already_voided = CreditNoteApplicationService(self.ledger).apply_credit_note(
             TENANT_ONE, void_note.issued_credit_note_id, collection.collection_case_id
         )
-        self.assertEqual(already_voided.credit_note_application_outcome_code.value, "rejected")
+        self.assertEqual(
+            already_voided.credit_note_application_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             already_voided.rejection_reason_code.value, "issued_credit_note_voided"
         )
@@ -7938,9 +9132,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(presentment.credit_note_application_status, "applied")
         self.assertEqual(presentment.next_operator_action, "collect")
         self.assertIsNone(presentment.issued_invoice_id)
-        page = CreditNoteApplicationPresentmentService(fresh).list_credit_note_applications(
-            TENANT_ONE
-        )
+        page = CreditNoteApplicationPresentmentService(
+            fresh
+        ).list_credit_note_applications(TENANT_ONE)
         self.assertEqual(
             {row.credit_note_application_id for row in page.credit_note_applications},
             {
@@ -7960,17 +9154,24 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             reloaded_presentment.credit_note_application_id,
             presentment.credit_note_application_id,
         )
-        with self.assertRaises(CreditNoteApplicationPresentmentQueryError) as missing_pin:
-            CreditNoteApplicationPresentmentService(fresh).present_credit_note_application(
-                "", stored.credit_note_application_id
-            )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(
+            CreditNoteApplicationPresentmentQueryError
+        ) as missing_pin:
+            CreditNoteApplicationPresentmentService(
+                fresh
+            ).present_credit_note_application("", stored.credit_note_application_id)
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(CreditNoteApplicationPresentmentQueryError) as other_pin:
-            CreditNoteApplicationPresentmentService(fresh).present_credit_note_application(
+            CreditNoteApplicationPresentmentService(
+                fresh
+            ).present_credit_note_application(
                 TENANT_TWO, stored.credit_note_application_id
             )
         self.assertEqual(
-            other_pin.exception.rejection_reason_code, "credit_note_application_not_found"
+            other_pin.exception.rejection_reason_code,
+            "credit_note_application_not_found",
         )
 
         self.assertEqual(self.ledger.insert_credit_note_application(stored), stored)
@@ -7981,7 +9182,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         with self.assertRaises(ValueError):
-            self.ledger.insert_credit_note_application(replace(stored, currency_code="usd"))
+            self.ledger.insert_credit_note_application(
+                replace(stored, currency_code="usd")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_credit_note_application(
                 replace(stored, source_payload_hash="md5:abc")
@@ -7996,7 +9199,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_credit_note_application(
-                replace(stored, applied_amount=Decimal("0"), credit_note_application_id=uuid4())
+                replace(
+                    stored,
+                    applied_amount=Decimal("0"),
+                    credit_note_application_id=uuid4(),
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_credit_note_application(
@@ -8019,10 +9226,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).apply_credit_note(
             TENANT_ONE, issued_note.issued_credit_note_id, collection.collection_case_id
         )
-        self.assertEqual(raced.credit_note_application_outcome_code.value, "duplicate_replay")
-        self.assertEqual(raced.credit_note_application_id, stored.credit_note_application_id)
         self.assertEqual(
-            self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
+            raced.credit_note_application_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            raced.credit_note_application_id, stored.credit_note_application_id
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(
+                collection.collection_case_id
+            ).outstanding_amount,
             remaining_after_first - later_credit_amount,
         )
 
@@ -8034,17 +9247,23 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
-        issued_at = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
-        issued = IssuedInvoiceService(self.ledger, clock=lambda: issued_at).issue_invoice(
-            TENANT_ONE, draft.invoice_draft_id
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
         )
+        issued_at = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+        issued = IssuedInvoiceService(
+            self.ledger, clock=lambda: issued_at
+        ).issue_invoice(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
         assert issued.issued_invoice_id is not None
         first_voided_amount = issued.tax_inclusive_amount
@@ -8123,7 +9342,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         replay = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: voided_at
         ).void_issued_invoice(TENANT_ONE, issued.issued_invoice_id)
-        self.assertEqual(replay.issued_invoice_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            replay.issued_invoice_void_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(replay.issued_invoice_void_id, stored.issued_invoice_void_id)
         self.assertEqual(
             self.connection.execute(
@@ -8200,21 +9421,27 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         currency_mismatch = IssuedInvoiceVoidService(self.ledger).void_issued_invoice(
             TENANT_ONE, afternoon_issued.issued_invoice_id, currency_code="EUR"
         )
-        self.assertEqual(currency_mismatch.issued_invoice_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            currency_mismatch.issued_invoice_void_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.issued_invoice_void"
             ).fetchone()[0],
             1,
         )
-        stored_afternoon = self.ledger.get_issued_invoice(afternoon_issued.issued_invoice_id)
+        stored_afternoon = self.ledger.get_issued_invoice(
+            afternoon_issued.issued_invoice_id
+        )
         assert stored_afternoon is not None
         crash_hash = compute_issued_invoice_void_payload_hash(
             {
                 "issued_invoice_id": str(stored_afternoon.issued_invoice_id),
                 "invoice_draft_id": str(stored_afternoon.invoice_draft_id),
                 "currency_code": stored_afternoon.currency_code,
-                "voided_amount": format_exact_decimal(stored_afternoon.tax_inclusive_amount),
+                "voided_amount": format_exact_decimal(
+                    stored_afternoon.tax_inclusive_amount
+                ),
                 "issued_invoice_void_contract_version": 1,
             }
         )
@@ -8246,9 +9473,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         healed = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: voided_at
         ).void_issued_invoice(TENANT_ONE, afternoon_issued.issued_invoice_id)
-        self.assertEqual(healed.issued_invoice_void_outcome_code.value, "duplicate_replay")
         self.assertEqual(
-            healed.issued_invoice_void_id, inserted_without_outbox.issued_invoice_void_id
+            healed.issued_invoice_void_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            healed.issued_invoice_void_id,
+            inserted_without_outbox.issued_invoice_void_id,
         )
         self.assertEqual(
             len(
@@ -8299,7 +9529,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         evening_collection = CollectionCaseService(
             self.ledger, clock=lambda: CATALOG_START
         ).open_collection_case(TENANT_ONE, evening_draft.invoice_draft_id)
-        self.assertEqual(evening_collection.collection_case_outcome_code.value, "accepted")
+        self.assertEqual(
+            evening_collection.collection_case_outcome_code.value, "accepted"
+        )
         assert evening_collection.collection_case_id is not None
         evening_amount = evening_issued.tax_inclusive_amount
         with self.assertRaises(ValueError):
@@ -8323,15 +9555,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         fresh = PostgresUsageLedger(self.connection)
         reloaded = fresh.get_issued_invoice_void(stored.issued_invoice_void_id)
         self.assertEqual(reloaded, stored)
-        presentment = IssuedInvoiceVoidPresentmentService(fresh).present_issued_invoice_void(
-            TENANT_ONE, stored.issued_invoice_void_id
-        )
+        presentment = IssuedInvoiceVoidPresentmentService(
+            fresh
+        ).present_issued_invoice_void(TENANT_ONE, stored.issued_invoice_void_id)
         self.assertEqual(presentment.voided_amount, first_voided_amount)
         self.assertEqual(presentment.remaining_outstanding_amount, Decimal("0"))
         self.assertEqual(presentment.issued_invoice_void_status, "recorded")
         self.assertEqual(presentment.collection_case_status, "voided")
         self.assertEqual(presentment.next_operator_action, "wait")
-        page = IssuedInvoiceVoidPresentmentService(fresh).list_issued_invoice_voids(TENANT_ONE)
+        page = IssuedInvoiceVoidPresentmentService(fresh).list_issued_invoice_voids(
+            TENANT_ONE
+        )
         self.assertEqual(
             {row.issued_invoice_void_id for row in page.issued_invoice_voids},
             {
@@ -8350,7 +9584,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             IssuedInvoiceVoidPresentmentService(fresh).present_issued_invoice_void(
                 "", stored.issued_invoice_void_id
             )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(IssuedInvoiceVoidPresentmentQueryError) as other_pin:
             IssuedInvoiceVoidPresentmentService(fresh).present_issued_invoice_void(
                 TENANT_TWO, stored.issued_invoice_void_id
@@ -8387,7 +9623,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_invoice_void(
-                replace(stored, voided_amount=Decimal("0"), issued_invoice_void_id=uuid4())
+                replace(
+                    stored, voided_amount=Decimal("0"), issued_invoice_void_id=uuid4()
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_issued_invoice_void(
@@ -8432,7 +9670,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).open_collection_case(TENANT_ONE, race_draft.invoice_draft_id)
         self.assertEqual(race_collection.collection_case_outcome_code.value, "accepted")
         assert race_collection.collection_case_id is not None
-        stored_race_invoice = self.ledger.get_issued_invoice(race_issued.issued_invoice_id)
+        stored_race_invoice = self.ledger.get_issued_invoice(
+            race_issued.issued_invoice_id
+        )
         assert stored_race_invoice is not None
         race_hash = compute_issued_invoice_void_payload_hash(
             {
@@ -8461,7 +9701,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 voided_at=datetime(2026, 8, 18, 18, 30, tzinfo=UTC),
             )
         )
-        open_race_case = self.ledger.get_collection_case(race_collection.collection_case_id)
+        open_race_case = self.ledger.get_collection_case(
+            race_collection.collection_case_id
+        )
         assert open_race_case is not None
         self.assertEqual(open_race_case.collection_case_status, "open")
 
@@ -8474,8 +9716,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         raced = IssuedInvoiceVoidService(
             BlindFindLedger(self.connection), clock=lambda: voided_at
         ).void_issued_invoice(TENANT_ONE, race_issued.issued_invoice_id)
-        self.assertEqual(raced.issued_invoice_void_outcome_code.value, "duplicate_replay")
-        self.assertEqual(raced.issued_invoice_void_id, raced_inserted.issued_invoice_void_id)
+        self.assertEqual(
+            raced.issued_invoice_void_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            raced.issued_invoice_void_id, raced_inserted.issued_invoice_void_id
+        )
         raced_case = self.ledger.get_collection_case(race_collection.collection_case_id)
         assert raced_case is not None
         self.assertEqual(raced_case.collection_case_status, "voided")
@@ -8486,7 +9732,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             BlindFindLedger(self.connection), clock=lambda: voided_at
         ).void_issued_invoice(TENANT_ONE, afternoon_issued.issued_invoice_id)
         self.assertEqual(
-            raced_without_case.issued_invoice_void_outcome_code.value, "duplicate_replay"
+            raced_without_case.issued_invoice_void_outcome_code.value,
+            "duplicate_replay",
         )
         self.assertEqual(
             raced_without_case.issued_invoice_void_id,
@@ -8540,9 +9787,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         night_collection = CollectionCaseService(
             self.ledger, clock=lambda: CATALOG_START
         ).open_collection_case(TENANT_ONE, night_draft.invoice_draft_id)
-        self.assertEqual(night_collection.collection_case_outcome_code.value, "accepted")
+        self.assertEqual(
+            night_collection.collection_case_outcome_code.value, "accepted"
+        )
         assert night_collection.collection_case_id is not None
-        stored_night_invoice = self.ledger.get_issued_invoice(night_issued.issued_invoice_id)
+        stored_night_invoice = self.ledger.get_issued_invoice(
+            night_issued.issued_invoice_id
+        )
         assert stored_night_invoice is not None
         night_hash = compute_issued_invoice_void_payload_hash(
             {
@@ -8571,7 +9822,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 voided_at=datetime(2026, 8, 18, 19, 30, tzinfo=UTC),
             )
         )
-        unclosed_case = self.ledger.get_collection_case(night_collection.collection_case_id)
+        unclosed_case = self.ledger.get_collection_case(
+            night_collection.collection_case_id
+        )
         assert unclosed_case is not None
         self.assertEqual(unclosed_case.collection_case_status, "open")
         self.assertEqual(
@@ -8580,12 +9833,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         missing_case = IssuedInvoiceVoidService(
             BlindFindMissingCaseLedger(self.connection), clock=lambda: voided_at
         ).void_issued_invoice(TENANT_ONE, night_issued.issued_invoice_id)
-        self.assertEqual(missing_case.issued_invoice_void_outcome_code.value, "rejected")
+        self.assertEqual(
+            missing_case.issued_invoice_void_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             missing_case.rejection_reason_code,
             IssuedInvoiceVoidRejectionReasonCode.ISSUED_INVOICE_NOT_FOUND,
         )
-        still_unclosed = self.ledger.get_collection_case(night_collection.collection_case_id)
+        still_unclosed = self.ledger.get_collection_case(
+            night_collection.collection_case_id
+        )
         assert still_unclosed is not None
         self.assertEqual(still_unclosed.collection_case_status, "open")
         self.assertEqual(
@@ -8594,14 +9851,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         healed_case = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: voided_at
         ).void_issued_invoice(TENANT_ONE, night_issued.issued_invoice_id)
-        self.assertEqual(healed_case.issued_invoice_void_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            healed_case.issued_invoice_void_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(
             healed_case.issued_invoice_void_id,
             inserted_without_close.issued_invoice_void_id,
         )
         self.assertEqual(healed_case.collection_case_status, "voided")
         self.assertEqual(healed_case.remaining_outstanding_amount, Decimal("0"))
-        closed_night = self.ledger.get_collection_case(night_collection.collection_case_id)
+        closed_night = self.ledger.get_collection_case(
+            night_collection.collection_case_id
+        )
         assert closed_night is not None
         self.assertEqual(closed_night.collection_case_status, "voided")
         self.assertEqual(closed_night.outstanding_amount, Decimal("0"))
@@ -8613,7 +9874,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(already_healed.collection_case_status, "voided")
         self.assertEqual(already_healed.remaining_outstanding_amount, Decimal("0"))
-        still_voided = self.ledger.get_collection_case(night_collection.collection_case_id)
+        still_voided = self.ledger.get_collection_case(
+            night_collection.collection_case_id
+        )
         assert still_voided is not None
         self.assertEqual(still_voided.collection_case_status, "voided")
         self.assertEqual(still_voided.outstanding_amount, Decimal("0"))
@@ -8633,13 +9896,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         collection = CollectionCaseService(
             self.ledger, clock=lambda: CATALOG_START
         ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
@@ -8650,7 +9919,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).project_payment_intent(TENANT_ONE, collection.collection_case_id)
         self.assertEqual(intent.payment_intent_outcome_code.value, "accepted")
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            collection.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         remaining_before = received
@@ -8694,7 +9965,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert parked_case is not None
         self.assertEqual(parked_case.outstanding_amount, remaining_before - received)
         self.assertEqual(
-            self.ledger.find_unapplied_cash(stored.tenant_account_id, stored.payment_receipt_id),
+            self.ledger.find_unapplied_cash(
+                stored.tenant_account_id, stored.payment_receipt_id
+            ),
             stored,
         )
         self.assertEqual(
@@ -8708,7 +9981,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             (),
         )
         self.assertIsNone(self.ledger.get_unapplied_cash(uuid4()))
-        self.assertIsNone(self.ledger.find_unapplied_cash(stored.tenant_account_id, uuid4()))
+        self.assertIsNone(
+            self.ledger.find_unapplied_cash(stored.tenant_account_id, uuid4())
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash"
@@ -8716,7 +9991,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            len(self.ledger.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)),
+            len(
+                self.ledger.list_webhook_outbox_events_for_tenant(
+                    stored.tenant_account_id
+                )
+            ),
             prior_outbox,
         )
 
@@ -8732,11 +10011,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
+            self.ledger.get_collection_case(
+                collection.collection_case_id
+            ).outstanding_amount,
             remaining_before - received,
         )
         self.assertEqual(
-            len(self.ledger.list_webhook_outbox_events_for_tenant(stored.tenant_account_id)),
+            len(
+                self.ledger.list_webhook_outbox_events_for_tenant(
+                    stored.tenant_account_id
+                )
+            ),
             prior_outbox,
         )
 
@@ -8799,7 +10084,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).record_payment_receipt(
             TENANT_ONE, afternoon_intent.payment_intent_id, afternoon_received
         )
-        self.assertEqual(afternoon_receipt.payment_settlement_outcome_code.value, "accepted")
+        self.assertEqual(
+            afternoon_receipt.payment_settlement_outcome_code.value, "accepted"
+        )
         assert afternoon_receipt.payment_receipt_id is not None
         omitted = UnappliedCashService(self.ledger).park_unapplied_cash(
             TENANT_ONE, afternoon_receipt.payment_receipt_id
@@ -8817,7 +10104,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             leftover,
             currency_code="EUR",
         )
-        self.assertEqual(currency_mismatch.unapplied_cash_outcome_code.value, "rejected")
+        self.assertEqual(
+            currency_mismatch.unapplied_cash_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash"
@@ -8826,12 +10115,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         later = UnappliedCashService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 21, 0, tzinfo=UTC)
-        ).park_unapplied_cash(TENANT_ONE, afternoon_receipt.payment_receipt_id, leftover)
+        ).park_unapplied_cash(
+            TENANT_ONE, afternoon_receipt.payment_receipt_id, leftover
+        )
         self.assertEqual(later.unapplied_cash_outcome_code.value, "accepted")
         assert later.unapplied_cash_id is not None
         later_stored = self.ledger.get_unapplied_cash(later.unapplied_cash_id)
         assert later_stored is not None
-        self.assertEqual(later_stored.payment_receipt_id, afternoon_receipt.payment_receipt_id)
+        self.assertEqual(
+            later_stored.payment_receipt_id, afternoon_receipt.payment_receipt_id
+        )
         self.assertEqual(later_stored.unapplied_amount, leftover)
         self.assertEqual(
             self.connection.execute(
@@ -8842,20 +10135,26 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         self.assertEqual(self.ledger.insert_unapplied_cash(stored), stored)
         self.assertEqual(
-            self.ledger.insert_unapplied_cash(replace(stored, unapplied_cash_id=uuid4())),
+            self.ledger.insert_unapplied_cash(
+                replace(stored, unapplied_cash_id=uuid4())
+            ),
             stored,
         )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash(replace(stored, currency_code="usd"))
         with self.assertRaises(ValueError):
-            self.ledger.insert_unapplied_cash(replace(stored, source_payload_hash="md5:abc"))
+            self.ledger.insert_unapplied_cash(
+                replace(stored, source_payload_hash="md5:abc")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash(
                 replace(stored, unapplied_cash_status="applied")
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash(
-                replace(stored, unapplied_amount=Decimal("0"), unapplied_cash_id=uuid4())
+                replace(
+                    stored, unapplied_amount=Decimal("0"), unapplied_cash_id=uuid4()
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash(
@@ -8926,12 +10225,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             UnappliedCashPresentmentService(fresh).present_unapplied_cash(
                 "", stored.unapplied_cash_id
             )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(UnappliedCashPresentmentQueryError) as other_pin:
             UnappliedCashPresentmentService(fresh).present_unapplied_cash(
                 TENANT_TWO, stored.unapplied_cash_id
             )
-        self.assertEqual(other_pin.exception.rejection_reason_code, "unapplied_cash_not_found")
+        self.assertEqual(
+            other_pin.exception.rejection_reason_code, "unapplied_cash_not_found"
+        )
 
     def test_unapplied_cash_application_is_durable(self) -> None:
         """Persist one leftover-apply and keep GET presentment after restart."""
@@ -8942,13 +10245,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         collection = CollectionCaseService(
             self.ledger, clock=lambda: CATALOG_START
         ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
@@ -8959,7 +10268,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).project_payment_intent(TENANT_ONE, collection.collection_case_id)
         self.assertEqual(intent.payment_intent_outcome_code.value, "accepted")
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            collection.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         receipt = PaymentSettlementService(
@@ -9016,17 +10327,25 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         accepted = UnappliedCashApplicationService(
             self.ledger, clock=lambda: applied_at
         ).apply_unapplied_cash(
-            TENANT_ONE, parked.unapplied_cash_id, afternoon_collection.collection_case_id
+            TENANT_ONE,
+            parked.unapplied_cash_id,
+            afternoon_collection.collection_case_id,
         )
-        self.assertEqual(accepted.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            accepted.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert accepted.unapplied_cash_application_id is not None
-        stored = self.ledger.get_unapplied_cash_application(accepted.unapplied_cash_application_id)
+        stored = self.ledger.get_unapplied_cash_application(
+            accepted.unapplied_cash_application_id
+        )
         self.assertIsNotNone(stored)
         assert stored is not None
         tenant = self.ledger.require_tenant(TENANT_ONE)
         self.assertEqual(stored.tenant_account_id, tenant.tenant_account_id)
         self.assertEqual(stored.unapplied_cash_id, parked.unapplied_cash_id)
-        self.assertEqual(stored.collection_case_id, afternoon_collection.collection_case_id)
+        self.assertEqual(
+            stored.collection_case_id, afternoon_collection.collection_case_id
+        )
         self.assertEqual(stored.payment_receipt_id, receipt.payment_receipt_id)
         self.assertEqual(stored.invoice_draft_id, afternoon_draft.invoice_draft_id)
         self.assertEqual(stored.currency_code, "USD")
@@ -9036,7 +10355,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(stored.source_payload_hash, accepted.source_payload_hash)
         self.assertIsInstance(stored.applied_amount, Decimal)
         self.assertNotIsInstance(stored.applied_amount, float)
-        applied_case = self.ledger.get_collection_case(afternoon_collection.collection_case_id)
+        applied_case = self.ledger.get_collection_case(
+            afternoon_collection.collection_case_id
+        )
         assert applied_case is not None
         self.assertEqual(applied_case.outstanding_amount, Decimal("0"))
         self.assertEqual(applied_case.collection_case_status, "open")
@@ -9052,7 +10373,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         self.assertEqual(
-            self.ledger.list_unapplied_cash_applications_for_tenant(stored.tenant_account_id),
+            self.ledger.list_unapplied_cash_applications_for_tenant(
+                stored.tenant_account_id
+            ),
             (stored,),
         )
         self.assertEqual(
@@ -9063,7 +10386,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertIsNone(self.ledger.get_unapplied_cash_application(uuid4()))
         self.assertIsNone(
-            self.ledger.find_unapplied_cash_application(stored.tenant_account_id, uuid4())
+            self.ledger.find_unapplied_cash_application(
+                stored.tenant_account_id, uuid4()
+            )
         )
         self.assertEqual(
             self.connection.execute(
@@ -9084,10 +10409,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         replay = UnappliedCashApplicationService(
             self.ledger, clock=lambda: applied_at
         ).apply_unapplied_cash(
-            TENANT_ONE, parked.unapplied_cash_id, afternoon_collection.collection_case_id
+            TENANT_ONE,
+            parked.unapplied_cash_id,
+            afternoon_collection.collection_case_id,
         )
-        self.assertEqual(replay.unapplied_cash_application_outcome_code.value, "duplicate_replay")
-        self.assertEqual(replay.unapplied_cash_application_id, stored.unapplied_cash_application_id)
+        self.assertEqual(
+            replay.unapplied_cash_application_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            replay.unapplied_cash_application_id, stored.unapplied_cash_application_id
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash_application"
@@ -9095,11 +10426,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            self.ledger.get_collection_case(afternoon_collection.collection_case_id).outstanding_amount,
+            self.ledger.get_collection_case(
+                afternoon_collection.collection_case_id
+            ).outstanding_amount,
             Decimal("0"),
         )
         self.assertEqual(
-            self.ledger.get_collection_case(afternoon_collection.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                afternoon_collection.collection_case_id
+            ).collection_case_status,
             "open",
         )
         self.assertEqual(
@@ -9118,7 +10453,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         rejected = UnappliedCashApplicationService(self.ledger).apply_unapplied_cash(
             TENANT_ONE, uuid4(), afternoon_collection.collection_case_id
         )
-        self.assertEqual(rejected.unapplied_cash_application_outcome_code.value, "rejected")
+        self.assertEqual(
+            rejected.unapplied_cash_application_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash_application"
@@ -9126,19 +10463,28 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
         mismatch = UnappliedCashApplicationService(self.ledger).apply_unapplied_cash(
-            TENANT_TWO, parked.unapplied_cash_id, afternoon_collection.collection_case_id
+            TENANT_TWO,
+            parked.unapplied_cash_id,
+            afternoon_collection.collection_case_id,
         )
-        self.assertEqual(mismatch.unapplied_cash_application_outcome_code.value, "rejected")
+        self.assertEqual(
+            mismatch.unapplied_cash_application_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash_application"
             ).fetchone()[0],
             1,
         )
-        settled_source = UnappliedCashApplicationService(self.ledger).apply_unapplied_cash(
+        settled_source = UnappliedCashApplicationService(
+            self.ledger
+        ).apply_unapplied_cash(
             TENANT_ONE, parked.unapplied_cash_id, collection.collection_case_id
         )
-        self.assertEqual(settled_source.unapplied_cash_application_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            settled_source.unapplied_cash_application_outcome_code.value,
+            "duplicate_replay",
+        )
 
         unused_void = IssuedInvoiceVoidService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 15, 30, tzinfo=UTC)
@@ -9149,7 +10495,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             IssuedInvoiceVoidRejectionReasonCode.UNAPPLIED_CASH_ALREADY_APPLIED,
         )
         self.assertEqual(
-            self.ledger.get_collection_case(afternoon_collection.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                afternoon_collection.collection_case_id
+            ).collection_case_status,
             "open",
         )
 
@@ -9231,19 +10579,29 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         later = UnappliedCashApplicationService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 16, 30, tzinfo=UTC)
         ).apply_unapplied_cash(
-            TENANT_ONE, later_parked.unapplied_cash_id, night_collection.collection_case_id
+            TENANT_ONE,
+            later_parked.unapplied_cash_id,
+            night_collection.collection_case_id,
         )
-        self.assertEqual(later.unapplied_cash_application_outcome_code.value, "accepted")
+        self.assertEqual(
+            later.unapplied_cash_application_outcome_code.value, "accepted"
+        )
         assert later.unapplied_cash_application_id is not None
-        later_stored = self.ledger.get_unapplied_cash_application(later.unapplied_cash_application_id)
+        later_stored = self.ledger.get_unapplied_cash_application(
+            later.unapplied_cash_application_id
+        )
         assert later_stored is not None
         self.assertEqual(later_stored.applied_amount, leftover)
         self.assertEqual(
-            self.ledger.get_collection_case(night_collection.collection_case_id).outstanding_amount,
+            self.ledger.get_collection_case(
+                night_collection.collection_case_id
+            ).outstanding_amount,
             night_remaining_before - leftover,
         )
         self.assertEqual(
-            self.ledger.get_collection_case(night_collection.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                night_collection.collection_case_id
+            ).collection_case_status,
             "open",
         )
         self.assertEqual(
@@ -9329,7 +10687,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         crash_target_issued = IssuedInvoiceService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 17, 20, tzinfo=UTC)
         ).issue_invoice(TENANT_ONE, crash_target_draft.invoice_draft_id)
-        self.assertEqual(crash_target_issued.issued_invoice_outcome_code.value, "accepted")
+        self.assertEqual(
+            crash_target_issued.issued_invoice_outcome_code.value, "accepted"
+        )
         crash_target_remaining_before = self.ledger.get_collection_case(
             crash_target_collection.collection_case_id
         ).outstanding_amount
@@ -9340,7 +10700,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "payment_receipt_id": str(crash_leftover.payment_receipt_id),
                 "currency_code": crash_leftover.currency_code,
                 "applied_amount": format_exact_decimal(leftover),
-                "unapplied_amount": format_exact_decimal(crash_leftover.unapplied_amount),
+                "unapplied_amount": format_exact_decimal(
+                    crash_leftover.unapplied_amount
+                ),
                 "unapplied_cash_application_contract_version": 1,
             }
         )
@@ -9372,9 +10734,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         healed = UnappliedCashApplicationService(
             self.ledger, clock=lambda: applied_at
         ).apply_unapplied_cash(
-            TENANT_ONE, crash_parked.unapplied_cash_id, crash_target_collection.collection_case_id
+            TENANT_ONE,
+            crash_parked.unapplied_cash_id,
+            crash_target_collection.collection_case_id,
         )
-        self.assertEqual(healed.unapplied_cash_application_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            healed.unapplied_cash_application_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(
             healed.unapplied_cash_application_id,
             inserted_without_outbox.unapplied_cash_application_id,
@@ -9391,19 +10757,24 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             prior_outbox + 1,
         )
-        healed_case = self.ledger.get_collection_case(crash_target_collection.collection_case_id)
+        healed_case = self.ledger.get_collection_case(
+            crash_target_collection.collection_case_id
+        )
         assert healed_case is not None
         self.assertEqual(
             healed_case.outstanding_amount, crash_target_remaining_before - leftover
         )
         self.assertEqual(healed_case.collection_case_status, "open")
         self.assertEqual(
-            healed.remaining_outstanding_amount, crash_target_remaining_before - leftover
+            healed.remaining_outstanding_amount,
+            crash_target_remaining_before - leftover,
         )
         already_healed_remaining = UnappliedCashApplicationService(
             self.ledger, clock=lambda: applied_at
         ).apply_unapplied_cash(
-            TENANT_ONE, crash_parked.unapplied_cash_id, crash_target_collection.collection_case_id
+            TENANT_ONE,
+            crash_parked.unapplied_cash_id,
+            crash_target_collection.collection_case_id,
         )
         self.assertEqual(
             already_healed_remaining.unapplied_cash_application_outcome_code.value,
@@ -9414,25 +10785,33 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         assert still_healed_case is not None
         self.assertEqual(
-            still_healed_case.outstanding_amount, crash_target_remaining_before - leftover
+            still_healed_case.outstanding_amount,
+            crash_target_remaining_before - leftover,
         )
         self.assertEqual(still_healed_case.collection_case_status, "open")
 
         fresh = PostgresUsageLedger(self.connection)
-        reloaded = fresh.get_unapplied_cash_application(stored.unapplied_cash_application_id)
+        reloaded = fresh.get_unapplied_cash_application(
+            stored.unapplied_cash_application_id
+        )
         self.assertEqual(reloaded, stored)
         presentment = UnappliedCashApplicationPresentmentService(
             fresh
-        ).present_unapplied_cash_application(TENANT_ONE, stored.unapplied_cash_application_id)
+        ).present_unapplied_cash_application(
+            TENANT_ONE, stored.unapplied_cash_application_id
+        )
         self.assertEqual(presentment.applied_amount, leftover)
         self.assertEqual(presentment.unapplied_cash_application_status, "applied")
         self.assertEqual(presentment.next_operator_action, "settle")
         self.assertEqual(presentment.remaining_outstanding_amount, Decimal("0"))
-        page = UnappliedCashApplicationPresentmentService(fresh).list_unapplied_cash_applications(
-            TENANT_ONE
-        )
+        page = UnappliedCashApplicationPresentmentService(
+            fresh
+        ).list_unapplied_cash_applications(TENANT_ONE)
         self.assertEqual(
-            {row.unapplied_cash_application_id for row in page.unapplied_cash_applications},
+            {
+                row.unapplied_cash_application_id
+                for row in page.unapplied_cash_applications
+            },
             {
                 stored.unapplied_cash_application_id,
                 later.unapplied_cash_application_id,
@@ -9441,26 +10820,41 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         later_presentment = UnappliedCashApplicationPresentmentService(
             fresh
-        ).present_unapplied_cash_application(TENANT_ONE, later.unapplied_cash_application_id)
+        ).present_unapplied_cash_application(
+            TENANT_ONE, later.unapplied_cash_application_id
+        )
         self.assertEqual(later_presentment.next_operator_action, "collect")
         reloaded_presentment = UnappliedCashApplicationPresentmentService(
             PostgresUsageLedger(self.connection)
-        ).present_unapplied_cash_application(TENANT_ONE, stored.unapplied_cash_application_id)
+        ).present_unapplied_cash_application(
+            TENANT_ONE, stored.unapplied_cash_application_id
+        )
         self.assertEqual(
             reloaded_presentment.unapplied_cash_application_id,
             presentment.unapplied_cash_application_id,
         )
-        with self.assertRaises(UnappliedCashApplicationPresentmentQueryError) as missing_pin:
-            UnappliedCashApplicationPresentmentService(fresh).present_unapplied_cash_application(
+        with self.assertRaises(
+            UnappliedCashApplicationPresentmentQueryError
+        ) as missing_pin:
+            UnappliedCashApplicationPresentmentService(
+                fresh
+            ).present_unapplied_cash_application(
                 "", stored.unapplied_cash_application_id
             )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
-        with self.assertRaises(UnappliedCashApplicationPresentmentQueryError) as other_pin:
-            UnappliedCashApplicationPresentmentService(fresh).present_unapplied_cash_application(
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
+        with self.assertRaises(
+            UnappliedCashApplicationPresentmentQueryError
+        ) as other_pin:
+            UnappliedCashApplicationPresentmentService(
+                fresh
+            ).present_unapplied_cash_application(
                 TENANT_TWO, stored.unapplied_cash_application_id
             )
         self.assertEqual(
-            other_pin.exception.rejection_reason_code, "unapplied_cash_application_not_found"
+            other_pin.exception.rejection_reason_code,
+            "unapplied_cash_application_not_found",
         )
 
         self.assertEqual(self.ledger.insert_unapplied_cash_application(stored), stored)
@@ -9471,7 +10865,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         with self.assertRaises(ValueError):
-            self.ledger.insert_unapplied_cash_application(replace(stored, currency_code="usd"))
+            self.ledger.insert_unapplied_cash_application(
+                replace(stored, currency_code="usd")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash_application(
                 replace(stored, source_payload_hash="md5:abc")
@@ -9482,7 +10878,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash_application(
-                replace(stored, applied_amount=Decimal("0"), unapplied_cash_application_id=uuid4())
+                replace(
+                    stored,
+                    applied_amount=Decimal("0"),
+                    unapplied_cash_application_id=uuid4(),
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash_application(
@@ -9517,12 +10917,20 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         raced = UnappliedCashApplicationService(
             BlindFindLedger(self.connection), clock=lambda: applied_at
         ).apply_unapplied_cash(
-            TENANT_ONE, later_parked.unapplied_cash_id, night_collection.collection_case_id
+            TENANT_ONE,
+            later_parked.unapplied_cash_id,
+            night_collection.collection_case_id,
         )
-        self.assertEqual(raced.unapplied_cash_application_outcome_code.value, "duplicate_replay")
-        self.assertEqual(raced.unapplied_cash_application_id, later.unapplied_cash_application_id)
         self.assertEqual(
-            self.ledger.get_collection_case(night_collection.collection_case_id).outstanding_amount,
+            raced.unapplied_cash_application_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            raced.unapplied_cash_application_id, later.unapplied_cash_application_id
+        )
+        self.assertEqual(
+            self.ledger.get_collection_case(
+                night_collection.collection_case_id
+            ).outstanding_amount,
             night_remaining_before - leftover,
         )
 
@@ -9537,8 +10945,10 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 return None
 
             def insert_unapplied_cash_application(self, application):
-                stored_application = PostgresUsageLedger.insert_unapplied_cash_application(
-                    self, application
+                stored_application = (
+                    PostgresUsageLedger.insert_unapplied_cash_application(
+                        self, application
+                    )
                 )
                 self._hide_collection_case = True
                 return stored_application
@@ -9551,9 +10961,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         missing_case = UnappliedCashApplicationService(
             BlindFindMissingCaseLedger(self.connection), clock=lambda: applied_at
         ).apply_unapplied_cash(
-            TENANT_ONE, later_parked.unapplied_cash_id, night_collection.collection_case_id
+            TENANT_ONE,
+            later_parked.unapplied_cash_id,
+            night_collection.collection_case_id,
         )
-        self.assertEqual(missing_case.unapplied_cash_application_outcome_code.value, "rejected")
+        self.assertEqual(
+            missing_case.unapplied_cash_application_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash_application"
@@ -9570,13 +10984,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         collection = CollectionCaseService(
             self.ledger, clock=lambda: CATALOG_START
         ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
@@ -9587,7 +11007,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).project_payment_intent(TENANT_ONE, collection.collection_case_id)
         self.assertEqual(intent.payment_intent_outcome_code.value, "accepted")
         assert intent.payment_intent_id is not None
-        received = self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount
+        received = self.ledger.get_collection_case(
+            collection.collection_case_id
+        ).outstanding_amount
         self.assertGreater(received, leftover)
         self.assertNotEqual(received, KNOWN_MORNING_TOTAL)
         receipt = PaymentSettlementService(
@@ -9611,7 +11033,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).refund_unapplied_cash(TENANT_ONE, parked.unapplied_cash_id)
         self.assertEqual(accepted.unapplied_cash_refund_outcome_code.value, "accepted")
         assert accepted.unapplied_cash_refund_id is not None
-        stored = self.ledger.get_unapplied_cash_refund(accepted.unapplied_cash_refund_id)
+        stored = self.ledger.get_unapplied_cash_refund(
+            accepted.unapplied_cash_refund_id
+        )
         self.assertIsNotNone(stored)
         assert stored is not None
         tenant = self.ledger.require_tenant(TENANT_ONE)
@@ -9639,7 +11063,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         self.assertEqual(
-            self.ledger.list_unapplied_cash_refunds_for_tenant(stored.tenant_account_id),
+            self.ledger.list_unapplied_cash_refunds_for_tenant(
+                stored.tenant_account_id
+            ),
             (stored,),
         )
         self.assertEqual(
@@ -9671,8 +11097,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         replay = UnappliedCashRefundService(
             self.ledger, clock=lambda: refunded_at
         ).refund_unapplied_cash(TENANT_ONE, parked.unapplied_cash_id)
-        self.assertEqual(replay.unapplied_cash_refund_outcome_code.value, "duplicate_replay")
-        self.assertEqual(replay.unapplied_cash_refund_id, stored.unapplied_cash_refund_id)
+        self.assertEqual(
+            replay.unapplied_cash_refund_outcome_code.value, "duplicate_replay"
+        )
+        self.assertEqual(
+            replay.unapplied_cash_refund_id, stored.unapplied_cash_refund_id
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash_refund"
@@ -9680,7 +11110,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            self.ledger.get_unapplied_cash(parked.unapplied_cash_id).unapplied_cash_status,
+            self.ledger.get_unapplied_cash(
+                parked.unapplied_cash_id
+            ).unapplied_cash_status,
             "parked",
         )
         self.assertEqual(
@@ -9744,10 +11176,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger, clock=lambda: CATALOG_START
         ).open_collection_case(TENANT_ONE, afternoon_draft.invoice_draft_id)
         assert afternoon_collection.collection_case_id is not None
-        already_refunded = UnappliedCashApplicationService(self.ledger).apply_unapplied_cash(
-            TENANT_ONE, parked.unapplied_cash_id, afternoon_collection.collection_case_id
+        already_refunded = UnappliedCashApplicationService(
+            self.ledger
+        ).apply_unapplied_cash(
+            TENANT_ONE,
+            parked.unapplied_cash_id,
+            afternoon_collection.collection_case_id,
         )
-        self.assertEqual(already_refunded.unapplied_cash_application_outcome_code.value, "rejected")
+        self.assertEqual(
+            already_refunded.unapplied_cash_application_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             already_refunded.rejection_reason_code,
             UnappliedCashApplicationRejectionReasonCode.UNAPPLIED_CASH_ALREADY_REFUNDED,
@@ -9809,11 +11247,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         ).refund_unapplied_cash(TENANT_ONE, later_parked.unapplied_cash_id)
         self.assertEqual(later.unapplied_cash_refund_outcome_code.value, "accepted")
         assert later.unapplied_cash_refund_id is not None
-        later_stored = self.ledger.get_unapplied_cash_refund(later.unapplied_cash_refund_id)
+        later_stored = self.ledger.get_unapplied_cash_refund(
+            later.unapplied_cash_refund_id
+        )
         assert later_stored is not None
         self.assertEqual(later_stored.refund_amount, leftover)
         self.assertEqual(
-            self.ledger.get_unapplied_cash(later_parked.unapplied_cash_id).unapplied_cash_status,
+            self.ledger.get_unapplied_cash(
+                later_parked.unapplied_cash_id
+            ).unapplied_cash_status,
             "parked",
         )
         self.assertEqual(
@@ -9875,7 +11317,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "payment_receipt_id": str(crash_leftover.payment_receipt_id),
                 "currency_code": crash_leftover.currency_code,
                 "refund_amount": format_exact_decimal(leftover),
-                "unapplied_amount": format_exact_decimal(crash_leftover.unapplied_amount),
+                "unapplied_amount": format_exact_decimal(
+                    crash_leftover.unapplied_amount
+                ),
                 "unapplied_cash_refund_contract_version": 1,
             }
         )
@@ -9908,7 +11352,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         healed = UnappliedCashRefundService(
             self.ledger, clock=lambda: refunded_at
         ).refund_unapplied_cash(TENANT_ONE, crash_parked.unapplied_cash_id)
-        self.assertEqual(healed.unapplied_cash_refund_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            healed.unapplied_cash_refund_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(
             healed.unapplied_cash_refund_id,
             inserted_without_outbox.unapplied_cash_refund_id,
@@ -9929,9 +11375,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         fresh = PostgresUsageLedger(self.connection)
         reloaded = fresh.get_unapplied_cash_refund(stored.unapplied_cash_refund_id)
         self.assertEqual(reloaded, stored)
-        presentment = UnappliedCashRefundPresentmentService(fresh).present_unapplied_cash_refund(
-            TENANT_ONE, stored.unapplied_cash_refund_id
-        )
+        presentment = UnappliedCashRefundPresentmentService(
+            fresh
+        ).present_unapplied_cash_refund(TENANT_ONE, stored.unapplied_cash_refund_id)
         self.assertEqual(presentment.refund_amount, leftover)
         self.assertEqual(presentment.unapplied_cash_refund_status, "recorded")
         self.assertEqual(presentment.unapplied_cash_status, "parked")
@@ -9958,7 +11404,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             UnappliedCashRefundPresentmentService(fresh).present_unapplied_cash_refund(
                 "", stored.unapplied_cash_refund_id
             )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(UnappliedCashRefundPresentmentQueryError) as other_pin:
             UnappliedCashRefundPresentmentService(fresh).present_unapplied_cash_refund(
                 TENANT_TWO, stored.unapplied_cash_refund_id
@@ -9975,7 +11423,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             stored,
         )
         with self.assertRaises(ValueError):
-            self.ledger.insert_unapplied_cash_refund(replace(stored, currency_code="usd"))
+            self.ledger.insert_unapplied_cash_refund(
+                replace(stored, currency_code="usd")
+            )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash_refund(
                 replace(stored, source_payload_hash="md5:abc")
@@ -9986,11 +11436,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash_refund(
-                replace(stored, refund_amount=Decimal("0"), unapplied_cash_refund_id=uuid4())
+                replace(
+                    stored, refund_amount=Decimal("0"), unapplied_cash_refund_id=uuid4()
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash_refund(
-                replace(stored, unapplied_amount=Decimal("0"), unapplied_cash_refund_id=uuid4())
+                replace(
+                    stored,
+                    unapplied_amount=Decimal("0"),
+                    unapplied_cash_refund_id=uuid4(),
+                )
             )
         with self.assertRaises(ValueError):
             self.ledger.insert_unapplied_cash_refund(
@@ -10019,7 +11475,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         raced = UnappliedCashRefundService(
             BlindFindLedger(self.connection), clock=lambda: refunded_at
         ).refund_unapplied_cash(TENANT_ONE, later_parked.unapplied_cash_id)
-        self.assertEqual(raced.unapplied_cash_refund_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            raced.unapplied_cash_refund_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(raced.unapplied_cash_refund_id, later.unapplied_cash_refund_id)
         self.assertEqual(
             self.connection.execute(
@@ -10039,7 +11497,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 return None
 
             def insert_unapplied_cash_refund(self, refund):
-                stored_refund = PostgresUsageLedger.insert_unapplied_cash_refund(self, refund)
+                stored_refund = PostgresUsageLedger.insert_unapplied_cash_refund(
+                    self, refund
+                )
                 self._hide_leftover = True
                 return stored_refund
 
@@ -10051,7 +11511,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         missing_leftover = UnappliedCashRefundService(
             BlindFindMissingLeftoverLedger(self.connection), clock=lambda: refunded_at
         ).refund_unapplied_cash(TENANT_ONE, later_parked.unapplied_cash_id)
-        self.assertEqual(missing_leftover.unapplied_cash_refund_outcome_code.value, "rejected")
+        self.assertEqual(
+            missing_leftover.unapplied_cash_refund_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             self.connection.execute(
                 "SELECT COUNT(*) FROM billing_core.unapplied_cash_refund"
@@ -10067,19 +11529,27 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             "cwl_standard",
             "USD",
             (
-                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+                {
+                    "metric_code": "gen_ai_output_token",
+                    "unit_amount": "0.000002",
+                    "currency_code": "USD",
+                },
             ),
         )
         rating = UsageRatingService(self.ledger).rate_usage_window(
             TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
         )
-        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
         collection = CollectionCaseService(
             self.ledger, clock=lambda: CATALOG_START
         ).open_collection_case(TENANT_ONE, draft.invoice_draft_id)
         self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
         assert collection.collection_case_id is not None
-        remaining = self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount
+        remaining = self.ledger.get_collection_case(
+            collection.collection_case_id
+        ).outstanding_amount
         self.assertGreater(remaining, 0)
         self.assertNotEqual(remaining, KNOWN_MORNING_TOTAL)
 
@@ -10147,7 +11617,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         replay = CollectionDisputeService(
             self.ledger, clock=lambda: held_at
         ).hold_collection_case(TENANT_ONE, collection.collection_case_id)
-        self.assertEqual(replay.collection_dispute_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            replay.collection_dispute_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(replay.collection_dispute_id, stored.collection_dispute_id)
         self.assertEqual(
             self.connection.execute(
@@ -10156,7 +11628,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            self.ledger.get_collection_case(collection.collection_case_id).outstanding_amount,
+            self.ledger.get_collection_case(
+                collection.collection_case_id
+            ).outstanding_amount,
             remaining,
         )
         self.assertEqual(
@@ -10192,10 +11666,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
-        disputed_write_off = CollectionWriteOffService(self.ledger).write_off_collection_case(
-            TENANT_ONE, collection.collection_case_id
+        disputed_write_off = CollectionWriteOffService(
+            self.ledger
+        ).write_off_collection_case(TENANT_ONE, collection.collection_case_id)
+        self.assertEqual(
+            disputed_write_off.collection_write_off_outcome_code.value, "rejected"
         )
-        self.assertEqual(disputed_write_off.collection_write_off_outcome_code.value, "rejected")
         self.assertEqual(
             disputed_write_off.rejection_reason_code,
             CollectionWriteOffRejectionReasonCode.COLLECTION_CASE_DISPUTED,
@@ -10241,7 +11717,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert later_stored is not None
         self.assertEqual(later_stored.remaining_outstanding_amount, afternoon_remaining)
         self.assertEqual(
-            self.ledger.get_collection_case(afternoon_collection.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                afternoon_collection.collection_case_id
+            ).collection_case_status,
             "disputed",
         )
         self.assertEqual(
@@ -10255,14 +11733,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         released = CollectionDisputeReleaseService(
             self.ledger, clock=lambda: released_at
         ).release_collection_dispute(TENANT_ONE, later.collection_dispute_id)
-        self.assertEqual(released.collection_dispute_release_outcome_code.value, "accepted")
+        self.assertEqual(
+            released.collection_dispute_release_outcome_code.value, "accepted"
+        )
         released_row = self.ledger.get_collection_dispute(later.collection_dispute_id)
         assert released_row is not None
         self.assertEqual(released_row.collection_dispute_status, "released")
         self.assertEqual(released_row.released_at, released_at)
         self.assertEqual(released_row.remaining_outstanding_amount, afternoon_remaining)
         self.assertEqual(
-            self.ledger.get_collection_case(afternoon_collection.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                afternoon_collection.collection_case_id
+            ).collection_case_status,
             "open",
         )
         release_outbox = [
@@ -10278,7 +11760,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger, clock=lambda: released_at
         ).release_collection_dispute(TENANT_ONE, later.collection_dispute_id)
         self.assertEqual(
-            release_replay.collection_dispute_release_outcome_code.value, "duplicate_replay"
+            release_replay.collection_dispute_release_outcome_code.value,
+            "duplicate_replay",
         )
         self.assertEqual(
             len(
@@ -10330,7 +11813,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger, clock=lambda: CATALOG_START
         ).open_collection_case(TENANT_ONE, crash_draft.invoice_draft_id)
         assert crash_collection.collection_case_id is not None
-        crash_case = self.ledger.get_collection_case(crash_collection.collection_case_id)
+        crash_case = self.ledger.get_collection_case(
+            crash_collection.collection_case_id
+        )
         assert crash_case is not None
         crash_hash = compute_dispute_payload_hash(
             {
@@ -10359,7 +11844,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            self.ledger.get_collection_case(crash_case.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                crash_case.collection_case_id
+            ).collection_case_status,
             "open",
         )
         prior_outbox = len(
@@ -10374,13 +11861,17 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         healed = CollectionDisputeService(
             self.ledger, clock=lambda: held_at
         ).hold_collection_case(TENANT_ONE, crash_collection.collection_case_id)
-        self.assertEqual(healed.collection_dispute_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            healed.collection_dispute_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(
             healed.collection_dispute_id,
             inserted_without_outbox.collection_dispute_id,
         )
         self.assertEqual(
-            self.ledger.get_collection_case(crash_case.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                crash_case.collection_case_id
+            ).collection_case_status,
             "disputed",
         )
         self.assertEqual(
@@ -10450,7 +11941,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             self.ledger, clock=lambda: crash_released_at
         ).release_collection_dispute(TENANT_ONE, crash_hold.collection_dispute_id)
         self.assertEqual(
-            healed_release.collection_dispute_release_outcome_code.value, "duplicate_replay"
+            healed_release.collection_dispute_release_outcome_code.value,
+            "duplicate_replay",
         )
         self.assertEqual(
             self.ledger.get_collection_case(
@@ -10474,14 +11966,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         fresh = PostgresUsageLedger(self.connection)
         reloaded = fresh.get_collection_dispute(stored.collection_dispute_id)
         self.assertEqual(reloaded, stored)
-        presentment = CollectionDisputePresentmentService(fresh).present_collection_dispute(
-            TENANT_ONE, stored.collection_dispute_id
-        )
+        presentment = CollectionDisputePresentmentService(
+            fresh
+        ).present_collection_dispute(TENANT_ONE, stored.collection_dispute_id)
         self.assertEqual(presentment.remaining_outstanding_amount, remaining)
         self.assertEqual(presentment.collection_dispute_status, "held")
         self.assertEqual(presentment.collection_case_status, "disputed")
         self.assertEqual(presentment.next_operator_action, "wait")
-        page = CollectionDisputePresentmentService(fresh).list_collection_disputes(TENANT_ONE)
+        page = CollectionDisputePresentmentService(fresh).list_collection_disputes(
+            TENANT_ONE
+        )
         self.assertEqual(
             {row.collection_dispute_id for row in page.collection_disputes},
             {
@@ -10507,7 +12001,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             CollectionDisputePresentmentService(fresh).present_collection_dispute(
                 "", stored.collection_dispute_id
             )
-        self.assertEqual(missing_pin.exception.rejection_reason_code, "tenant_not_found")
+        self.assertEqual(
+            missing_pin.exception.rejection_reason_code, "tenant_not_found"
+        )
         with self.assertRaises(CollectionDisputePresentmentQueryError) as other_pin:
             CollectionDisputePresentmentService(fresh).present_collection_dispute(
                 TENANT_TWO, stored.collection_dispute_id
@@ -10515,8 +12011,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             other_pin.exception.rejection_reason_code, "collection_dispute_not_found"
         )
-        with self.assertRaises(CollectionDisputeReleasePresentmentQueryError) as held_release:
-            CollectionDisputeReleasePresentmentService(fresh).present_collection_dispute_release(
+        with self.assertRaises(
+            CollectionDisputeReleasePresentmentQueryError
+        ) as held_release:
+            CollectionDisputeReleasePresentmentService(
+                fresh
+            ).present_collection_dispute_release(
                 TENANT_ONE, stored.collection_dispute_id
             )
         self.assertEqual(
@@ -10585,13 +12085,19 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         written_off = CollectionWriteOffService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 16, 30, tzinfo=UTC)
         ).write_off_collection_case(TENANT_ONE, afternoon_collection.collection_case_id)
-        self.assertEqual(written_off.collection_write_off_outcome_code.value, "accepted")
+        self.assertEqual(
+            written_off.collection_write_off_outcome_code.value, "accepted"
+        )
         settled = CollectionCaseSettlementService(self.ledger).settle_collection_case(
             TENANT_ONE, afternoon_collection.collection_case_id
         )
-        self.assertEqual(settled.collection_case_settlement_outcome_code.value, "accepted")
+        self.assertEqual(
+            settled.collection_case_settlement_outcome_code.value, "accepted"
+        )
         with self.assertRaises(ValueError):
-            self.ledger.mark_collection_case_disputed(afternoon_collection.collection_case_id)
+            self.ledger.mark_collection_case_disputed(
+                afternoon_collection.collection_case_id
+            )
         with self.assertRaises(ValueError):
             self.ledger.mark_collection_case_released_from_dispute(
                 afternoon_collection.collection_case_id
@@ -10650,7 +12156,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         dunning_release = CollectionDisputeReleaseService(
             self.ledger, clock=lambda: datetime(2026, 8, 18, 23, 30, tzinfo=UTC)
         ).release_collection_dispute(TENANT_ONE, dunning_hold.collection_dispute_id)
-        self.assertEqual(dunning_release.collection_dispute_release_outcome_code.value, "accepted")
+        self.assertEqual(
+            dunning_release.collection_dispute_release_outcome_code.value, "accepted"
+        )
         self.assertEqual(dunning_release.collection_case_status, "dunning")
         self.assertEqual(
             self.ledger.get_collection_case(
@@ -10668,7 +12176,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         released_mismatch = CollectionDisputeService(
             BlindFindReleasedLedger(self.connection), clock=lambda: held_at
         ).hold_collection_case(TENANT_ONE, dunning_collection.collection_case_id)
-        self.assertEqual(released_mismatch.collection_dispute_outcome_code.value, "rejected")
+        self.assertEqual(
+            released_mismatch.collection_dispute_outcome_code.value, "rejected"
+        )
         self.assertEqual(
             released_mismatch.rejection_reason_code,
             CollectionDisputeRejectionReasonCode.COLLECTION_DISPUTE_RELEASED,
@@ -10736,7 +12246,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            self.ledger.get_collection_case(race_case.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                race_case.collection_case_id
+            ).collection_case_status,
             "open",
         )
 
@@ -10751,7 +12263,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 return None
 
             def insert_collection_dispute(self, dispute):
-                stored_dispute = PostgresUsageLedger.insert_collection_dispute(self, dispute)
+                stored_dispute = PostgresUsageLedger.insert_collection_dispute(
+                    self, dispute
+                )
                 self._hide_case = True
                 return stored_dispute
 
@@ -10769,7 +12283,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             CollectionDisputeRejectionReasonCode.COLLECTION_CASE_NOT_FOUND,
         )
         self.assertEqual(
-            self.ledger.get_collection_case(race_case.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                race_case.collection_case_id
+            ).collection_case_status,
             "open",
         )
 
@@ -10782,10 +12298,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         raced = CollectionDisputeService(
             BlindFindLedger(self.connection), clock=lambda: held_at
         ).hold_collection_case(TENANT_ONE, race_collection.collection_case_id)
-        self.assertEqual(raced.collection_dispute_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            raced.collection_dispute_outcome_code.value, "duplicate_replay"
+        )
         self.assertEqual(raced.collection_dispute_id, raced_row.collection_dispute_id)
         self.assertEqual(
-            self.ledger.get_collection_case(race_case.collection_case_id).collection_case_status,
+            self.ledger.get_collection_case(
+                race_case.collection_case_id
+            ).collection_case_status,
             "disputed",
         )
         self.assertEqual(

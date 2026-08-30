@@ -35,6 +35,25 @@ contextual-orchestrator usage
 -> accounting journal proposal
 ```
 
+## Late-period adjustment acceptance
+
+- A late adjustment is an immutable, tenant-scoped commercial fact linking a
+  source period that is at least `soft_closed` to a different target period
+  that is still `open`; the target starts at or after the source end.
+- `late_usage`, `correction`, and `reversal` are the only adjustment kinds.
+  The amount is a non-zero signed exact-decimal string, the currency is an
+  uppercase ISO 4217 code, and the tenant-scoped source reference is the stable
+  replay identity with the source payload hash included in the payload identity.
+- An identical replay, including one with a regenerated opaque ID, returns the
+  stored fact. A changed amount, source reference, hash, or other identity
+  field fails closed; the source period, rating facts, reconciliation facts,
+  and period transitions are never rewritten.
+- PostgreSQL migrations `0048`/`0049` enforce tenant-scoped foreign keys,
+  lifecycle ordering, target openness, replay conflict handling, and
+  update/delete immutability. Application,
+  re-rating, provider settlement, FOCUS export, tax documents, and statutory
+  posting remain separate workflows.
+
 ## Tax-assessment acceptance
 
 - A known tenant publishes one `tax_rate_schedule` and one immutable `tax_rate_version` whose `tax_rate` is an exact decimal in `[0, 1]`.

@@ -237,6 +237,18 @@ an explicit `as_of` instant, UTC calendar days, and fixed current / 1-30 / 31-60
 / 61-90 / 90+ buckets. PostgreSQL returns it through the existing tenant- and
 period-scoped line reads; age is never stored or used to mutate the exception.
 
+`late_adjustment` is an append-only commercial fact with source and target
+periods, one of `late_usage`, `correction`, or `reversal`, a signed exact
+amount, currency, source reference, source payload hash, and contract version.
+Its tenant-scoped source reference is the stable replay key; the source/target,
+kind, hash, and contract version also have a unique payload identity. Identical
+retries remain durable even when an opaque ID is regenerated, while changed
+payloads fail closed. Composite foreign keys and migrations `0048`/`0049` triggers
+require an adequately closed source, an open target beginning no earlier than
+the source end, and immutable rows. The fact does not rewrite usage, rating,
+or source period history and does not itself create a journal, tax document, or
+FOCUS export.
+
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception
 summary must equal the run's persisted exception rows, and every exception must

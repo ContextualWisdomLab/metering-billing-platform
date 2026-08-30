@@ -26,6 +26,7 @@ RECONCILIATION_RESOLUTION_CONTRACT_VERSION = 1
 RECONCILIATION_EVIDENCE_CONTRACT_VERSION = 1
 RECONCILIATION_RUN_CONTRACT_VERSION = 1
 RECONCILIATION_EXCEPTION_AGING_CONTRACT_VERSION = 1
+LATE_ADJUSTMENT_CONTRACT_VERSION = 1
 ROUNDING_MODE = "ROUND_HALF_UP"
 
 _CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
@@ -44,6 +45,14 @@ class BillingPeriodStatus(StrEnum):
     RECONCILED = "reconciled"
     INVOICED = "invoiced"
     HARD_CLOSED = "hard_closed"
+
+
+class LateAdjustmentKind(StrEnum):
+    """Closed reason vocabulary for a correction applied to a later period."""
+
+    LATE_USAGE = "late_usage"
+    CORRECTION = "correction"
+    REVERSAL = "reversal"
 
 
 class FxRateType(StrEnum):
@@ -136,13 +145,19 @@ def _tenant_reference(value: Any) -> str:
 def _currency(value: Any, field_name: str = "currency_code") -> str:
     """Require an uppercase ISO-4217-shaped currency code."""
     if not isinstance(value, str) or _CURRENCY_PATTERN.fullmatch(value) is None:
-        raise PeriodCloseValidationError(f"{field_name} must be an uppercase three-letter code")
+        raise PeriodCloseValidationError(
+            f"{field_name} must be an uppercase three-letter code"
+        )
     return value
 
 
 def _aware_datetime(value: Any, field_name: str) -> datetime:
     """Require a timezone-aware datetime so persisted ordering is unambiguous."""
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise PeriodCloseValidationError(f"{field_name} must be timezone-aware")
     return value
 
@@ -177,7 +192,9 @@ def _signed_decimal(value: Any, field_name: str) -> Decimal:
     else:
         raise PeriodCloseValidationError(f"{field_name} must be an exact decimal")
     if _SIGNED_DECIMAL_PATTERN.fullmatch(text) is None:
-        raise PeriodCloseValidationError(f"{field_name} must be a canonical decimal string")
+        raise PeriodCloseValidationError(
+            f"{field_name} must be a canonical decimal string"
+        )
     return Decimal(text)
 
 
@@ -192,7 +209,9 @@ def _non_negative_decimal(value: Any, field_name: str) -> Decimal:
 def _minor_units(value: Any) -> int:
     """Require an explicitly supplied zero- through four-decimal currency scale."""
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 4:
-        raise PeriodCloseValidationError("minor_units must be an integer from 0 through 4")
+        raise PeriodCloseValidationError(
+            "minor_units must be an integer from 0 through 4"
+        )
     return value
 
 
@@ -204,7 +223,9 @@ def _rate_scale(value: Decimal) -> int:
 def _require_decimal_length(value: Decimal, maximum: int, field_name: str) -> Decimal:
     """Keep exact decimal projections inside their published contract bounds."""
     if len(format(value, "f")) > maximum:
-        raise PeriodCloseValidationError(f"{field_name} exceeds the contract length limit")
+        raise PeriodCloseValidationError(
+            f"{field_name} exceeds the contract length limit"
+        )
     return value
 
 
@@ -253,13 +274,17 @@ class BillingPeriodTransition:
             from_status = BillingPeriodStatus(self.from_status)
             to_status = BillingPeriodStatus(self.to_status)
         except ValueError as error:
-            raise PeriodCloseValidationError("period transition status is unsupported") from error
+            raise PeriodCloseValidationError(
+                "period transition status is unsupported"
+            ) from error
         object.__setattr__(self, "from_status", from_status)
         object.__setattr__(self, "to_status", to_status)
         if from_status == to_status:
             raise PeriodCloseValidationError("period transition must change status")
         if _NEXT_PERIOD_STATUS.get(from_status) != to_status:
-            raise PeriodCloseValidationError("period transition must advance one lifecycle state")
+            raise PeriodCloseValidationError(
+                "period transition must advance one lifecycle state"
+            )
         _reference(self.actor_reference, "actor_reference")
         _reference(self.authorization_reference, "authorization_reference")
         _reference(self.reason, "reason")
@@ -304,7 +329,9 @@ class BillingPeriod:
             or not isinstance(self.period_end, date)
             or isinstance(self.period_end, datetime)
         ):
-            raise PeriodCloseValidationError("period_start and period_end must be dates")
+            raise PeriodCloseValidationError(
+                "period_start and period_end must be dates"
+            )
         if self.period_start >= self.period_end:
             raise PeriodCloseValidationError("period_start must precede period_end")
         opened_at = _aware_datetime(self.opened_at, "opened_at")
@@ -320,18 +347,30 @@ class BillingPeriod:
         current_time = opened_at
         for transition in self.transitions:
             if not isinstance(transition, BillingPeriodTransition):
-                raise PeriodCloseValidationError("transitions must contain BillingPeriodTransition values")
+                raise PeriodCloseValidationError(
+                    "transitions must contain BillingPeriodTransition values"
+                )
             if transition.from_status != current_status:
-                raise PeriodCloseValidationError("period transition history is not contiguous")
+                raise PeriodCloseValidationError(
+                    "period transition history is not contiguous"
+                )
             if transition.transitioned_at < current_time:
-                raise PeriodCloseValidationError("period transition timestamps must be monotonic")
+                raise PeriodCloseValidationError(
+                    "period transition timestamps must be monotonic"
+                )
             current_status = transition.to_status
             current_time = transition.transitioned_at
-        transition_ids = tuple(transition.transition_id for transition in self.transitions)
+        transition_ids = tuple(
+            transition.transition_id for transition in self.transitions
+        )
         if len(set(transition_ids)) != len(transition_ids):
-            raise PeriodCloseValidationError("period transition identifiers must be unique")
+            raise PeriodCloseValidationError(
+                "period transition identifiers must be unique"
+            )
         if current_status != status:
-            raise PeriodCloseValidationError("period status must equal the last transition")
+            raise PeriodCloseValidationError(
+                "period status must equal the last transition"
+            )
 
     def advance(
         self,
@@ -387,7 +426,9 @@ class BillingPeriod:
             "opened_at": _format_datetime(self.opened_at),
             "opened_by": self.opened_by,
             "period_status": self.status.value,
-            "transitions": [transition.as_contract_dict() for transition in self.transitions],
+            "transitions": [
+                transition.as_contract_dict() for transition in self.transitions
+            ],
         }
 
 
@@ -408,6 +449,113 @@ def create_billing_period(
         period_end=period_end,
         opened_at=opened_at,
         opened_by=opened_by,
+    )
+
+
+@dataclass(frozen=True)
+class LateAdjustment:
+    """Immutable signed correction from a closed period into a later period.
+
+    The fact carries only opaque source evidence and exact commercial amount.
+    It never rewrites usage, rating, reconciliation, or the source period.
+    PostgreSQL validates the source/target lifecycle and period ordering when
+    this contract is persisted.
+    """
+
+    late_adjustment_id: UUID
+    source_period_id: UUID
+    target_period_id: UUID
+    adjustment_kind: LateAdjustmentKind
+    adjustment_amount: Decimal
+    currency_code: str
+    source_reference: str
+    source_payload_hash: str
+    recorded_at: datetime
+    late_adjustment_contract_version: int = LATE_ADJUSTMENT_CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        """Require signed exact money, opaque evidence, and an auditable instant."""
+        _contract_version(
+            self.late_adjustment_contract_version,
+            "late_adjustment_contract_version",
+        )
+        if (
+            not isinstance(self.late_adjustment_id, UUID)
+            or not isinstance(self.source_period_id, UUID)
+            or not isinstance(self.target_period_id, UUID)
+        ):
+            raise PeriodCloseValidationError(
+                "late adjustment identifiers must be UUIDs"
+            )
+        if self.source_period_id == self.target_period_id:
+            raise PeriodCloseValidationError("source and target periods must differ")
+        try:
+            kind = LateAdjustmentKind(self.adjustment_kind)
+        except ValueError as error:
+            raise PeriodCloseValidationError(
+                "late adjustment kind is unsupported"
+            ) from error
+        object.__setattr__(self, "adjustment_kind", kind)
+        amount = _require_decimal_length(
+            _signed_decimal(self.adjustment_amount, "adjustment_amount"),
+            _SIGNED_AMOUNT_MAX_LENGTH,
+            "adjustment_amount",
+        )
+        if amount == 0:
+            raise PeriodCloseValidationError("adjustment_amount must not be zero")
+        object.__setattr__(self, "adjustment_amount", amount)
+        _currency(self.currency_code)
+        _reference(self.source_reference, "source_reference")
+        if (
+            not isinstance(self.source_payload_hash, str)
+            or _SHA256_PATTERN.fullmatch(self.source_payload_hash) is None
+        ):
+            raise PeriodCloseValidationError(
+                "source_payload_hash must be a sha256 digest"
+            )
+        _not_future(_aware_datetime(self.recorded_at, "recorded_at"), "recorded_at")
+
+    def as_contract_dict(self) -> dict[str, object]:
+        """Return the immutable later-period adjustment contract."""
+        return {
+            "late_adjustment_contract_version": self.late_adjustment_contract_version,
+            "late_adjustment_id": str(self.late_adjustment_id),
+            "source_period_id": str(self.source_period_id),
+            "target_period_id": str(self.target_period_id),
+            "adjustment_kind": self.adjustment_kind.value,
+            "adjustment_amount": format(self.adjustment_amount, "f"),
+            "currency_code": self.currency_code,
+            "source_reference": self.source_reference,
+            "source_payload_hash": self.source_payload_hash,
+            "recorded_at": _format_datetime(self.recorded_at),
+        }
+
+
+def create_late_adjustment(
+    source_period_id: UUID,
+    target_period_id: UUID,
+    adjustment_kind: LateAdjustmentKind | str,
+    adjustment_amount: Decimal | str,
+    currency_code: str,
+    source_reference: str,
+    source_payload_hash: str,
+    recorded_at: datetime,
+    *,
+    late_adjustment_id: UUID | None = None,
+) -> LateAdjustment:
+    """Create one immutable correction fact for a later billing period."""
+    return LateAdjustment(
+        late_adjustment_id=uuid4()
+        if late_adjustment_id is None
+        else late_adjustment_id,
+        source_period_id=source_period_id,
+        target_period_id=target_period_id,
+        adjustment_kind=adjustment_kind,
+        adjustment_amount=adjustment_amount,
+        currency_code=currency_code,
+        source_reference=source_reference,
+        source_payload_hash=source_payload_hash,
+        recorded_at=recorded_at,
     )
 
 
@@ -452,7 +600,9 @@ class FxRate:
             or not isinstance(self.rate_precision, int)
             or self.rate_precision < _rate_scale(parsed_rate)
         ):
-            raise PeriodCloseValidationError("rate_precision must cover the exact rate scale")
+            raise PeriodCloseValidationError(
+                "rate_precision must cover the exact rate scale"
+            )
         _aware_datetime(self.effective_at, "effective_at")
         _aware_datetime(self.recorded_at, "recorded_at")
 
@@ -519,7 +669,9 @@ class FxConversion:
         _contract_version(
             self.fx_conversion_contract_version, "fx_conversion_contract_version"
         )
-        if not isinstance(self.fx_conversion_id, UUID) or not isinstance(self.fx_rate_id, UUID):
+        if not isinstance(self.fx_conversion_id, UUID) or not isinstance(
+            self.fx_rate_id, UUID
+        ):
             raise PeriodCloseValidationError("FX conversion identifiers must be UUIDs")
         object.__setattr__(
             self,
@@ -558,11 +710,19 @@ class FxConversion:
             or not isinstance(self.rate_precision, int)
             or self.rate_precision < _rate_scale(self.rate)
         ):
-            raise PeriodCloseValidationError("rate_precision must cover the exact rate scale")
+            raise PeriodCloseValidationError(
+                "rate_precision must cover the exact rate scale"
+            )
         if _rate_scale(self.quote_amount) > minor_units:
-            raise PeriodCloseValidationError("quote_amount exceeds quote_minor_units scale")
-        if self.quote_amount != _convert_exact_amount(self.source_amount, self.rate, minor_units):
-            raise PeriodCloseValidationError("quote_amount must equal the rounded source amount at the pinned rate")
+            raise PeriodCloseValidationError(
+                "quote_amount exceeds quote_minor_units scale"
+            )
+        if self.quote_amount != _convert_exact_amount(
+            self.source_amount, self.rate, minor_units
+        ):
+            raise PeriodCloseValidationError(
+                "quote_amount must equal the rounded source amount at the pinned rate"
+            )
         _aware_datetime(self.converted_at, "converted_at")
 
     def as_contract_dict(self) -> dict[str, object]:
@@ -597,7 +757,9 @@ def convert_currency_amount(
         raise PeriodCloseValidationError("fx_rate must be an FxRate")
     source_code = _currency(source_currency, "source_currency")
     if source_code != fx_rate.base_currency:
-        raise PeriodCloseValidationError("source_currency must match FX rate base_currency")
+        raise PeriodCloseValidationError(
+            "source_currency must match FX rate base_currency"
+        )
     source = _signed_decimal(source_amount, "source_amount")
     minor_units = _minor_units(target_minor_units)
     quote = _convert_exact_amount(source, fx_rate.rate, minor_units)
@@ -627,10 +789,14 @@ class ReconciliationException:
         try:
             code = ReconciliationExceptionCode(self.exception_code)
         except ValueError as error:
-            raise PeriodCloseValidationError("reconciliation exception code is unsupported") from error
+            raise PeriodCloseValidationError(
+                "reconciliation exception code is unsupported"
+            ) from error
         object.__setattr__(self, "exception_code", code)
         if self.next_action != _NEXT_ACTIONS[code]:
-            raise PeriodCloseValidationError("next_action must match the reconciliation exception code")
+            raise PeriodCloseValidationError(
+                "next_action must match the reconciliation exception code"
+            )
         _reference(self.next_action, "next_action")
 
     def as_contract_dict(self) -> dict[str, object]:
@@ -689,7 +855,9 @@ class ReconciliationExceptionAging:
             raise PeriodCloseValidationError("age_days must be a non-negative integer")
         expected_age_days = _calendar_age_days(assessed_at, as_of)
         if self.age_days != expected_age_days:
-            raise PeriodCloseValidationError("age_days must match assessed_at and as_of")
+            raise PeriodCloseValidationError(
+                "age_days must match assessed_at and as_of"
+            )
         if self.aging_bucket != _exception_aging_bucket(self.age_days):
             raise PeriodCloseValidationError("aging_bucket must match age_days")
         ReconciliationException(exception_code, self.next_action)
@@ -722,13 +890,17 @@ def age_reconciliation_exception(
     try:
         code = ReconciliationExceptionCode(exception_code)
     except ValueError as error:
-        raise PeriodCloseValidationError("reconciliation exception code is unsupported") from error
+        raise PeriodCloseValidationError(
+            "reconciliation exception code is unsupported"
+        ) from error
     exception = next(
         (item for item in line.exceptions if item.exception_code == code),
         None,
     )
     if exception is None:
-        raise PeriodCloseValidationError("exception code is not present on the reconciliation line")
+        raise PeriodCloseValidationError(
+            "exception code is not present on the reconciliation line"
+        )
     assessed_at = _aware_datetime(line.assessed_at, "assessed_at")
     observed_as_of = _aware_datetime(as_of, "as_of")
     if observed_as_of < assessed_at:
@@ -793,13 +965,16 @@ class ReconciliationEvidence:
         try:
             exception_code = ReconciliationExceptionCode(self.exception_code)
         except ValueError as error:
-            raise PeriodCloseValidationError("reconciliation evidence code is unsupported") from error
+            raise PeriodCloseValidationError(
+                "reconciliation evidence code is unsupported"
+            ) from error
         object.__setattr__(self, "exception_code", exception_code)
         _reference(self.evidence_kind, "evidence_kind")
         _reference(self.evidence_reference, "evidence_reference")
-        if not isinstance(self.evidence_sha256, str) or _SHA256_PATTERN.fullmatch(
-            self.evidence_sha256
-        ) is None:
+        if (
+            not isinstance(self.evidence_sha256, str)
+            or _SHA256_PATTERN.fullmatch(self.evidence_sha256) is None
+        ):
             raise PeriodCloseValidationError("evidence_sha256 must be a sha256 digest")
         _reference(self.captured_by, "captured_by")
         _not_future(_aware_datetime(self.captured_at, "captured_at"), "captured_at")
@@ -846,15 +1021,21 @@ class ReconciliationRun:
         if not isinstance(self.reconciliation_line_ids, tuple) or any(
             not isinstance(line_id, UUID) for line_id in self.reconciliation_line_ids
         ):
-            raise PeriodCloseValidationError("reconciliation_line_ids must contain UUIDs")
+            raise PeriodCloseValidationError(
+                "reconciliation_line_ids must contain UUIDs"
+            )
         if len(set(self.reconciliation_line_ids)) != len(self.reconciliation_line_ids):
-            raise PeriodCloseValidationError("reconciliation line identifiers must be unique")
+            raise PeriodCloseValidationError(
+                "reconciliation line identifiers must be unique"
+            )
         if (
             isinstance(self.blocking_exception_count, bool)
             or not isinstance(self.blocking_exception_count, int)
             or self.blocking_exception_count < 0
         ):
-            raise PeriodCloseValidationError("blocking_exception_count must be non-negative")
+            raise PeriodCloseValidationError(
+                "blocking_exception_count must be non-negative"
+            )
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the completed run and its ordered line membership."""
@@ -864,7 +1045,9 @@ class ReconciliationRun:
             "period_id": str(self.period_id),
             "started_at": _format_datetime(self.started_at),
             "completed_at": _format_datetime(self.completed_at),
-            "reconciliation_line_ids": [str(line_id) for line_id in self.reconciliation_line_ids],
+            "reconciliation_line_ids": [
+                str(line_id) for line_id in self.reconciliation_line_ids
+            ],
             "blocking_exception_count": self.blocking_exception_count,
         }
 
@@ -964,7 +1147,9 @@ class ReconciliationLine:
             self.reconciliation_line_contract_version,
             "reconciliation_line_contract_version",
         )
-        if not isinstance(self.reconciliation_line_id, UUID) or not isinstance(self.period_id, UUID):
+        if not isinstance(self.reconciliation_line_id, UUID) or not isinstance(
+            self.period_id, UUID
+        ):
             raise PeriodCloseValidationError("reconciliation identifiers must be UUIDs")
         _reference(self.provider_account_reference, "provider_account_reference")
         _currency(self.currency_code)
@@ -983,7 +1168,11 @@ class ReconciliationLine:
                     field_name,
                 ),
             )
-        for field_name in ("provider_fee_amount", "withheld_tax_amount", "reserve_amount"):
+        for field_name in (
+            "provider_fee_amount",
+            "withheld_tax_amount",
+            "reserve_amount",
+        ):
             object.__setattr__(
                 self,
                 field_name,
@@ -1000,21 +1189,34 @@ class ReconciliationLine:
             self.reserve_amount,
         )
         if self.expected_cash_amount != expected_cash:
-            raise PeriodCloseValidationError("expected_cash_amount must equal provider actual less deductions")
+            raise PeriodCloseValidationError(
+                "expected_cash_amount must equal provider actual less deductions"
+            )
         try:
             status = ReconciliationLineStatus(self.status)
         except ValueError as error:
-            raise PeriodCloseValidationError("reconciliation line status is unsupported") from error
+            raise PeriodCloseValidationError(
+                "reconciliation line status is unsupported"
+            ) from error
         object.__setattr__(self, "status", status)
         if not isinstance(self.exceptions, tuple) or any(
-            not isinstance(exception, ReconciliationException) for exception in self.exceptions
+            not isinstance(exception, ReconciliationException)
+            for exception in self.exceptions
         ):
-            raise PeriodCloseValidationError("exceptions must contain immutable reconciliation exceptions")
+            raise PeriodCloseValidationError(
+                "exceptions must contain immutable reconciliation exceptions"
+            )
         if (status == ReconciliationLineStatus.MATCHED) != (not self.exceptions):
-            raise PeriodCloseValidationError("reconciliation status must match exception presence")
-        exception_codes = tuple(exception.exception_code for exception in self.exceptions)
+            raise PeriodCloseValidationError(
+                "reconciliation status must match exception presence"
+            )
+        exception_codes = tuple(
+            exception.exception_code for exception in self.exceptions
+        )
         if len(set(exception_codes)) != len(exception_codes):
-            raise PeriodCloseValidationError("reconciliation exception codes must be unique")
+            raise PeriodCloseValidationError(
+                "reconciliation exception codes must be unique"
+            )
         _aware_datetime(self.assessed_at, "assessed_at")
         currency_mismatch = False
         for field_name, value in (
@@ -1022,7 +1224,9 @@ class ReconciliationLine:
             ("provider_currency_code", self.provider_currency_code),
             ("cash_currency_code", self.cash_currency_code),
         ):
-            currency_mismatch = currency_mismatch or _currency(value, field_name) != self.currency_code
+            currency_mismatch = (
+                currency_mismatch or _currency(value, field_name) != self.currency_code
+            )
         has_currency_exception = any(
             exception.exception_code == ReconciliationExceptionCode.CURRENCY_MISMATCH
             for exception in self.exceptions
@@ -1048,10 +1252,16 @@ class ReconciliationLine:
             "reserve_amount": format(self.reserve_amount, "f"),
             "expected_cash_amount": format(self.expected_cash_amount, "f"),
             "reconciliation_line_status": self.status.value,
-            "exceptions": [exception.as_contract_dict() for exception in self.exceptions],
+            "exceptions": [
+                exception.as_contract_dict() for exception in self.exceptions
+            ],
             "assessed_at": _format_datetime(self.assessed_at),
         }
-        for field_name in ("internal_currency_code", "provider_currency_code", "cash_currency_code"):
+        for field_name in (
+            "internal_currency_code",
+            "provider_currency_code",
+            "cash_currency_code",
+        ):
             payload[field_name] = getattr(self, field_name)
         return payload
 
@@ -1098,14 +1308,18 @@ def assess_reconciliation_line(
     if cash != expected_cash:
         exception_codes.append(
             ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH
-            if fee > 0 and cash == _expected_cash_amount(provider, Decimal("0"), withheld, reserve)
+            if fee > 0
+            and cash == _expected_cash_amount(provider, Decimal("0"), withheld, reserve)
             else ReconciliationExceptionCode.SETTLEMENT_MISMATCH
         )
     exceptions = tuple(
-        ReconciliationException(code, _NEXT_ACTIONS[code]) for code in dict.fromkeys(exception_codes)
+        ReconciliationException(code, _NEXT_ACTIONS[code])
+        for code in dict.fromkeys(exception_codes)
     )
     return ReconciliationLine(
-        reconciliation_line_id=uuid4() if reconciliation_line_id is None else reconciliation_line_id,
+        reconciliation_line_id=uuid4()
+        if reconciliation_line_id is None
+        else reconciliation_line_id,
         period_id=period_id,
         provider_account_reference=provider_account_reference,
         currency_code=currency_code,

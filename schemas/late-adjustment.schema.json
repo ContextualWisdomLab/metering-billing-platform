@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/late-adjustment/v1",
+  "title": "Late Period Adjustment",
+  "description": "Immutable signed commercial correction from a closed period into a later open period.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "late_adjustment_contract_version",
+    "late_adjustment_id",
+    "source_period_id",
+    "target_period_id",
+    "adjustment_kind",
+    "adjustment_amount",
+    "currency_code",
+    "source_reference",
+    "source_payload_hash",
+    "recorded_at"
+  ],
+  "properties": {
+    "late_adjustment_contract_version": {"type": "integer", "minimum": 1},
+    "late_adjustment_id": {"type": "string", "format": "uuid"},
+    "source_period_id": {"type": "string", "format": "uuid"},
+    "target_period_id": {"type": "string", "format": "uuid"},
+    "adjustment_kind": {
+      "type": "string",
+      "enum": ["late_usage", "correction", "reversal"]
+    },
+    "adjustment_amount": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 40
+    },
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "source_reference": {"type": "string", "minLength": 1},
+    "source_payload_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "recorded_at": {"type": "string", "format": "date-time"}
+  }
+}
