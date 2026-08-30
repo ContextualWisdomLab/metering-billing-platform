@@ -44,6 +44,13 @@
   The memory adapter serializes recording, application, and period lifecycle writes for
   at-most-once behavior, and application audit timestamps must be timezone
   aware and not future-dated.
+- Issue #87 now records consumption of an applied late adjustment as a separate
+  immutable rating fact in `0054`/`0055`. It preserves the original usage
+  `rating_run`, copies the signed commercial delta, replays safely after target
+  closure, and advances presentment to `record_invoice_adjustment`. Rating
+  audit timestamps must be timezone-aware and not future-dated at service,
+  adapter, and PostgreSQL boundaries; invoice-adjustment composition remains an
+  explicit downstream workflow (ADR 0135).
 - Issue #87 now preserves applied reconciliation-fact migration checksums:
   period, FX, and exception immutability triggers are delivered by migration
   `0047` before the FX snapshot trigger in migration `0048`.

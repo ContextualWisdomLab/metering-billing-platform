@@ -21,7 +21,10 @@ from types import ModuleType
 from typing import Any, Callable
 from uuid import UUID
 
-from metering_billing.errors import RejectionReasonCode
+from metering_billing.errors import (
+    LateAdjustmentRatingTargetPeriodNotOpen,
+    RejectionReasonCode,
+)
 from metering_billing.exact_decimal import (
     format_exact_decimal,
     parse_exact_decimal,
@@ -502,6 +505,24 @@ class StoredLateAdjustmentApplication:
     applied_at: datetime
     late_adjustment_application_contract_version: int
     late_adjustment_application_status: str
+
+
+@dataclass(frozen=True)
+class StoredLateAdjustmentRating:
+    """Append-only rating consumption fact for one applied late adjustment."""
+
+    late_adjustment_rating_id: UUID
+    tenant_account_id: UUID
+    late_adjustment_application_id: UUID
+    late_adjustment_id: UUID
+    target_period_id: UUID
+    adjustment_amount: Decimal
+    currency_code: str
+    rated_by: str
+    authorization_reference: str
+    rated_at: datetime
+    late_adjustment_rating_contract_version: int
+    late_adjustment_rating_status: str
 
 
 @dataclass(frozen=True)
@@ -1031,6 +1052,12 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     late_adjustment_application_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    late_adjustment_ratings: dict[UUID, StoredLateAdjustmentRating] = field(
+        default_factory=dict
+    )
+    late_adjustment_rating_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
     late_adjustment_payload_index: dict[
@@ -3077,6 +3104,17 @@ class MemoryUsageLedger:
             if stored_tenant_id == tenant_account_id and late_adjustment_id in requested
         )
 
+    def find_late_adjustment_rating_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return rated late-adjustment IDs for one bounded page."""
+        requested = set(late_adjustment_ids)
+        return frozenset(
+            late_adjustment_id
+            for (stored_tenant_id, late_adjustment_id) in self.late_adjustment_rating_index
+            if stored_tenant_id == tenant_account_id and late_adjustment_id in requested
+        )
+
     def get_late_adjustment_application(
         self, late_adjustment_application_id: UUID
     ) -> StoredLateAdjustmentApplication | None:
@@ -3171,6 +3209,126 @@ class MemoryUsageLedger:
         self.late_adjustment_applications[application.late_adjustment_application_id] = application
         self.late_adjustment_application_index[identity_key] = application.late_adjustment_application_id
         return application
+
+    def find_late_adjustment_rating(
+        self, tenant_account_id: UUID, late_adjustment_id: UUID
+    ) -> StoredLateAdjustmentRating | None:
+        """Return one tenant-scoped rating consumption fact, if present."""
+        rating_id = self.late_adjustment_rating_index.get(
+            (tenant_account_id, late_adjustment_id)
+        )
+        if rating_id is None:
+            return None
+        return self.late_adjustment_ratings[rating_id]
+
+    def get_late_adjustment_rating(
+        self, late_adjustment_rating_id: UUID
+    ) -> StoredLateAdjustmentRating | None:
+        """Return one late-adjustment rating consumption fact by identifier."""
+        return self.late_adjustment_ratings.get(late_adjustment_rating_id)
+
+    def insert_late_adjustment_rating(
+        self, rating: StoredLateAdjustmentRating
+    ) -> StoredLateAdjustmentRating:
+        """Store one rating fact while serializing target lifecycle changes."""
+        with self._late_adjustment_application_lock:
+            return self._insert_late_adjustment_rating(rating)
+
+    def _insert_late_adjustment_rating(
+        self, rating: StoredLateAdjustmentRating
+    ) -> StoredLateAdjustmentRating:
+        """Store one immutable rating fact while the lifecycle lock is held."""
+        _validate_audit_timestamp(rating.rated_at, "rated_at")
+        if rating.late_adjustment_rating_status != "rated":
+            raise ValueError("late_adjustment_rating_status must be rated")
+        if CURRENCY_CODE_PATTERN.fullmatch(rating.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(rating.adjustment_amount, Decimal)
+            or rating.adjustment_amount.is_nan()
+            or rating.adjustment_amount.is_infinite()
+            or rating.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        amount_text = format(rating.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        for value, field_name in (
+            (rating.rated_by, "rated_by"),
+            (rating.authorization_reference, "authorization_reference"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-empty")
+        if rating.late_adjustment_rating_id in self.late_adjustment_ratings:
+            raise ValueError("late_adjustment_rating_id already stored")
+        identity_key = (rating.tenant_account_id, rating.late_adjustment_id)
+        existing = self.find_late_adjustment_rating(*identity_key)
+        if existing is not None:
+            if (
+                replace(
+                    existing,
+                    late_adjustment_rating_id=rating.late_adjustment_rating_id,
+                    rated_at=rating.rated_at,
+                    rated_by=rating.rated_by,
+                    authorization_reference=rating.authorization_reference,
+                )
+                != rating
+            ):
+                raise ValueError("late adjustment rating identity cannot change")
+            return existing
+        tenant_reference = next(
+            (
+                tenant.tenant_reference
+                for tenant in self.tenant_accounts.values()
+                if tenant.tenant_account_id == rating.tenant_account_id
+            ),
+            None,
+        )
+        target_period = (
+            self.get_billing_period(tenant_reference, rating.target_period_id)
+            if tenant_reference is not None
+            else None
+        )
+        if target_period is None or target_period.status.value != "open":
+            raise LateAdjustmentRatingTargetPeriodNotOpen(
+                "late adjustment rating target period must be open"
+            )
+        adjustment = self.late_adjustments.get(rating.late_adjustment_id)
+        if (
+            adjustment is None
+            or self.late_adjustment_tenant_index.get(rating.late_adjustment_id)
+            != rating.tenant_account_id
+        ):
+            raise ValueError("late adjustment rating source is missing")
+        application = self.find_late_adjustment_application(
+            rating.tenant_account_id, rating.late_adjustment_id
+        )
+        if (
+            application is None
+            or application.late_adjustment_application_id
+            != rating.late_adjustment_application_id
+        ):
+            raise ValueError("late adjustment rating application is missing")
+        if (
+            application.late_adjustment_application_status != "applied"
+            or application.late_adjustment_id != adjustment.late_adjustment_id
+            or application.target_period_id != rating.target_period_id
+            or application.adjustment_amount != rating.adjustment_amount
+            or application.currency_code != rating.currency_code
+        ):
+            raise ValueError("late adjustment rating does not match application")
+        if (
+            adjustment.target_period_id != rating.target_period_id
+            or adjustment.adjustment_amount != rating.adjustment_amount
+            or adjustment.currency_code != rating.currency_code
+        ):
+            raise ValueError("late adjustment rating does not match source")
+        self.late_adjustment_ratings[rating.late_adjustment_rating_id] = rating
+        self.late_adjustment_rating_index[identity_key] = rating.late_adjustment_rating_id
+        return rating
 
     def insert_credit_adjustment(
         self, credit: StoredCreditAdjustment

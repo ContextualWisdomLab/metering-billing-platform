@@ -167,6 +167,33 @@ class LateAdjustmentApplicationRejectionReasonCode(StrEnum):
     TARGET_PERIOD_NOT_OPEN = "target_period_not_open"
 
 
+class LateAdjustmentApplicationTargetPeriodNotOpen(ValueError):
+    """Raised when a new application targets a period that is not open."""
+
+
+class LateAdjustmentRatingOutcomeCode(StrEnum):
+    """Terminal result of rating one applied late adjustment."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class LateAdjustmentRatingRejectionReasonCode(StrEnum):
+    """Why a late-adjustment rating was refused without writing a fact."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
+    LATE_ADJUSTMENT_APPLICATION_NOT_FOUND = "late_adjustment_application_not_found"
+    TARGET_PERIOD_NOT_OPEN = "late_adjustment_target_period_not_open"
+    ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
+    AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
+
+
+class LateAdjustmentRatingTargetPeriodNotOpen(ValueError):
+    """Raised when a new rating targets a period that is not open."""
+
+
 class TaxRateOutcomeCode(StrEnum):
     """Terminal result of publishing one tenant-scoped tax-rate version."""
 

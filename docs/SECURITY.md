@@ -54,5 +54,9 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
 - Unknown or cross-tenant late adjustment: `late_adjustment_not_found`
 - Missing or blank late-adjustment actor reference: `actor_reference_invalid`
 - Missing or blank late-adjustment authorization reference: `authorization_reference_invalid`
+- Rating an unapplied late adjustment: `late_adjustment_application_not_found`
+- Applying after the target period closes: `late_adjustment_target_period_not_open`
+- Rating after the target period closes: `late_adjustment_target_period_not_open`
+- Unknown or cross-tenant late-adjustment rating source: `late_adjustment_not_found`
 
 Do not store card data, PAT plaintext, prompt text, response text, provider secrets, or webhook-subscription plaintext.  Do not start a web UI in this slice.

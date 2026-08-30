@@ -1,23 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/late-adjustment-application/v1",
-  "title": "Late Adjustment Application Result",
-  "description": "Append-only acknowledgement that immutable late-adjustment evidence was consumed for downstream rating.",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/late-adjustment-rating/v1",
+  "title": "Late adjustment rating result",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "late_adjustment_application_contract_version": {},
-    "late_adjustment_application_outcome_code": {},
+    "late_adjustment_rating_contract_version": {},
+    "late_adjustment_rating_outcome_code": {},
+    "late_adjustment_rating_id": {},
     "late_adjustment_application_id": {},
     "late_adjustment_id": {},
     "tenant_reference": {},
     "target_period_id": {},
     "adjustment_amount": {},
     "currency_code": {},
-    "applied_by": {},
+    "rated_by": {},
     "authorization_reference": {},
-    "applied_at": {},
-    "late_adjustment_application_status": {},
+    "rated_at": {},
+    "late_adjustment_rating_status": {},
     "next_operator_action": {},
     "rejection_reason_code": {}
   },
@@ -26,26 +26,28 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "late_adjustment_application_contract_version",
-        "late_adjustment_application_outcome_code",
+        "late_adjustment_rating_contract_version",
+        "late_adjustment_rating_outcome_code",
+        "late_adjustment_rating_id",
         "late_adjustment_application_id",
         "late_adjustment_id",
         "tenant_reference",
         "target_period_id",
         "adjustment_amount",
         "currency_code",
-        "applied_by",
+        "rated_by",
         "authorization_reference",
-        "applied_at",
-        "late_adjustment_application_status",
+        "rated_at",
+        "late_adjustment_rating_status",
         "next_operator_action"
       ],
       "properties": {
-        "late_adjustment_application_contract_version": {"type": "integer", "minimum": 1},
-        "late_adjustment_application_outcome_code": {
+        "late_adjustment_rating_contract_version": {"type": "integer", "minimum": 1},
+        "late_adjustment_rating_outcome_code": {
           "type": "string",
           "enum": ["accepted", "duplicate_replay"]
         },
+        "late_adjustment_rating_id": {"type": "string", "format": "uuid"},
         "late_adjustment_application_id": {"type": "string", "format": "uuid"},
         "late_adjustment_id": {"type": "string", "format": "uuid"},
         "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
@@ -56,38 +58,37 @@
           "maxLength": 40
         },
         "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
-        "applied_by": {"type": "string", "minLength": 1},
+        "rated_by": {"type": "string", "minLength": 1},
         "authorization_reference": {"type": "string", "minLength": 1},
-        "applied_at": {"type": "string", "format": "date-time"},
-        "late_adjustment_application_status": {"type": "string", "const": "applied"},
-        "next_operator_action": {"type": "string", "const": "rate_late_adjustment"}
+        "rated_at": {"type": "string", "format": "date-time"},
+        "late_adjustment_rating_status": {"type": "string", "const": "rated"},
+        "next_operator_action": {"type": "string", "const": "record_invoice_adjustment"}
       }
     },
     {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "late_adjustment_application_contract_version",
-        "late_adjustment_application_outcome_code",
+        "late_adjustment_rating_contract_version",
+        "late_adjustment_rating_outcome_code",
         "rejection_reason_code",
         "next_operator_action"
       ],
       "properties": {
-        "late_adjustment_application_contract_version": {"type": "integer", "minimum": 1},
-        "late_adjustment_application_outcome_code": {"type": "string", "const": "rejected"},
+        "late_adjustment_rating_contract_version": {"type": "integer", "minimum": 1},
+        "late_adjustment_rating_outcome_code": {"type": "string", "const": "rejected"},
         "rejection_reason_code": {
           "type": "string",
           "enum": [
             "tenant_not_found",
             "late_adjustment_not_found",
+            "late_adjustment_application_not_found",
             "late_adjustment_target_period_not_open",
             "actor_reference_invalid",
-            "authorization_reference_invalid",
-            "target_period_not_found",
-            "target_period_not_open"
+            "authorization_reference_invalid"
           ]
         },
-        "next_operator_action": {"type": "string", "const": "wait"}
+        "next_operator_action": {"type": "string", "enum": ["apply_late_adjustment", "wait"]}
       }
     }
   ]

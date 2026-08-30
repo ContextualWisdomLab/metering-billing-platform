@@ -16,6 +16,7 @@ from uuid import UUID
 from metering_billing.errors import (
     LateAdjustmentApplicationOutcomeCode,
     LateAdjustmentApplicationRejectionReasonCode,
+    LateAdjustmentApplicationTargetPeriodNotOpen,
     require_resolved,
 )
 from metering_billing.period_close import BillingPeriodStatus

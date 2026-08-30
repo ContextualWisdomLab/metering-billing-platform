@@ -261,15 +261,28 @@ returns the first writer's immutable audit fields. The application row has
 composite source/target foreign keys and immutable update/delete triggers; it
 does not mutate the late adjustment. The memory reference adapter stores the
 same billing-period aggregate and enforces source/target tenant, lifecycle, and
-ordering invariants before storing a late-adjustment fact.
+ordering invariants before storing a late-adjustment fact. Migrations `0052`/`0053`
+recheck concurrent application replays after the source lock and reject future
+application audit timestamps.
 The list read passes the decoded cursor and `limit + 1` to the ledger, and
 PostgreSQL evaluates one tenant-scoped ordered keyset query so the page never
-scans or hydrates the complete history; application existence is loaded with
-one bulk lookup for the bounded page.
+scans or hydrates the complete history; application and rating existence are
+loaded with one bulk lookup each for the bounded page.
 Application audit timestamps are timezone-aware and not future-dated. The
 memory adapter serializes recording, application, and target-period lifecycle writes while
 preserving the same replay identity.
 Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
+
+`LateAdjustmentRatingService` consumes that application and stores one
+append-only `late_adjustment_rating` per tenant and late-adjustment ID. It copies
+the application target, signed amount, and currency and adds the rating actor,
+authorization reference, and instant. Rating instants must be timezone-aware
+and not future-dated. Migrations `0054` and `0055` protect the
+application/source/target links, exact-value equality, replay identity, current
+target openness for first ratings, and update/delete immutability. A stored
+rating replays after target closure. This is a rating-consumption fact, not a
+synthetic `rating_run`; ordinary usage re-rating and invoice-adjustment
+composition remain separate downstream work.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception

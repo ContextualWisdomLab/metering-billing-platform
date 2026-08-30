@@ -50,10 +50,12 @@ contextual-orchestrator usage
   and period transitions are never rewritten.
 - PostgreSQL migrations `0049`/`0050` enforce tenant-scoped foreign keys,
   lifecycle ordering, target openness, replay conflict handling, and
-  update/delete immutability; migrations `0052`/`0053` enforce application
-  source equality, target locking, replay rechecks, and audit-time bounds.
-  Application, re-rating, provider settlement, FOCUS export, tax documents,
-  and statutory posting remain separate workflows.
+  update/delete immutability; migration `0051` supplies the matching keyset
+  index; migrations `0052`/`0053` enforce application source equality, target
+  locking, replay rechecks, and audit-time bounds, while migrations `0054`/`0055`
+  protect the separate late-adjustment rating fact. Application, re-rating,
+  provider settlement, FOCUS export, tax documents, and statutory posting remain
+  separate workflows.
 
 ## Late-adjustment-presentment acceptance
 
@@ -73,12 +75,14 @@ contextual-orchestrator usage
 - The ledger read receives the decoded cursor and `page_limit + 1`; PostgreSQL
   evaluates the tenant-scoped recorded-at/ID keyset predicate in one ordered
   query so `next_cursor` is derived only from a bounded result, then performs
-  one bulk application-existence lookup for that page.
+  one bulk application-existence and one bulk rating-existence lookup for that
+  page.
 
 ## Late-adjustment-application acceptance
 
 - `POST /v1/late-adjustments/{late_adjustment_id}/applications` requires
-  non-empty `applied_by` and `authorization_reference` audit references.
+  a currently open target period, plus non-empty `applied_by` and
+  `authorization_reference` audit references.
 - The application is an append-only, tenant-scoped fact whose target period,
   signed exact amount, and currency must equal the stored late adjustment.
   Identity is `(tenant_account_id, late_adjustment_id)`; replay returns the
@@ -101,6 +105,25 @@ contextual-orchestrator usage
 - This slice does not re-rate, mutate a period or usage fact, create a tax or
   journal document, settle a provider, export FOCUS, or emit a webhook. Those
   remain explicit downstream workflows.
+
+## Late-adjustment-rating acceptance
+
+- `POST /v1/late-adjustments/{late_adjustment_id}/ratings` requires the
+  tenant's durable application, a currently open target period, and non-empty `rated_by` and
+  `authorization_reference` audit references.
+- Rating appends one immutable tenant-scoped fact that copies the application's
+  target period, signed exact amount, and currency. A replay returns the same
+  rating fact without a second row or mutation of the original usage rating,
+  including when the target has since closed.
+- A first rating after the target closes is rejected with
+  `late_adjustment_target_period_not_open`; the target lock serializes this
+  decision with period transitions.
+- The command does not invent a usage snapshot or rate-card version. It records
+  consumption of the already-authoritative commercial delta; invoice-adjustment
+  composition, tax, provider settlement, FOCUS export, and statutory posting
+  remain explicit downstream workflows.
+- Until application, the command returns `apply_late_adjustment`; after rating,
+  presentment reports `record_invoice_adjustment`.
 
 ## Tax-assessment acceptance
 

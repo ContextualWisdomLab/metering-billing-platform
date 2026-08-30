@@ -22,10 +22,13 @@ DEFAULT_PAGE_LIMIT = 50
 MAXIMUM_PAGE_LIMIT = 100
 OPERATOR_ACTION_APPLY = "apply_late_adjustment"
 OPERATOR_ACTION_RATE = "rate_late_adjustment"
+OPERATOR_ACTION_RECORD_INVOICE_ADJUSTMENT = "record_invoice_adjustment"
 
 
-def next_operator_action(*, applied: bool = False) -> str:
+def next_operator_action(*, applied: bool = False, rated: bool = False) -> str:
     """Return the next action for recorded evidence."""
+    if rated:
+        return OPERATOR_ACTION_RECORD_INVOICE_ADJUSTMENT
     return OPERATOR_ACTION_RATE if applied else OPERATOR_ACTION_APPLY
 
 
@@ -118,6 +121,10 @@ class LateAdjustmentPresentmentService:
                 tenant.tenant_account_id, adjustment.late_adjustment_id
             )
             is not None,
+            rated=self.ledger.find_late_adjustment_rating(
+                tenant.tenant_account_id, adjustment.late_adjustment_id
+            )
+            is not None,
         )
 
     def list_late_adjustments(
@@ -144,12 +151,17 @@ class LateAdjustmentPresentmentService:
             tenant.tenant_account_id,
             tuple(adjustment.late_adjustment_id for adjustment in page_rows),
         )
+        rating_ids = self.ledger.find_late_adjustment_rating_ids(
+            tenant.tenant_account_id,
+            tuple(adjustment.late_adjustment_id for adjustment in page_rows),
+        )
         return LateAdjustmentPresentmentPage(
             late_adjustments=tuple(
                 self._project_adjustment(
                     tenant.tenant_reference,
                     adjustment,
                     applied=adjustment.late_adjustment_id in application_ids,
+                    rated=adjustment.late_adjustment_id in rating_ids,
                 )
                 for adjustment in page_rows
             ),
@@ -166,7 +178,11 @@ class LateAdjustmentPresentmentService:
 
     @staticmethod
     def _project_adjustment(
-        tenant_reference: str, adjustment: LateAdjustment, *, applied: bool = False
+        tenant_reference: str,
+        adjustment: LateAdjustment,
+        *,
+        applied: bool = False,
+        rated: bool = False,
     ) -> LateAdjustmentPresentmentResult:
         """Project only persisted commercial evidence."""
         return LateAdjustmentPresentmentResult(
@@ -180,7 +196,7 @@ class LateAdjustmentPresentmentService:
             source_reference=adjustment.source_reference,
             source_payload_hash=adjustment.source_payload_hash,
             recorded_at=adjustment.recorded_at,
-            next_operator_action=next_operator_action(applied=applied),
+            next_operator_action=next_operator_action(applied=applied, rated=rated),
         )
 
 

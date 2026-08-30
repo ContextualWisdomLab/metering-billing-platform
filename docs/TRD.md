@@ -78,8 +78,14 @@ is `rate_late_adjustment`. The application requires actor and authorization
 references, preserves the source target/exact signed amount/currency, locks and
 rechecks that the target period is still `open` for a new application, and is
 replay-safe. A stored application replays after the target closes and retains
-its first-writer audit data. Neither command applies a rating, mutates a
-period, posts a journal, calls a provider, or creates a tax document.
+its first-writer audit data. `POST /v1/late-adjustments/{late_adjustment_id}/ratings`
+then consumes the application into one immutable rating fact only while its
+target period is open; a first rating after closure is rejected while a stored
+rating replays. This preserves the original usage `rating_run` and exact signed
+delta. Because the adjustment has no usage snapshot or rate-card input, this
+command does not synthesize one; invoice-adjustment composition is the next
+explicit action. Neither command mutates a period, posts a journal, calls a
+provider, or creates a tax document.
 The memory reference adapter stores billing periods and applies the same
 source/target lifecycle and ordering checks as PostgreSQL; target lifecycle
 rejections remain stable `target_period_not_found` or `target_period_not_open`
@@ -87,10 +93,12 @@ rejections remain stable `target_period_not_found` or `target_period_not_open`
 The list repository contract accepts a decoded `(recorded_at,
 late_adjustment_id)` cursor and bounded limit; the PostgreSQL adapter performs
 one ordered tenant-scoped keyset query with `limit + 1`.
-Presentment uses one bulk application-existence lookup for the returned page,
-not one application query per item.
-The application timestamp must be timezone-aware and not future-dated. The
-memory adapter serializes recording, application, and target-period lifecycle writes to
+Presentment uses one bulk application-existence and one bulk rating-existence
+lookup for the returned page, not one query per item.
+Application and rating timestamps must be timezone-aware and not future-dated.
+The service, both adapters, and migrations `0052`/`0053`/`0054`/`0055` enforce
+this boundary. The memory adapter serializes recording, application, and
+target-period lifecycle writes to
 preserve at-most-once behavior during concurrent application and close.
 Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
