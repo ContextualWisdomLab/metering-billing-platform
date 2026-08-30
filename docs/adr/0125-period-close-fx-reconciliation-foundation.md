@@ -34,7 +34,10 @@ arithmetic, reconciliation arithmetic, exception/status consistency, and
 contract decimal length limits cannot be bypassed by submitting a raw
 dictionary. Reconciliation requires internal, provider, and cash source
 currency evidence; a differing source currency must carry a typed
-`currency_mismatch` exception.
+`currency_mismatch` exception. Every published fact carries a positive,
+non-boolean contract version. Transition identities are unique within a
+period, non-negative deductions reject signed zero, and the ordered exception
+tuple is derived from all comparison evidence rather than trusted from input.
 
 ## Consequences
 
@@ -46,5 +49,7 @@ currency evidence; a differing source currency must carry a typed
   precision until the documented target-scale or comparison boundary.
 - Reconciliation can distinguish a provider fee mismatch from a settlement
   mismatch while retaining all three source amounts and their currency evidence.
+- Exponent-form decimal inputs retain their integer precision, and persisted
+  exception evidence cannot omit, duplicate, or invent a comparison result.
 - This ADR does not claim that period close, statutory invoice authority, tax
   calculation, FOCUS export, or GA evidence is complete.

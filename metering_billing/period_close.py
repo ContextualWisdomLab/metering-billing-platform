@@ -140,7 +140,7 @@ def _signed_decimal(value: Any, field_name: str) -> Decimal:
 def _non_negative_decimal(value: Any, field_name: str) -> Decimal:
     """Parse an exact decimal that cannot represent a negative cost component."""
     parsed = _signed_decimal(value, field_name)
-    if parsed < 0:
+    if parsed.is_signed():
         raise PeriodCloseValidationError(f"{field_name} must not be negative")
     return parsed
 
@@ -149,6 +149,13 @@ def _minor_units(value: Any) -> int:
     """Require an explicitly supplied zero- through four-decimal currency scale."""
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 4:
         raise PeriodCloseValidationError("minor_units must be an integer from 0 through 4")
+    return value
+
+
+def _contract_version(value: Any, field_name: str) -> int:
+    """Require a positive integer contract version, excluding boolean values."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PeriodCloseValidationError(f"{field_name} must be a positive integer")
     return value
 
 
@@ -168,8 +175,16 @@ def _convert_exact_amount(source: Decimal, rate: Decimal, minor_units: int) -> D
     """Multiply without context rounding before applying the target currency scale."""
     quantum = Decimal(1).scaleb(-minor_units)
     coefficient_digits = len(source.as_tuple().digits) + len(rate.as_tuple().digits)
+    integer_digits = max(0, source.adjusted() + 1) + max(0, rate.adjusted() + 1)
+    fractional_digits = max(0, -source.as_tuple().exponent) + max(
+        0, -rate.as_tuple().exponent
+    )
     with localcontext() as context:
-        context.prec = max(28, coefficient_digits + minor_units + 2)
+        context.prec = max(
+            28,
+            coefficient_digits,
+            integer_digits + fractional_digits + minor_units + 2,
+        )
         return (source * rate).quantize(quantum, rounding=ROUND_HALF_UP)
 
 
@@ -177,16 +192,53 @@ def _expected_cash_amount(
     provider: Decimal, fee: Decimal, withheld: Decimal, reserve: Decimal
 ) -> Decimal:
     """Subtract independent deductions without context rounding at the contract limit."""
+    values = (provider, fee, withheld, reserve)
+    integer_digits = max(max(0, value.adjusted() + 1) for value in values)
+    fractional_digits = max(max(0, -value.as_tuple().exponent) for value in values)
     with localcontext() as context:
-        context.prec = max(
-            28,
-            len(provider.as_tuple().digits)
-            + len(fee.as_tuple().digits)
-            + len(withheld.as_tuple().digits)
-            + len(reserve.as_tuple().digits)
-            + 2,
-        )
+        context.prec = max(28, integer_digits + fractional_digits + 2)
         return provider - fee - withheld - reserve
+
+
+def _reconciliation_exception_codes(
+    currency_code: str,
+    internal_expected_amount: Decimal,
+    provider_actual_amount: Decimal,
+    cash_actual_amount: Decimal,
+    provider_fee_amount: Decimal,
+    withheld_tax_amount: Decimal,
+    reserve_amount: Decimal,
+    expected_cash_amount: Decimal,
+    internal_currency_code: str,
+    provider_currency_code: str,
+    cash_currency_code: str,
+) -> tuple[ReconciliationExceptionCode, ...]:
+    """Derive the complete deterministic exception vocabulary for one line."""
+    exception_codes: list[ReconciliationExceptionCode] = []
+    for field_name, source_currency in (
+        ("internal_currency_code", internal_currency_code),
+        ("provider_currency_code", provider_currency_code),
+        ("cash_currency_code", cash_currency_code),
+    ):
+        if _currency(source_currency, field_name) != currency_code:
+            exception_codes.append(ReconciliationExceptionCode.CURRENCY_MISMATCH)
+            break
+    if internal_expected_amount != provider_actual_amount:
+        exception_codes.append(ReconciliationExceptionCode.PRICE_MISMATCH)
+    if cash_actual_amount != expected_cash_amount:
+        exception_codes.append(
+            ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH
+            if provider_fee_amount > 0
+            and cash_actual_amount
+            == _expected_cash_amount(
+                provider_actual_amount,
+                Decimal("0"),
+                withheld_tax_amount,
+                reserve_amount,
+            )
+            else ReconciliationExceptionCode.SETTLEMENT_MISMATCH
+        )
+    return tuple(exception_codes)
 
 
 @dataclass(frozen=True)
@@ -252,6 +304,7 @@ class BillingPeriod:
         """Validate dates, identity, and a contiguous forward-only history."""
         if not isinstance(self.period_id, UUID):
             raise PeriodCloseValidationError("period_id must be a UUID")
+        _contract_version(self.period_contract_version, "period_contract_version")
         _tenant_reference(self.tenant_reference)
         if (
             not isinstance(self.period_start, date)
@@ -273,9 +326,13 @@ class BillingPeriod:
             raise PeriodCloseValidationError("transitions must be an immutable tuple")
         current_status = BillingPeriodStatus.OPEN
         current_time = opened_at
+        transition_ids: set[UUID] = set()
         for transition in self.transitions:
             if not isinstance(transition, BillingPeriodTransition):
                 raise PeriodCloseValidationError("transitions must contain BillingPeriodTransition values")
+            if transition.transition_id in transition_ids:
+                raise PeriodCloseValidationError("period transition IDs must be unique")
+            transition_ids.add(transition.transition_id)
             if transition.from_status != current_status:
                 raise PeriodCloseValidationError("period transition history is not contiguous")
             if transition.transitioned_at < current_time:
@@ -382,6 +439,7 @@ class FxRate:
         """Validate exact rate metadata and preserve the supplied versioned value."""
         if not isinstance(self.fx_rate_id, UUID):
             raise PeriodCloseValidationError("fx_rate_id must be a UUID")
+        _contract_version(self.fx_rate_contract_version, "fx_rate_contract_version")
         _reference(self.rate_source, "rate_source")
         try:
             rate_type = FxRateType(self.rate_type)
@@ -469,6 +527,10 @@ class FxConversion:
         """Validate a conversion result without recalculating or mutating it."""
         if not isinstance(self.fx_conversion_id, UUID) or not isinstance(self.fx_rate_id, UUID):
             raise PeriodCloseValidationError("FX conversion identifiers must be UUIDs")
+        _contract_version(
+            self.fx_conversion_contract_version,
+            "fx_conversion_contract_version",
+        )
         object.__setattr__(
             self,
             "source_amount",
@@ -611,6 +673,10 @@ class ReconciliationResolution:
             self.reconciliation_line_id, UUID
         ):
             raise PeriodCloseValidationError("resolution identifiers must be UUIDs")
+        _contract_version(
+            self.reconciliation_resolution_contract_version,
+            "reconciliation_resolution_contract_version",
+        )
         try:
             exception_code = ReconciliationExceptionCode(self.exception_code)
             resolution_status = ReconciliationResolutionStatus(self.resolution_status)
@@ -676,6 +742,10 @@ class ReconciliationLine:
         """Validate exact amounts and the deterministic status/exception invariant."""
         if not isinstance(self.reconciliation_line_id, UUID) or not isinstance(self.period_id, UUID):
             raise PeriodCloseValidationError("reconciliation identifiers must be UUIDs")
+        _contract_version(
+            self.reconciliation_line_contract_version,
+            "reconciliation_line_contract_version",
+        )
         _reference(self.provider_account_reference, "provider_account_reference")
         _currency(self.currency_code)
         for field_name in (
@@ -723,20 +793,23 @@ class ReconciliationLine:
         if (status == ReconciliationLineStatus.MATCHED) != (not self.exceptions):
             raise PeriodCloseValidationError("reconciliation status must match exception presence")
         _aware_datetime(self.assessed_at, "assessed_at")
-        currency_mismatch = False
-        for field_name, value in (
-            ("internal_currency_code", self.internal_currency_code),
-            ("provider_currency_code", self.provider_currency_code),
-            ("cash_currency_code", self.cash_currency_code),
-        ):
-            currency_mismatch = currency_mismatch or _currency(value, field_name) != self.currency_code
-        has_currency_exception = any(
-            exception.exception_code == ReconciliationExceptionCode.CURRENCY_MISMATCH
-            for exception in self.exceptions
+        expected_exception_codes = _reconciliation_exception_codes(
+            self.currency_code,
+            self.internal_expected_amount,
+            self.provider_actual_amount,
+            self.cash_actual_amount,
+            self.provider_fee_amount,
+            self.withheld_tax_amount,
+            self.reserve_amount,
+            expected_cash,
+            self.internal_currency_code,
+            self.provider_currency_code,
+            self.cash_currency_code,
         )
-        if currency_mismatch != has_currency_exception:
+        actual_exception_codes = tuple(exception.exception_code for exception in self.exceptions)
+        if actual_exception_codes != expected_exception_codes:
             raise PeriodCloseValidationError(
-                "currency mismatch evidence must match currency_mismatch exception"
+                "reconciliation exceptions must match comparison evidence"
             )
 
     def as_contract_dict(self) -> dict[str, object]:
@@ -790,26 +863,21 @@ def assess_reconciliation_line(
     withheld = _non_negative_decimal(withheld_tax_amount, "withheld_tax_amount")
     reserve = _non_negative_decimal(reserve_amount, "reserve_amount")
     expected_cash = _expected_cash_amount(provider, fee, withheld, reserve)
-    exception_codes: list[ReconciliationExceptionCode] = []
-    compared_currencies = (
-        ("internal_currency_code", internal_currency_code),
-        ("provider_currency_code", provider_currency_code),
-        ("cash_currency_code", cash_currency_code),
+    exception_codes = _reconciliation_exception_codes(
+        currency_code,
+        internal,
+        provider,
+        cash,
+        fee,
+        withheld,
+        reserve,
+        expected_cash,
+        internal_currency_code,
+        provider_currency_code,
+        cash_currency_code,
     )
-    for field_name, source_currency in compared_currencies:
-        if _currency(source_currency, field_name) != currency_code:
-            exception_codes.append(ReconciliationExceptionCode.CURRENCY_MISMATCH)
-            break
-    if internal != provider:
-        exception_codes.append(ReconciliationExceptionCode.PRICE_MISMATCH)
-    if cash != expected_cash:
-        exception_codes.append(
-            ReconciliationExceptionCode.PROVIDER_FEE_MISMATCH
-            if fee > 0 and cash == _expected_cash_amount(provider, Decimal("0"), withheld, reserve)
-            else ReconciliationExceptionCode.SETTLEMENT_MISMATCH
-        )
     exceptions = tuple(
-        ReconciliationException(code, _NEXT_ACTIONS[code]) for code in dict.fromkeys(exception_codes)
+        ReconciliationException(code, _NEXT_ACTIONS[code]) for code in exception_codes
     )
     return ReconciliationLine(
         reconciliation_line_id=uuid4() if reconciliation_line_id is None else reconciliation_line_id,

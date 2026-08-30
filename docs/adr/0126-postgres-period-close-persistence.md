@@ -18,8 +18,9 @@ must match the referenced rate snapshot before insertion.
 The repository uses one transaction for each aggregate write, idempotent
 opaque identifiers, composite tenant foreign keys, exact PostgreSQL `numeric`
 values, and database checks for currency, status, arithmetic, and rounding
-contracts. Maker-checker authorization, late adjustments, FOCUS 1.4 export,
-provider settlement ingestion, and HTTP presentment remain later #87 slices.
+contracts. Maker-checker authorization is persisted as the separate ADR 0127
+resolution slice; late adjustments, FOCUS 1.4 export, provider settlement
+ingestion, and HTTP presentment remain later #87 slices.
 
 ## Consequences
 
