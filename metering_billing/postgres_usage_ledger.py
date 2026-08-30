@@ -314,29 +314,50 @@ class PostgresUsageLedger:
             return stored
 
     def list_late_adjustments(
-        self, tenant_reference: str
+        self,
+        tenant_reference: str,
+        *,
+        after: tuple[datetime, UUID] | None = None,
+        limit: int | None = None,
     ) -> tuple[LateAdjustment, ...]:
-        """Return later-period adjustments ordered by their recorded evidence time."""
+        """Return ordered late adjustments after an optional bounded cursor."""
         with self._cursor() as cursor:
             tenant_account_id = self._tenant_account_id_with_cursor(
                 cursor, tenant_reference
             )
-            cursor.execute(
-                """
-                SELECT late_adjustment_id
+            query = """
+                SELECT late_adjustment_id, source_period_id, target_period_id,
+                       adjustment_kind, adjustment_amount, currency_code,
+                       source_reference, source_payload_hash, recorded_at,
+                       late_adjustment_contract_version
                 FROM billing_core.late_adjustment
                 WHERE tenant_account_id = %s
-                ORDER BY recorded_at, late_adjustment_id
-                """,
-                (tenant_account_id,),
-            )
+            """
+            parameters: list[Any] = [tenant_account_id]
+            if after is not None:
+                query += " AND (recorded_at, late_adjustment_id) > (%s, %s)"
+                parameters.extend(after)
+            query += " ORDER BY recorded_at, late_adjustment_id"
+            if limit is not None:
+                query += " LIMIT %s"
+                parameters.append(limit)
+            cursor.execute(query, tuple(parameters))
             adjustments = tuple(
-                self._fetch_late_adjustment(
-                    cursor, UUID(str(row[0])), tenant_account_id
+                LateAdjustment(
+                    late_adjustment_id=UUID(str(row[0])),
+                    source_period_id=UUID(str(row[1])),
+                    target_period_id=UUID(str(row[2])),
+                    adjustment_kind=row[3],
+                    adjustment_amount=row[4],
+                    currency_code=row[5],
+                    source_reference=row[6],
+                    source_payload_hash=row[7],
+                    recorded_at=row[8],
+                    late_adjustment_contract_version=row[9],
                 )
                 for row in cursor.fetchall()
             )
-        return tuple(item for item in adjustments if item is not None)
+        return adjustments
 
     def _insert_billing_period(
         self, period: BillingPeriod, *, allow_reconciled: bool

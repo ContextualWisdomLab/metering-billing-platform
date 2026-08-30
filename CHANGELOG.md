@@ -24,6 +24,13 @@
 - Migration `0050` keeps duplicate late-adjustment replays idempotent after a
   target period closes, allowing PostgreSQL conflict handling to return the
   stored immutable fact without weakening validation for new facts.
+- Issue #87 now presents stored late-adjustment evidence through tenant-scoped
+  item/list reads with exact signed amounts, keyset pagination, and the closed
+  `apply_late_adjustment` next action. Presentment does not apply, re-rate, or
+  post the fact (ADR 0133). The read contract now passes the decoded cursor and
+  bounded `limit + 1` to each ledger; PostgreSQL resolves one tenant-scoped
+  keyset query and hydrates only that bounded page. Migration `0051` indexes
+  the tenant/recorded-at/ID order.
 - Issue #87 now preserves applied reconciliation-fact migration checksums:
   period, FX, and exception immutability triggers are delivered by migration
   `0047` before the FX snapshot trigger in migration `0048`.

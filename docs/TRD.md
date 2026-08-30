@@ -57,7 +57,7 @@ provider is added. The broader commercial repository, production-default,
 readiness, recovery, HA, and telemetry requirements remain tracked by issue
 #84.
 
-Migrations `0048`/`0049` also store and protect the immutable `late_adjustment` fact. Its
+Migrations `0049`/`0050` also store and protect the immutable `late_adjustment` fact. Its
 tenant-scoped source reference is a stable replay key, while the source/target,
 kind, payload hash, and contract version form the payload identity; period
 foreign keys are protected by PostgreSQL checks and triggers. A source period
@@ -66,6 +66,16 @@ earlier than the source end, and the row cannot be updated or deleted. The
 contract records commercial evidence only; a later application or re-rating
 workflow must explicitly consume it and no FX, tax, FOCUS, or statutory
 posting is inferred here.
+
+`LateAdjustmentPresentmentService` projects the stored fact without adding a
+snapshot table. `GET /v1/late-adjustments/{late_adjustment_id}` and
+`GET /v1/late-adjustments` are tenant-scoped read-only routes returning the
+closed presentment contract and recorded-at/ID keyset pagination. The next
+operator action is `apply_late_adjustment`; the read does not apply, re-rate,
+post, call a provider, or create a tax document. The list repository contract
+accepts a decoded `(recorded_at, late_adjustment_id)` cursor and bounded limit;
+the PostgreSQL adapter performs one ordered tenant-scoped keyset query with
+`limit + 1`; migration `0051` indexes that tenant/cursor order.
 
 ## Provider plane
 

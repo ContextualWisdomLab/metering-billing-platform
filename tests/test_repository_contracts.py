@@ -4764,6 +4764,17 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, replay_sql)
 
+    def test_late_adjustment_keyset_migration_matches_read_order(self) -> None:
+        """The pagination index covers tenant, cursor timestamp, and ID order."""
+        sql = (
+            ROOT / "database/migrations/0051_late_adjustment_keyset_index.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CREATE INDEX late_adjustment_keyset_idx", sql)
+        self.assertIn(
+            "tenant_account_id,\n        recorded_at,\n        late_adjustment_id",
+            sql,
+        )
+
     def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
         """The offline validator covers required, type, reference, and one-of rules."""
         schema = self._schema("accounting-journal-proposal.schema.json")

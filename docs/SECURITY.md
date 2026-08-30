@@ -51,5 +51,6 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
 - Non-https production webhook callback: `webhook_callback_url_insecure`
 - Unknown webhook event type: `webhook_event_type_unknown`
 - Unknown or cross-tenant webhook subscription: `webhook_subscription_not_found`
+- Unknown or cross-tenant late adjustment: `late_adjustment_not_found`
 
 Do not store card data, PAT plaintext, prompt text, response text, provider secrets, or webhook-subscription plaintext.  Do not start a web UI in this slice.
