@@ -33,7 +33,8 @@
         "collection_case_not_found",
         "outstanding_amount_invalid",
         "dunning_notice_invalid",
-        "collection_case_disputed"
+        "collection_case_disputed",
+        "invoice_draft_has_late_adjustment"
       ]
     },
     "dunning_events": {

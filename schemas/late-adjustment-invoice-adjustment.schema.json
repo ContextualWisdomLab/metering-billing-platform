@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/late-adjustment-invoice-adjustment/v2",
+  "title": "Late adjustment invoice adjustment result",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "late_adjustment_invoice_adjustment_contract_version": {},
+    "late_adjustment_invoice_adjustment_outcome_code": {},
+    "late_adjustment_invoice_adjustment_id": {},
+    "late_adjustment_rating_id": {},
+    "late_adjustment_application_id": {},
+    "late_adjustment_id": {},
+    "invoice_draft_id": {},
+    "tenant_reference": {},
+    "billing_account_id": {},
+    "billing_account_reference": {},
+    "target_period_id": {},
+    "adjustment_amount": {},
+    "currency_code": {},
+    "recorded_by": {},
+    "authorization_reference": {},
+    "recorded_at": {},
+    "source_payload_hash": {},
+    "late_adjustment_invoice_adjustment_status": {},
+    "next_operator_action": {},
+    "rejection_reason_code": {}
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "late_adjustment_invoice_adjustment_contract_version",
+        "late_adjustment_invoice_adjustment_outcome_code",
+        "late_adjustment_invoice_adjustment_id",
+        "late_adjustment_rating_id",
+        "late_adjustment_application_id",
+        "late_adjustment_id",
+        "invoice_draft_id",
+        "tenant_reference",
+        "billing_account_id",
+        "billing_account_reference",
+        "target_period_id",
+        "adjustment_amount",
+        "currency_code",
+        "recorded_by",
+        "authorization_reference",
+        "recorded_at",
+        "source_payload_hash",
+        "late_adjustment_invoice_adjustment_status",
+        "next_operator_action"
+      ],
+      "properties": {
+        "late_adjustment_invoice_adjustment_contract_version": {"type": "integer", "minimum": 2},
+        "late_adjustment_invoice_adjustment_outcome_code": {"type": "string", "enum": ["accepted", "duplicate_replay"]},
+        "late_adjustment_invoice_adjustment_id": {"type": "string", "format": "uuid"},
+        "late_adjustment_rating_id": {"type": "string", "format": "uuid"},
+        "late_adjustment_application_id": {"type": "string", "format": "uuid"},
+        "late_adjustment_id": {"type": "string", "format": "uuid"},
+        "invoice_draft_id": {"type": "string", "format": "uuid"},
+        "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "billing_account_id": {"type": "string", "format": "uuid"},
+        "billing_account_reference": {"type": "string", "pattern": "^urn:cwl:"},
+        "target_period_id": {"type": "string", "format": "uuid"},
+        "adjustment_amount": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 40},
+        "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "recorded_by": {"type": "string", "minLength": 1},
+        "authorization_reference": {"type": "string", "minLength": 1},
+        "recorded_at": {"type": "string", "format": "date-time"},
+        "source_payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "late_adjustment_invoice_adjustment_status": {"type": "string", "const": "recorded"},
+        "next_operator_action": {"type": "string", "const": "issue_invoice"}
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "late_adjustment_invoice_adjustment_contract_version",
+        "late_adjustment_invoice_adjustment_outcome_code",
+        "rejection_reason_code",
+        "next_operator_action"
+      ],
+      "properties": {
+        "late_adjustment_invoice_adjustment_contract_version": {"type": "integer", "minimum": 2},
+        "late_adjustment_invoice_adjustment_outcome_code": {"type": "string", "const": "rejected"},
+        "rejection_reason_code": {
+          "type": "string",
+          "enum": [
+            "tenant_not_found",
+            "late_adjustment_not_found",
+            "late_adjustment_rating_not_found",
+            "invoice_draft_not_found",
+            "currency_mismatch",
+            "invoice_already_issued",
+            "invoice_draft_has_downstream_records",
+            "invoice_draft_billing_account_not_found",
+            "invoice_draft_billing_account_ambiguous",
+            "adjustment_amount_not_representable",
+            "late_adjustment_invoice_adjustment_identity_conflict",
+            "actor_reference_invalid",
+            "authorization_reference_invalid"
+          ]
+        },
+        "next_operator_action": {"type": "string", "enum": ["apply_late_adjustment", "rate_late_adjustment", "wait"]}
+      }
+    }
+  ]
+}

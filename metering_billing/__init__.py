@@ -67,6 +67,8 @@ from metering_billing.contracts import (
     LATE_ADJUSTMENT_SCHEMA_NAME,
     LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME,
     LATE_ADJUSTMENT_APPLICATION_SCHEMA_NAME,
+    LATE_ADJUSTMENT_RATING_SCHEMA_NAME,
+    LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_SCHEMA_NAME,
     COLLECTION_CASE_SCHEMA_NAME,
     CREDIT_ADJUSTMENT_SCHEMA_NAME,
     RATE_CARD_SCHEMA_NAME,
@@ -194,6 +196,8 @@ from metering_billing.contracts import (
     validate_late_adjustment,
     validate_late_adjustment_presentment,
     validate_late_adjustment_application,
+    validate_late_adjustment_rating,
+    validate_late_adjustment_invoice_adjustment,
     validate_fx_rate,
     validate_fx_conversion,
     validate_reconciliation_line,
@@ -315,6 +319,10 @@ from metering_billing.errors import (
     PostingReceiptObservationRejectionReasonCode,
     RatingOutcomeCode,
     RatingRejectionReasonCode,
+    LateAdjustmentRatingOutcomeCode,
+    LateAdjustmentRatingRejectionReasonCode,
+    LateAdjustmentInvoiceAdjustmentOutcomeCode,
+    LateAdjustmentInvoiceAdjustmentRejectionReasonCode,
     RejectionReasonCode,
     PeriodCloseValidationError,
 )
@@ -334,6 +342,14 @@ from metering_billing.credit_note_application import CreditNoteApplicationServic
 from metering_billing.late_adjustment_application import (
     LateAdjustmentApplicationResult,
     LateAdjustmentApplicationService,
+)
+from metering_billing.late_adjustment_rating import (
+    LateAdjustmentRatingResult,
+    LateAdjustmentRatingService,
+)
+from metering_billing.late_adjustment_invoice_adjustment import (
+    LateAdjustmentInvoiceAdjustmentResult,
+    LateAdjustmentInvoiceAdjustmentService,
 )
 from metering_billing.credit_note_application_presentment import (
     CreditNoteApplicationPresentmentService,
@@ -455,6 +471,8 @@ __all__ = (
     "LATE_ADJUSTMENT_SCHEMA_NAME",
     "LATE_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
     "LATE_ADJUSTMENT_APPLICATION_SCHEMA_NAME",
+    "LATE_ADJUSTMENT_RATING_SCHEMA_NAME",
+    "LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_SCHEMA_NAME",
     "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
     "COLLECTION_CASE_SCHEMA_NAME",
@@ -727,10 +745,20 @@ __all__ = (
     "validate_late_adjustment",
     "validate_late_adjustment_presentment",
     "validate_late_adjustment_application",
+    "validate_late_adjustment_rating",
+    "validate_late_adjustment_invoice_adjustment",
     "LateAdjustmentApplicationOutcomeCode",
     "LateAdjustmentApplicationRejectionReasonCode",
     "LateAdjustmentApplicationResult",
     "LateAdjustmentApplicationService",
+    "LateAdjustmentRatingOutcomeCode",
+    "LateAdjustmentRatingRejectionReasonCode",
+    "LateAdjustmentRatingResult",
+    "LateAdjustmentRatingService",
+    "LateAdjustmentInvoiceAdjustmentOutcomeCode",
+    "LateAdjustmentInvoiceAdjustmentRejectionReasonCode",
+    "LateAdjustmentInvoiceAdjustmentResult",
+    "LateAdjustmentInvoiceAdjustmentService",
     "validate_collection_aging_presentment",
     "validate_collection_case",
     "validate_collection_case_presentment",

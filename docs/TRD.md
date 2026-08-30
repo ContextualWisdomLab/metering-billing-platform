@@ -78,20 +78,67 @@ is `rate_late_adjustment`. The application requires actor and authorization
 references, preserves the source target/exact signed amount/currency, locks and
 rechecks that the target period is still `open` for a new application, and is
 replay-safe. A stored application replays after the target closes and retains
-its first-writer audit data. Neither command applies a rating, mutates a
-period, posts a journal, calls a provider, or creates a tax document.
-The memory reference adapter stores billing periods and applies the same
-source/target lifecycle and ordering checks as PostgreSQL; target lifecycle
-rejections remain stable `target_period_not_found` or `target_period_not_open`
-422 results.
-The list repository contract accepts a decoded `(recorded_at,
-late_adjustment_id)` cursor and bounded limit; the PostgreSQL adapter performs
-one ordered tenant-scoped keyset query with `limit + 1`.
-Presentment uses one bulk application-existence lookup for the returned page,
-not one application query per item.
-The application timestamp must be timezone-aware and not future-dated. The
-memory adapter serializes recording, application, and target-period lifecycle writes to
-preserve at-most-once behavior during concurrent application and close.
+its first-writer audit data. A first application after its target period closes
+is rejected. `POST /v1/late-adjustments/{late_adjustment_id}/ratings` then
+consumes the application into one immutable rating fact only while its target
+period is open; a first rating after closure is rejected while a stored rating
+replays. This preserves the original usage `rating_run` and exact signed delta.
+The rating audit timestamp must be timezone-aware and not future-dated; the
+service, both adapters, and migrations `0054`/`0055` enforce this boundary. Because the
+adjustment has no usage snapshot or rate-card input, this command does not
+synthesize one; invoice-adjustment composition is the next action.
+
+The nested `/invoice-adjustments` command requires an unissued same-tenant
+invoice draft, matching currency, and non-empty `recorded_by` and
+`authorization_reference`; it appends a separate immutable composition fact
+with the single billing account selected from the draft lines and reports
+`issue_invoice`. Empty or multi-account drafts, drafts with collection,
+journal, tax, or credit downstream facts, and amounts outside `numeric(38,12)`
+fail closed. Issuance locks the draft, consumes all linked composition facts
+into signed `late_adjustment` lines, and adjusts the untaxed exact total. A zero
+or negative result is rejected. If a tax assessment already exists, issuance
+rejects with `late_adjustment_tax_reassessment_required` until reassessment is
+implemented; it does not reuse stale tax. Issued-invoice payload hashing and
+presentment include the signed lines and billing account. Version 2 makes
+`line_type` required and enforces usage/late-adjustment line invariants. The
+draft and issued snapshot remain append-only; collection, journal, provider
+export, and statutory tax treatment remain downstream boundaries.
+Composition `recorded_at` is timezone-aware and not future-dated at the service,
+adapter, and PostgreSQL trigger boundaries.
+
+Composition and the collection, tax-assessment, journal-proposal, and
+credit-adjustment write paths take the same invoice-draft lock. After a
+composition exists, they reject with `invoice_draft_has_late_adjustment`
+without writing a stale fact. Migrations `0059` and `0060` repeat both orderings
+in PostgreSQL `BEFORE INSERT` triggers, preserving composition replays while
+preventing direct persistence from bypassing the application guard. Issuance
+preserves exact representable totals before checking `numeric(38,12)`, uses a
+count-aware local decimal context for bulk exact summation, and rejects a
+projected result above 10,000 lines. Migration `0061` fails closed on legacy
+composition rows without payer evidence, upgrades compatible version metadata,
+and enforces contract version 2 for direct PostgreSQL inserts. Migration `0062`
+also rejects direct composition precision loss, binds late-adjustment issued
+lines to their composition draft/amount/payer evidence, and allows collection
+after issuance only when its currency and outstanding amount equal the frozen
+issued snapshot. Migration `0063` defers issued-invoice completeness checks
+until the header and all lines are present, requiring every linked composition
+and signed amount to be represented. Migration `0064` enforces issued-invoice
+snapshot and line immutability for direct PostgreSQL UPDATE/DELETE and removes
+the `line_type` default from issued lines. Migration `0065` requires version 2
+on new direct issued-invoice headers while preserving historical v1 snapshots.
+Migration `0066` rejects future first-write composition timestamps while
+preserving existing composition replays.
+Neither command mutates a period,
+posts a journal, calls a provider, or creates a tax document. The memory
+reference adapter stores billing periods and applies the same source/target
+lifecycle and ordering checks as PostgreSQL; target lifecycle rejections remain
+stable `target_period_not_found` or `target_period_not_open` 422 results. The
+list repository contract accepts a decoded `(recorded_at, late_adjustment_id)`
+cursor and bounded limit; PostgreSQL performs one ordered tenant-scoped keyset
+query with `limit + 1`. Presentment uses one bulk application-existence,
+rating-existence, and composition-existence lookup for the returned page. The memory adapter
+serializes recording, application, rating, and target-period lifecycle writes
+to preserve at-most-once behavior during concurrent application and close.
 Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 ## Provider plane

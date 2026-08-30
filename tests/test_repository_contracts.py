@@ -3382,7 +3382,7 @@ class RepositoryContractTests(unittest.TestCase):
         """An issued-invoice contract freezes exact totals and cannot invent a number."""
         schema = self._schema("issued-invoice.schema.json")
         instance = {
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "issued_invoice_outcome_code": "accepted",
             "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
             "tenant_reference": "urn:cwl:tenant_001",
@@ -3407,11 +3407,55 @@ class RepositoryContractTests(unittest.TestCase):
                     "rated_quantity": "1852.5",
                     "unit_price_amount": "0.000002",
                     "line_total_amount": "0.003705",
+                    "line_type": "usage",
                 }
             ],
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
         self.assertEqual(validate_issued_invoice(instance), ())
+        unsupported_version = dict(instance)
+        unsupported_version["issued_invoice_contract_version"] = 1
+        self.assertNotEqual(validate_schema_instance(schema, unsupported_version), ())
+        missing_line_type = dict(instance)
+        missing_line_type["issued_invoice_lines"] = [
+            {key: value for key, value in instance["issued_invoice_lines"][0].items() if key != "line_type"}
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, missing_line_type), ())
+        negative_usage = dict(instance)
+        negative_usage["issued_invoice_lines"] = [
+            {**instance["issued_invoice_lines"][0], "line_total_amount": "-1"}
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, negative_usage), ())
+        late_adjustment_line = {
+            **instance["issued_invoice_lines"][0],
+            "line_type": "late_adjustment",
+            "rated_quantity": "1",
+            "late_adjustment_invoice_adjustment_id": (
+                "019d7b92-1aa0-7a7f-b61c-962c0f4bf632"
+            ),
+        }
+        for amount in ("0", "-0", "0.0", "-0.00"):
+            zero_late_adjustment = dict(instance)
+            zero_late_adjustment["issued_invoice_lines"] = [
+                {**late_adjustment_line, "line_total_amount": amount}
+            ]
+            self.assertNotEqual(validate_schema_instance(schema, zero_late_adjustment), ())
+        for amount in ("1", "-1"):
+            nonzero_late_adjustment = dict(instance)
+            nonzero_late_adjustment["issued_invoice_lines"] = [
+                {**late_adjustment_line, "line_total_amount": amount}
+            ]
+            self.assertEqual(validate_schema_instance(schema, nonzero_late_adjustment), ())
+        usage_with_adjustment_id = dict(instance)
+        usage_with_adjustment_id["issued_invoice_lines"] = [
+            {
+                **instance["issued_invoice_lines"][0],
+                "late_adjustment_invoice_adjustment_id": (
+                    "019d7b92-1aa0-7a7f-b61c-962c0f4bf632"
+                ),
+            }
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, usage_with_adjustment_id), ())
         numbered = dict(instance)
         numbered["invoice_number"] = "INV-0001"
         self.assertIn(
@@ -3467,13 +3511,13 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
         rejected = {
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "issued_invoice_outcome_code": "rejected",
             "rejection_reason_code": "invoice_draft_not_found",
         }
         self.assertEqual(validate_issued_invoice(rejected), ())
         missing_reason = {
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "issued_invoice_outcome_code": "rejected",
         }
         self.assertIn(
@@ -3481,7 +3525,7 @@ class RepositoryContractTests(unittest.TestCase):
             validate_issued_invoice(missing_reason),
         )
         missing_id = {
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "issued_invoice_outcome_code": "accepted",
         }
         self.assertIn(
@@ -3490,7 +3534,7 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertNotEqual(validate_issued_invoice([]), ())
         self.assertNotEqual(
-            validate_issued_invoice({"issued_invoice_contract_version": 1}),
+            validate_issued_invoice({"issued_invoice_contract_version": 2}),
             (),
         )
 
@@ -3500,7 +3544,7 @@ class RepositoryContractTests(unittest.TestCase):
         """An issued-invoice statement records frozen totals and cannot claim a write outcome."""
         schema = self._schema("issued-invoice-presentment.schema.json")
         instance = {
-            "issued_invoice_presentment_contract_version": 1,
+            "issued_invoice_presentment_contract_version": 2,
             "issued_invoice_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bfd10",
             "tenant_reference": "urn:cwl:tenant_001",
             "invoice_draft_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf630",
@@ -3514,7 +3558,7 @@ class RepositoryContractTests(unittest.TestCase):
             "issued_at": "2026-08-17T21:00:00Z",
             "due_at": "2026-09-16T21:00:00Z",
             "source_payload_hash": "sha256:" + ("b" * 64),
-            "issued_invoice_contract_version": 1,
+            "issued_invoice_contract_version": 2,
             "next_operator_action": "collect",
             "issued_invoice_lines": [
                 {
@@ -3525,11 +3569,55 @@ class RepositoryContractTests(unittest.TestCase):
                     "rated_quantity": "50000",
                     "unit_price_amount": "0.002",
                     "line_total_amount": "100.00",
+                    "line_type": "usage",
                 }
             ],
         }
         self.assertEqual(validate_schema_instance(schema, instance), ())
         self.assertEqual(validate_issued_invoice_presentment(instance), ())
+        unsupported_version = dict(instance)
+        unsupported_version["issued_invoice_contract_version"] = 1
+        self.assertNotEqual(validate_schema_instance(schema, unsupported_version), ())
+        missing_line_type = dict(instance)
+        missing_line_type["issued_invoice_lines"] = [
+            {key: value for key, value in instance["issued_invoice_lines"][0].items() if key != "line_type"}
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, missing_line_type), ())
+        negative_usage = dict(instance)
+        negative_usage["issued_invoice_lines"] = [
+            {**instance["issued_invoice_lines"][0], "line_total_amount": "-1"}
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, negative_usage), ())
+        late_adjustment_line = {
+            **instance["issued_invoice_lines"][0],
+            "line_type": "late_adjustment",
+            "rated_quantity": "1",
+            "late_adjustment_invoice_adjustment_id": (
+                "019d7b92-1aa0-7a7f-b61c-962c0f4bf632"
+            ),
+        }
+        for amount in ("0", "-0", "0.0", "-0.00"):
+            zero_late_adjustment = dict(instance)
+            zero_late_adjustment["issued_invoice_lines"] = [
+                {**late_adjustment_line, "line_total_amount": amount}
+            ]
+            self.assertNotEqual(validate_schema_instance(schema, zero_late_adjustment), ())
+        for amount in ("1", "-1"):
+            nonzero_late_adjustment = dict(instance)
+            nonzero_late_adjustment["issued_invoice_lines"] = [
+                {**late_adjustment_line, "line_total_amount": amount}
+            ]
+            self.assertEqual(validate_schema_instance(schema, nonzero_late_adjustment), ())
+        usage_with_adjustment_id = dict(instance)
+        usage_with_adjustment_id["issued_invoice_lines"] = [
+            {
+                **instance["issued_invoice_lines"][0],
+                "late_adjustment_invoice_adjustment_id": (
+                    "019d7b92-1aa0-7a7f-b61c-962c0f4bf632"
+                ),
+            }
+        ]
+        self.assertNotEqual(validate_schema_instance(schema, usage_with_adjustment_id), ())
         posted = dict(instance)
         posted["issued_invoice_outcome_code"] = "accepted"
         self.assertIn(

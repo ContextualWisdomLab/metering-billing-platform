@@ -11,6 +11,7 @@ Python 3.12 and CI Python 3.13 behave identically at the API boundary.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import re
 import uuid
 from dataclasses import dataclass, field, replace
@@ -18,14 +19,19 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from threading import RLock
 from types import ModuleType
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from uuid import UUID
 
-from metering_billing.errors import RejectionReasonCode
+from metering_billing.errors import (
+    LateAdjustmentRatingTargetPeriodNotOpen,
+    RejectionReasonCode,
+)
 from metering_billing.exact_decimal import (
     format_exact_decimal,
+    issued_invoice_amount_exceeds_storage_precision,
     parse_exact_decimal,
     require_postable_journal_line_amounts,
+    sum_exact_decimals,
 )
 from metering_billing.period_close import (
     BillingPeriod,
@@ -50,6 +56,7 @@ CREDIT_REASON_CODES = frozenset({"rating_correction", "goodwill", "billing_error
 TAX_CODES = frozenset({"vat", "gst", "sales_tax"})
 CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 SOURCE_PAYLOAD_HASH_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION = 2
 
 
 def generate_record_id(uuid_module: ModuleType = uuid) -> UUID:
@@ -380,6 +387,8 @@ class StoredIssuedInvoiceLine:
     rated_quantity: Decimal
     unit_price_amount: Decimal
     line_total_amount: Decimal
+    line_type: str = "usage"
+    late_adjustment_invoice_adjustment_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -502,6 +511,47 @@ class StoredLateAdjustmentApplication:
     applied_at: datetime
     late_adjustment_application_contract_version: int
     late_adjustment_application_status: str
+
+
+@dataclass(frozen=True)
+class StoredLateAdjustmentRating:
+    """Append-only rating consumption fact for one applied late adjustment."""
+
+    late_adjustment_rating_id: UUID
+    tenant_account_id: UUID
+    late_adjustment_application_id: UUID
+    late_adjustment_id: UUID
+    target_period_id: UUID
+    adjustment_amount: Decimal
+    currency_code: str
+    rated_by: str
+    authorization_reference: str
+    rated_at: datetime
+    late_adjustment_rating_contract_version: int
+    late_adjustment_rating_status: str
+
+
+@dataclass(frozen=True)
+class StoredLateAdjustmentInvoiceAdjustment:
+    """Append-only invoice-intent composition for one rated late adjustment."""
+
+    late_adjustment_invoice_adjustment_id: UUID
+    tenant_account_id: UUID
+    billing_account_id: UUID | None
+    billing_account_reference: str | None
+    late_adjustment_rating_id: UUID
+    late_adjustment_application_id: UUID
+    late_adjustment_id: UUID
+    invoice_draft_id: UUID
+    target_period_id: UUID
+    adjustment_amount: Decimal
+    currency_code: str
+    recorded_by: str
+    authorization_reference: str
+    recorded_at: datetime
+    source_payload_hash: str
+    late_adjustment_invoice_adjustment_contract_version: int
+    late_adjustment_invoice_adjustment_status: str
 
 
 @dataclass(frozen=True)
@@ -959,6 +1009,11 @@ class StoredWebhookDeliveryAttempt:
 class MemoryUsageLedger:
     """Mutable catalog plus append-only usage tables with tenant isolation."""
 
+    # ponytail: one ledger lock keeps command transactions correct; use per-draft
+    # locks only if measured in-memory throughput needs finer granularity.
+    _transaction_lock: object = field(
+        default_factory=RLock, init=False, repr=False, compare=False
+    )
     tenant_accounts: dict[str, TenantAccount] = field(default_factory=dict)
     billing_accounts: dict[str, BillingAccount] = field(default_factory=dict)
     billing_principals: dict[str, BillingPrincipal] = field(default_factory=dict)
@@ -1031,6 +1086,18 @@ class MemoryUsageLedger:
         default_factory=dict
     )
     late_adjustment_application_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    late_adjustment_ratings: dict[UUID, StoredLateAdjustmentRating] = field(
+        default_factory=dict
+    )
+    late_adjustment_rating_index: dict[tuple[UUID, UUID], UUID] = field(
+        default_factory=dict
+    )
+    late_adjustment_invoice_adjustments: dict[
+        UUID, StoredLateAdjustmentInvoiceAdjustment
+    ] = field(default_factory=dict)
+    late_adjustment_invoice_adjustment_index: dict[tuple[UUID, UUID], UUID] = field(
         default_factory=dict
     )
     late_adjustment_payload_index: dict[
@@ -1130,6 +1197,12 @@ class MemoryUsageLedger:
     _late_adjustment_application_lock: Any = field(
         default_factory=RLock, repr=False, compare=False
     )
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Serialize one multi-record command like the PostgreSQL adapter."""
+        with self._transaction_lock:  # type: ignore[union-attr]
+            yield
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Register a tenant authority.  Re-registering the same URN is idempotent."""
@@ -1724,7 +1797,7 @@ class MemoryUsageLedger:
         inclusive = parse_exact_decimal(format_exact_decimal(assessment.tax_inclusive_amount))
         if exclusive <= 0:
             raise ValueError("tax_exclusive_amount must be greater than zero")
-        if inclusive != exclusive + tax_amount:
+        if inclusive != sum_exact_decimals(exclusive, tax_amount):
             raise ValueError("tax_inclusive_amount must equal exclusive plus tax")
         parsed_rate = parse_exact_decimal(format_exact_decimal(assessment.tax_rate))
         if parsed_rate > 1:
@@ -1739,6 +1812,10 @@ class MemoryUsageLedger:
         existing_id = self.tax_assessment_index.get(identity)
         if existing_id is not None:
             return self.tax_assessments[existing_id]
+        if self.list_late_adjustment_invoice_adjustments_for_draft(
+            assessment.tenant_account_id, assessment.invoice_draft_id
+        ):
+            raise ValueError("invoice draft has late adjustment invoice adjustment")
         draft_key = (assessment.tenant_account_id, assessment.invoice_draft_id)
         existing_draft_id = self.tax_assessment_draft_index.get(draft_key)
         if existing_draft_id is not None:
@@ -1897,6 +1974,17 @@ class MemoryUsageLedger:
         """Return a stored invoice draft by internal identifier."""
         return self.invoice_drafts.get(invoice_draft_id)
 
+    def lock_invoice_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> StoredInvoiceDraft | None:
+        """Return the draft while matching the PostgreSQL row-lock boundary."""
+        draft = self.get_invoice_draft(invoice_draft_id)
+        return (
+            draft
+            if draft is not None and draft.tenant_account_id == tenant_account_id
+            else None
+        )
+
     def find_issued_invoice(
         self, tenant_account_id: UUID, invoice_draft_id: UUID
     ) -> StoredIssuedInvoice | None:
@@ -1937,13 +2025,14 @@ class MemoryUsageLedger:
         inclusive = parse_exact_decimal(
             format_exact_decimal(issued_invoice.tax_inclusive_amount)
         )
-        if inclusive != exclusive + tax_amount:
+        if inclusive != sum_exact_decimals(exclusive, tax_amount):
             raise ValueError("tax_inclusive_amount must equal exclusive plus tax")
         if issued_invoice.issued_invoice_id in self.issued_invoices:
             raise ValueError("issued invoices are immutable and cannot be replaced")
         identity_key = (issued_invoice.tenant_account_id, issued_invoice.invoice_draft_id)
         if identity_key in self.issued_invoice_index:
             raise ValueError("issued invoices are immutable and cannot be replaced")
+        self._validate_issued_invoice_composition(issued_invoice, issued_invoice_lines)
         persisted = StoredIssuedInvoice(
             issued_invoice_id=issued_invoice.issued_invoice_id,
             tenant_account_id=issued_invoice.tenant_account_id,
@@ -1965,6 +2054,67 @@ class MemoryUsageLedger:
         self.issued_invoice_index[identity_key] = persisted.issued_invoice_id
         self.issued_invoice_lines.extend(issued_invoice_lines)
         return persisted
+
+    def _validate_issued_invoice_composition(
+        self,
+        issued_invoice: StoredIssuedInvoice,
+        issued_invoice_lines: tuple[StoredIssuedInvoiceLine, ...],
+    ) -> None:
+        """Keep direct memory persistence aligned with PostgreSQL composition checks."""
+        if issued_invoice.issued_invoice_contract_version != 2:
+            raise ValueError("new issued invoice contract version must be 2")
+        draft = self.get_invoice_draft(issued_invoice.invoice_draft_id)
+        if draft is None or draft.tenant_account_id != issued_invoice.tenant_account_id:
+            raise ValueError("issued invoice draft is missing")
+        compositions = self.list_late_adjustment_invoice_adjustments_for_draft(
+            issued_invoice.tenant_account_id, issued_invoice.invoice_draft_id
+        )
+        composition_by_id = {
+            composition.late_adjustment_invoice_adjustment_id: composition
+            for composition in compositions
+        }
+        adjustment_lines = tuple(
+            line for line in issued_invoice_lines if line.line_type == "late_adjustment"
+        )
+        if len(adjustment_lines) != len(compositions):
+            raise ValueError("issued invoice is missing late adjustment lines")
+        line_composition_ids: set[UUID] = set()
+        for line in issued_invoice_lines:
+            if line.tenant_account_id != issued_invoice.tenant_account_id:
+                raise ValueError("issued invoice line tenant does not match invoice")
+            if line.issued_invoice_id != issued_invoice.issued_invoice_id:
+                raise ValueError("issued invoice line does not match invoice")
+            if line.line_type == "usage":
+                if line.late_adjustment_invoice_adjustment_id is not None:
+                    raise ValueError("usage line cannot carry composition evidence")
+                if line.line_total_amount < 0:
+                    raise ValueError("usage line total must be non-negative")
+                continue
+            if line.line_type != "late_adjustment":
+                raise ValueError("issued invoice line type is unsupported")
+            composition_id = line.late_adjustment_invoice_adjustment_id
+            if composition_id is None:
+                raise ValueError("late adjustment line is missing composition evidence")
+            composition = composition_by_id.get(composition_id)
+            if composition is None:
+                raise ValueError("issued invoice composition evidence is unknown")
+            line_composition_ids.add(composition_id)
+            if line.billing_account_reference != composition.billing_account_reference:
+                raise ValueError("late adjustment line billing account does not match composition")
+            if line.line_total_amount != composition.adjustment_amount:
+                raise ValueError("late adjustment line total does not match composition")
+            if line.unit_price_amount != composition.adjustment_amount.copy_abs():
+                raise ValueError("late adjustment line unit price does not match composition")
+            if line.rated_quantity != Decimal("1"):
+                raise ValueError("late adjustment line quantity must be one")
+        if line_composition_ids != set(composition_by_id):
+            raise ValueError("issued invoice composition lines do not match compositions")
+        expected_exclusive = sum_exact_decimals(
+            draft.drafted_total_amount,
+            *(composition.adjustment_amount for composition in compositions),
+        )
+        if issued_invoice.tax_exclusive_amount != expected_exclusive:
+            raise ValueError("issued invoice total does not include late adjustments")
 
     def find_issued_credit_note(
         self, tenant_account_id: UUID, credit_adjustment_id: UUID
@@ -3077,6 +3227,29 @@ class MemoryUsageLedger:
             if stored_tenant_id == tenant_account_id and late_adjustment_id in requested
         )
 
+    def find_late_adjustment_rating_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return rated late-adjustment IDs for one bounded page."""
+        requested = set(late_adjustment_ids)
+        return frozenset(
+            late_adjustment_id
+            for (stored_tenant_id, late_adjustment_id) in self.late_adjustment_rating_index
+            if stored_tenant_id == tenant_account_id and late_adjustment_id in requested
+        )
+
+    def find_late_adjustment_invoice_adjusted_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return late-adjustment IDs composed into an invoice for one page."""
+        requested = set(late_adjustment_ids)
+        return frozenset(
+            composition.late_adjustment_id
+            for composition in self.late_adjustment_invoice_adjustments.values()
+            if composition.tenant_account_id == tenant_account_id
+            and composition.late_adjustment_id in requested
+        )
+
     def get_late_adjustment_application(
         self, late_adjustment_application_id: UUID
     ) -> StoredLateAdjustmentApplication | None:
@@ -3172,6 +3345,301 @@ class MemoryUsageLedger:
         self.late_adjustment_application_index[identity_key] = application.late_adjustment_application_id
         return application
 
+    def find_late_adjustment_rating(
+        self, tenant_account_id: UUID, late_adjustment_id: UUID
+    ) -> StoredLateAdjustmentRating | None:
+        """Return one tenant-scoped rating consumption fact, if present."""
+        rating_id = self.late_adjustment_rating_index.get(
+            (tenant_account_id, late_adjustment_id)
+        )
+        if rating_id is None:
+            return None
+        return self.late_adjustment_ratings[rating_id]
+
+    def get_late_adjustment_rating(
+        self, late_adjustment_rating_id: UUID
+    ) -> StoredLateAdjustmentRating | None:
+        """Return one late-adjustment rating consumption fact by identifier."""
+        return self.late_adjustment_ratings.get(late_adjustment_rating_id)
+
+    def insert_late_adjustment_rating(
+        self, rating: StoredLateAdjustmentRating
+    ) -> StoredLateAdjustmentRating:
+        """Store one rating fact while serializing target lifecycle changes."""
+        with self._late_adjustment_application_lock:
+            return self._insert_late_adjustment_rating(rating)
+
+    def _insert_late_adjustment_rating(
+        self, rating: StoredLateAdjustmentRating
+    ) -> StoredLateAdjustmentRating:
+        """Store one immutable rating fact while the lifecycle lock is held."""
+        _validate_audit_timestamp(rating.rated_at, "rated_at")
+        if rating.late_adjustment_rating_status != "rated":
+            raise ValueError("late_adjustment_rating_status must be rated")
+        if CURRENCY_CODE_PATTERN.fullmatch(rating.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(rating.adjustment_amount, Decimal)
+            or rating.adjustment_amount.is_nan()
+            or rating.adjustment_amount.is_infinite()
+            or rating.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        amount_text = format(rating.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        for value, field_name in (
+            (rating.rated_by, "rated_by"),
+            (rating.authorization_reference, "authorization_reference"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-empty")
+        if rating.late_adjustment_rating_id in self.late_adjustment_ratings:
+            raise ValueError("late_adjustment_rating_id already stored")
+        identity_key = (rating.tenant_account_id, rating.late_adjustment_id)
+        existing = self.find_late_adjustment_rating(*identity_key)
+        if existing is not None:
+            if (
+                replace(
+                    existing,
+                    late_adjustment_rating_id=rating.late_adjustment_rating_id,
+                    rated_at=rating.rated_at,
+                    rated_by=rating.rated_by,
+                    authorization_reference=rating.authorization_reference,
+                )
+                != rating
+            ):
+                raise ValueError("late adjustment rating identity cannot change")
+            return existing
+        tenant_reference = next(
+            (
+                tenant.tenant_reference
+                for tenant in self.tenant_accounts.values()
+                if tenant.tenant_account_id == rating.tenant_account_id
+            ),
+            None,
+        )
+        target_period = (
+            self.get_billing_period(tenant_reference, rating.target_period_id)
+            if tenant_reference is not None
+            else None
+        )
+        if target_period is None or target_period.status.value != "open":
+            raise LateAdjustmentRatingTargetPeriodNotOpen(
+                "late adjustment rating target period must be open"
+            )
+        adjustment = self.late_adjustments.get(rating.late_adjustment_id)
+        if (
+            adjustment is None
+            or self.late_adjustment_tenant_index.get(rating.late_adjustment_id)
+            != rating.tenant_account_id
+        ):
+            raise ValueError("late adjustment rating source is missing")
+        application = self.find_late_adjustment_application(
+            rating.tenant_account_id, rating.late_adjustment_id
+        )
+        if (
+            application is None
+            or application.late_adjustment_application_id
+            != rating.late_adjustment_application_id
+        ):
+            raise ValueError("late adjustment rating application is missing")
+        if (
+            application.late_adjustment_application_status != "applied"
+            or application.late_adjustment_id != adjustment.late_adjustment_id
+            or application.target_period_id != rating.target_period_id
+            or application.adjustment_amount != rating.adjustment_amount
+            or application.currency_code != rating.currency_code
+        ):
+            raise ValueError("late adjustment rating does not match application")
+        if (
+            adjustment.target_period_id != rating.target_period_id
+            or adjustment.adjustment_amount != rating.adjustment_amount
+            or adjustment.currency_code != rating.currency_code
+        ):
+            raise ValueError("late adjustment rating does not match source")
+        self.late_adjustment_ratings[rating.late_adjustment_rating_id] = rating
+        self.late_adjustment_rating_index[identity_key] = rating.late_adjustment_rating_id
+        return rating
+
+    def find_late_adjustment_invoice_adjustment(
+        self, tenant_account_id: UUID, late_adjustment_rating_id: UUID
+    ) -> StoredLateAdjustmentInvoiceAdjustment | None:
+        """Return one tenant-scoped invoice composition, if present."""
+        adjustment_id = self.late_adjustment_invoice_adjustment_index.get(
+            (tenant_account_id, late_adjustment_rating_id)
+        )
+        if adjustment_id is None:
+            return None
+        return self.late_adjustment_invoice_adjustments[adjustment_id]
+
+    def get_late_adjustment_invoice_adjustment(
+        self, late_adjustment_invoice_adjustment_id: UUID
+    ) -> StoredLateAdjustmentInvoiceAdjustment | None:
+        """Return one invoice composition by opaque identifier."""
+        return self.late_adjustment_invoice_adjustments.get(
+            late_adjustment_invoice_adjustment_id
+        )
+
+    def list_late_adjustment_invoice_adjustments_for_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> tuple[StoredLateAdjustmentInvoiceAdjustment, ...]:
+        """Return compositions linked to one tenant-scoped invoice draft."""
+        return tuple(
+            sorted(
+                (
+                    composition
+                    for composition in self.late_adjustment_invoice_adjustments.values()
+                    if composition.tenant_account_id == tenant_account_id
+                    and composition.invoice_draft_id == invoice_draft_id
+                ),
+                key=lambda composition: (
+                    composition.recorded_at,
+                    composition.late_adjustment_invoice_adjustment_id,
+                ),
+            )
+        )
+
+    def insert_late_adjustment_invoice_adjustment(
+        self, composition: StoredLateAdjustmentInvoiceAdjustment
+    ) -> StoredLateAdjustmentInvoiceAdjustment:
+        """Store one immutable composition or return its rating replay."""
+        if (
+            composition.late_adjustment_invoice_adjustment_contract_version
+            != LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION
+        ):
+            raise ValueError(
+                "late adjustment invoice adjustment contract version must be 2"
+            )
+        if composition.late_adjustment_invoice_adjustment_status != "recorded":
+            raise ValueError("late adjustment invoice adjustment status must be recorded")
+        _validate_audit_timestamp(composition.recorded_at, "recorded_at")
+        if CURRENCY_CODE_PATTERN.fullmatch(composition.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(composition.adjustment_amount, Decimal)
+            or composition.adjustment_amount.is_nan()
+            or composition.adjustment_amount.is_infinite()
+            or composition.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        if issued_invoice_amount_exceeds_storage_precision(composition.adjustment_amount):
+            raise ValueError("adjustment_amount exceeds numeric(38,12) precision")
+        if (
+            composition.billing_account_id is None
+            or not isinstance(composition.billing_account_reference, str)
+            or not composition.billing_account_reference.strip()
+        ):
+            raise ValueError("billing account evidence must be present")
+        amount_text = format(composition.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        if (
+            not isinstance(composition.recorded_by, str)
+            or not composition.recorded_by.strip()
+        ):
+            raise ValueError("recorded_by must be non-empty")
+        if (
+            not isinstance(composition.authorization_reference, str)
+            or not composition.authorization_reference.strip()
+        ):
+            raise ValueError("authorization_reference must be non-empty")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(composition.source_payload_hash) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        if composition.late_adjustment_invoice_adjustment_id in self.late_adjustment_invoice_adjustments:
+            raise ValueError("late adjustment invoice adjustment id already stored")
+        identity_key = (
+            composition.tenant_account_id,
+            composition.late_adjustment_rating_id,
+        )
+        existing = self.find_late_adjustment_invoice_adjustment(*identity_key)
+        if existing is not None:
+            if (
+                replace(
+                    existing,
+                    late_adjustment_invoice_adjustment_id=(
+                        composition.late_adjustment_invoice_adjustment_id
+                    ),
+                    recorded_at=composition.recorded_at,
+                    recorded_by=composition.recorded_by,
+                    authorization_reference=composition.authorization_reference,
+                )
+                != composition
+            ):
+                raise ValueError(
+                    "late adjustment invoice adjustment identity cannot change"
+                )
+            return existing
+        rating = self.late_adjustment_ratings.get(composition.late_adjustment_rating_id)
+        if (
+            rating is None
+            or self.late_adjustment_rating_index.get(
+                (composition.tenant_account_id, composition.late_adjustment_id)
+            )
+            != composition.late_adjustment_rating_id
+        ):
+            raise ValueError("late adjustment invoice adjustment rating is missing")
+        draft = self.invoice_drafts.get(composition.invoice_draft_id)
+        if draft is None or draft.tenant_account_id != composition.tenant_account_id:
+            raise ValueError("late adjustment invoice adjustment draft is missing")
+        if self.find_issued_invoice(
+            composition.tenant_account_id, composition.invoice_draft_id
+        ) is not None:
+            raise ValueError("invoice draft already has an issued invoice")
+        if (
+            self.find_collection_case(
+                composition.tenant_account_id, composition.invoice_draft_id
+            ) is not None
+            or self.find_tax_assessment_for_draft(
+                composition.tenant_account_id, composition.invoice_draft_id
+            ) is not None
+            or self.find_journal_proposal_for_invoice_draft(
+                composition.tenant_account_id, composition.invoice_draft_id
+            ) is not None
+            or any(
+                credit.invoice_draft_id == composition.invoice_draft_id
+                for credit in self.list_credit_adjustments(composition.tenant_account_id)
+            )
+        ):
+            raise ValueError("invoice draft has downstream records")
+        draft_billing_accounts = {
+            (line.billing_account_id, line.billing_account_reference)
+            for line in draft.invoice_draft_lines
+        }
+        if len(draft_billing_accounts) != 1:
+            raise ValueError("invoice draft billing account is ambiguous")
+        if next(iter(draft_billing_accounts)) != (
+            composition.billing_account_id,
+            composition.billing_account_reference,
+        ):
+            raise ValueError(
+                "late adjustment invoice adjustment billing account does not match draft"
+            )
+        if (
+            composition.late_adjustment_application_id
+            != rating.late_adjustment_application_id
+            or composition.late_adjustment_id != rating.late_adjustment_id
+            or composition.target_period_id != rating.target_period_id
+            or composition.adjustment_amount != rating.adjustment_amount
+            or composition.currency_code != rating.currency_code
+            or draft.currency_code != rating.currency_code
+            or rating.late_adjustment_rating_status != "rated"
+        ):
+            raise ValueError("late adjustment invoice adjustment does not match evidence")
+        self.late_adjustment_invoice_adjustments[
+            composition.late_adjustment_invoice_adjustment_id
+        ] = composition
+        self.late_adjustment_invoice_adjustment_index[identity_key] = (
+            composition.late_adjustment_invoice_adjustment_id
+        )
+        return composition
+
     def insert_credit_adjustment(
         self, credit: StoredCreditAdjustment
     ) -> StoredCreditAdjustment:
@@ -3214,6 +3682,10 @@ class MemoryUsageLedger:
         existing_id = self.credit_adjustment_index.get(identity)
         if existing_id is not None:
             return self.credit_adjustments[existing_id]
+        if self.list_late_adjustment_invoice_adjustments_for_draft(
+            credit.tenant_account_id, credit.invoice_draft_id
+        ):
+            raise ValueError("invoice draft has late adjustment invoice adjustment")
         persisted = StoredCreditAdjustment(
             credit_adjustment_id=credit.credit_adjustment_id,
             tenant_account_id=credit.tenant_account_id,
@@ -3671,6 +4143,13 @@ class MemoryUsageLedger:
             and credit_note_void_identity_key in self.credit_note_void_journal_proposal_index
         ):
             raise ValueError("journal proposals are immutable and cannot be replaced")
+        if (
+            journal_proposal.invoice_draft_id is not None
+            and self.list_late_adjustment_invoice_adjustments_for_draft(
+                journal_proposal.tenant_account_id, journal_proposal.invoice_draft_id
+            )
+        ):
+            raise ValueError("invoice draft has late adjustment invoice adjustment")
         persisted = StoredJournalProposal(
             journal_proposal_id=journal_proposal.journal_proposal_id,
             tenant_account_id=journal_proposal.tenant_account_id,
@@ -3770,6 +4249,18 @@ class MemoryUsageLedger:
             raise ValueError("collection cases are immutable and cannot be replaced")
         if identity_key in self.collection_case_index:
             raise ValueError("collection cases are immutable and cannot be replaced")
+        issued_invoice = self.find_issued_invoice(
+            collection_case.tenant_account_id, collection_case.invoice_draft_id
+        )
+        if issued_invoice is None and self.list_late_adjustment_invoice_adjustments_for_draft(
+            collection_case.tenant_account_id, collection_case.invoice_draft_id
+        ):
+            raise ValueError("invoice draft has late adjustment invoice adjustment")
+        if issued_invoice is not None and (
+            collection_case.currency_code != issued_invoice.currency_code
+            or outstanding_amount != issued_invoice.tax_inclusive_amount
+        ):
+            raise ValueError("collection case does not match issued invoice")
         persisted = StoredCollectionCase(
             collection_case_id=collection_case.collection_case_id,
             tenant_account_id=collection_case.tenant_account_id,
@@ -4341,6 +4832,21 @@ class MemoryUsageLedger:
         if outbox_event_id is None:
             return None
         return self.webhook_outbox_events[outbox_event_id]
+
+    def find_webhook_outbox_event_by_source(
+        self, tenant_account_id: UUID, event_type_code: str, source_id: UUID
+    ) -> StoredWebhookOutboxEvent | None:
+        """Return the append-only event for one tenant-scoped commercial fact."""
+        return next(
+            (
+                outbox_event
+                for outbox_event in self.webhook_outbox_events.values()
+                if outbox_event.tenant_account_id == tenant_account_id
+                and outbox_event.event_type_code == event_type_code
+                and outbox_event.source_id == source_id
+            ),
+            None,
+        )
 
     def list_pending_webhook_outbox_events(
         self, tenant_account_id: UUID

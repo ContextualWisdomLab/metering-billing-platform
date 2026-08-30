@@ -43,7 +43,12 @@
     "recorded_at": {"type": "string", "format": "date-time"},
     "next_operator_action": {
       "type": "string",
-      "enum": ["apply_late_adjustment", "rate_late_adjustment"]
+      "enum": [
+        "apply_late_adjustment",
+        "rate_late_adjustment",
+        "record_invoice_adjustment",
+        "issue_invoice"
+      ]
     }
   }
 }

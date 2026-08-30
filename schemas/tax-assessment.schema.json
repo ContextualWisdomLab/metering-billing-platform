@@ -54,7 +54,8 @@
         "tax_after_collection_opened",
         "draft_total_invalid",
         "currency_exponent_unknown",
-        "tax_assessment_not_found"
+        "tax_assessment_not_found",
+        "invoice_draft_has_late_adjustment"
       ]
     }
   }

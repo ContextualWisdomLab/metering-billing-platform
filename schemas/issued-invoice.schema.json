@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/issued-invoice/v1",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/issued-invoice/v2",
   "title": "Issued Invoice",
   "description": "Append-only commercial invoice snapshot issued from one tenant invoice draft. Totals are exact-decimal strings. Replays acknowledge the stored issued_invoice_id. The document is not a statutory invoice, tax invoice certificate, or AIS posting and does not invent sequential legal numbering.",
   "type": "object",
@@ -10,7 +10,7 @@
     "issued_invoice_outcome_code"
   ],
   "properties": {
-    "issued_invoice_contract_version": {"type": "integer", "minimum": 1},
+    "issued_invoice_contract_version": {"const": 2},
     "issued_invoice_outcome_code": {
       "type": "string",
       "enum": ["accepted", "duplicate_replay", "rejected"]
@@ -47,6 +47,7 @@
       "enum": [
         "tenant_not_found",
         "invoice_draft_not_found",
+        "late_adjustment_tax_reassessment_required",
         "request_invalid"
       ]
     },
@@ -68,7 +69,8 @@
         "unit_code",
         "rated_quantity",
         "unit_price_amount",
-        "line_total_amount"
+        "line_total_amount",
+        "line_type"
       ],
       "properties": {
         "line_number": {"type": "integer", "minimum": 1},
@@ -87,10 +89,35 @@
         },
         "line_total_amount": {
           "type": "string",
-          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
-          "maxLength": 39
+          "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "maxLength": 40
+        },
+        "line_type": {"type": "string", "enum": ["usage", "late_adjustment"]},
+        "late_adjustment_invoice_adjustment_id": {"type": "string", "format": "uuid"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"line_type": {"const": "usage"}}},
+          "then": {
+            "properties": {
+              "line_total_amount": {
+                "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+              }
+            },
+            "not": {"required": ["late_adjustment_invoice_adjustment_id"]}
+          }
+        },
+        {
+          "if": {"properties": {"line_type": {"const": "late_adjustment"}}},
+          "then": {
+            "required": ["late_adjustment_invoice_adjustment_id"],
+            "properties": {"rated_quantity": {"pattern": "^1(\\.0+)?$"}},
+            "not": {
+              "properties": {"line_total_amount": {"pattern": "^-?0(?:\\.0+)?$"}}
+            }
+          }
         }
-      }
+      ]
     }
   }
 }

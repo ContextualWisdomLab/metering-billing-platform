@@ -8,27 +8,37 @@
 
 ## Current working snapshot (2026-08-30)
 
-The current #87 work is stacked through PR [#172](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/172),
-with parent PR [#171](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/171).
-The implementation snapshots are parent `b28e86503f3c01e946d56d7ba710c88622f8e6dc`
-and application `5562924ddd0ada32c73fb117d88f109747396141`; both PRs remain open
-pending hosted checks and a qualifying independent approval. Local pass status is
-not merge evidence.
+The current #87 work is stacked through PR [#174](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/174),
+with rating/application parent PR [#173](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/173).
+The implementation snapshot is integration commit
+`30f6a3c25acfc2a1e258d570904ef22691e88f5d`; both PRs remain open pending hosted
+checks and a qualifying independent approval. Local pass status is not merge
+evidence.
 
-This follow-up adds PostgreSQL migrations `0049`/`0050`/`0051`/`0052`/`0053`, the
-`LateAdjustment` and application contracts, tenant-scoped presentment reads,
-bounded recorded-at/ID keyset pagination, and a durable application
-acknowledgement for late usage, correction, and reversal facts. The source period
-must be at least `soft_closed`; the target must be `open` and start no earlier
-than the source end. A new application rechecks and locks the target's latest
-append-only status, while a stored application remains replayable after target
-close and preserves its first writer audit data. The memory adapter enforces the
-same period state and tenant/order checks, serializes recording/application/close races,
-and validates aware non-future audit timestamps. Presentment uses one bulk
-application-existence lookup per bounded page. Full local PostgreSQL,
-repository-contract, and 100% statement/branch coverage checks pass on the
-respective branches. Applying or re-rating the fact, provider settlement
-ingestion, FOCUS 1.4 export, and statutory accounting remain open gaps.
+This follow-up adds PostgreSQL migrations `0047` through `0066`, the
+`LateAdjustment`, application, rating-consumption, and invoice-adjustment
+contracts, tenant-scoped presentment reads, bounded recorded-at/ID keyset
+pagination, and durable application/rating/composition facts for late usage,
+correction, and reversal evidence. The source period must be at least
+`soft_closed`; the target must be `open` and start no earlier than the source
+end. New application, rating, and composition facts lock and recheck the
+target's latest append-only status, while stored replays remain available after
+target close and preserve first-writer audit data. Composition captures one
+tenant-scoped billing account, rejects drafts already captured by collection,
+journal, tax, or credit facts, and blocks those downstream writes under the
+shared draft lock. Issuance consumes linked compositions as signed invoice
+lines, rejects stale tax and non-positive totals, preserves exact totals before
+storage validation, and rejects projected invoices above 10,000 lines.
+Migrations `0059`/`0060` enforce downstream write ordering, `0061`/`0062`/
+`0063`/`0064`/`0065`/`0066` enforce composition version, precision,
+completeness, immutability, new-header, and audit-time boundaries, and
+historical v1 issued invoices remain readable through the v2 envelopes.
+The source period is never rewritten; composition requires a rated adjustment
+and an unissued same-tenant, same-currency invoice draft. The full real-
+PostgreSQL suite passes with 790 tests, 19,474 statements, and 6,748 branches
+at 100% statement/branch coverage. Recalculation from
+source usage and rate-card versions, provider settlement ingestion, FOCUS 1.4
+export, tax/legal invoice treatment, and statutory accounting remain open gaps.
 
 ## Executive decision
 

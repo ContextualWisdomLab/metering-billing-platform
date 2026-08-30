@@ -50,10 +50,17 @@ contextual-orchestrator usage
   and period transitions are never rewritten.
 - PostgreSQL migrations `0049`/`0050` enforce tenant-scoped foreign keys,
   lifecycle ordering, target openness, replay conflict handling, and
-  update/delete immutability; migrations `0052`/`0053` enforce application
-  source equality, target locking, replay rechecks, and audit-time bounds.
-  Application, re-rating, provider settlement, FOCUS export, tax documents,
-  and statutory posting remain separate workflows.
+  update/delete immutability; migration `0051` supplies the matching keyset
+  index; migrations `0052`/`0053` enforce application source equality, target
+  locking, replay rechecks, and audit-time bounds; migrations `0054`/`0055`
+  protect the separate rating-consumption fact. Migrations
+  `0056`/`0057`/`0058`/`0059`/`0060`/`0061`/`0062`/`0063`/`0064`/`0065`/`0066` protect composition evidence,
+  selected billing-account identity, the same-draft downstream write boundary
+  in either write order, the version-2 contract invariant, issued-invoice
+  snapshot/line immutability, the new-header version boundary, and composition
+  audit-time bounds.
+  Application, re-rating, provider settlement, FOCUS export, tax documents, and
+  statutory posting remain separate workflows.
 
 ## Late-adjustment-presentment acceptance
 
@@ -73,12 +80,14 @@ contextual-orchestrator usage
 - The ledger read receives the decoded cursor and `page_limit + 1`; PostgreSQL
   evaluates the tenant-scoped recorded-at/ID keyset predicate in one ordered
   query so `next_cursor` is derived only from a bounded result, then performs
-  one bulk application-existence lookup for that page.
+  one bulk application-existence and one bulk rating-existence lookup for that
+  page.
 
 ## Late-adjustment-application acceptance
 
 - `POST /v1/late-adjustments/{late_adjustment_id}/applications` requires
-  non-empty `applied_by` and `authorization_reference` audit references.
+  a currently open target period, plus non-empty `applied_by` and
+  `authorization_reference` audit references.
 - The application is an append-only, tenant-scoped fact whose target period,
   signed exact amount, and currency must equal the stored late adjustment.
   Identity is `(tenant_account_id, late_adjustment_id)`; replay returns the
@@ -101,6 +110,59 @@ contextual-orchestrator usage
 - This slice does not re-rate, mutate a period or usage fact, create a tax or
   journal document, settle a provider, export FOCUS, or emit a webhook. Those
   remain explicit downstream workflows.
+
+## Late-adjustment-rating acceptance
+
+- `POST /v1/late-adjustments/{late_adjustment_id}/ratings` requires the
+  tenant's durable application, a currently open target period, and non-empty `rated_by` and
+  `authorization_reference` audit references.
+- Rating appends one immutable tenant-scoped fact that copies the application's
+  target period, signed exact amount, and currency. A replay returns the same
+  rating fact without a second row or mutation of the original usage rating,
+  including when the target has since closed.
+- A first rating after the target closes is rejected with
+  `late_adjustment_target_period_not_open`; the target lock serializes this
+  decision with period transitions.
+- The command does not invent a usage snapshot or rate-card version. It records
+  consumption of the already-authoritative commercial delta; invoice-adjustment
+  composition, tax, provider settlement, FOCUS export, and statutory posting
+  remain explicit downstream workflows.
+- Until application, the command returns `apply_late_adjustment`; after rating,
+  presentment reports `record_invoice_adjustment`.
+
+## Late-adjustment-invoice-adjustment acceptance
+
+- `POST /v1/late-adjustments/{late_adjustment_id}/invoice-adjustments` requires
+  a stored rating, an unissued same-tenant `invoice_draft_id`, matching
+  currency, and non-empty `recorded_by` and `authorization_reference`.
+- The command records one immutable signed composition fact linking the late
+  adjustment, application, rating, target period, and invoice draft. Replays
+  return the same fact as `duplicate_replay`; a second draft, cross-tenant
+  draft, currency mismatch, or issued draft fails closed.
+- Composition and every downstream collection, tax, journal, or credit write
+  serialize on the invoice-draft lock. Once a composition exists, a new
+  downstream write is rejected with `invoice_draft_has_late_adjustment` and
+  does not create a stale fact; PostgreSQL migrations `0059`, `0060`, `0062`, `0063`, `0064`, `0065`, and `0066` enforce
+  both write orders for direct persistence too. A direct composition insert is
+  rejected after an existing collection, tax, journal, or credit fact, while
+  an existing composition remains replayable. Issued invoices reject more than
+  10,000 projected lines and preserve exact representable totals before the
+  `numeric(38,12)` check. Migration `0059` upgrades legacy composition metadata
+  only when payer evidence is present, fails closed otherwise, and then enforces
+  version 2. Migration `0062` prevents direct precision loss, binds issued
+  adjustment lines to their composition evidence, and permits collection only
+  from the frozen issued total. Migration `0063` requires every linked
+  composition to have a matching issued line and included signed total.
+  Migration `0064` makes issued snapshots and lines immutable to direct database
+  UPDATE/DELETE and removes the issued-line `line_type` default. Migration
+  `0065` requires version 2 for new direct issued headers without rewriting
+  historical v1 snapshots. Migration `0066` rejects future first-write
+  composition timestamps while preserving existing replays.
+  All three write routes return HTTP 422 for rejected
+  command results, including missing tenant or source records.
+- After composition, late-adjustment presentment reports `issue_invoice`.
+  The command does not rewrite the invoice draft, issue an invoice, calculate
+  tax, post a journal, or call a provider; those remain explicit boundaries.
 
 ## Tax-assessment acceptance
 
@@ -240,6 +302,13 @@ contextual-orchestrator usage
 - `issued_invoice_id` is an opaque generated identifier. The path does not invent sequential or statutory numbering, QR/fiscal signatures, Peppol clearance, or jurisdiction-specific compliance claims.
 - Optional `due_at` is stored only when the caller supplies a valid timezone-aware instant. Drafts have no due terms today.
 - `POST /v1/invoice-drafts/{invoice_draft_id}/issued-invoices` is the nested issue command. PAN, CVC, and provider secrets are refused. Missing tenant is HTTP 422. Unknown or cross-tenant drafts reject `invoice_draft_not_found`.
+- Linked rated late-adjustment compositions are consumed under the invoice-draft lock exactly once. Each becomes a `late_adjustment` issued line with its signed exact delta, selected billing-account identity, and composition identity; the issued payload hash covers those lines. Positive and negative deltas are supported only when the resulting invoice total remains positive and representable in PostgreSQL `numeric(38,12)`.
+- A draft with a linked late-adjustment composition and an existing tax assessment rejects `late_adjustment_tax_reassessment_required` until tax reassessment is implemented; the stale tax snapshot is never reused.
+- Composition rejects drafts already captured by a collection case, journal proposal, tax assessment, or credit adjustment. Drafts with no billing account or multiple billing accounts fail closed rather than fabricating a tenant payer.
+- Issued-invoice and presentment line contracts are version 2; `line_type` is required, usage lines are non-negative and cannot carry a composition ID, and late-adjustment lines require a non-zero signed total plus their composition ID.
+- Late-adjustment composition persistence accepts only contract version 2. Migration `0059` fails closed on legacy rows without billing-account evidence, upgrades compatible version metadata, and enforces the same invariant in PostgreSQL; stored v1 issued-invoice snapshots remain readable through presentment and issuance replay envelopes without rewriting their facts.
+- After successful issuance, collection uses the frozen adjusted inclusive total and remains blocked before issuance; direct PostgreSQL collection inserts must match that issued currency and total.
+- Issued-invoice snapshots and lines remain immutable after issuance, including for direct PostgreSQL writes; direct issued lines must provide `line_type` explicitly.
 - A known stored issued invoice presents one tenant-scoped statement with identity, draft source, frozen totals, lines, `issued_at`, optional `due_at`, optional stored `tax_assessment_id` when the draft assessment amounts still match those totals, and `next_operator_action` (`collect`).
 - `GET /v1/issued-invoices/{issued_invoice_id}` is HTTP 200 for the same tenant. Cross-tenant or unknown is HTTP 404 with no leak.
 - `GET /v1/issued-invoices` lists summaries as `{issued_invoices, next_cursor}`. Never `items` or `cursor`. `page_limit` defaults to 50 and maxes at 100. Cursor is `{issued_at}|{issued_invoice_id}`.

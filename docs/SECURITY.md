@@ -54,5 +54,48 @@ SOC 2 CC6 requires logical access control before a shippable HTTP surface (Ameri
 - Unknown or cross-tenant late adjustment: `late_adjustment_not_found`
 - Missing or blank late-adjustment actor reference: `actor_reference_invalid`
 - Missing or blank late-adjustment authorization reference: `authorization_reference_invalid`
+- Rating an unapplied late adjustment: `late_adjustment_application_not_found`
+- Applying after the target period closes: `late_adjustment_target_period_not_open`
+- Rating after the target period closes: `late_adjustment_target_period_not_open`
+- Unknown or cross-tenant late-adjustment rating source: `late_adjustment_not_found`
+- Unknown or cross-tenant invoice draft for a rated adjustment: `invoice_draft_not_found`
+- Invoice-draft currency different from the rated adjustment: `currency_mismatch`
+- Rated adjustment already attached to another draft: `late_adjustment_invoice_adjustment_identity_conflict`
+- Rated adjustment targeting an issued invoice draft: `invoice_already_issued`
+- Composition after collection, journal, tax, or credit capture:
+  `invoice_draft_has_downstream_records`
+- New collection, journal, tax-assessment, or credit writes before issuance after
+  composition: `invoice_draft_has_late_adjustment`; the draft lock and
+  PostgreSQL migrations `0059`/`0060` prevent stale downstream capture.
+  Migration `0061` fails closed on legacy compositions without payer evidence,
+  upgrades compatible version metadata, and enforces composition contract
+  version 2. After issuance, collection is allowed only against the frozen
+  issued currency and inclusive total; other downstream writes remain blocked.
+- Direct PostgreSQL issued lines must match their composition's draft, signed
+  amount, absolute unit price, and billing-account reference. Composition
+  amounts that would round in `numeric(38,12)` are rejected by migration `0062`.
+  Migration `0063` rejects direct issued headers that omit linked composition
+  lines or freeze a total that excludes a signed adjustment, after taking the
+  shared invoice-draft lock.
+- Migration `0064` rejects direct UPDATE/DELETE of issued-invoice snapshots and
+  lines and removes the issued-line `line_type` default so a direct insert cannot
+  silently become a usage line.
+- Migration `0065` rejects new direct issued-invoice headers with a contract
+  version other than 2; historical v1 snapshots are not rewritten.
+- Migration `0066` rejects future first-write composition timestamps while
+  allowing immutable identity replays.
+- Composition or direct persistence with a contract version other than 2 is
+  rejected; stored v1 issued-invoice snapshots are upgraded only at the
+  presentment and issuance-replay envelopes and are not rewritten.
+- Draft with no single tenant-scoped payer:
+  `invoice_draft_billing_account_not_found` or
+  `invoice_draft_billing_account_ambiguous`
+- Adjustment that would round in issued-invoice storage:
+  `adjustment_amount_not_representable`
+- Late-adjustment composition on a draft with an existing tax assessment:
+  `late_adjustment_tax_reassessment_required`; stale tax is never reused.
+- Rejected late-adjustment application, rating, and invoice-adjustment command
+  writes, including missing source records, return HTTP 422; only reads use
+  HTTP 404 to hide unknown or cross-tenant resources.
 
 Do not store card data, PAT plaintext, prompt text, response text, provider secrets, or webhook-subscription plaintext.  Do not start a web UI in this slice.

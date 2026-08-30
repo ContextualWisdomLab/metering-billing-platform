@@ -24,11 +24,14 @@ from typing import Any, Iterator
 from uuid import UUID
 
 from metering_billing.errors import (
+    LateAdjustmentApplicationTargetPeriodNotOpen,
+    LateAdjustmentRatingTargetPeriodNotOpen,
     RejectionReasonCode,
     UsageEventConflict,
 )
 from metering_billing.exact_decimal import (
     format_exact_decimal,
+    issued_invoice_amount_exceeds_storage_precision,
     parse_exact_decimal,
     require_postable_journal_line_amounts,
 )
@@ -68,6 +71,9 @@ from metering_billing.usage_ledger import (
     StoredIngestionReceipt,
     StoredCreditNoteApplication,
     StoredLateAdjustmentApplication,
+    StoredLateAdjustmentInvoiceAdjustment,
+    StoredLateAdjustmentRating,
+    LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION,
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoice,
@@ -124,6 +130,53 @@ def _same_late_adjustment_application(
         == incoming.late_adjustment_application_contract_version
         and stored.late_adjustment_application_status
         == incoming.late_adjustment_application_status
+    )
+
+
+def _same_late_adjustment_rating(
+    stored: StoredLateAdjustmentRating,
+    incoming: StoredLateAdjustmentRating,
+) -> bool:
+    """Compare every immutable rating field except its generated id."""
+    return (
+        stored.tenant_account_id == incoming.tenant_account_id
+        and stored.late_adjustment_application_id
+        == incoming.late_adjustment_application_id
+        and stored.late_adjustment_id == incoming.late_adjustment_id
+        and stored.target_period_id == incoming.target_period_id
+        and format(stored.adjustment_amount, "f")
+        == format(incoming.adjustment_amount, "f")
+        and stored.currency_code == incoming.currency_code
+        and stored.late_adjustment_rating_contract_version
+        == incoming.late_adjustment_rating_contract_version
+        and stored.late_adjustment_rating_status
+        == incoming.late_adjustment_rating_status
+    )
+
+
+def _same_late_adjustment_invoice_adjustment(
+    stored: StoredLateAdjustmentInvoiceAdjustment,
+    incoming: StoredLateAdjustmentInvoiceAdjustment,
+) -> bool:
+    """Compare immutable composition fields except generated/audit fields."""
+    return (
+        stored.tenant_account_id == incoming.tenant_account_id
+        and stored.billing_account_id == incoming.billing_account_id
+        and stored.billing_account_reference == incoming.billing_account_reference
+        and stored.late_adjustment_rating_id == incoming.late_adjustment_rating_id
+        and stored.late_adjustment_application_id
+        == incoming.late_adjustment_application_id
+        and stored.late_adjustment_id == incoming.late_adjustment_id
+        and stored.invoice_draft_id == incoming.invoice_draft_id
+        and stored.target_period_id == incoming.target_period_id
+        and format(stored.adjustment_amount, "f")
+        == format(incoming.adjustment_amount, "f")
+        and stored.currency_code == incoming.currency_code
+        and stored.source_payload_hash == incoming.source_payload_hash
+        and stored.late_adjustment_invoice_adjustment_contract_version
+        == incoming.late_adjustment_invoice_adjustment_contract_version
+        and stored.late_adjustment_invoice_adjustment_status
+        == incoming.late_adjustment_invoice_adjustment_status
     )
 
 
@@ -377,6 +430,44 @@ class PostgresUsageLedger:
             )
             return frozenset(UUID(str(row[0])) for row in cursor.fetchall())
 
+    def find_late_adjustment_rating_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return rated late-adjustment IDs for one bounded page."""
+        if not late_adjustment_ids:
+            return frozenset()
+        placeholders = ", ".join("%s" for _ in late_adjustment_ids)
+        with self._cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT late_adjustment_id
+                FROM billing_core.late_adjustment_rating
+                WHERE tenant_account_id = %s
+                  AND late_adjustment_id IN ({placeholders})
+                """,
+                (tenant_account_id, *late_adjustment_ids),
+            )
+            return frozenset(UUID(str(row[0])) for row in cursor.fetchall())
+
+    def find_late_adjustment_invoice_adjusted_ids(
+        self, tenant_account_id: UUID, late_adjustment_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Return late-adjustment IDs composed into an invoice for one page."""
+        if not late_adjustment_ids:
+            return frozenset()
+        placeholders = ", ".join("%s" for _ in late_adjustment_ids)
+        with self._cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT late_adjustment_id
+                FROM billing_core.late_adjustment_invoice_adjustment
+                WHERE tenant_account_id = %s
+                  AND late_adjustment_id IN ({placeholders})
+                """,
+                (tenant_account_id, *late_adjustment_ids),
+            )
+            return frozenset(UUID(str(row[0])) for row in cursor.fetchall())
+
     def get_late_adjustment_application(
         self, late_adjustment_application_id: UUID
     ) -> StoredLateAdjustmentApplication | None:
@@ -421,6 +512,66 @@ class PostgresUsageLedger:
         with self._cursor() as cursor:
             cursor.execute(
                 """
+                SELECT late_adjustment_id
+                FROM billing_core.late_adjustment
+                WHERE late_adjustment_id = %s AND tenant_account_id = %s
+                FOR UPDATE
+                """,
+                (application.late_adjustment_id, application.tenant_account_id),
+            )
+            cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT period_id
+                FROM billing_core.billing_period
+                WHERE period_id = %s AND tenant_account_id = %s
+                FOR UPDATE
+                """,
+                (application.target_period_id, application.tenant_account_id),
+            )
+            if cursor.fetchone() is None:
+                raise LateAdjustmentApplicationTargetPeriodNotOpen(
+                    "late adjustment application target period must be open"
+                )
+            cursor.execute(
+                """
+                SELECT late_adjustment_application_id
+                FROM billing_core.late_adjustment_application
+                WHERE tenant_account_id = %s AND late_adjustment_id = %s
+                """,
+                (application.tenant_account_id, application.late_adjustment_id),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row is not None:
+                stored = self._fetch_late_adjustment_application(
+                    cursor, UUID(str(existing_row[0])), application.tenant_account_id
+                )
+                if stored is None:  # pragma: no cover - row is locked by this transaction
+                    raise RuntimeError(  # pragma: no cover - row is locked by this transaction
+                        "late adjustment application did not return a row"
+                    )
+                if not _same_late_adjustment_application(stored, application):
+                    raise ValueError("late adjustment application identity cannot change")
+                return stored
+            cursor.execute(
+                """
+                SELECT COALESCE((
+                    SELECT transition.to_status
+                    FROM billing_core.billing_period_transition AS transition
+                    WHERE transition.tenant_account_id = %s
+                      AND transition.period_id = %s
+                    ORDER BY transition.transition_number DESC
+                    LIMIT 1
+                ), 'open')
+                """,
+                (application.tenant_account_id, application.target_period_id),
+            )
+            if cursor.fetchone()[0] != "open":
+                raise LateAdjustmentApplicationTargetPeriodNotOpen(
+                    "late adjustment application target period must be open"
+                )
+            cursor.execute(
+                """
                 INSERT INTO billing_core.late_adjustment_application
                     (late_adjustment_application_id, tenant_account_id,
                      late_adjustment_id, target_period_id, adjustment_amount,
@@ -447,26 +598,173 @@ class PostgresUsageLedger:
             )
             row = cursor.fetchone()
             if row is None:
-                cursor.execute(
-                    """
-                    SELECT late_adjustment_application_id
-                    FROM billing_core.late_adjustment_application
-                    WHERE tenant_account_id = %s AND late_adjustment_id = %s
-                    """,
-                    (application.tenant_account_id, application.late_adjustment_id),
+                raise ValueError(
+                    "late adjustment application identity conflicts with an existing row"
                 )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - immutable conflict row cannot disappear
-                    raise ValueError(
-                        "late adjustment application identity conflicts with an existing row"
-                    )
             stored = self._fetch_late_adjustment_application(
                 cursor, UUID(str(row[0])), application.tenant_account_id
             )
-            if stored is None:  # pragma: no cover - insert or conflict exposes a row
+            if stored is None:  # pragma: no cover - insert exposes a row
                 raise RuntimeError("late adjustment application did not return a row")
-            if not _same_late_adjustment_application(stored, application):
-                raise ValueError("late adjustment application identity cannot change")
+            return stored
+
+    def find_late_adjustment_rating(
+        self, tenant_account_id: UUID, late_adjustment_id: UUID
+    ) -> StoredLateAdjustmentRating | None:
+        """Return one tenant-scoped late-adjustment rating, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT late_adjustment_rating_id
+                FROM billing_core.late_adjustment_rating
+                WHERE tenant_account_id = %s AND late_adjustment_id = %s
+                """,
+                (tenant_account_id, late_adjustment_id),
+            )
+            row = cursor.fetchone()
+            return (
+                None
+                if row is None
+                else self._fetch_late_adjustment_rating(
+                    cursor, UUID(str(row[0])), tenant_account_id
+                )
+            )
+
+    def get_late_adjustment_rating(
+        self, late_adjustment_rating_id: UUID
+    ) -> StoredLateAdjustmentRating | None:
+        """Return one late-adjustment rating by opaque identifier."""
+        with self._cursor() as cursor:
+            return self._fetch_late_adjustment_rating(cursor, late_adjustment_rating_id)
+
+    def insert_late_adjustment_rating(
+        self, rating: StoredLateAdjustmentRating
+    ) -> StoredLateAdjustmentRating:
+        """Persist one rating fact or return its tenant-scoped replay."""
+        _validate_audit_timestamp(rating.rated_at, "rated_at")
+        if CURRENCY_CODE_PATTERN.fullmatch(rating.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(rating.adjustment_amount, Decimal)
+            or rating.adjustment_amount.is_nan()
+            or rating.adjustment_amount.is_infinite()
+            or rating.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        amount_text = format(rating.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        if rating.late_adjustment_rating_status != "rated":
+            raise ValueError("late_adjustment_rating_status must be rated")
+        for value, field_name in (
+            (rating.rated_by, "rated_by"),
+            (rating.authorization_reference, "authorization_reference"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-empty")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT period_id
+                FROM billing_core.billing_period
+                WHERE period_id = %s AND tenant_account_id = %s
+                FOR UPDATE
+                """,
+                (rating.target_period_id, rating.tenant_account_id),
+            )
+            if cursor.fetchone() is None:
+                raise LateAdjustmentRatingTargetPeriodNotOpen(
+                    "late adjustment rating target period must be open"
+                )
+            cursor.execute(
+                """
+                SELECT COALESCE((
+                    SELECT transition.to_status
+                    FROM billing_core.billing_period_transition AS transition
+                    WHERE transition.tenant_account_id = %s
+                      AND transition.period_id = %s
+                    ORDER BY transition.transition_number DESC
+                    LIMIT 1
+                ), 'open')
+                """,
+                (rating.tenant_account_id, rating.target_period_id),
+            )
+            target_status = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                SELECT late_adjustment_rating_id
+                FROM billing_core.late_adjustment_rating
+                WHERE tenant_account_id = %s
+                  AND (
+                      late_adjustment_application_id = %s
+                      OR late_adjustment_id = %s
+                  )
+                """,
+                (
+                    rating.tenant_account_id,
+                    rating.late_adjustment_application_id,
+                    rating.late_adjustment_id,
+                ),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row is not None:
+                stored = self._fetch_late_adjustment_rating(
+                    cursor, UUID(str(existing_row[0])), rating.tenant_account_id
+                )
+                if stored is None:  # pragma: no cover - row is locked by this transaction
+                    raise RuntimeError("late adjustment rating did not return a row")
+                if not _same_late_adjustment_rating(stored, rating):
+                    raise ValueError("late adjustment rating identity cannot change")
+                return stored
+            if target_status != "open":
+                raise LateAdjustmentRatingTargetPeriodNotOpen(
+                    "late adjustment rating target period must be open"
+                )
+            cursor.execute(
+                """
+                INSERT INTO billing_core.late_adjustment_rating
+                    (late_adjustment_rating_id, tenant_account_id,
+                     late_adjustment_application_id, late_adjustment_id,
+                     target_period_id, adjustment_amount, currency_code,
+                     rated_by, authorization_reference, rated_at,
+                     late_adjustment_rating_contract_version,
+                     late_adjustment_rating_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING late_adjustment_rating_id
+                """,
+                (
+                    rating.late_adjustment_rating_id,
+                    rating.tenant_account_id,
+                    rating.late_adjustment_application_id,
+                    rating.late_adjustment_id,
+                    rating.target_period_id,
+                    rating.adjustment_amount,
+                    rating.currency_code,
+                    rating.rated_by,
+                    rating.authorization_reference,
+                    rating.rated_at,
+                    rating.late_adjustment_rating_contract_version,
+                    rating.late_adjustment_rating_status,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError(
+                    "late adjustment rating identity conflicts with an existing row"
+                )
+            stored = self._fetch_late_adjustment_rating(
+                cursor, UUID(str(row[0])), rating.tenant_account_id
+            )
+            if stored is None:  # pragma: no cover - insert or conflict exposes a row
+                raise RuntimeError("late adjustment rating did not return a row")
+            if not _same_late_adjustment_rating(stored, rating):
+                raise ValueError(  # pragma: no cover - inserted values are validated above
+                    "late adjustment rating identity cannot change"
+                )
             return stored
 
     def list_late_adjustments(
@@ -514,6 +812,244 @@ class PostgresUsageLedger:
                 for row in cursor.fetchall()
             )
         return adjustments
+
+    def find_late_adjustment_invoice_adjustment(
+        self, tenant_account_id: UUID, late_adjustment_rating_id: UUID
+    ) -> StoredLateAdjustmentInvoiceAdjustment | None:
+        """Return one tenant-scoped invoice composition, if present."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT late_adjustment_invoice_adjustment_id
+                FROM billing_core.late_adjustment_invoice_adjustment
+                WHERE tenant_account_id = %s AND late_adjustment_rating_id = %s
+                """,
+                (tenant_account_id, late_adjustment_rating_id),
+            )
+            row = cursor.fetchone()
+            return (
+                None
+                if row is None
+                else self._fetch_late_adjustment_invoice_adjustment(
+                    cursor, UUID(str(row[0])), tenant_account_id
+                )
+            )
+
+    def get_late_adjustment_invoice_adjustment(
+        self, late_adjustment_invoice_adjustment_id: UUID
+    ) -> StoredLateAdjustmentInvoiceAdjustment | None:
+        """Return one invoice composition by opaque identifier."""
+        with self._cursor() as cursor:
+            return self._fetch_late_adjustment_invoice_adjustment(
+                cursor, late_adjustment_invoice_adjustment_id
+            )
+
+    def list_late_adjustment_invoice_adjustments_for_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> tuple[StoredLateAdjustmentInvoiceAdjustment, ...]:
+        """Return compositions linked to one tenant-scoped invoice draft."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT late_adjustment_invoice_adjustment_id
+                FROM billing_core.late_adjustment_invoice_adjustment
+                WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                ORDER BY recorded_at, late_adjustment_invoice_adjustment_id
+                """,
+                (tenant_account_id, invoice_draft_id),
+            )
+            return tuple(
+                stored
+                for row in cursor.fetchall()
+                if (
+                    stored := self._fetch_late_adjustment_invoice_adjustment(
+                        cursor, UUID(str(row[0])), tenant_account_id
+                    )
+                )
+                is not None
+            )
+
+    def insert_late_adjustment_invoice_adjustment(
+        self, composition: StoredLateAdjustmentInvoiceAdjustment
+    ) -> StoredLateAdjustmentInvoiceAdjustment:
+        """Persist one composition or return its tenant-scoped replay."""
+        if (
+            composition.late_adjustment_invoice_adjustment_contract_version
+            != LATE_ADJUSTMENT_INVOICE_ADJUSTMENT_CONTRACT_VERSION
+        ):
+            raise ValueError(
+                "late adjustment invoice adjustment contract version must be 2"
+            )
+        if CURRENCY_CODE_PATTERN.fullmatch(composition.currency_code) is None:
+            raise ValueError("currency_code must be a three-letter ISO code")
+        if (
+            not isinstance(composition.adjustment_amount, Decimal)
+            or composition.adjustment_amount.is_nan()
+            or composition.adjustment_amount.is_infinite()
+            or composition.adjustment_amount == 0
+        ):
+            raise ValueError("adjustment_amount must be a finite non-zero exact decimal")
+        if issued_invoice_amount_exceeds_storage_precision(composition.adjustment_amount):
+            raise ValueError("adjustment_amount exceeds numeric(38,12) precision")
+        if (
+            composition.billing_account_id is None
+            or not isinstance(composition.billing_account_reference, str)
+            or not composition.billing_account_reference.strip()
+        ):
+            raise ValueError("billing account evidence must be present")
+        amount_text = format(composition.adjustment_amount, "f")
+        if (
+            not re.fullmatch(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$", amount_text)
+            or len(amount_text) > 40
+        ):
+            raise ValueError("adjustment_amount must be a canonical exact decimal")
+        if composition.late_adjustment_invoice_adjustment_status != "recorded":
+            raise ValueError("late adjustment invoice adjustment status must be recorded")
+        _validate_audit_timestamp(composition.recorded_at, "recorded_at")
+        for value, field_name in (
+            (composition.recorded_by, "recorded_by"),
+            (composition.authorization_reference, "authorization_reference"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-empty")
+        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(composition.source_payload_hash) is None:
+            raise ValueError("source_payload_hash must be a sha256 digest")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT late_adjustment_rating_id, late_adjustment_application_id,
+                       late_adjustment_id, target_period_id, adjustment_amount,
+                       currency_code, late_adjustment_rating_status
+                FROM billing_core.late_adjustment_rating
+                WHERE late_adjustment_rating_id = %s AND tenant_account_id = %s
+                FOR UPDATE
+                """,
+                (composition.late_adjustment_rating_id, composition.tenant_account_id),
+            )
+            rating_row = cursor.fetchone()
+            if rating_row is None:
+                raise ValueError("late adjustment invoice adjustment rating is missing")
+            cursor.execute(
+                """
+                SELECT invoice_draft_id, currency_code
+                FROM billing_core.invoice_draft
+                WHERE invoice_draft_id = %s AND tenant_account_id = %s
+                FOR UPDATE
+                """,
+                (composition.invoice_draft_id, composition.tenant_account_id),
+            )
+            draft_row = cursor.fetchone()
+            if draft_row is None:
+                raise ValueError("late adjustment invoice adjustment draft is missing")
+            cursor.execute(
+                """
+                SELECT DISTINCT line.billing_account_id, account.billing_account_reference
+                FROM billing_core.invoice_draft_line AS line
+                JOIN billing_core.billing_account AS account
+                  ON account.tenant_account_id = line.tenant_account_id
+                 AND account.billing_account_id = line.billing_account_id
+                WHERE line.tenant_account_id = %s AND line.invoice_draft_id = %s
+                """,
+                (composition.tenant_account_id, composition.invoice_draft_id),
+            )
+            billing_accounts = tuple(cursor.fetchall())
+            if len(billing_accounts) != 1:
+                raise ValueError("invoice draft billing account is ambiguous")
+            if billing_accounts[0] != (
+                composition.billing_account_id,
+                composition.billing_account_reference,
+            ):
+                raise ValueError(
+                    "late adjustment invoice adjustment billing account does not match draft"
+                )
+            cursor.execute(
+                """
+                SELECT late_adjustment_invoice_adjustment_id
+                FROM billing_core.late_adjustment_invoice_adjustment
+                WHERE tenant_account_id = %s AND late_adjustment_rating_id = %s
+                """,
+                (composition.tenant_account_id, composition.late_adjustment_rating_id),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row is not None:
+                stored = self._fetch_late_adjustment_invoice_adjustment(
+                    cursor, UUID(str(existing_row[0])), composition.tenant_account_id
+                )
+                if stored is None:  # pragma: no cover - row was selected in this transaction
+                    raise RuntimeError("late adjustment invoice adjustment did not return a row")
+                if not _same_late_adjustment_invoice_adjustment(stored, composition):
+                    raise ValueError(
+                        "late adjustment invoice adjustment identity cannot change"
+                    )
+                return stored
+            if (
+                rating_row[1] != composition.late_adjustment_application_id
+                or rating_row[2] != composition.late_adjustment_id
+                or rating_row[3] != composition.target_period_id
+                or format(rating_row[4], "f") != format(composition.adjustment_amount, "f")
+                or rating_row[5] != composition.currency_code
+                or draft_row[1] != composition.currency_code
+                or rating_row[6] != "rated"
+            ):
+                raise ValueError("late adjustment invoice adjustment does not match evidence")
+            cursor.execute(
+                """
+                SELECT 1
+                FROM billing_core.issued_invoice
+                WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                """,
+                (composition.tenant_account_id, composition.invoice_draft_id),
+            )
+            if cursor.fetchone() is not None:
+                raise ValueError("invoice draft already has an issued invoice")
+            cursor.execute(
+                """
+                INSERT INTO billing_core.late_adjustment_invoice_adjustment
+                    (late_adjustment_invoice_adjustment_id, tenant_account_id,
+                     billing_account_id, billing_account_reference,
+                     late_adjustment_rating_id, late_adjustment_application_id,
+                     late_adjustment_id, invoice_draft_id, target_period_id,
+                     adjustment_amount, currency_code, recorded_by,
+                     authorization_reference, recorded_at, source_payload_hash,
+                     late_adjustment_invoice_adjustment_contract_version,
+                     late_adjustment_invoice_adjustment_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING late_adjustment_invoice_adjustment_id
+                """,
+                (
+                    composition.late_adjustment_invoice_adjustment_id,
+                    composition.tenant_account_id,
+                    composition.billing_account_id,
+                    composition.billing_account_reference,
+                    composition.late_adjustment_rating_id,
+                    composition.late_adjustment_application_id,
+                    composition.late_adjustment_id,
+                    composition.invoice_draft_id,
+                    composition.target_period_id,
+                    composition.adjustment_amount,
+                    composition.currency_code,
+                    composition.recorded_by,
+                    composition.authorization_reference,
+                    composition.recorded_at,
+                    composition.source_payload_hash,
+                    composition.late_adjustment_invoice_adjustment_contract_version,
+                    composition.late_adjustment_invoice_adjustment_status,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError(
+                    "late adjustment invoice adjustment identity conflicts with an existing row"
+                )
+            stored = self._fetch_late_adjustment_invoice_adjustment(
+                cursor, UUID(str(row[0])), composition.tenant_account_id
+            )
+            if stored is None:  # pragma: no cover - insert exposes a row
+                raise RuntimeError("late adjustment invoice adjustment did not return a row")
+            if not _same_late_adjustment_invoice_adjustment(stored, composition):
+                raise ValueError("late adjustment invoice adjustment identity cannot change")
+            return stored
 
     def _insert_billing_period(
         self, period: BillingPeriod, *, allow_reconciled: bool
@@ -3301,6 +3837,27 @@ class PostgresUsageLedger:
                 else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
             )
 
+    def lock_invoice_draft(
+        self, tenant_account_id: UUID, invoice_draft_id: UUID
+    ) -> StoredInvoiceDraft | None:
+        """Load one draft under the issue/composition serialization lock."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT invoice_draft_id
+                FROM billing_core.invoice_draft
+                WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                FOR UPDATE
+                """,
+                (tenant_account_id, invoice_draft_id),
+            )
+            row = cursor.fetchone()
+            return (
+                None
+                if row is None
+                else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
+            )
+
     def find_tax_assessment_for_draft(
         self, tenant_account_id: UUID, invoice_draft_id: UUID
     ) -> StoredTaxAssessment | None:
@@ -3442,8 +3999,9 @@ class PostgresUsageLedger:
                     INSERT INTO billing_core.issued_invoice_line
                         (issued_invoice_line_id, issued_invoice_id, tenant_account_id,
                          line_number, billing_account_reference, meter_code, unit_code,
-                         rated_quantity, unit_price_amount, line_total_amount)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         rated_quantity, unit_price_amount, line_total_amount,
+                         line_type, late_adjustment_invoice_adjustment_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         line.issued_invoice_line_id,
@@ -3456,6 +4014,8 @@ class PostgresUsageLedger:
                         line.rated_quantity,
                         line.unit_price_amount,
                         line.line_total_amount,
+                        line.line_type,
+                        line.late_adjustment_invoice_adjustment_id,
                     ),
                 )
             return self._fetch_issued_invoice(cursor, issued_invoice.issued_invoice_id)
@@ -6965,6 +7525,30 @@ class PostgresUsageLedger:
                 else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
             )
 
+    def find_webhook_outbox_event_by_source(
+        self, tenant_account_id: UUID, event_type_code: str, source_id: UUID
+    ) -> StoredWebhookOutboxEvent | None:
+        """Return the append-only event for one tenant-scoped commercial fact."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT outbox_event_id
+                FROM billing_core.webhook_outbox_event
+                WHERE tenant_account_id = %s
+                  AND event_type_code = %s
+                  AND source_id = %s
+                ORDER BY enqueued_at, outbox_event_id
+                LIMIT 1
+                """,
+                (tenant_account_id, event_type_code, source_id),
+            )
+            row = cursor.fetchone()
+            return (
+                None
+                if row is None
+                else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
+            )
+
     def get_webhook_outbox_event(
         self, outbox_event_id: UUID
     ) -> StoredWebhookOutboxEvent | None:
@@ -7462,6 +8046,93 @@ class PostgresUsageLedger:
             applied_at=row[8],
             late_adjustment_application_contract_version=row[9],
             late_adjustment_application_status=row[10],
+        )
+
+    @staticmethod
+    def _fetch_late_adjustment_rating(
+        cursor: Any,
+        late_adjustment_rating_id: UUID,
+        tenant_account_id: UUID | None = None,
+    ) -> StoredLateAdjustmentRating | None:
+        """Hydrate one rating fact, optionally enforcing its tenant boundary."""
+        query = """
+            SELECT late_adjustment_rating_id, tenant_account_id,
+                   late_adjustment_application_id, late_adjustment_id,
+                   target_period_id, adjustment_amount, currency_code,
+                   rated_by, authorization_reference, rated_at,
+                   late_adjustment_rating_contract_version,
+                   late_adjustment_rating_status
+            FROM billing_core.late_adjustment_rating
+            WHERE late_adjustment_rating_id = %s
+        """
+        parameters: tuple[object, ...] = (late_adjustment_rating_id,)
+        if tenant_account_id is not None:
+            query += " AND tenant_account_id = %s"
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return StoredLateAdjustmentRating(
+            late_adjustment_rating_id=UUID(str(row[0])),
+            tenant_account_id=UUID(str(row[1])),
+            late_adjustment_application_id=UUID(str(row[2])),
+            late_adjustment_id=UUID(str(row[3])),
+            target_period_id=UUID(str(row[4])),
+            adjustment_amount=row[5],
+            currency_code=row[6],
+            rated_by=row[7],
+            authorization_reference=row[8],
+            rated_at=row[9],
+            late_adjustment_rating_contract_version=row[10],
+            late_adjustment_rating_status=row[11],
+        )
+
+    @staticmethod
+    def _fetch_late_adjustment_invoice_adjustment(
+        cursor: Any,
+        late_adjustment_invoice_adjustment_id: UUID,
+        tenant_account_id: UUID | None = None,
+    ) -> StoredLateAdjustmentInvoiceAdjustment | None:
+        """Hydrate one invoice composition, optionally enforcing its tenant."""
+        query = """
+            SELECT late_adjustment_invoice_adjustment_id, tenant_account_id,
+                   billing_account_id, billing_account_reference,
+                   late_adjustment_rating_id, late_adjustment_application_id,
+                   late_adjustment_id, invoice_draft_id, target_period_id,
+                   adjustment_amount, currency_code, recorded_by,
+                   authorization_reference, recorded_at, source_payload_hash,
+                   late_adjustment_invoice_adjustment_contract_version,
+                   late_adjustment_invoice_adjustment_status
+            FROM billing_core.late_adjustment_invoice_adjustment
+            WHERE late_adjustment_invoice_adjustment_id = %s
+        """
+        parameters: tuple[object, ...] = (late_adjustment_invoice_adjustment_id,)
+        if tenant_account_id is not None:
+            query += " AND tenant_account_id = %s"
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return StoredLateAdjustmentInvoiceAdjustment(
+            late_adjustment_invoice_adjustment_id=UUID(str(row[0])),
+            tenant_account_id=UUID(str(row[1])),
+            billing_account_id=None if row[2] is None else UUID(str(row[2])),
+            billing_account_reference=row[3],
+            late_adjustment_rating_id=UUID(str(row[4])),
+            late_adjustment_application_id=UUID(str(row[5])),
+            late_adjustment_id=UUID(str(row[6])),
+            invoice_draft_id=UUID(str(row[7])),
+            target_period_id=UUID(str(row[8])),
+            adjustment_amount=row[9],
+            currency_code=row[10],
+            recorded_by=row[11],
+            authorization_reference=row[12],
+            recorded_at=row[13],
+            source_payload_hash=row[14],
+            late_adjustment_invoice_adjustment_contract_version=row[15],
+            late_adjustment_invoice_adjustment_status=row[16],
         )
 
     @staticmethod
@@ -8087,7 +8758,8 @@ class PostgresUsageLedger:
             """
             SELECT issued_invoice_line_id, issued_invoice_id, tenant_account_id,
                    line_number, billing_account_reference, meter_code, unit_code,
-                   rated_quantity, unit_price_amount, line_total_amount
+                   rated_quantity, unit_price_amount, line_total_amount,
+                   line_type, late_adjustment_invoice_adjustment_id
             FROM billing_core.issued_invoice_line
             WHERE tenant_account_id = %s AND issued_invoice_id = %s
             ORDER BY line_number
@@ -8106,6 +8778,8 @@ class PostgresUsageLedger:
                 line[7],
                 line[8],
                 line[9],
+                line[10],
+                UUID(str(line[11])) if line[11] is not None else None,
             )
             for line in cursor.fetchall()
         )

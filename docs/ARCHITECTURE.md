@@ -77,11 +77,54 @@ and maps missing or closed targets to `target_period_not_found` or
 tax, journal, provider state, or webhook.
 List reads pass the decoded cursor and `limit + 1` to the ledger; PostgreSQL
 applies the tenant-scoped keyset predicate and hydrates only those bounded rows,
-then performs one bulk application-existence lookup for the page.
-The memory adapter serializes recording, application, and period lifecycle writes so a
-concurrent application/close race cannot create a second acknowledgement or
-accept a new application for a closed target; application audit timestamps are
-timezone-aware and not future-dated.
+then performs one bulk application-existence and one bulk rating-existence lookup
+for the page. `LateAdjustmentRatingService` consumes the acknowledgement through
+the nested `/ratings` command and appends `late_adjustment_rating` only while the
+target remains open; a stored rating replays after closure. The exact signed delta
+is copied; its audit timestamp is timezone-aware and not future-dated; no
+synthetic usage snapshot or ordinary `rating_run` is created.
+`LateAdjustmentInvoiceAdjustmentService` consumes that rating through the
+nested `/invoice-adjustments` command and appends one tenant-scoped
+`late_adjustment_invoice_adjustment` linked to an unissued invoice draft and
+the one billing account shared by its draft lines. Composition fails closed
+when the draft has no single payer or has already produced collection,
+journal, tax, or credit downstream facts. Composition and collection,
+tax-assessment, journal-proposal, and credit-adjustment writes share the
+invoice-draft lock. After a composition is stored, those downstream writes
+return `invoice_draft_has_late_adjustment` without persisting; migrations
+`0059`, `0060`, `0062`, `0063`, and `0064` enforce both orderings and issued-invoice
+completeness for direct PostgreSQL inserts while
+allowing an existing composition replay. Issuance preserves exact totals before
+storage validation, expands the local decimal context for bulk exact sums, and
+rejects more than 10,000 projected lines. Migration `0061` fails closed on legacy
+composition rows without payer evidence, upgrades compatible version metadata,
+and enforces composition contract version 2 in PostgreSQL. Migration `0062`
+rejects composition precision loss, validates direct issued-line draft/amount/
+payer equality, and lets collection start after issuance from the frozen total.
+Migration `0063` defers the completeness check until all direct issued lines are
+inserted and takes the shared invoice-draft lock before comparing facts,
+rejecting omitted compositions or stale signed totals.
+Migration `0064` repeats issued-invoice snapshot and line immutability for direct
+PostgreSQL UPDATE/DELETE and removes the `line_type` default so direct lines must
+declare their type explicitly.
+Migration `0065` rejects new direct issued snapshots whose contract version is
+not 2 without rewriting historical v1 rows.
+Migration `0066` rejects future first-write composition timestamps while
+preserving replay of an existing immutable composition.
+Presentment then reports `issue_invoice`. `IssuedInvoiceService` locks the
+draft, consumes all linked composition facts exactly once, and freezes each as
+a signed `late_adjustment` issued-invoice line while adjusting the untaxed
+exact total. A stale tax assessment rejects issuance with
+`late_adjustment_tax_reassessment_required`; no tax is silently reused. A zero
+or negative resulting total is rejected. Issued-invoice line contracts are
+version 2: usage lines are non-negative and late-adjustment lines retain their
+signed exact total and composition ID. The draft and issued snapshot remain
+immutable; collection, journal, provider export, and tax/legal-document
+settlement remain downstream boundaries.
+The memory adapter serializes recording, application, rating, and period
+lifecycle writes so concurrent application/close or rating/close races cannot
+create a second acknowledgement or accept a new fact for a closed target;
+application and rating audit timestamps are timezone-aware and not future-dated.
 Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
 
 ## Usage ingestion

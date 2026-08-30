@@ -167,6 +167,59 @@ class LateAdjustmentApplicationRejectionReasonCode(StrEnum):
     TARGET_PERIOD_NOT_OPEN = "target_period_not_open"
 
 
+class LateAdjustmentApplicationTargetPeriodNotOpen(ValueError):
+    """Raised when a new application targets a period that is not open."""
+
+
+class LateAdjustmentRatingOutcomeCode(StrEnum):
+    """Terminal result of rating one applied late adjustment."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class LateAdjustmentRatingRejectionReasonCode(StrEnum):
+    """Why a late-adjustment rating was refused without writing a fact."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
+    LATE_ADJUSTMENT_APPLICATION_NOT_FOUND = "late_adjustment_application_not_found"
+    TARGET_PERIOD_NOT_OPEN = "late_adjustment_target_period_not_open"
+    ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
+    AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
+
+
+class LateAdjustmentRatingTargetPeriodNotOpen(ValueError):
+    """Raised when a new rating targets a period that is not open."""
+
+
+class LateAdjustmentInvoiceAdjustmentOutcomeCode(StrEnum):
+    """Terminal result of composing one rated late adjustment into a draft."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class LateAdjustmentInvoiceAdjustmentRejectionReasonCode(StrEnum):
+    """Why a rated late adjustment was not attached to an invoice draft."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    LATE_ADJUSTMENT_NOT_FOUND = "late_adjustment_not_found"
+    LATE_ADJUSTMENT_RATING_NOT_FOUND = "late_adjustment_rating_not_found"
+    INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    INVOICE_ALREADY_ISSUED = "invoice_already_issued"
+    INVOICE_DRAFT_HAS_DOWNSTREAM_RECORDS = "invoice_draft_has_downstream_records"
+    INVOICE_DRAFT_BILLING_ACCOUNT_NOT_FOUND = "invoice_draft_billing_account_not_found"
+    INVOICE_DRAFT_BILLING_ACCOUNT_AMBIGUOUS = "invoice_draft_billing_account_ambiguous"
+    ADJUSTMENT_AMOUNT_NOT_REPRESENTABLE = "adjustment_amount_not_representable"
+    IDENTITY_CONFLICT = "late_adjustment_invoice_adjustment_identity_conflict"
+    ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
+    AUTHORIZATION_REFERENCE_INVALID = "authorization_reference_invalid"
+
+
 class TaxRateOutcomeCode(StrEnum):
     """Terminal result of publishing one tenant-scoped tax-rate version."""
 
@@ -210,6 +263,7 @@ class TaxAssessmentRejectionReasonCode(StrEnum):
     DRAFT_TOTAL_INVALID = "draft_total_invalid"
     CURRENCY_EXPONENT_UNKNOWN = "currency_exponent_unknown"
     TAX_ASSESSMENT_NOT_FOUND = "tax_assessment_not_found"
+    INVOICE_DRAFT_HAS_LATE_ADJUSTMENT = "invoice_draft_has_late_adjustment"
 
 
 class TaxAssessmentQueryError(ValueError):
@@ -256,6 +310,9 @@ class IssuedInvoiceRejectionReasonCode(StrEnum):
 
     TENANT_NOT_FOUND = "tenant_not_found"
     INVOICE_DRAFT_NOT_FOUND = "invoice_draft_not_found"
+    LATE_ADJUSTMENT_TAX_REASSESSMENT_REQUIRED = (
+        "late_adjustment_tax_reassessment_required"
+    )
     REQUEST_INVALID = "request_invalid"
 
 
@@ -795,6 +852,7 @@ class JournalProposalRejectionReasonCode(StrEnum):
     VOIDED_AMOUNT_INVALID = "voided_amount_invalid"
     JOURNAL_LINE_AMOUNT_INVALID = "journal_line_amount_invalid"
     CURRENCY_MISMATCH = "currency_mismatch"
+    INVOICE_DRAFT_HAS_LATE_ADJUSTMENT = "invoice_draft_has_late_adjustment"
 
 
 class JournalProposalQueryError(ValueError):
@@ -878,6 +936,7 @@ class CollectionCaseRejectionReasonCode(StrEnum):
     OUTSTANDING_AMOUNT_INVALID = "outstanding_amount_invalid"
     DUNNING_NOTICE_INVALID = "dunning_notice_invalid"
     COLLECTION_CASE_DISPUTED = "collection_case_disputed"
+    INVOICE_DRAFT_HAS_LATE_ADJUSTMENT = "invoice_draft_has_late_adjustment"
 
 
 class PaymentIntentOutcomeCode(StrEnum):
@@ -922,6 +981,7 @@ class CreditAdjustmentRejectionReasonCode(StrEnum):
     CREDIT_EXCEEDS_REMAINING = "credit_exceeds_remaining"
     CREDIT_EXCEEDS_OUTSTANDING = "credit_exceeds_outstanding"
     TAX_SPLIT_INVALID = "tax_split_invalid"
+    INVOICE_DRAFT_HAS_LATE_ADJUSTMENT = "invoice_draft_has_late_adjustment"
 
 
 class CreditAdjustmentQueryError(ValueError):

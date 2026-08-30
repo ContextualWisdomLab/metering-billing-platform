@@ -159,6 +159,8 @@ REQUIRED_FILES = (
     "docs/adr/0132-late-period-adjustment.md",
     "docs/adr/0133-late-adjustment-presentment.md",
     "docs/adr/0134-late-adjustment-application.md",
+    "docs/adr/0135-late-adjustment-rating.md",
+    "docs/adr/0136-late-adjustment-invoice-adjustment.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
@@ -176,6 +178,7 @@ REQUIRED_FILES = (
     "schemas/reconciliation-run.schema.json",
     "schemas/late-adjustment.schema.json",
     "schemas/late-adjustment-presentment.schema.json",
+    "schemas/late-adjustment-invoice-adjustment.schema.json",
     "schemas/usage-ingestion-receipt.schema.json",
     "schemas/rating-run.schema.json",
     "schemas/invoice-draft.schema.json",
@@ -295,7 +298,21 @@ REQUIRED_FILES = (
     "database/migrations/0051_late_adjustment_keyset_index.sql",
     "database/migrations/0052_late_adjustment_application.sql",
     "database/migrations/0053_late_adjustment_application_race.sql",
+    "database/migrations/0054_late_adjustment_rating.sql",
+    "database/migrations/0055_late_adjustment_rating_target_guard.sql",
+    "database/migrations/0056_late_adjustment_invoice_adjustment.sql",
+    "database/migrations/0057_signed_issued_invoice_lines.sql",
+    "database/migrations/0058_late_adjustment_invoice_adjustment_billing_account.sql",
+    "database/migrations/0059_reject_downstream_after_late_adjustment.sql",
+    "database/migrations/0060_reject_late_adjustment_after_downstream.sql",
+    "database/migrations/0061_enforce_late_adjustment_invoice_adjustment_version.sql",
+    "database/migrations/0062_harden_late_adjustment_invoice_boundaries.sql",
+    "database/migrations/0063_require_issued_invoice_composition_completeness.sql",
+    "database/migrations/0064_immutable_typed_issued_invoice_rows.sql",
+    "database/migrations/0065_require_new_issued_invoice_contract_v2.sql",
+    "database/migrations/0066_require_composition_recorded_at_now.sql",
     "schemas/late-adjustment-application.schema.json",
+    "schemas/late-adjustment-rating.schema.json",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
@@ -617,6 +634,13 @@ def _validate_node(
     if "allOf" in schema:
         for branch in schema["allOf"]:
             errors.extend(_validate_node(root_schema, branch, instance, path))
+    if "if" in schema:
+        condition_matches = not _validate_node(root_schema, schema["if"], instance, path)
+        selected = schema.get("then" if condition_matches else "else")
+        if selected is not None:
+            errors.extend(_validate_node(root_schema, selected, instance, path))
+    if "not" in schema and not _validate_node(root_schema, schema["not"], instance, path):
+        errors.append(f"{path}: value matches a forbidden schema")
     if "enum" in schema and instance not in schema["enum"]:
         errors.append(f"{path}: value is not in the allowed enumeration")
     if "const" in schema and instance != schema["const"]:

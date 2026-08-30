@@ -22,7 +22,7 @@ from uuid import UUID
 
 from metering_billing.errors import IssuedInvoicePresentmentQueryError
 from metering_billing.exact_decimal import format_exact_decimal
-from metering_billing.issued_invoice import OPERATOR_ACTION_COLLECT
+from metering_billing.issued_invoice import OPERATOR_ACTION_COLLECT, _format_signed_decimal
 from metering_billing.time_window import parse_iso8601_datetime
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
@@ -31,7 +31,7 @@ from metering_billing.usage_ledger import (
 )
 
 
-ISSUED_INVOICE_PRESENTMENT_CONTRACT_VERSION = 1
+ISSUED_INVOICE_PRESENTMENT_CONTRACT_VERSION = 2
 DEFAULT_PAGE_LIMIT = 50
 MAXIMUM_PAGE_LIMIT = 100
 
@@ -52,18 +52,26 @@ class IssuedInvoicePresentmentLine:
     rated_quantity: Decimal
     unit_price_amount: Decimal
     line_total_amount: Decimal
+    line_type: str = "usage"
+    late_adjustment_invoice_adjustment_id: UUID | None = None
 
     def as_contract_dict(self) -> dict[str, object]:
         """Return the closed JSON object published in the presentment schema."""
-        return {
+        payload: dict[str, object] = {
             "line_number": self.line_number,
             "billing_account_reference": self.billing_account_reference,
             "meter_code": self.meter_code,
             "unit_code": self.unit_code,
             "rated_quantity": format_exact_decimal(self.rated_quantity),
             "unit_price_amount": format_exact_decimal(self.unit_price_amount),
-            "line_total_amount": format_exact_decimal(self.line_total_amount),
+            "line_total_amount": _format_signed_decimal(self.line_total_amount),
+            "line_type": self.line_type,
         }
+        if self.late_adjustment_invoice_adjustment_id is not None:
+            payload["late_adjustment_invoice_adjustment_id"] = str(
+                self.late_adjustment_invoice_adjustment_id
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -236,7 +244,7 @@ class IssuedInvoicePresentmentService:
             issued_at=stored.issued_at,
             due_at=stored.due_at,
             source_payload_hash=stored.source_payload_hash,
-            issued_invoice_contract_version=stored.issued_invoice_contract_version,
+            issued_invoice_contract_version=ISSUED_INVOICE_PRESENTMENT_CONTRACT_VERSION,
             next_operator_action=next_operator_action(),
             issued_invoice_lines=tuple(
                 IssuedInvoicePresentmentLine(
@@ -247,6 +255,10 @@ class IssuedInvoicePresentmentService:
                     rated_quantity=line.rated_quantity,
                     unit_price_amount=line.unit_price_amount,
                     line_total_amount=line.line_total_amount,
+                    line_type=line.line_type,
+                    late_adjustment_invoice_adjustment_id=(
+                        line.late_adjustment_invoice_adjustment_id
+                    ),
                 )
                 for line in stored.issued_invoice_lines
             ),

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
-from threading import Barrier, Event
+from threading import Barrier, Event, Thread
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -12,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
+from unittest import mock
 
 import psycopg
 
@@ -32,9 +34,12 @@ from metering_billing import (
     IssuedCreditNoteVoidPresentmentService,
     IssuedCreditNoteVoidService,
     IssuedInvoiceService,
+    IssuedInvoicePresentmentService,
     IssuedInvoiceVoidPresentmentService,
     IssuedInvoiceVoidService,
     LateAdjustmentApplicationService,
+    LateAdjustmentRatingService,
+    LateAdjustmentInvoiceAdjustmentService,
     LateAdjustmentPresentmentService,
     PaymentIntentService,
     PostgresUsageLedger,
@@ -61,6 +66,10 @@ from metering_billing import (
     validate_reconciliation_evidence,
     validate_reconciliation_run,
     validate_reconciliation_resolution,
+    validate_late_adjustment_rating,
+    validate_late_adjustment_invoice_adjustment,
+    validate_issued_invoice,
+    validate_issued_invoice_presentment,
 )
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_dispute import compute_dispute_payload_hash
@@ -128,6 +137,7 @@ from metering_billing.usage_rating import UsageRatingService
 from metering_billing.usage_ledger import (
     StoredCollectionDispute,
     StoredCreditNoteApplication,
+    StoredLateAdjustmentInvoiceAdjustment,
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
@@ -174,6 +184,86 @@ from tests.test_usage_ingestion import (
 )
 
 
+def prepare_postgres_late_adjustment(
+    ledger, amount: str, source_reference: str, quantity: str = "1810"
+):
+    """Build one durable rated adjustment and unissued draft for integration tests."""
+    accepted = UsageIngestionService(ledger).ingest_usage_event(
+        make_event(
+            event_id=str(uuid4()),
+            source_event_key=source_reference,
+            measurements=[
+                {
+                    "meter_code": "gen_ai_output_token",
+                    "quantity": quantity,
+                    "unit_code": "token",
+                    "quality_code": "provider_reported",
+                }
+            ],
+        )
+    )
+    assert accepted.ingestion_outcome_code.value == "accepted"
+    card = RateCardService(ledger).publish_rate_card(
+        TENANT_ONE,
+        "cwl_standard",
+        "USD",
+        ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+    )
+    rating = UsageRatingService(ledger).rate_usage_window(
+        TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+    )
+    draft = InvoiceDraftService(ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+    source = create_billing_period(
+        TENANT_ONE,
+        date(2026, 7, 1),
+        date(2026, 8, 1),
+        opened_by="operator:period",
+        opened_at=CATALOG_START,
+        period_id=uuid4(),
+    ).advance(
+        "soft_closed",
+        actor_reference="operator:period",
+        authorization_reference="approval:period",
+        reason="close source",
+        transitioned_at=CATALOG_START + timedelta(hours=1),
+    )
+    target = create_billing_period(
+        TENANT_ONE,
+        date(2026, 8, 1),
+        date(2026, 9, 1),
+        opened_by="operator:period",
+        opened_at=CATALOG_START,
+        period_id=uuid4(),
+    )
+    ledger.insert_billing_period(source)
+    ledger.insert_billing_period(target)
+    adjustment = create_late_adjustment(
+        source.period_id,
+        target.period_id,
+        "correction",
+        amount,
+        "USD",
+        source_reference,
+        "sha256:" + "a" * 64,
+        CATALOG_START + timedelta(hours=2),
+        late_adjustment_id=uuid4(),
+    )
+    ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+    LateAdjustmentApplicationService(ledger).apply_late_adjustment(
+        TENANT_ONE,
+        adjustment.late_adjustment_id,
+        applied_by="operator:finance",
+        authorization_reference="approval:apply",
+    )
+    LateAdjustmentRatingService(ledger).rate_late_adjustment(
+        TENANT_ONE,
+        adjustment.late_adjustment_id,
+        rated_by="operator:finance",
+        authorization_reference="approval:rate",
+    )
+    return adjustment, draft
+
+
 POSTGRES_DSN = os.environ.get(
     "METERING_BILLING_POSTGRES_DSN", "dbname=metering_billing_usage_repo_test"
 )
@@ -206,8 +296,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 53:
-            raise AssertionError(f"expected 53 migrations, got {len(applied)}")
+        if len(applied) != 66:
+            raise AssertionError(f"expected 66 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -219,6 +309,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.late_adjustment_invoice_adjustment,
+                billing_core.late_adjustment_rating,
                 billing_core.late_adjustment_application,
                 billing_core.late_adjustment,
                 billing_core.reconciliation_run_line,
@@ -591,6 +683,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.list_late_adjustments(TENANT_TWO), ())
         self.assertEqual(
             self.ledger.find_late_adjustment_application_ids(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id, ()
+            ),
+            frozenset(),
+        )
+        self.assertEqual(
+            self.ledger.find_late_adjustment_rating_ids(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id, ()
+            ),
+            frozenset(),
+        )
+        self.assertEqual(
+            self.ledger.find_late_adjustment_invoice_adjusted_ids(
                 self.ledger.require_tenant(TENANT_ONE).tenant_account_id, ()
             ),
             frozenset(),
@@ -1423,6 +1527,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         assert stored is not None
         self.assertEqual(stored.adjustment_amount, Decimal("-12.50"))
         self.assertEqual(stored.target_period_id, target.period_id)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_application(
+                replace(
+                    stored,
+                    late_adjustment_application_id=uuid4(),
+                    target_period_id=uuid4(),
+                )
+            )
         self.assertEqual(
             service.apply_late_adjustment(
                 TENANT_ONE,
@@ -1432,6 +1544,37 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ).late_adjustment_application_outcome_code,
             "duplicate_replay",
         )
+        conflict_target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 5, 1),
+            date(2026, 6, 1),
+            opened_by="operator:finance_035",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(conflict_target)
+        conflict_adjustment = create_late_adjustment(
+            source.period_id,
+            conflict_target.period_id,
+            "correction",
+            "8.25",
+            "USD",
+            "provider:application-id-conflict",
+            "sha256:" + "c" * 64,
+            CATALOG_START + timedelta(hours=6),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, conflict_adjustment)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_application(
+                replace(
+                    stored,
+                    late_adjustment_id=conflict_adjustment.late_adjustment_id,
+                    target_period_id=conflict_target.period_id,
+                    adjustment_amount=conflict_adjustment.adjustment_amount,
+                    late_adjustment_application_id=stored.late_adjustment_application_id,
+                )
+            )
         self.assertIsNone(
             self.ledger.find_late_adjustment_application(
                 self.ledger.require_tenant(TENANT_TWO).tenant_account_id,
@@ -1444,6 +1587,157 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             .next_operator_action,
             "rate_late_adjustment",
         )
+        rating_service = LateAdjustmentRatingService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=4),
+        )
+        rated = rating_service.rate_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            rated_by="operator:finance_024",
+            authorization_reference="approval:rating_020",
+        )
+        self.assertEqual(rated.late_adjustment_rating_outcome_code, "accepted")
+        self.assertEqual(rated.adjustment_amount, Decimal("-12.50"))
+        self.assertEqual(validate_late_adjustment_rating(rated.as_contract_dict()), ())
+        self.assertEqual(
+            rating_service.rate_late_adjustment(
+                TENANT_ONE,
+                adjustment.late_adjustment_id,
+                rated_by="operator:other",
+                authorization_reference="approval:other",
+            ).late_adjustment_rating_outcome_code,
+            "duplicate_replay",
+        )
+        self.assertEqual(
+            LateAdjustmentPresentmentService(self.ledger)
+            .list_late_adjustments(TENANT_ONE)
+            .late_adjustments[0]
+            .next_operator_action,
+            "record_invoice_adjustment",
+        )
+        stored_rating = self.ledger.get_late_adjustment_rating(
+            rated.late_adjustment_rating_id
+        )
+        self.assertIsNotNone(stored_rating)
+        assert stored_rating is not None
+        self.assertEqual(stored_rating.target_period_id, target.period_id)
+        future_adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "3.00",
+            "USD",
+            "provider:rating-future-time",
+            "sha256:" + "8" * 64,
+            CATALOG_START + timedelta(hours=8),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, future_adjustment)
+        future_application = LateAdjustmentApplicationService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=9),
+        ).apply_late_adjustment(
+            TENANT_ONE,
+            future_adjustment.late_adjustment_id,
+            applied_by="operator:finance_future",
+            authorization_reference="approval:application_future",
+        )
+        self.assertEqual(
+            future_application.late_adjustment_application_outcome_code, "accepted"
+        )
+        with self.assertRaisesRegex(
+            psycopg.errors.RaiseException, "rated_at.*future"
+        ):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_rating
+                        (late_adjustment_rating_id, tenant_account_id,
+                         late_adjustment_application_id, late_adjustment_id,
+                         target_period_id, adjustment_amount, currency_code,
+                         rated_by, authorization_reference, rated_at,
+                         late_adjustment_rating_contract_version,
+                         late_adjustment_rating_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                        future_application.late_adjustment_application_id,
+                        future_adjustment.late_adjustment_id,
+                        future_adjustment.target_period_id,
+                        future_adjustment.adjustment_amount,
+                        future_adjustment.currency_code,
+                        "operator:finance_future",
+                        "approval:rating_future",
+                        datetime.now(UTC) + timedelta(days=1),
+                        1,
+                        "rated",
+                    ),
+                )
+        for invalid in (
+            replace(stored_rating, currency_code="usd"),
+            replace(stored_rating, adjustment_amount=Decimal("0")),
+            replace(stored_rating, adjustment_amount=Decimal("1" * 41)),
+            replace(stored_rating, late_adjustment_rating_status="pending"),
+            replace(stored_rating, rated_by=" "),
+            replace(stored_rating, authorization_reference=" "),
+            replace(stored_rating, rated_at=datetime(2027, 1, 1, 0, 0)),
+            replace(stored_rating, rated_at=datetime.now(UTC) + timedelta(days=1)),
+        ):
+            with self.assertRaises(ValueError):
+                self.ledger.insert_late_adjustment_rating(invalid)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_rating(
+                replace(
+                    stored_rating,
+                    late_adjustment_rating_id=uuid4(),
+                    target_period_id=uuid4(),
+                )
+            )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_rating(
+                replace(
+                    stored_rating,
+                    late_adjustment_rating_id=uuid4(),
+                    adjustment_amount=Decimal("1.0"),
+                )
+            )
+        conflict_application = LateAdjustmentApplicationService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=7),
+        ).apply_late_adjustment(
+            TENANT_ONE,
+            conflict_adjustment.late_adjustment_id,
+            applied_by="operator:finance_conflict",
+            authorization_reference="approval:application_conflict",
+        )
+        self.assertEqual(
+            conflict_application.late_adjustment_application_outcome_code, "accepted"
+        )
+        with self.assertRaisesRegex(ValueError, "identity conflicts"):
+            self.ledger.insert_late_adjustment_rating(
+                replace(
+                    stored_rating,
+                    late_adjustment_id=conflict_adjustment.late_adjustment_id,
+                    late_adjustment_application_id=(
+                        conflict_application.late_adjustment_application_id
+                    ),
+                    target_period_id=conflict_target.period_id,
+                    adjustment_amount=conflict_adjustment.adjustment_amount,
+                )
+            )
+        self.assertIsNone(self.ledger.get_late_adjustment_rating(uuid4()))
+        for statement in (
+            "UPDATE billing_core.late_adjustment_rating "
+            "SET rated_by = 'operator:rewrite' WHERE late_adjustment_rating_id = %s",
+            "DELETE FROM billing_core.late_adjustment_rating "
+            "WHERE late_adjustment_rating_id = %s",
+        ):
+            with self.assertRaises(psycopg.errors.RaiseException):
+                with self.connection.transaction():
+                    self.connection.execute(statement, (rated.late_adjustment_rating_id,))
         future_adjustment = create_late_adjustment(
             source.period_id,
             target.period_id,
@@ -1581,6 +1875,192 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
                 adjustment.late_adjustment_id,
             )
+        )
+
+    def test_late_adjustment_rating_rechecks_closed_target(self) -> None:
+        """A first rating after target closure is rejected, including by SQL."""
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 12, 1),
+            date(2027, 1, 1),
+            opened_by="operator:finance_040",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_041",
+            authorization_reference="approval:period_040",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2027, 1, 1),
+            date(2027, 2, 1),
+            opened_by="operator:finance_042",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "2.75",
+            "USD",
+            "provider:rating-closed-target",
+            "sha256:" + "f" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        applied = LateAdjustmentApplicationService(self.ledger).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:finance_043",
+            authorization_reference="approval:application_040",
+        )
+        self.assertEqual(applied.late_adjustment_application_outcome_code, "accepted")
+        closed_target = target.advance(
+            "soft_closed",
+            actor_reference="operator:finance_044",
+            authorization_reference="approval:period_041",
+            reason="close target before rating",
+            transitioned_at=CATALOG_START + timedelta(hours=3),
+        )
+        self.ledger.insert_billing_period(closed_target)
+        rejected = LateAdjustmentRatingService(self.ledger).rate_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            rated_by="operator:finance_045",
+            authorization_reference="approval:rating_040",
+        )
+        self.assertEqual(rejected.late_adjustment_rating_outcome_code, "rejected")
+        self.assertEqual(
+            rejected.rejection_reason_code, "late_adjustment_target_period_not_open"
+        )
+        application = self.ledger.get_late_adjustment_application(
+            applied.late_adjustment_application_id
+        )
+        assert application is not None
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_rating
+                        (late_adjustment_rating_id, tenant_account_id,
+                         late_adjustment_application_id, late_adjustment_id,
+                         target_period_id, adjustment_amount, currency_code,
+                         rated_by, authorization_reference, rated_at,
+                         late_adjustment_rating_contract_version,
+                         late_adjustment_rating_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        application.tenant_account_id,
+                        application.late_adjustment_application_id,
+                        application.late_adjustment_id,
+                        application.target_period_id,
+                        application.adjustment_amount,
+                        application.currency_code,
+                        "operator:finance_045",
+                        "approval:rating_040",
+                        CATALOG_START + timedelta(hours=4),
+                        1,
+                        "rated",
+                    ),
+                )
+        self.assertIsNone(
+            self.ledger.find_late_adjustment_rating(
+                application.tenant_account_id, adjustment.late_adjustment_id
+            )
+        )
+
+    def test_concurrent_late_adjustment_ratings_replay_first_writer(self) -> None:
+        """Concurrent rating writers preserve one fact and the winner's audit data."""
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2027, 2, 1),
+            date(2027, 3, 1),
+            opened_by="operator:finance_046",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_047",
+            authorization_reference="approval:period_042",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2027, 3, 1),
+            date(2027, 4, 1),
+            opened_by="operator:finance_048",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        adjustment = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "6.25",
+            "USD",
+            "provider:concurrent-rating",
+            "sha256:" + "7" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, adjustment)
+        application = LateAdjustmentApplicationService(self.ledger).apply_late_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            applied_by="operator:finance_049",
+            authorization_reference="approval:application_042",
+        )
+        self.assertEqual(application.late_adjustment_application_outcome_code, "accepted")
+        barrier = Barrier(2)
+
+        class BarrierLedger(PostgresUsageLedger):
+            """Hold both rating calls after their pre-insert read."""
+
+            def find_late_adjustment_rating(self, tenant_account_id, late_adjustment_id):
+                result = super().find_late_adjustment_rating(
+                    tenant_account_id, late_adjustment_id
+                )
+                barrier.wait()
+                return result
+
+        def rate_once(index: int) -> str:
+            with psycopg.connect(POSTGRES_DSN) as connection:
+                return LateAdjustmentRatingService(
+                    BarrierLedger(connection),
+                    clock=lambda: CATALOG_START + timedelta(hours=4 + index),
+                ).rate_late_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    rated_by=f"operator:rating_{index}",
+                    authorization_reference=f"approval:rating_{index}",
+                ).late_adjustment_rating_outcome_code.value
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(rate_once, (0, 1)))
+        self.assertEqual(sorted(outcomes), ["accepted", "duplicate_replay"])
+        stored = self.ledger.find_late_adjustment_rating(
+            self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+            adjustment.late_adjustment_id,
+        )
+        self.assertIsNotNone(stored)
+        self.assertEqual(
+            self.ledger.find_late_adjustment_rating_ids(
+                self.ledger.require_tenant(TENANT_ONE).tenant_account_id,
+                (adjustment.late_adjustment_id,),
+            ),
+            frozenset({adjustment.late_adjustment_id}),
         )
 
     def test_concurrent_late_adjustment_applications_replay_first_writer(self) -> None:
@@ -12782,6 +13262,1129 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM billing_core.collection_dispute"
             ).fetchone()[0],
             6,
+        )
+
+    def test_late_adjustment_invoice_adjustment_is_durable_and_immutable(self) -> None:
+        """The signed rating is attached to one unissued draft and replays safely."""
+        accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 7, 1),
+            date(2026, 8, 1),
+            opened_by="operator:period",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:period",
+            authorization_reference="approval:period",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 8, 1),
+            date(2026, 9, 1),
+            opened_by="operator:period",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        late = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "-0.002",
+            "USD",
+            "provider:late-invoice-001",
+            "sha256:" + "a" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, late)
+        LateAdjustmentApplicationService(self.ledger).apply_late_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            applied_by="operator:finance",
+            authorization_reference="approval:apply",
+        )
+        rated = LateAdjustmentRatingService(self.ledger).rate_late_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            rated_by="operator:finance",
+            authorization_reference="approval:rate",
+        )
+        with self.assertRaisesRegex(ValueError, "recorded_at.*future"):
+            LateAdjustmentInvoiceAdjustmentService(
+                self.ledger, clock=lambda: datetime.now(UTC) + timedelta(days=1)
+            ).record_invoice_adjustment(
+                TENANT_ONE,
+                late.late_adjustment_id,
+                draft.invoice_draft_id,
+                recorded_by="operator:future",
+                authorization_reference="approval:future",
+            )
+        composition_service = LateAdjustmentInvoiceAdjustmentService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=3),
+        )
+        composed = composition_service.record_invoice_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        self.assertEqual(
+            composed.late_adjustment_invoice_adjustment_outcome_code, "accepted"
+        )
+        self.assertEqual(validate_late_adjustment_invoice_adjustment(composed.as_contract_dict()), ())
+        stored = self.ledger.get_late_adjustment_invoice_adjustment(
+            composed.late_adjustment_invoice_adjustment_id
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.late_adjustment_rating_id, rated.late_adjustment_rating_id)
+        with self.assertRaisesRegex(ValueError, "recorded_at.*future"):
+            self.ledger.insert_late_adjustment_invoice_adjustment(
+                replace(
+                    stored,
+                    late_adjustment_invoice_adjustment_id=uuid4(),
+                    recorded_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+        replay = composition_service.record_invoice_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:other",
+            authorization_reference="approval:other",
+        )
+        self.assertEqual(
+            replay.late_adjustment_invoice_adjustment_outcome_code,
+            "duplicate_replay",
+        )
+        self.assertEqual(
+            replay.late_adjustment_invoice_adjustment_id,
+            composed.late_adjustment_invoice_adjustment_id,
+        )
+        self.assertEqual(
+            LateAdjustmentPresentmentService(self.ledger)
+            .present_late_adjustment(TENANT_ONE, late.late_adjustment_id)
+            .next_operator_action,
+            "issue_invoice",
+        )
+        issued = IssuedInvoiceService(
+            self.ledger,
+            clock=lambda: CATALOG_START + timedelta(hours=4),
+        ).issue_invoice(TENANT_ONE, draft.invoice_draft_id)
+        self.assertEqual(
+            issued.issued_invoice_outcome_code.value,
+            "accepted",
+            issued.rejection_reason_code,
+        )
+        self.assertEqual(
+            issued.tax_exclusive_amount,
+            draft.drafted_total_amount + Decimal("-0.002"),
+        )
+        assert issued.issued_invoice_lines
+        adjustment_line = issued.issued_invoice_lines[-1]
+        self.assertEqual(adjustment_line.line_type, "late_adjustment")
+        self.assertEqual(adjustment_line.line_total_amount, Decimal("-0.002"))
+        self.assertEqual(
+            adjustment_line.late_adjustment_invoice_adjustment_id,
+            composed.late_adjustment_invoice_adjustment_id,
+        )
+        self.assertEqual(validate_issued_invoice(issued.as_contract_dict()), ())
+        presented = IssuedInvoicePresentmentService(self.ledger).present_issued_invoice(
+            TENANT_ONE, issued.issued_invoice_id
+        )
+        self.assertEqual(
+            presented.issued_invoice_lines[-1].line_total_amount, Decimal("-0.002")
+        )
+        self.assertEqual(
+            presented.issued_invoice_lines[-1].late_adjustment_invoice_adjustment_id,
+            composed.late_adjustment_invoice_adjustment_id,
+        )
+        self.assertEqual(
+            validate_issued_invoice_presentment(presented.as_contract_dict()), ()
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.collection_case
+                        (collection_case_id, tenant_account_id, invoice_draft_id,
+                         currency_code, collection_case_status, outstanding_amount, opened_at)
+                    VALUES (%s, %s, %s, %s, 'open', %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        tenant.tenant_account_id,
+                        draft.invoice_draft_id,
+                        issued.currency_code,
+                        issued.tax_inclusive_amount + Decimal("0.001"),
+                        CATALOG_START,
+                    ),
+                )
+        collection = CollectionCaseService(self.ledger).open_collection_case(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        self.assertEqual(collection.collection_case_outcome_code.value, "accepted")
+        self.assertEqual(collection.outstanding_amount, issued.tax_inclusive_amount)
+        stored_issued = self.ledger.get_issued_invoice(issued.issued_invoice_id)
+        assert stored_issued is not None
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    "UPDATE billing_core.issued_invoice "
+                    "SET tax_exclusive_amount = tax_exclusive_amount + 1 "
+                    "WHERE issued_invoice_id = %s",
+                    (issued.issued_invoice_id,),
+                )
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    "DELETE FROM billing_core.issued_invoice_line "
+                    "WHERE issued_invoice_line_id = %s",
+                    (stored_issued.issued_invoice_lines[-1].issued_invoice_line_id,),
+                )
+        for statement in (
+            "UPDATE billing_core.late_adjustment_invoice_adjustment "
+            "SET recorded_by = 'operator:rewrite' "
+            "WHERE late_adjustment_invoice_adjustment_id = %s",
+            "DELETE FROM billing_core.late_adjustment_invoice_adjustment "
+            "WHERE late_adjustment_invoice_adjustment_id = %s",
+        ):
+            with self.assertRaises(psycopg.errors.RaiseException):
+                with self.connection.transaction():
+                    self.connection.execute(
+                        statement, (composed.late_adjustment_invoice_adjustment_id,)
+                    )
+
+    def test_late_adjustment_invoice_adjustment_rejects_collection_and_journal(self) -> None:
+        """PostgreSQL refuses composition after collection or journal capture."""
+        for downstream in ("collection", "journal"):
+            with self.subTest(downstream=downstream):
+                adjustment, draft = prepare_postgres_late_adjustment(
+                    self.ledger,
+                    "0.002",
+                    f"provider:late-downstream-{downstream}",
+                    quantity="1810" if downstream == "collection" else "1811",
+                )
+                if downstream == "collection":
+                    result = CollectionCaseService(self.ledger).open_collection_case(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    self.assertEqual(result.collection_case_outcome_code.value, "accepted")
+                else:
+                    result = AccountingExportService(self.ledger).propose_journal(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    self.assertEqual(result.journal_proposal_outcome_code.value, "accepted")
+                rejected = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    draft.invoice_draft_id,
+                    recorded_by="operator:finance",
+                    authorization_reference="approval:invoice-adjustment",
+                )
+                self.assertEqual(
+                    rejected.rejection_reason_code.value,
+                    "invoice_draft_has_downstream_records",
+                )
+
+    def test_postgres_downstream_writes_reject_after_composition(self) -> None:
+        """The draft lock and database trigger prevent stale downstream facts."""
+        for downstream in ("collection", "journal", "tax", "credit"):
+            with self.subTest(downstream=downstream):
+                adjustment, draft = prepare_postgres_late_adjustment(
+                    self.ledger,
+                    "0.002",
+                    f"provider:late-after-composition-{downstream}",
+                    quantity=str(1810 + ("collection", "journal", "tax", "credit").index(downstream)),
+                )
+                composed = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+                    TENANT_ONE,
+                    adjustment.late_adjustment_id,
+                    draft.invoice_draft_id,
+                    recorded_by="operator:finance",
+                    authorization_reference="approval:invoice-adjustment",
+                )
+                self.assertEqual(composed.late_adjustment_invoice_adjustment_outcome_code.value, "accepted")
+                if downstream == "collection":
+                    tenant = self.ledger.require_tenant(TENANT_ONE)
+                    with self.assertRaises(psycopg.errors.RaiseException):
+                        with self.connection.transaction():
+                            self.connection.execute(
+                                """
+                                INSERT INTO billing_core.collection_case
+                                    (collection_case_id, tenant_account_id, invoice_draft_id,
+                                     currency_code, collection_case_status, outstanding_amount, opened_at)
+                                VALUES (%s, %s, %s, 'USD', 'open', %s, %s)
+                                """,
+                                (
+                                    uuid4(),
+                                    tenant.tenant_account_id,
+                                    draft.invoice_draft_id,
+                                    Decimal("0.002"),
+                                    CATALOG_START,
+                                ),
+                            )
+                    result = CollectionCaseService(self.ledger).open_collection_case(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    table = "collection_case"
+                elif downstream == "journal":
+                    result = AccountingExportService(self.ledger).propose_journal(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    table = "journal_proposal"
+                elif downstream == "tax":
+                    TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.10")
+                    result = TaxAssessmentService(self.ledger).assess_tax(
+                        TENANT_ONE, draft.invoice_draft_id, 1
+                    )
+                    table = "tax_assessment"
+                else:
+                    result = CreditAdjustmentService(self.ledger).record_credit_adjustment(
+                        TENANT_ONE, draft.invoice_draft_id, "0.001", "rating_correction"
+                    )
+                    table = "credit_adjustment"
+                self.assertEqual(result.rejection_reason_code.value, "invoice_draft_has_late_adjustment")
+                self.assertEqual(
+                    self.connection.execute(
+                        f"SELECT COUNT(*) FROM billing_core.{table} WHERE invoice_draft_id = %s",
+                        (draft.invoice_draft_id,),
+                    ).fetchone()[0],
+                    0,
+                    )
+
+    def test_postgres_direct_composition_rejects_after_downstream(self) -> None:
+        """The composition trigger closes the reverse direct-SQL ordering gap."""
+        for downstream in ("collection", "journal", "tax", "credit"):
+            with self.subTest(downstream=downstream):
+                adjustment, draft = prepare_postgres_late_adjustment(
+                    self.ledger,
+                    "0.002",
+                    f"provider:direct-composition-after-{downstream}",
+                    quantity=str(1820 + ("collection", "journal", "tax", "credit").index(downstream)),
+                )
+                if downstream == "collection":
+                    result = CollectionCaseService(self.ledger).open_collection_case(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    self.assertEqual(result.collection_case_outcome_code.value, "accepted")
+                elif downstream == "journal":
+                    result = AccountingExportService(self.ledger).propose_journal(
+                        TENANT_ONE, draft.invoice_draft_id
+                    )
+                    self.assertEqual(result.journal_proposal_outcome_code.value, "accepted")
+                elif downstream == "tax":
+                    TaxRateService(self.ledger).publish_tax_rate(TENANT_ONE, "vat", "0.10")
+                    result = TaxAssessmentService(self.ledger).assess_tax(
+                        TENANT_ONE, draft.invoice_draft_id, 1
+                    )
+                    self.assertEqual(result.tax_assessment_outcome_code.value, "accepted")
+                else:
+                    result = CreditAdjustmentService(self.ledger).record_credit_adjustment(
+                        TENANT_ONE, draft.invoice_draft_id, "0.001", "rating_correction"
+                    )
+                    self.assertEqual(result.credit_adjustment_outcome_code.value, "accepted")
+                tenant = self.ledger.require_tenant(TENANT_ONE)
+                stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+                assert stored_draft is not None
+                rating = self.ledger.find_late_adjustment_rating(
+                    tenant.tenant_account_id, adjustment.late_adjustment_id
+                )
+                assert rating is not None
+                line = stored_draft.invoice_draft_lines[0]
+                candidate = StoredLateAdjustmentInvoiceAdjustment(
+                    late_adjustment_invoice_adjustment_id=uuid4(),
+                    tenant_account_id=tenant.tenant_account_id,
+                    billing_account_id=line.billing_account_id,
+                    billing_account_reference=line.billing_account_reference,
+                    late_adjustment_rating_id=rating.late_adjustment_rating_id,
+                    late_adjustment_application_id=rating.late_adjustment_application_id,
+                    late_adjustment_id=rating.late_adjustment_id,
+                    invoice_draft_id=draft.invoice_draft_id,
+                    target_period_id=rating.target_period_id,
+                    adjustment_amount=rating.adjustment_amount,
+                    currency_code=rating.currency_code,
+                    recorded_by="operator:test",
+                    authorization_reference="approval:test",
+                    recorded_at=CATALOG_START,
+                    source_payload_hash="sha256:" + "d" * 64,
+                    late_adjustment_invoice_adjustment_contract_version=2,
+                    late_adjustment_invoice_adjustment_status="recorded",
+                )
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    self.ledger.insert_late_adjustment_invoice_adjustment(candidate)
+                self.assertEqual(
+                    self.connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM billing_core.late_adjustment_invoice_adjustment
+                        WHERE invoice_draft_id = %s
+                        """,
+                        (draft.invoice_draft_id,),
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_postgres_composition_rejects_unrepresentable_fractional_amount(self) -> None:
+        """The composition boundary rejects a non-zero digit beyond numeric(38,12)."""
+        adjustment, draft = prepare_postgres_late_adjustment(
+            self.ledger, "0.0000000000001", "provider:late-precision-001"
+        )
+        rejected = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        self.assertEqual(
+            rejected.rejection_reason_code.value,
+            "adjustment_amount_not_representable",
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        rating = self.ledger.find_late_adjustment_rating(
+            tenant.tenant_account_id, adjustment.late_adjustment_id
+        )
+        assert stored_draft is not None
+        assert rating is not None
+        line = stored_draft.invoice_draft_lines[0]
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_invoice_adjustment
+                        (late_adjustment_invoice_adjustment_id, tenant_account_id,
+                         late_adjustment_rating_id, late_adjustment_application_id,
+                         late_adjustment_id, invoice_draft_id, target_period_id,
+                         adjustment_amount, currency_code, recorded_by,
+                         authorization_reference, recorded_at, source_payload_hash,
+                         late_adjustment_invoice_adjustment_contract_version,
+                         late_adjustment_invoice_adjustment_status, billing_account_id,
+                         billing_account_reference)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        tenant.tenant_account_id,
+                        rating.late_adjustment_rating_id,
+                        rating.late_adjustment_application_id,
+                        rating.late_adjustment_id,
+                        draft.invoice_draft_id,
+                        rating.target_period_id,
+                        Decimal("0.0000000000001"),
+                        rating.currency_code,
+                        "operator:test",
+                        "approval:test",
+                        CATALOG_START,
+                        "sha256:" + "e" * 64,
+                        2,
+                        "recorded",
+                        line.billing_account_id,
+                        line.billing_account_reference,
+                    ),
+                )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.late_adjustment_invoice_adjustment "
+                "WHERE invoice_draft_id = %s",
+                (draft.invoice_draft_id,),
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_postgres_direct_composition_rejects_future_recorded_at(self) -> None:
+        """Raw composition inserts cannot persist a future audit timestamp."""
+        adjustment, draft = prepare_postgres_late_adjustment(
+            self.ledger, "0.002", "provider:direct-future-composition"
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        rating = self.ledger.find_late_adjustment_rating(
+            tenant.tenant_account_id, adjustment.late_adjustment_id
+        )
+        assert stored_draft is not None
+        assert rating is not None
+        line = stored_draft.invoice_draft_lines[0]
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.late_adjustment_invoice_adjustment
+                        (late_adjustment_invoice_adjustment_id, tenant_account_id,
+                         late_adjustment_rating_id, late_adjustment_application_id,
+                         late_adjustment_id, invoice_draft_id, target_period_id,
+                         adjustment_amount, currency_code, recorded_by,
+                         authorization_reference, recorded_at, source_payload_hash,
+                         late_adjustment_invoice_adjustment_contract_version,
+                         late_adjustment_invoice_adjustment_status, billing_account_id,
+                         billing_account_reference)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        tenant.tenant_account_id,
+                        rating.late_adjustment_rating_id,
+                        rating.late_adjustment_application_id,
+                        rating.late_adjustment_id,
+                        draft.invoice_draft_id,
+                        rating.target_period_id,
+                        rating.adjustment_amount,
+                        rating.currency_code,
+                        "operator:future",
+                        "approval:future",
+                        datetime.now(UTC) + timedelta(days=1),
+                        "sha256:" + "f" * 64,
+                        2,
+                        "recorded",
+                        line.billing_account_id,
+                        line.billing_account_reference,
+                    ),
+                )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.late_adjustment_invoice_adjustment "
+                "WHERE invoice_draft_id = %s",
+                (draft.invoice_draft_id,),
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_postgres_direct_issued_line_rejects_forged_composition_evidence(self) -> None:
+        """Raw issued lines must match composition draft, amount, and payer exactly."""
+        adjustment_a, draft_a = prepare_postgres_late_adjustment(
+            self.ledger, "-0.002", "provider:line-evidence-a", quantity="1830"
+        )
+        composition_a = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment_a.late_adjustment_id,
+            draft_a.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        adjustment_b, draft_b = prepare_postgres_late_adjustment(
+            self.ledger, "0.002", "provider:line-evidence-b", quantity="1831"
+        )
+        composition_b = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment_b.late_adjustment_id,
+            draft_b.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_a = self.ledger.get_invoice_draft(draft_a.invoice_draft_id)
+        stored_composition_a = self.ledger.get_late_adjustment_invoice_adjustment(
+            composition_a.late_adjustment_invoice_adjustment_id
+        )
+        stored_composition_b = self.ledger.get_late_adjustment_invoice_adjustment(
+            composition_b.late_adjustment_invoice_adjustment_id
+        )
+        assert stored_a is not None
+        assert stored_composition_a is not None
+        assert stored_composition_b is not None
+        line_a = stored_a.invoice_draft_lines[0]
+
+        forged_lines = (
+            (
+                stored_composition_a,
+                line_a.billing_account_reference,
+                stored_composition_a.adjustment_amount + Decimal("0.001"),
+            ),
+            (
+                stored_composition_a,
+                "urn:cwl:forged:billing-account",
+                stored_composition_a.adjustment_amount,
+            ),
+            (
+                stored_composition_b,
+                stored_composition_b.billing_account_reference,
+                stored_composition_b.adjustment_amount,
+            ),
+        )
+        for index, (composition, billing_account_reference, line_total) in enumerate(
+            forged_lines
+        ):
+            with self.subTest(index=index):
+                issued_invoice_id = uuid4()
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    with self.connection.transaction():
+                        self.connection.execute(
+                            """
+                            INSERT INTO billing_core.issued_invoice
+                                (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                                 issued_invoice_contract_version, rating_run_id,
+                                 usage_snapshot_hash, source_payload_hash, currency_code,
+                                 tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                                 issued_invoice_status, issued_at)
+                            VALUES (%s, %s, %s, 2, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                            """,
+                            (
+                                issued_invoice_id,
+                                tenant.tenant_account_id,
+                                draft_a.invoice_draft_id,
+                                stored_a.rating_run_id,
+                                stored_a.usage_snapshot_hash,
+                                "sha256:" + ("def"[index] * 64),
+                                stored_a.currency_code,
+                                stored_a.drafted_total_amount,
+                                stored_a.drafted_total_amount,
+                                CATALOG_START,
+                            ),
+                        )
+                        self.connection.execute(
+                            """
+                            INSERT INTO billing_core.issued_invoice_line
+                                (issued_invoice_line_id, issued_invoice_id, tenant_account_id,
+                                 line_number, billing_account_reference, meter_code, unit_code,
+                                 rated_quantity, unit_price_amount, line_total_amount,
+                                 line_type, late_adjustment_invoice_adjustment_id)
+                            VALUES (%s, %s, %s, 1, %s, 'late_adjustment', 'adjustment',
+                                    1, %s, %s, 'late_adjustment', %s)
+                            """,
+                            (
+                                uuid4(),
+                                issued_invoice_id,
+                                tenant.tenant_account_id,
+                                billing_account_reference,
+                                composition.adjustment_amount.copy_abs(),
+                                line_total,
+                                composition.late_adjustment_invoice_adjustment_id,
+                            ),
+                        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM billing_core.issued_invoice_line"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_postgres_direct_issued_invoice_requires_composition_lines(self) -> None:
+        """A direct issued header cannot omit linked late-adjustment lines."""
+        adjustment, draft = prepare_postgres_late_adjustment(
+            self.ledger, "-0.002", "provider:line-completeness-001", quantity="1840"
+        )
+        composed = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            adjustment.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        self.assertEqual(composed.late_adjustment_invoice_adjustment_outcome_code.value, "accepted")
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+        issued_invoice_id = uuid4()
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.issued_invoice
+                        (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                         issued_invoice_contract_version, rating_run_id,
+                         usage_snapshot_hash, source_payload_hash, currency_code,
+                         tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                         issued_invoice_status, issued_at)
+                    VALUES (%s, %s, %s, 2, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                    """,
+                    (
+                        issued_invoice_id,
+                        tenant.tenant_account_id,
+                        draft.invoice_draft_id,
+                        stored_draft.rating_run_id,
+                        stored_draft.usage_snapshot_hash,
+                        "sha256:" + "f" * 64,
+                        stored_draft.currency_code,
+                        stored_draft.drafted_total_amount,
+                        stored_draft.drafted_total_amount,
+                        CATALOG_START,
+                    ),
+                )
+        self.assertIsNone(
+            self.ledger.find_issued_invoice(
+                tenant.tenant_account_id, draft.invoice_draft_id
+            )
+        )
+
+    def test_postgres_issuance_waits_for_composition_draft_lock(self) -> None:
+        """A direct SQL writer serializes on the draft before issuance."""
+        adjustment, draft = prepare_postgres_late_adjustment(
+            self.ledger, "-0.002", "provider:composition-issuance-race", quantity="1841"
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+
+        composition_connection = psycopg.connect(POSTGRES_DSN)
+        composition_connection.execute("BEGIN")
+        composition_ledger = PostgresUsageLedger(composition_connection)
+        try:
+            composed = LateAdjustmentInvoiceAdjustmentService(
+                composition_ledger,
+                clock=lambda: CATALOG_START + timedelta(hours=3),
+            ).record_invoice_adjustment(
+                TENANT_ONE,
+                adjustment.late_adjustment_id,
+                draft.invoice_draft_id,
+                recorded_by="operator:race",
+                authorization_reference="approval:race",
+            )
+            self.assertEqual(composed.late_adjustment_invoice_adjustment_outcome_code.value, "accepted")
+            composition_connection.execute(
+                """
+                SELECT 1
+                FROM billing_core.invoice_draft
+                WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                FOR UPDATE
+                """,
+                (tenant.tenant_account_id, draft.invoice_draft_id),
+            )
+
+            issued_invoice_id = uuid4()
+            issue_started = Event()
+            issue_inserted = Event()
+            issue_succeeded = Event()
+            issue_pid: list[int] = []
+            issue_errors: list[BaseException] = []
+
+            def issue_directly() -> None:
+                try:
+                    with psycopg.connect(POSTGRES_DSN) as lock_connection:
+                        issue_pid.append(
+                            lock_connection.execute("SELECT pg_backend_pid()").fetchone()[0]
+                        )
+                        issue_started.set()
+                        lock_connection.execute(
+                            """
+                            SELECT 1
+                            FROM billing_core.invoice_draft
+                            WHERE tenant_account_id = %s AND invoice_draft_id = %s
+                            FOR UPDATE
+                            """,
+                            (tenant.tenant_account_id, draft.invoice_draft_id),
+                        )
+                        lock_connection.commit()
+                    issue_inserted.set()
+                    with psycopg.connect(POSTGRES_DSN) as issue_connection:
+                        with issue_connection.transaction():
+                            issue_connection.execute(
+                                """
+                                INSERT INTO billing_core.issued_invoice
+                                    (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                                     issued_invoice_contract_version, rating_run_id,
+                                     usage_snapshot_hash, source_payload_hash, currency_code,
+                                     tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                                     issued_invoice_status, issued_at)
+                                VALUES (%s, %s, %s, 2, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                                """,
+                                (
+                                    issued_invoice_id,
+                                    tenant.tenant_account_id,
+                                    draft.invoice_draft_id,
+                                    stored_draft.rating_run_id,
+                                    stored_draft.usage_snapshot_hash,
+                                    "sha256:" + "c" * 64,
+                                    stored_draft.currency_code,
+                                    stored_draft.drafted_total_amount,
+                                    stored_draft.drafted_total_amount,
+                                    CATALOG_START,
+                                ),
+                            )
+                        issue_succeeded.set()
+                except BaseException as error:  # pragma: no cover - asserted below
+                    issue_errors.append(error)
+
+            issue_thread = Thread(target=issue_directly)
+            issue_thread.start()
+            self.assertTrue(issue_started.wait(5))
+
+            blockers: list[int] = []
+            for _ in range(100):
+                blockers = self.connection.execute(
+                    "SELECT pg_blocking_pids(%s)", (issue_pid[0],)
+                ).fetchone()[0]
+                if blockers:
+                    break
+                if issue_inserted.is_set():
+                    break
+                issue_inserted.wait(0.01)
+            self.assertTrue(blockers)
+            composition_connection.commit()
+            self.assertEqual(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM billing_core.late_adjustment_invoice_adjustment "
+                    "WHERE invoice_draft_id = %s",
+                    (draft.invoice_draft_id,),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertTrue(issue_inserted.wait(5))
+            issue_thread.join(5)
+            self.assertFalse(issue_thread.is_alive())
+            self.assertFalse(issue_succeeded.is_set())
+            self.assertEqual(len(issue_errors), 1)
+            self.assertIsInstance(issue_errors[0], psycopg.errors.RaiseException)
+            self.assertIn("missing late adjustment lines", str(issue_errors[0]))
+        finally:
+            composition_connection.rollback()
+            composition_connection.close()
+        self.assertIsNone(
+            self.ledger.find_issued_invoice(
+                tenant.tenant_account_id, draft.invoice_draft_id
+            )
+        )
+
+    def test_postgres_direct_issued_invoice_rejects_unsupported_contract_versions(
+        self,
+    ) -> None:
+        """New issued snapshots must use contract version 2."""
+        accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_contract_version",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+
+        for version in (1, 3):
+            with self.subTest(version=version):
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    with self.connection.transaction():
+                        self.connection.execute(
+                            """
+                            INSERT INTO billing_core.issued_invoice
+                                (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                                 issued_invoice_contract_version, rating_run_id,
+                                 usage_snapshot_hash, source_payload_hash, currency_code,
+                                 tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                                 issued_invoice_status, issued_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                            """,
+                            (
+                                uuid4(),
+                                tenant.tenant_account_id,
+                                draft.invoice_draft_id,
+                                version,
+                                stored_draft.rating_run_id,
+                                stored_draft.usage_snapshot_hash,
+                                "sha256:" + ("b" * 64),
+                                stored_draft.currency_code,
+                                stored_draft.drafted_total_amount,
+                                stored_draft.drafted_total_amount,
+                                CATALOG_START,
+                            ),
+                        )
+        self.assertIsNone(
+            self.ledger.find_issued_invoice(
+                tenant.tenant_account_id, draft.invoice_draft_id
+            )
+        )
+
+    def test_postgres_issued_line_requires_explicit_line_type(self) -> None:
+        """Direct issued-line inserts cannot rely on a usage-line default."""
+        accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_typed_line",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        tenant = self.ledger.require_tenant(TENANT_ONE)
+        stored_draft = self.ledger.get_invoice_draft(draft.invoice_draft_id)
+        assert stored_draft is not None
+        issued_invoice_id = uuid4()
+        self.assertIsNone(
+            self.connection.execute(
+                """
+                SELECT column_default
+                FROM information_schema.columns
+                WHERE table_schema = 'billing_core'
+                  AND table_name = 'issued_invoice_line'
+                  AND column_name = 'line_type'
+                """
+            ).fetchone()[0]
+        )
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.issued_invoice
+                        (issued_invoice_id, tenant_account_id, invoice_draft_id,
+                         issued_invoice_contract_version, rating_run_id,
+                         usage_snapshot_hash, source_payload_hash, currency_code,
+                         tax_exclusive_amount, tax_amount, tax_inclusive_amount,
+                         issued_invoice_status, issued_at)
+                    VALUES (%s, %s, %s, 2, %s, %s, %s, %s, %s, 0, %s, 'issued', %s)
+                    """,
+                    (
+                        issued_invoice_id,
+                        tenant.tenant_account_id,
+                        draft.invoice_draft_id,
+                        stored_draft.rating_run_id,
+                        stored_draft.usage_snapshot_hash,
+                        "sha256:" + "a" * 64,
+                        stored_draft.currency_code,
+                        stored_draft.drafted_total_amount,
+                        stored_draft.drafted_total_amount,
+                        CATALOG_START,
+                    ),
+                )
+                line = stored_draft.invoice_draft_lines[0]
+                self.connection.execute(
+                    """
+                    INSERT INTO billing_core.issued_invoice_line
+                        (issued_invoice_line_id, issued_invoice_id, tenant_account_id,
+                         line_number, billing_account_reference, meter_code, unit_code,
+                         rated_quantity, unit_price_amount, line_total_amount)
+                    VALUES (%s, %s, %s, 1, %s, 'gen_ai_output_token', 'token', %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        issued_invoice_id,
+                        tenant.tenant_account_id,
+                        line.billing_account_reference,
+                        line.rated_quantity,
+                        line.unit_price_amount,
+                        line.line_total_amount,
+                    ),
+                )
+
+    def test_late_adjustment_invoice_adjustment_adapter_boundaries(self) -> None:
+        """The PostgreSQL adapter rejects malformed, missing, and racing evidence."""
+        accepted = UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        self.assertEqual(accepted.ingestion_outcome_code.value, "accepted")
+        card = RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            ({"metric_code": "gen_ai_output_token", "unit_amount": "0.000002"},),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, card.rate_card_version
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(
+            TENANT_ONE, rating.rating_run_id
+        )
+        source = create_billing_period(
+            TENANT_ONE,
+            date(2026, 7, 1),
+            date(2026, 8, 1),
+            opened_by="operator:period",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:period",
+            authorization_reference="approval:period",
+            reason="close source",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+        )
+        target = create_billing_period(
+            TENANT_ONE,
+            date(2026, 8, 1),
+            date(2026, 9, 1),
+            opened_by="operator:period",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.ledger.insert_billing_period(source)
+        self.ledger.insert_billing_period(target)
+        late = create_late_adjustment(
+            source.period_id,
+            target.period_id,
+            "correction",
+            "-12.50",
+            "USD",
+            "provider:late-invoice-002",
+            "sha256:" + "c" * 64,
+            CATALOG_START + timedelta(hours=2),
+            late_adjustment_id=uuid4(),
+        )
+        self.ledger.insert_late_adjustment(TENANT_ONE, late)
+        LateAdjustmentApplicationService(self.ledger).apply_late_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            applied_by="operator:finance",
+            authorization_reference="approval:apply",
+        )
+        LateAdjustmentRatingService(self.ledger).rate_late_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            rated_by="operator:finance",
+            authorization_reference="approval:rate",
+        )
+        composed = LateAdjustmentInvoiceAdjustmentService(self.ledger).record_invoice_adjustment(
+            TENANT_ONE,
+            late.late_adjustment_id,
+            draft.invoice_draft_id,
+            recorded_by="operator:finance",
+            authorization_reference="approval:invoice-adjustment",
+        )
+        stored = self.ledger.get_late_adjustment_invoice_adjustment(
+            composed.late_adjustment_invoice_adjustment_id
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        rating_row = (
+            stored.late_adjustment_rating_id,
+            stored.late_adjustment_application_id,
+            stored.late_adjustment_id,
+            stored.target_period_id,
+            stored.adjustment_amount,
+            stored.currency_code,
+            "rated",
+        )
+        draft_row = (stored.invoice_draft_id, stored.currency_code)
+
+        class NonCanonicalDecimal(Decimal):
+            """Exercise the adapter's defensive canonical-string check."""
+
+            def __format__(self, _spec: str) -> str:
+                return "01"
+
+        for bad in (
+            replace(stored, late_adjustment_invoice_adjustment_contract_version=1),
+            replace(stored, currency_code="US"),
+            replace(stored, adjustment_amount=Decimal("0")),
+            replace(stored, adjustment_amount=Decimal("NaN")),
+            replace(stored, adjustment_amount=Decimal("1E+40")),
+            replace(stored, billing_account_id=None),
+            replace(stored, adjustment_amount=NonCanonicalDecimal("1")),
+            replace(stored, late_adjustment_invoice_adjustment_status="pending"),
+            replace(stored, recorded_by=" "),
+            replace(stored, authorization_reference=" "),
+            replace(stored, source_payload_hash="invalid"),
+        ):
+            with self.assertRaises(ValueError):
+                self.ledger.insert_late_adjustment_invoice_adjustment(bad)
+
+        replay = self.ledger.insert_late_adjustment_invoice_adjustment(
+            replace(
+                stored,
+                late_adjustment_invoice_adjustment_id=uuid4(),
+                recorded_by="operator:replay",
+                authorization_reference="approval:replay",
+            )
+        )
+        self.assertEqual(replay, stored)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_late_adjustment_invoice_adjustment(
+                replace(
+                    stored,
+                    late_adjustment_invoice_adjustment_id=uuid4(),
+                    adjustment_amount=Decimal("-12.51"),
+                )
+            )
+
+        class SequenceCursor:
+            """Return deterministic rows for adapter-only race branches."""
+
+            def __init__(self, rows):
+                self.rows = iter(rows)
+
+            def execute(self, *_args, **_kwargs):
+                return None
+
+            def fetchone(self):
+                return next(self.rows)
+
+            def fetchall(self):
+                return next(self.rows)
+
+        billing_account_row = [
+            (stored.billing_account_id, stored.billing_account_reference)
+        ]
+        fake_cases = (
+            ([None], "late adjustment invoice adjustment rating is missing"),
+            ([rating_row, None], "late adjustment invoice adjustment draft is missing"),
+            ([rating_row, draft_row, []], "invoice draft billing account is ambiguous"),
+            (
+                [rating_row, draft_row, [(uuid4(), "urn:cwl:other:billing-account")]],
+                "late adjustment invoice adjustment billing account does not match draft",
+            ),
+            ([rating_row, draft_row, billing_account_row, None], "late adjustment invoice adjustment does not match evidence"),
+            ([rating_row, draft_row, billing_account_row, None, (1,)], "invoice draft already has an issued invoice"),
+            ([rating_row, draft_row, billing_account_row, None, None, None], "late adjustment invoice adjustment identity conflicts with an existing row"),
+        )
+        fake_candidates = (
+            stored,
+            stored,
+            stored,
+            stored,
+            replace(stored, adjustment_amount=Decimal("-12.51")),
+            stored,
+            stored,
+        )
+        for (rows, expected), candidate in zip(fake_cases, fake_candidates):
+            with self.subTest(expected=expected):
+                cursor = SequenceCursor(rows)
+                with mock.patch.object(self.ledger, "_cursor", return_value=nullcontext(cursor)):
+                    with self.assertRaisesRegex(ValueError, expected):
+                        self.ledger.insert_late_adjustment_invoice_adjustment(
+                            replace(candidate, late_adjustment_invoice_adjustment_id=uuid4())
+                        )
+
+        mismatch_cursor = SequenceCursor(
+            [rating_row, draft_row, billing_account_row, None, None, (uuid4(),)]
+        )
+        with mock.patch.object(
+            self.ledger, "_cursor", return_value=nullcontext(mismatch_cursor)
+        ), mock.patch.object(
+            self.ledger,
+            "_fetch_late_adjustment_invoice_adjustment",
+            return_value=replace(stored, adjustment_amount=Decimal("-12.51")),
+        ):
+            with self.assertRaisesRegex(ValueError, "identity cannot change"):
+                self.ledger.insert_late_adjustment_invoice_adjustment(
+                    replace(stored, late_adjustment_invoice_adjustment_id=uuid4())
+                )
+
+        self.assertIsNone(
+            PostgresUsageLedger._fetch_late_adjustment_invoice_adjustment(
+                SequenceCursor([None]), uuid4()
+            )
         )
 
     def test_transaction_context_and_connection_lifecycle(self) -> None:

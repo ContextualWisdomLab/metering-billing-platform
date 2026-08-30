@@ -4,16 +4,28 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest import mock
 from uuid import UUID, uuid4
 
 from metering_billing import (
+    AccountingExportService,
+    CollectionCaseService,
+    CollectionCaseSettlementService,
+    CollectionWriteOffService,
+    CreditAdjustmentService,
+    InvoiceDraftService,
     IssuedInvoicePresentmentService,
     IssuedInvoiceService,
+    LateAdjustmentInvoiceAdjustmentService,
+    MemoryUsageLedger,
+    PaymentSettlementService,
+    RateCardService,
     TaxAssessmentService,
     TaxRateService,
+    UsageRatingService,
     create_http_app,
     format_exact_decimal,
 )
@@ -30,7 +42,7 @@ from metering_billing.errors import (
 from metering_billing.issued_invoice import next_operator_action
 from metering_billing.issued_invoice_presentment import next_operator_action as presentment_action
 from metering_billing.usage_ledger import generate_record_id
-from metering_billing.webhook_outbox import EVENT_TYPE_INVOICE_ISSUED
+from metering_billing.webhook_outbox import EVENT_TYPE_INVOICE_ISSUED, enqueue_accepted_fact
 from test_collection_case import draft_known_morning
 from test_http_app import invoke_http
 from test_tax_assessment import HUNDRED, STANDARD_TAX_RATE, insert_commercial_draft
@@ -38,6 +50,7 @@ from test_usage_ingestion import TENANT_ONE, TENANT_TWO
 from test_usage_rating import (
     KNOWN_MORNING_QUANTITY,
     KNOWN_MORNING_TOTAL,
+    MORNING_WINDOW,
     TOKEN_UNIT_PRICE,
     seed_rated_ledger,
 )
@@ -50,6 +63,32 @@ DUE_AT = datetime(2026, 9, 16, 21, 0, tzinfo=UTC)
 
 class IssuedInvoiceTests(unittest.TestCase):
     """Verify idempotent issue, immutable totals, and metadata-only GET."""
+
+    def test_memory_commands_support_a_nontransactional_adapter(self) -> None:
+        """Command wrappers retain compatibility with duck-typed adapters."""
+        ledger = MemoryUsageLedger()
+        ledger.transaction = None  # type: ignore[method-assign]
+        commands = (
+            lambda: AccountingExportService(ledger).propose_journal("", uuid4()),
+            lambda: CollectionCaseService(ledger).open_collection_case("", uuid4()),
+            lambda: CollectionCaseSettlementService(ledger).settle_collection_case("", uuid4()),
+            lambda: CollectionWriteOffService(ledger).write_off_collection_case("", uuid4()),
+            lambda: CreditAdjustmentService(ledger).record_credit_adjustment(
+                "", uuid4(), "0.001", "rating_correction"
+            ),
+            lambda: InvoiceDraftService(ledger).draft_invoice("", uuid4()),
+            lambda: IssuedInvoiceService(ledger).issue_invoice("", uuid4()),
+            lambda: LateAdjustmentInvoiceAdjustmentService(ledger).record_invoice_adjustment(
+                "", uuid4(), uuid4(), recorded_by="operator:test", authorization_reference="approval:test"
+            ),
+            lambda: PaymentSettlementService(ledger).record_payment_receipt("", uuid4(), "1"),
+            lambda: RateCardService(ledger).publish_rate_card("", "test", "USD", ()),
+            lambda: TaxAssessmentService(ledger).assess_tax("", uuid4(), 1),
+            lambda: TaxRateService(ledger).publish_tax_rate("", "vat", "0.10"),
+            lambda: UsageRatingService(ledger).rate_usage_window("", MORNING_WINDOW, 1),
+        )
+        for command in commands:
+            command()
 
     def test_known_draft_issues_immutable_untaxed_snapshot(self) -> None:
         """A known morning draft freezes exact line and tax-zero totals."""
@@ -81,7 +120,7 @@ class IssuedInvoiceTests(unittest.TestCase):
             first.idempotency_key,
             (
                 f"{TENANT_ONE}:issued_invoice:{first.issued_invoice_id}:"
-                f"{first.source_payload_hash}:v1"
+                f"{first.source_payload_hash}:v2"
             ),
         )
         self.assertEqual(len(first.issued_invoice_lines), 1)
@@ -111,7 +150,7 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertEqual(envelope["data"]["issued_invoice_id"], str(first.issued_invoice_id))
         self.assertEqual(envelope["data"]["invoice_draft_id"], str(invoice_draft_id))
         self.assertEqual(envelope["data"]["source_payload_hash"], first.source_payload_hash)
-        self.assertEqual(envelope["data"]["issued_invoice_contract_version"], 1)
+        self.assertEqual(envelope["data"]["issued_invoice_contract_version"], 2)
         self.assertEqual(envelope["data"]["currency_code"], "USD")
         self.assertEqual(
             envelope["data"]["tax_exclusive_amount"],
@@ -135,6 +174,91 @@ class IssuedInvoiceTests(unittest.TestCase):
         self.assertNotIn("webhook_secret", json.dumps(envelope))
         self.assertNotIn("api_credential_secret", json.dumps(envelope))
         self.assertEqual(len(ledger.journal_proposals), 0)
+
+    def test_presentment_upgrades_historical_v1_snapshot_to_v2(self) -> None:
+        """Historical stored versions use the current presentment envelope."""
+        ledger, invoice_draft_id = draft_known_morning()
+        issued = IssuedInvoiceService(ledger, clock=lambda: ISSUED_MORNING).issue_invoice(
+            TENANT_ONE, invoice_draft_id
+        )
+        stored = ledger.get_issued_invoice(issued.issued_invoice_id)
+        assert stored is not None
+        ledger.issued_invoices[issued.issued_invoice_id] = replace(
+            stored, issued_invoice_contract_version=1
+        )
+        historical_event = next(
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+        )
+        ledger.webhook_outbox_events.pop(historical_event.outbox_event_id)
+        ledger.webhook_outbox_identity_index.pop(
+            (
+                historical_event.tenant_account_id,
+                historical_event.event_type_code,
+                historical_event.source_id,
+                historical_event.payload_hash,
+            )
+        )
+        historical_data = json.loads(historical_event.payload_json)["data"]
+        historical_data["issued_invoice_contract_version"] = 1
+        enqueue_accepted_fact(
+            ledger,
+            TENANT_ONE,
+            EVENT_TYPE_INVOICE_ISSUED,
+            issued.issued_invoice_id,
+            historical_data,
+            historical_event.occurred_at,
+        )
+        presented = IssuedInvoicePresentmentService(ledger).present_issued_invoice(
+            TENANT_ONE, issued.issued_invoice_id
+        )
+        payload = presented.as_contract_dict()
+        self.assertEqual(payload["issued_invoice_presentment_contract_version"], 2)
+        self.assertEqual(payload["issued_invoice_contract_version"], 2)
+        self.assertEqual(validate_issued_invoice_presentment(payload), ())
+        replayed = IssuedInvoiceService(ledger).issue_invoice(
+            TENANT_ONE, issued.invoice_draft_id
+        )
+        self.assertEqual(replayed.issued_invoice_outcome_code.value, "duplicate_replay")
+        self.assertEqual(replayed.issued_invoice_contract_version, 2)
+        self.assertEqual(validate_issued_invoice(replayed.as_contract_dict()), ())
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in ledger.webhook_outbox_events.values()
+                    if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+                ]
+            ),
+            1,
+        )
+        replay_event = next(
+            event
+            for event in ledger.webhook_outbox_events.values()
+            if event.event_type_code == EVENT_TYPE_INVOICE_ISSUED
+        )
+        self.assertEqual(
+            json.loads(replay_event.payload_json)["data"][
+                "issued_invoice_contract_version"
+            ],
+            1,
+        )
+
+    def test_invoice_outbox_enqueue_fails_closed_if_tenant_disappears(self) -> None:
+        """A transient tenant-resolution miss never creates an outbox row."""
+        ledger, invoice_draft_id = draft_known_morning()
+        resolved = ledger.resolve_tenant(TENANT_ONE)
+        with mock.patch.object(
+            ledger,
+            "resolve_tenant",
+            side_effect=[resolved, (None, "tenant_not_found")],
+        ):
+            issued = IssuedInvoiceService(ledger, clock=lambda: ISSUED_MORNING).issue_invoice(
+                TENANT_ONE, invoice_draft_id
+            )
+        self.assertEqual(issued.issued_invoice_outcome_code.value, "accepted")
+        self.assertEqual(ledger.webhook_outbox_events, {})
 
     def test_taxed_draft_freezes_assessment_totals_and_optional_due_at(self) -> None:
         """A taxed draft copies exclusive/tax/inclusive and stores caller due_at."""

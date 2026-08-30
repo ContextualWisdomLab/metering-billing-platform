@@ -19,7 +19,6 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from metering_billing.errors import RateCardPresentmentQueryError
-from metering_billing.exact_decimal import format_exact_decimal
 from metering_billing.rate_card import RateCardLineResult, _latest_version
 from metering_billing.time_window import parse_iso8601_datetime
 from metering_billing.usage_ledger import MemoryUsageLedger, StoredRateCard

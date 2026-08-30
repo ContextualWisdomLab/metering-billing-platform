@@ -12,7 +12,8 @@ Before changing behavior:
 5a. Record post-close commercial corrections only as immutable `LateAdjustment`
     facts through migrations `0049`/`0050`/`0051`; never rewrite the source period,
     infer FX, or create a statutory journal from the recording path. Apply them
-    through the separate application migrations `0052`/`0053`.
+    through the separate application migrations `0052`/`0053` and rating
+    migrations `0054`/`0055`.
 6. Ingest usage through `metering_billing.UsageIngestionService` so retries are idempotent and tenants cannot attribute usage to each other.
 7. Rate stored usage through `metering_billing.UsageRatingService` so a tenant window produces exact invoice-intent totals from billable quality only.
 8. Draft invoice intent through `metering_billing.InvoiceDraftService` from a stored rating run.  Do not issue, collect, or post from that path.

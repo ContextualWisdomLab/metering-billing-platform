@@ -109,7 +109,7 @@ Presentment does not add a table.  `GET /v1/invoice-drafts/{invoice_draft_id}` p
 
 ## Issued-invoice identity
 
-A stored issued invoice is identified by `(tenant_account_id, invoice_draft_id)`.  Internal primary key is the opaque generated `issued_invoice_id`.  The hash covers the draft, contract version, rating run, usage snapshot, currency, exclusive/tax/inclusive totals, and issued lines.  Status is `issued` only.  `due_at` is optional.  The snapshot does not store a statutory invoice number, fiscal signature, or customer PII.  First successful issue appends one `webhook_outbox_event` with `event_type_code` `invoice.issued` and `source_id` `issued_invoice_id`.  The outbox `data` is a thin reference plus hash and omits issued lines.  `GET /v1/issued-invoices/{issued_invoice_id}` projects the stored row and, when a stored `tax_assessment` for the same draft still matches the frozen exclusive/tax/inclusive amounts, optional `tax_assessment_id`.  The issued row does not persist that identifier.  `GET /v1/issued-invoices` lists `{issued_invoices, next_cursor}` ordered by `issued_at` then `issued_invoice_id`.
+A stored issued invoice is identified by `(tenant_account_id, invoice_draft_id)`.  Internal primary key is the opaque generated `issued_invoice_id`.  The hash covers the draft, contract version, rating run, usage snapshot, currency, exclusive/tax/inclusive totals, and issued lines.  Status is `issued` only.  `due_at` is optional.  The snapshot does not store a statutory invoice number, fiscal signature, or customer PII.  First successful issue appends one `webhook_outbox_event` with `event_type_code` `invoice.issued` and `source_id` `issued_invoice_id`.  The outbox `data` is a thin reference plus hash and omits issued lines.  Issued-invoice and presentment line envelopes are version 2; presentment upgrades a stored historical v1 line snapshot to the v2 envelope without rewriting the stored invoice.  Issuance preserves exact representable totals before the `numeric(38,12)` check and caps the projected issued lines at 10,000.  `GET /v1/issued-invoices/{issued_invoice_id}` projects the stored row and, when a stored `tax_assessment` for the same draft still matches the frozen exclusive/tax/inclusive amounts, optional `tax_assessment_id`.  The issued row does not persist that identifier.  `GET /v1/issued-invoices` lists `{issued_invoices, next_cursor}` ordered by `issued_at` then `issued_invoice_id`.
 
 ## Issued-invoice-void identity
 
@@ -261,15 +261,74 @@ returns the first writer's immutable audit fields. The application row has
 composite source/target foreign keys and immutable update/delete triggers; it
 does not mutate the late adjustment. The memory reference adapter stores the
 same billing-period aggregate and enforces source/target tenant, lifecycle, and
-ordering invariants before storing a late-adjustment fact.
+ordering invariants before storing a late-adjustment fact. Migrations `0052`/`0053`
+recheck concurrent application replays after the source lock and reject future
+application audit timestamps.
 The list read passes the decoded cursor and `limit + 1` to the ledger, and
 PostgreSQL evaluates one tenant-scoped ordered keyset query so the page never
-scans or hydrates the complete history; application existence is loaded with
-one bulk lookup for the bounded page.
+scans or hydrates the complete history; application and rating existence are
+loaded with one bulk lookup each for the bounded page.
 Application audit timestamps are timezone-aware and not future-dated. The
 memory adapter serializes recording, application, and target-period lifecycle writes while
 preserving the same replay identity.
 Migration `0051` supplies the matching tenant/recorded-at/ID keyset index.
+
+`LateAdjustmentRatingService` consumes that application and stores one
+append-only `late_adjustment_rating` per tenant and late-adjustment ID. It copies
+the application target, signed amount, and currency and adds the rating actor,
+authorization reference, and instant. Rating instants must be timezone-aware
+and not future-dated. Migrations `0054` and `0055` protect the
+application/source/target links, exact-value equality, replay identity, current
+target openness for first ratings, and update/delete immutability. Migration
+`0053` preserves already-stored rating replays after target closure. This is a rating-consumption fact, not a synthetic
+`rating_run`. `LateAdjustmentInvoiceAdjustmentService` then stores one
+tenant-scoped `late_adjustment_invoice_adjustment` per rated adjustment, linked
+to an unissued invoice draft and copying the signed exact delta, target period,
+application, rating, audit, source-hash, and single billing-account evidence.
+The composition audit instant is timezone-aware and not future-dated. Migration `0054` protects
+the tenant-scoped links, currency/evidence equality, replay identity, issued
+draft boundary, and update/delete immutability. It does not rewrite the draft,
+issue the invoice, calculate tax, or call a provider. Migration `0055` adds
+`line_type` and the tenant-scoped composition link to `issued_invoice_line`.
+Usage lines remain non-negative; a late-adjustment line carries the signed
+non-zero delta, selected billing-account reference, and immutable composition identity. Migration `0056` persists and validates that account evidence,
+backfills only unambiguous legacy drafts, and rejects ambiguous new drafts.
+Migration `0057` adds one shared `BEFORE INSERT` trigger to collection cases,
+tax assessments, credit adjustments, and journal proposals. It locks the
+tenant-scoped invoice draft and rejects a new downstream row when an
+immutable `late_adjustment_invoice_adjustment` already exists. Migration
+`0060` adds the reverse composition trigger: it takes the same lock and rejects
+direct composition after a downstream fact while allowing an existing
+composition identity to replay. These are the database counterparts to the
+service guards and make ordering safe for direct PostgreSQL persistence and
+concurrent writers. Migration `0061` fails closed if a legacy version-1
+composition lacks billing-account evidence; otherwise it upgrades only the
+contract metadata to version 2 and adds an exact-version check constraint.
+Application and direct PostgreSQL writes use the same version-2 constant.
+Migration `0062` rejects composition amounts that cannot round-trip through
+`numeric(38,12)`, validates late-adjustment issued lines against their
+composition draft/amount/payer, and lets a post-issue collection row copy only
+the frozen issued inclusive total.
+Migration `0063` adds deferred PostgreSQL checks requiring every composition
+linked to an issued draft to have one matching late-adjustment line and to be
+included in the issued exclusive total; the check takes the invoice-draft lock
+before reading the composition set.
+Migration `0064` adds database immutability triggers for issued invoices and
+issued lines and removes the `line_type` default, so direct issued-line writes
+must provide the explicit version-2 type.
+Migration `0065` requires contract version 2 for new issued-invoice headers
+while leaving historical v1 rows readable.
+Migration `0066` rejects future composition audit timestamps at the direct
+PostgreSQL boundary without rewriting historical rows.
+`IssuedInvoiceService`
+locks the draft before consuming these facts and adjusts an untaxed issued
+total exactly. If a tax assessment already exists, issuance rejects until a
+tax reassessment path exists; it never reuses a stale tax snapshot. The issued
+payload hash and presentment include the signed lines. Composition is rejected
+after collection, journal, tax, or credit facts capture the draft, and a zero
+resulting issue is rejected. Collection after issuance copies the frozen issued
+inclusive total; collection before issuance, journal,
+provider export, and statutory tax treatment remain downstream boundaries.
 
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception
