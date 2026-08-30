@@ -55,7 +55,9 @@ If publication or manifest writing fails, the invocation removes only its own
 backup hard link so a retry cannot inherit an orphaned evidence artifact.
 Once both files are published, a temporary-file cleanup failure does not turn
 completed evidence into a failed run; the published pair remains available for
-verification and the hidden temporary file requires operator cleanup.
+verification and the hidden temporary file requires operator cleanup. A later
+create attempt with the same paths returns that closed, digest-verified pair
+without starting another database operation.
 Record the command output, exact repository commit, database version, machine
 context, elapsed time, and operator in the incident/finance evidence store.
 

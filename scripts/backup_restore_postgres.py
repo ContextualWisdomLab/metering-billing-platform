@@ -301,12 +301,21 @@ def create_backup(
     backup_path: Path,
     manifest_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Create a custom-format backup and record source counts atomically."""
+    """Create a custom-format backup and record source counts atomically.
+
+    A closed, digest-verified pair is idempotently returned when both paths
+    already belong to a completed invocation.
+    """
     source_dsn = _validated_dsn(source_dsn)
     _require_safe_path(backup_path)
     manifest = _manifest_path(backup_path, manifest_path)
     _require_safe_path(manifest)
     if backup_path.exists():
+        if manifest.exists():
+            payload = _load_manifest(manifest, backup_path)
+            if _sha256(backup_path) != payload["backup_sha256"]:
+                raise BackupRestoreError("existing backup artifact digest does not match its manifest")
+            return payload
         raise BackupRestoreError(f"backup artifact already exists: {backup_path}")
     if manifest.exists():
         raise BackupRestoreError(f"manifest already exists: {manifest}")

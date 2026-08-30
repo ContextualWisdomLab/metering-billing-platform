@@ -210,6 +210,9 @@ class PostgresBackupRestoreTests(unittest.TestCase):
         )
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(self.counts, payload["row_counts"])
+        backup_path.write_bytes(b"tampered")
+        with self.assertRaisesRegex(backup.BackupRestoreError, "existing backup artifact digest"):
+            backup.create_backup("dbname=source", backup_path, manifest_path)
         with patch.object(backup.subprocess, "run", side_effect=self.fake_runner):
             with self.assertRaisesRegex(backup.BackupRestoreError, "artifact already exists"):
                 backup.create_backup("dbname=source", backup_path, self.root / "other.json")
@@ -257,8 +260,8 @@ class PostgresBackupRestoreTests(unittest.TestCase):
         self.assertTrue((self.root / "unclean.dump").is_file())
         self.assertTrue((self.root / "unclean.dump.manifest.json").is_file())
         with patch.object(backup.subprocess, "run", side_effect=self.fake_runner):
-            with self.assertRaisesRegex(backup.BackupRestoreError, "artifact already exists"):
-                backup.create_backup("dbname=source", self.root / "unclean.dump")
+            retry = backup.create_backup("dbname=source", self.root / "unclean.dump")
+            self.assertEqual(result, retry)
             backup.restore_and_verify(
                 "dbname=target",
                 self.root / "unclean.dump",

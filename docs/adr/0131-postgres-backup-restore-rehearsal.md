@@ -20,6 +20,8 @@ contains the same commercial records.
   if manifest publication fails; never replace a pre-existing artifact.
 - Treat the dump and manifest as the completed result once both are published;
   a later temporary-file cleanup failure does not invalidate that pair.
+- Return an existing pair only when its manifest is valid and its digest still
+  matches; never replace an existing or incomplete artifact.
 - Restore only when the operator explicitly marks the target disposable. The
   script uses `--clean` and `--if-exists` only on that acknowledged target.
 - Re-query the restored target through `psql` and fail closed on any digest,
