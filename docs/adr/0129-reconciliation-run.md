@@ -14,7 +14,7 @@ records line membership rather than embedding line objects in the run row.
 The repository accepts the completed run facts but does not calculate them,
 resolve exceptions, or advance the billing-period lifecycle in this slice. A
 later command can build this envelope from provider, internal, cash, and
-resolution evidence. Late-adjustment recording is separate migration `0048`
+resolution evidence. Late-adjustment recording is separate migration `0049`
 (ADR 0132); this run does not apply or re-rate those facts.
 
 ## Consequences
