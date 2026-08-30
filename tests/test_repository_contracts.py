@@ -4492,6 +4492,22 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_reconciliation_gate_migration_protects_period_and_line_boundaries(self) -> None:
+        """Direct PostgreSQL writes cannot bypass reconciliation or reopen a period."""
+        sql = (ROOT / "database/migrations/0049_reconciliation_gate_integrity.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE OR REPLACE FUNCTION billing_core.assert_reconciliation_gate(",
+            "CREATE OR REPLACE FUNCTION billing_core.validate_billing_period_transition()",
+            "CREATE TRIGGER billing_period_transition_gate",
+            "CREATE OR REPLACE FUNCTION billing_core.reject_reconciliation_line_after_close()",
+            "CREATE TRIGGER reconciliation_line_period_gate",
+            "FOR UPDATE",
+            "resolution.resolution_status IN ('resolved', 'waived')",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
         """The offline validator covers required, type, reference, and one-of rules."""
         schema = self._schema("accounting-journal-proposal.schema.json")

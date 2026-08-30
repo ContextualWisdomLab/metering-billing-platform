@@ -13,8 +13,10 @@ the persisted exception rows, requires the run membership to cover exactly all
 persisted reconciliation lines for the period, and requires every exception in
 that run to have at least one immutable `resolved` or `waived` resolution.
 
-The checks and append-only transition use the repository's existing transaction
-and period-history path. No exception, run, or resolution is updated or
+Migration 0049 repeats the lifecycle and reconciliation checks in PostgreSQL
+triggers, locks the period row before checking or appending, and rejects new
+reconciliation lines after reconciliation. The repository command keeps the
+same checks for clear errors; no exception, run, or resolution is updated or
 deleted.
 
 ## Consequences

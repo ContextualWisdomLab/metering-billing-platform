@@ -240,8 +240,11 @@ period-scoped line reads; age is never stored or used to mutate the exception.
 The PostgreSQL reconciliation command appends the `soft_closed` to `reconciled`
 transition only for the latest completed run of that period. Its exception
 summary must equal the run's persisted exception rows, and every exception must
-have at least one resolved or waived resolution. The run and resolution facts
-remain immutable; the validation and transition append share one transaction.
+have at least one resolved or waived resolution. Migration 0049 enforces the
+same gate in PostgreSQL, serializes it with period-row locking, and rejects new
+reconciliation lines after a period reaches `reconciled` or a later status. The
+run and resolution facts remain immutable; validation and transition append
+share one transaction.
 
 ## Tenant-API-credential identity
 

@@ -527,12 +527,30 @@ class PostgresUsageLedger:
                 SELECT tenant_account_id
                 FROM billing_core.billing_period
                 WHERE period_id = %s
+                FOR UPDATE
                 """,
                 (line.period_id,),
             )
             period = cursor.fetchone()
             if period is None or UUID(str(period[0])) != tenant_account_id:
                 raise KeyError(line.period_id)
+            cursor.execute(
+                """
+                SELECT to_status
+                FROM billing_core.billing_period_transition
+                WHERE tenant_account_id = %s AND period_id = %s
+                ORDER BY transition_number DESC
+                LIMIT 1
+                """,
+                (tenant_account_id, line.period_id),
+            )
+            current_status = cursor.fetchone()
+            if current_status is not None and current_status[0] in {
+                "reconciled",
+                "invoiced",
+                "hard_closed",
+            }:
+                raise ValueError("reconciliation lines cannot be added after period reconciliation")
             cursor.execute(
                 """
                 INSERT INTO billing_core.reconciliation_line

@@ -23,9 +23,10 @@
   PostgreSQL itself: every conversion insert must match the referenced rate's
   exact value, precision, and base/quote currencies (ADR 0125).
 - Issue #87 now gates the PostgreSQL `soft_closed` to `reconciled` transition
-  on the latest completed run's exact period-line membership, exception count,
-  and resolved-or-waived exception facts. Direct persistence cannot bypass the
-  gate, and the check plus append-only transition commit atomically (ADR 0131).
+  at the database boundary (migration 0049), locking the period while checking
+  the latest completed run's exact line membership, exception count, and
+  resolved-or-waived facts. Reconciled periods also reject later line inserts;
+  direct persistence cannot bypass either invariant (ADR 0131).
 - Issue #87 now exposes tenant-scoped reconciliation-exception aging derived
   from immutable line assessment timestamps. Explicit UTC calendar-day buckets
   preserve `current`, 1-30, 31-60, 61-90, and 90+ boundaries without adding a

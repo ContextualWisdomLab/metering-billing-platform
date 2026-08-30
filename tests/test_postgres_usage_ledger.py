@@ -203,8 +203,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 48:
-            raise AssertionError(f"expected 48 migrations, got {len(applied)}")
+        if len(applied) != 49:
+            raise AssertionError(f"expected 49 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -583,8 +583,25 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 )
             )
 
+        line_period = create_billing_period(
+            TENANT_ONE,
+            CATALOG_START.date(),
+            (CATALOG_START + timedelta(days=31)).date(),
+            opened_by="operator:finance_011",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_012",
+            authorization_reference="approval:period_006",
+            reason="close reconciliation fixture window",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+            transition_id=uuid4(),
+        )
+        self.assertEqual(self.ledger.insert_billing_period(line_period), line_period)
+
         matched = assess_reconciliation_line(
-            period.period_id,
+            line_period.period_id,
             "provider:account_001",
             "USD",
             "10",
@@ -597,7 +614,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             cash_currency_code="USD",
         )
         exception = assess_reconciliation_line(
-            period.period_id,
+            line_period.period_id,
             "provider:account_001",
             "USD",
             "10",
@@ -632,7 +649,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         expanded_exception = ReconciliationLine(
             reconciliation_line_id=uuid4(),
-            period_id=period.period_id,
+            period_id=line_period.period_id,
             provider_account_reference="provider:account_001",
             currency_code="USD",
             internal_currency_code="USD",
@@ -710,7 +727,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         run = ReconciliationRun(
             run_id=uuid4(),
-            period_id=period.period_id,
+            period_id=line_period.period_id,
             started_at=CATALOG_START + timedelta(minutes=7),
             completed_at=CATALOG_START + timedelta(minutes=8),
             reconciliation_line_ids=(
@@ -744,12 +761,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             )
         self.assertEqual(self.ledger.list_reconciliation_runs(TENANT_TWO), ())
         self.assertEqual(
-            self.ledger.list_reconciliation_runs(TENANT_ONE, period_id=period.period_id),
-            (run, empty_run),
+            self.ledger.list_reconciliation_runs(TENANT_ONE, period_id=line_period.period_id),
+            (run,),
         )
         empty_run = ReconciliationRun(
             run_id=uuid4(),
-            period_id=period.period_id,
+            period_id=line_period.period_id,
             started_at=CATALOG_START + timedelta(minutes=9),
             completed_at=CATALOG_START + timedelta(minutes=10),
             reconciliation_line_ids=(),
@@ -782,14 +799,14 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         self.assertEqual(
             self.ledger.list_reconciliation_lines(
-                TENANT_ONE, period_id=period.period_id
+                TENANT_ONE, period_id=line_period.period_id
             ),
             (matched, exception, expanded_exception),
         )
         exception_aging = self.ledger.list_reconciliation_exception_aging(
             TENANT_ONE,
             CATALOG_START + timedelta(days=31),
-            period_id=period.period_id,
+            period_id=line_period.period_id,
         )
         self.assertEqual(len(exception_aging), 3)
         self.assertEqual(
@@ -1046,6 +1063,21 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 reason="reconcile period",
                 transitioned_at=CATALOG_START + timedelta(hours=2),
             )
+        tenant_account_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+        with self.assertRaisesRegex(psycopg.Error, "completed reconciliation run"):
+            self.connection.execute(
+                """
+                INSERT INTO billing_core.billing_period_transition
+                    (transition_id, tenant_account_id, period_id, transition_number,
+                     from_status, to_status, actor_reference, authorization_reference,
+                     transition_reason, transitioned_at)
+                VALUES (%s, %s, %s, 2, 'soft_closed', 'reconciled',
+                        'operator:finance_003', 'approval:period_002',
+                        'direct SQL must not bypass the reconciliation gate', %s)
+                """,
+                (uuid4(), tenant_account_id, period.period_id, CATALOG_START + timedelta(hours=2)),
+            )
+        self.connection.rollback()
         matched = assess_reconciliation_line(
             period.period_id,
             "provider:account_001",
@@ -1182,6 +1214,36 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             self.ledger.get_billing_period(TENANT_ONE, period.period_id), reconciled
         )
+        late_line = replace(
+            matched,
+            reconciliation_line_id=uuid4(),
+            assessed_at=CATALOG_START + timedelta(hours=9),
+        )
+        with self.assertRaisesRegex(ValueError, "after period reconciliation"):
+            self.ledger.insert_reconciliation_line(TENANT_ONE, late_line)
+        with self.assertRaisesRegex(psycopg.Error, "after period reconciliation"):
+            self.connection.execute(
+                """
+                INSERT INTO billing_core.reconciliation_line
+                    (reconciliation_line_id, tenant_account_id, period_id,
+                     provider_account_reference, currency_code, internal_currency_code,
+                     provider_currency_code, cash_currency_code, internal_expected_amount,
+                     provider_actual_amount, cash_actual_amount, provider_fee_amount,
+                     withheld_tax_amount, reserve_amount, expected_cash_amount,
+                     reconciliation_line_status, assessed_at,
+                     reconciliation_line_contract_version)
+                VALUES (%s, %s, %s, %s, 'USD', 'USD', 'USD', 'USD',
+                        10, 10, 10, 0, 0, 0, 10, 'matched', %s, 1)
+                """,
+                (
+                    uuid4(),
+                    tenant_account_id,
+                    period.period_id,
+                    "provider:account_001",
+                    CATALOG_START + timedelta(hours=9),
+                ),
+            )
+        self.connection.rollback()
 
     def test_migration_runner_is_idempotent_and_detects_drift(self) -> None:
         """The runner records checksums and refuses a changed applied migration."""

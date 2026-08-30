@@ -285,6 +285,7 @@ REQUIRED_FILES = (
     "database/migrations/0046_reconciliation_run_immutability.sql",
     "database/migrations/0047_reconciliation_fact_immutability.sql",
     "database/migrations/0048_fx_conversion_rate_integrity.sql",
+    "database/migrations/0049_reconciliation_gate_integrity.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
