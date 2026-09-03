@@ -177,6 +177,60 @@ Payment-receipt presentment does not add a table.  `GET /v1/payment-receipts/{pa
 
 A stored tax-rate schedule is identified by `(tenant_account_id, tax_code)`.  A stored version is identified by `(tenant_account_id, tax_rate_schedule_id, source_payload_hash, tax_rate_contract_version)` and also by `(tenant_account_id, tax_rate_schedule_id, version_number)`.  A stored assessment is identified by `(tenant_account_id, invoice_draft_id, tax_rate_version_id, source_payload_hash, tax_assessment_contract_version)` and is unique per draft.  `tax_amount` is half-even rounded to the documented ISO 4217 minor-unit exponent.
 
+## Period-close and reconciliation foundation
+
+The first #87 slice publishes side-effect-free contracts for later durable
+period-close persistence.  `billing-period` represents one tenant period and
+allows only the append-only state sequence `open`, `soft_closed`,
+`reconciled`, `invoiced`, `hard_closed`; every transition carries an actor,
+authorization reference, reason, and monotonic timestamp.  A hard-closed
+snapshot cannot be changed through this contract. PostgreSQL now stores the
+period base row and normalized transition rows; the current status is derived
+from that history, and replaying a later immutable snapshot appends only new
+transitions. Tenant ownership is resolved through `tenant_account_id` and
+composite foreign keys.
+
+`fx-rate` stores the source, rate type, base/quote currencies, exact rate,
+declared precision, effective time, and recorded time.  `fx-conversion` copies
+the rate identity and exact value into the result and rounds only at the
+explicit target minor-unit scale.  This supports zero-, two-, three-, and
+four-decimal currencies without summing unlike currencies or looking up a
+later rate when re-exporting a closed result.
+
+`reconciliation-line` keeps internal expected, provider actual, cash actual,
+provider fee, withholding, and reserve amounts separate, and requires the
+internal, provider, and cash source currencies as evidence.  Its deterministic
+status reports typed quantity, price, tax, currency, payment, duplicate-charge,
+refund, dispute, settlement, provider-fee, cash-timing, or unmapped-provider
+exceptions with a next action. Raw contract validation re-applies the domain
+lifecycle, exact arithmetic, and exception/status invariants. PostgreSQL stores
+the line and exception children atomically, preserving the pinned FX snapshot
+and exact `numeric` amounts. These contracts are not a FOCUS export, tax engine,
+statutory invoice authority, provider connector, or period-wide reconciliation
+run.
+
+`reconciliation-resolution` is an append-only disposition linked to one stored
+exception. It retains owner, reason, evidence reference, resolved-versus-waived
+status, and distinct maker/checker references. Persisting a resolution does not
+rewrite the original line or advance its period; a later reconciliation run
+must evaluate all blocking exceptions and resolutions together.
+
+`reconciliation-evidence` is an append-only hash-backed source reference linked
+to one stored exception. It retains evidence kind, source reference, SHA-256
+content digest, capturing operator, and capture instant. PostgreSQL rejects
+evidence for an exception that is not present on the referenced line and keeps
+reads tenant-scoped. The repository does not fetch or archive provider payloads
+yet; run-level evidence completeness remains a follow-up.
+
+`reconciliation-run` is an immutable completed-run envelope for one billing
+period. Its normalized child rows preserve ordered reconciliation-line
+membership and PostgreSQL requires every member to belong to the same tenant
+and period. The stored exception count is a run summary; this slice does not
+calculate it, resolve exceptions, or advance the period status. PostgreSQL
+rejects updates and deletes for the run, line membership, and the underlying
+reconciliation facts; later immutability additions are forward-only migrations
+so applied migration checksums remain stable.
+
 ## Tenant-API-credential identity
 
 A stored tenant API credential is identified by `tenant_api_credential_id` and is unique on `credential_secret_hash`.  Internal primary key is `tenant_api_credential_id`.  The hash is `hmac-sha256:` plus HMAC-SHA256(pepper, secret).  The plaintext secret is never stored.  `credential_label` is two-or-more-word `snake_case`.  Status is `active` or `revoked`.  A second issue of the same tenant, label, and contract version inserts a new row with a new secret.  Revocation updates `credential_status` and `revoked_at` on the same row and does not delete history.

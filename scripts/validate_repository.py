@@ -149,6 +149,11 @@ REQUIRED_FILES = (
     "docs/adr/0116-postgres-issued-credit-note-void-journal.md",
     "docs/adr/0117-postgres-invoice-draft-journal.md",
     "docs/adr/0118-operator-invoice-draft-journal-storybook.md",
+    "docs/adr/0125-period-close-fx-reconciliation-foundation.md",
+    "docs/adr/0126-postgres-period-close-persistence.md",
+    "docs/adr/0127-reconciliation-resolution.md",
+    "docs/adr/0128-reconciliation-evidence.md",
+    "docs/adr/0129-reconciliation-run.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
@@ -156,6 +161,13 @@ REQUIRED_FILES = (
     "schemas/usage-event.schema.json",
     "schemas/provider-capability.schema.json",
     "schemas/accounting-journal-proposal.schema.json",
+    "schemas/billing-period.schema.json",
+    "schemas/fx-rate.schema.json",
+    "schemas/fx-conversion.schema.json",
+    "schemas/reconciliation-line.schema.json",
+    "schemas/reconciliation-resolution.schema.json",
+    "schemas/reconciliation-evidence.schema.json",
+    "schemas/reconciliation-run.schema.json",
     "schemas/usage-ingestion-receipt.schema.json",
     "schemas/rating-run.schema.json",
     "schemas/invoice-draft.schema.json",
@@ -261,6 +273,14 @@ REQUIRED_FILES = (
     "database/migrations/0037_catalog_reference_identity.sql",
     "database/migrations/0038_postgres_rating_vertical_slice.sql",
     "database/migrations/0039_spend_budget_status.sql",
+    "database/migrations/0040_period_close_persistence.sql",
+    "database/migrations/0041_reconciliation_resolution.sql",
+    "database/migrations/0042_reconciliation_exception_vocabulary.sql",
+    "database/migrations/0043_reconciliation_evidence.sql",
+    "database/migrations/0044_reconciliation_run.sql",
+    "database/migrations/0045_reconciliation_fact_immutability.sql",
+    "database/migrations/0046_reconciliation_run_immutability.sql",
+    "database/migrations/0047_reconciliation_fact_immutability.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
@@ -323,6 +343,7 @@ REQUIRED_FILES = (
     "metering_billing/unapplied_cash_refund.py",
     "metering_billing/unapplied_cash_refund_presentment.py",
     "metering_billing/contracts.py",
+    "metering_billing/period_close.py",
     "operator_console/package.json",
     "operator_console/src/index.js",
     "operator_console/tokens/design_tokens.json",
@@ -567,13 +588,20 @@ def _validate_node(
         return [f"{path}: schema is false"]
     if "$ref" in schema:
         resolved = _resolve_reference(root_schema, str(schema["$ref"]))
-        return _validate_node(root_schema, resolved, instance, path)
+        errors = _validate_node(root_schema, resolved, instance, path)
+        sibling_schema = {key: value for key, value in schema.items() if key != "$ref"}
+        if sibling_schema:
+            errors.extend(_validate_node(root_schema, sibling_schema, instance, path))
+        return errors
 
     expected_type = schema.get("type")
     if expected_type is not None and not _matches_type(str(expected_type), instance):
         return [f"{path}: expected {expected_type}"]
 
     errors: list[str] = []
+    if "allOf" in schema:
+        for branch in schema["allOf"]:
+            errors.extend(_validate_node(root_schema, branch, instance, path))
     if "enum" in schema and instance not in schema["enum"]:
         errors.append(f"{path}: value is not in the allowed enumeration")
     if "const" in schema and instance != schema["const"]:
@@ -664,11 +692,15 @@ def _validate_array(
         errors.append(f"{path}: array has fewer than minItems")
     if maximum_items is not None and len(instance) > maximum_items:
         errors.append(f"{path}: array has more than maxItems")
+    prefix_items = schema.get("prefixItems", [])
+    for index, item_schema in enumerate(prefix_items):
+        if index < len(instance):
+            errors.extend(_validate_node(root_schema, item_schema, instance[index], f"{path}[{index}]"))
     if schema.get("uniqueItems") and len({_canonical_value(item) for item in instance}) != len(instance):
         errors.append(f"{path}: array items must be unique")
     item_schema = schema.get("items")
     if isinstance(item_schema, (Mapping, bool)):
-        for index, item in enumerate(instance):
+        for index, item in enumerate(instance[len(prefix_items) :], start=len(prefix_items)):
             errors.extend(_validate_node(root_schema, item_schema, item, f"{path}[{index}]"))
     return errors
 
