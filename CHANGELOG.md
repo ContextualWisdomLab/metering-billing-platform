@@ -16,6 +16,55 @@
 
 ### Added
 
+- Issue #87 now protects the previously applied reconciliation-fact migration
+  checksum: later PostgreSQL immutability triggers for periods, FX snapshots,
+  and exceptions are delivered by forward-only migration 0047.
+- Issue #87 now exposes tenant-scoped reconciliation-exception aging derived
+  from immutable line assessment timestamps. Explicit UTC calendar-day buckets
+  preserve `current`, 1-30, 31-60, 61-90, and 90+ boundaries without adding a
+  mutable age column (ADR 0130).
+- Issue #87 now persists completed reconciliation runs with ordered,
+  tenant-and-period-safe line membership and a blocking-exception summary.
+  Runs are replay-safe immutable envelopes; calculation, resolution gates, and
+  period advancement remain separate (ADR 0129).
+- Issue #87 now persists immutable hash-backed reconciliation evidence linked to
+  an existing typed exception. Evidence keeps its source reference, SHA-256
+  digest, kind, capture operator, and capture instant with tenant-scoped,
+  idempotent PostgreSQL reads (ADR 0128).
+- Issue #87 now uses the complete minimum typed reconciliation exception
+  vocabulary: quantity, price, tax, currency, payment, duplicate charge,
+  refund, dispute, settlement, provider fee, cash timing, and unmapped provider
+  object. The existing append-only line and resolution persistence accepts the
+  expanded codes through migration 0042.
+- Issue #87 now records immutable reconciliation exception resolutions in
+  PostgreSQL. Each resolution retains owner, reason, evidence, resolved or
+  waived status, and distinct maker/checker references, and can reference only
+  an exception on the same persisted line. It does not rewrite amounts or
+  declare a period reconciled; run-level completeness and aging remain later
+  work (ADR 0127).
+- Issue #87 now has a durable PostgreSQL period-close slice: normalized
+  billing-period and append-only transition rows, exact FX rate/conversion
+  snapshots, and tenant-scoped reconciliation lines with normalized exception
+  children. Replays are idempotent, changed opaque identities fail closed, and
+  database constraints retain tenant ownership, exact arithmetic, and the
+  explicit `ROUND_HALF_UP` contract. Maker-checker resolution, late
+  adjustments, FOCUS 1.4 export, provider settlement ingestion, and HTTP
+  presentment remain later slices (ADR 0126).
+- Issue #87 gains its first immutable finance contracts: tenant billing periods
+  advance only through authorized append-only lifecycle transitions;
+  versioned exact FX rates produce frozen conversions at explicit zero-, two-,
+  three-, or four-decimal target scales; and three-way reconciliation lines
+  retain internal expectation, provider actual, cash actual, fees, withholding,
+  and reserves separately while returning deterministic typed exceptions. The
+  contracts and tests are side-effect-free foundations only; PostgreSQL
+  persistence, maker-checker resolution, late adjustments, and FOCUS 1.4
+  export remain open under #87 (ADR 0125).
+- The #87 foundation now re-applies its domain invariants when validating raw
+  contract dictionaries, preserves exact precision for large FX products and
+  reconciliation deductions, enforces published decimal length limits, and
+  requires source-currency evidence on reconciliation lines. The migration
+  liveness query is also literalized so the protected Semgrep gate no longer
+  treats the fixed internal table name as formatted SQL.
 - The HTTP accept surface selects its ledger backend from the environment: `create_http_app(ledger=...)` now accepts either the deterministic `MemoryUsageLedger` reference adapter or the durable `PostgresUsageLedger` production system of record through the new `UsageLedger` union, and `metering_billing.http_app.create_default_ledger(environ=None)` builds the selected backend — `METERING_BILLING_LEDGER_BACKEND=postgres` constructs `PostgresUsageLedger` via the existing `PostgresUsageLedger.connect` convention from `METERING_BILLING_POSTGRES_DSN`, a missing or empty DSN raises a startup `ValueError` naming `METERING_BILLING_POSTGRES_DSN`, and every other value including unset keeps returning `MemoryUsageLedger()` so tests stay unchanged. Unauthenticated `GET /readyz` joins `GET /healthz` in the same dispatch style: healthy backends answer `200 {"status": "ready", "backend": "memory" | "postgres"}`, and a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` using one cheap migration-history row count (`public.metering_billing_schema_migration`) executed through the ledger's own connection and transaction conventions with no ad-hoc psycopg connections and no raw exception text. Memory stays the deterministic reference/test adapter; postgres becomes the selectable production system of record as partial progress on issue #84. Service constructor signatures, existing routes, exact-decimal money, journal boundaries, AIS pull behavior, and the #24 outbox stay unchanged. ADR 0123 documents the decision. There is no new third-party dependency, schema change, secret, or provider call on this path.
 - ADR 0123 for environment-driven PostgreSQL ledger backend selection and the `/readyz` backend probe.
 - Compose becomes the deployment surface: a root `Dockerfile` on `python:3.13-slim` installs only the hash-locked runtime dependency set with CI's exact pip flags (`--disable-pip-version-check --only-binary=:all: --require-hashes -r requirements-runtime.txt`), copies the package plus migration assets, runs as a non-root user, exposes port 8000, and starts `python -m metering_billing.http_app`; `compose/docker-compose.yml` fixes the project name to `metering-billing-platform` and boots `postgres_database` (PostgreSQL 18 with a `pg_isready` healthcheck and named data volume), a one-shot idempotent `schema_migration` service running the advisory-locked `scripts/migrate_postgres.py` before the API starts, and `billing_api` gated on both, serving the durable PostgreSQL system of record behind a stdlib `urllib` `/readyz` healthcheck so the image needs no curl; `compose/.env.example` documents every variable with dev-safe defaults and production guidance; `compose/k6/e2e_smoke.js` records an end-to-end baseline (ramp to 50 virtual users over 60 seconds, sustain 60 seconds, status-only checks, per-request-kind duration trends over `/healthz`, `/readyz`, and one authenticated tenant read seeded by idempotent `compose/k6/seed.py`) whose real measured numbers live in `docs/operations/load-test-baseline.md`; isolated test containers and volumes are removed after each run (ADR 0124). No new Python dependency, schema change, secret, or provider call is introduced.

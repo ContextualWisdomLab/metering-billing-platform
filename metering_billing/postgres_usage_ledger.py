@@ -30,6 +30,20 @@ from metering_billing.exact_decimal import (
     parse_exact_decimal,
     require_postable_journal_line_amounts,
 )
+from metering_billing.period_close import (
+    BillingPeriod,
+    BillingPeriodStatus,
+    BillingPeriodTransition,
+    FxConversion,
+    FxRate,
+    ReconciliationException,
+    ReconciliationExceptionAging,
+    ReconciliationEvidence,
+    ReconciliationLine,
+    ReconciliationRun,
+    ReconciliationResolution,
+    age_reconciliation_exception,
+)
 from metering_billing.usage_ledger import (
     CURRENCY_CODE_PATTERN,
     SOURCE_PAYLOAD_HASH_PATTERN,
@@ -181,11 +195,749 @@ class PostgresUsageLedger:
         ad-hoc PostgreSQL connection beside the ledger's own session.
         """
         with self._cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE}")
+            cursor.execute("SELECT COUNT(*) FROM public.metering_billing_schema_migration")
             row = cursor.fetchone()
         if row is None:  # pragma: no cover - COUNT(*) always returns one row
             raise RuntimeError("migration history count did not return a row")
         return int(row[0])
+
+    def get_billing_period(
+        self, tenant_reference: str, period_id: UUID
+    ) -> BillingPeriod | None:
+        """Return one tenant-scoped period aggregate with its transition history."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_billing_period(
+                cursor, period_id, tenant_account_id=tenant_account_id
+            )
+
+    def insert_billing_period(self, period: BillingPeriod) -> BillingPeriod:
+        """Persist a period and append only transitions not already stored."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(
+                cursor, period.tenant_reference
+            )
+            cursor.execute(
+                """
+                INSERT INTO billing_core.billing_period
+                    (period_id, tenant_account_id, period_start, period_end,
+                     opened_at, opened_by, period_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (period_id) DO NOTHING
+                """,
+                (
+                    period.period_id,
+                    tenant_account_id,
+                    period.period_start,
+                    period.period_end,
+                    period.opened_at,
+                    period.opened_by,
+                    period.period_contract_version,
+                ),
+            )
+            existing = self._fetch_billing_period(cursor, period.period_id, lock=True)
+            if existing is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("billing period insert did not return a row")
+            if (
+                existing.tenant_reference != period.tenant_reference
+                or existing.period_start != period.period_start
+                or existing.period_end != period.period_end
+                or existing.opened_at != period.opened_at
+                or existing.opened_by != period.opened_by
+                or existing.period_contract_version != period.period_contract_version
+            ):
+                raise ValueError("billing period identity cannot change after persistence")
+            prefix = period.transitions[: len(existing.transitions)]
+            if existing.transitions != prefix:
+                raise ValueError("billing period transition history cannot be rewritten")
+            for transition_number, transition in enumerate(
+                period.transitions[len(existing.transitions) :],
+                start=len(existing.transitions) + 1,
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO billing_core.billing_period_transition
+                        (transition_id, tenant_account_id, period_id, transition_number, from_status,
+                         to_status, actor_reference, authorization_reference, transition_reason,
+                         transitioned_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (transition_id) DO NOTHING
+                    """,
+                    (
+                        transition.transition_id,
+                        tenant_account_id,
+                        period.period_id,
+                        transition_number,
+                        transition.from_status.value,
+                        transition.to_status.value,
+                        transition.actor_reference,
+                        transition.authorization_reference,
+                        transition.reason,
+                        transition.transitioned_at,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    SELECT transition_number, tenant_account_id, period_id, from_status, to_status,
+                           actor_reference, authorization_reference, transition_reason, transitioned_at
+                    FROM billing_core.billing_period_transition
+                    WHERE transition_id = %s
+                    """,
+                    (transition.transition_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row != (
+                    transition_number,
+                    tenant_account_id,
+                    period.period_id,
+                    transition.from_status.value,
+                    transition.to_status.value,
+                    transition.actor_reference,
+                    transition.authorization_reference,
+                    transition.reason,
+                    transition.transitioned_at,
+                ):
+                    raise ValueError("billing period transition identity cannot change")
+            stored = self._fetch_billing_period(cursor, period.period_id)
+            if stored is None:  # pragma: no cover - locked row remains present in this transaction
+                raise RuntimeError("billing period disappeared after persistence")
+            return stored
+
+    def list_billing_periods(self, tenant_reference: str) -> tuple[BillingPeriod, ...]:
+        """Return period aggregates for one registered tenant only."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            cursor.execute(
+                """
+                SELECT period_id
+                FROM billing_core.billing_period
+                WHERE tenant_account_id = %s
+                ORDER BY period_start, period_id
+                """,
+                (tenant_account_id,),
+            )
+            periods = tuple(
+                self._fetch_billing_period(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(period for period in periods if period is not None)
+
+    def get_fx_rate(self, fx_rate_id: UUID) -> FxRate | None:
+        """Return one immutable exchange-rate evidence row."""
+        with self._cursor() as cursor:
+            return self._fetch_fx_rate(cursor, fx_rate_id)
+
+    def insert_fx_rate(self, rate: FxRate) -> FxRate:
+        """Persist one exact FX rate without replacing an existing snapshot."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO billing_core.fx_rate
+                    (fx_rate_id, rate_source, rate_type, base_currency, quote_currency,
+                     fx_rate_value, rate_precision, effective_at, recorded_at,
+                     fx_rate_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (fx_rate_id) DO NOTHING
+                """,
+                (
+                    rate.fx_rate_id,
+                    rate.rate_source,
+                    rate.rate_type.value,
+                    rate.base_currency,
+                    rate.quote_currency,
+                    rate.rate,
+                    rate.rate_precision,
+                    rate.effective_at,
+                    rate.recorded_at,
+                    rate.fx_rate_contract_version,
+                ),
+            )
+            stored = self._fetch_fx_rate(cursor, rate.fx_rate_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("FX rate insert did not return a row")
+            if stored.as_contract_dict() != rate.as_contract_dict():
+                raise ValueError("FX rate identity cannot change after persistence")
+            return stored
+
+    def get_fx_conversion(self, fx_conversion_id: UUID) -> FxConversion | None:
+        """Return one frozen conversion result and its pinned rate snapshot."""
+        with self._cursor() as cursor:
+            return self._fetch_fx_conversion(cursor, fx_conversion_id)
+
+    def insert_fx_conversion(self, conversion: FxConversion) -> FxConversion:
+        """Persist a conversion only when its copied rate matches the pinned evidence."""
+        with self._cursor() as cursor:
+            rate = self._fetch_fx_rate(cursor, conversion.fx_rate_id)
+            if rate is None:
+                raise KeyError(conversion.fx_rate_id)
+            if (
+                rate.base_currency != conversion.source_currency
+                or rate.quote_currency != conversion.quote_currency
+                or rate.rate != conversion.rate
+                or rate.rate_precision != conversion.rate_precision
+            ):
+                raise ValueError("FX conversion must match its pinned rate snapshot")
+            cursor.execute(
+                """
+                INSERT INTO billing_core.fx_conversion
+                    (fx_conversion_id, fx_rate_id, source_amount, source_currency,
+                     quote_amount, quote_currency, quote_minor_units, fx_rate_value,
+                     rate_precision, rounding_mode, converted_at,
+                     fx_conversion_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (fx_conversion_id) DO NOTHING
+                """,
+                (
+                    conversion.fx_conversion_id,
+                    conversion.fx_rate_id,
+                    conversion.source_amount,
+                    conversion.source_currency,
+                    conversion.quote_amount,
+                    conversion.quote_currency,
+                    conversion.quote_minor_units,
+                    conversion.rate,
+                    conversion.rate_precision,
+                    "ROUND_HALF_UP",
+                    conversion.converted_at,
+                    conversion.fx_conversion_contract_version,
+                ),
+            )
+            stored = self._fetch_fx_conversion(cursor, conversion.fx_conversion_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("FX conversion insert did not return a row")
+            if stored.as_contract_dict() != conversion.as_contract_dict():
+                raise ValueError("FX conversion identity cannot change after persistence")
+            return stored
+
+    def get_reconciliation_line(
+        self, tenant_reference: str, reconciliation_line_id: UUID
+    ) -> ReconciliationLine | None:
+        """Return one tenant-scoped reconciliation line with typed exceptions."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_reconciliation_line(
+                cursor, reconciliation_line_id, tenant_account_id=tenant_account_id
+            )
+
+    def insert_reconciliation_line(
+        self, tenant_reference: str, line: ReconciliationLine
+    ) -> ReconciliationLine:
+        """Persist one tenant-owned line and its exception children atomically."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            cursor.execute(
+                """
+                SELECT tenant_account_id
+                FROM billing_core.billing_period
+                WHERE period_id = %s
+                """,
+                (line.period_id,),
+            )
+            period = cursor.fetchone()
+            if period is None or UUID(str(period[0])) != tenant_account_id:
+                raise KeyError(line.period_id)
+            cursor.execute(
+                """
+                INSERT INTO billing_core.reconciliation_line
+                    (reconciliation_line_id, tenant_account_id, period_id,
+                     provider_account_reference, currency_code, internal_currency_code,
+                     provider_currency_code, cash_currency_code, internal_expected_amount,
+                     provider_actual_amount, cash_actual_amount, provider_fee_amount,
+                     withheld_tax_amount, reserve_amount, expected_cash_amount,
+                     reconciliation_line_status, assessed_at,
+                     reconciliation_line_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s)
+                ON CONFLICT (reconciliation_line_id) DO NOTHING
+                RETURNING reconciliation_line_id
+                """,
+                (
+                    line.reconciliation_line_id,
+                    tenant_account_id,
+                    line.period_id,
+                    line.provider_account_reference,
+                    line.currency_code,
+                    line.internal_currency_code,
+                    line.provider_currency_code,
+                    line.cash_currency_code,
+                    line.internal_expected_amount,
+                    line.provider_actual_amount,
+                    line.cash_actual_amount,
+                    line.provider_fee_amount,
+                    line.withheld_tax_amount,
+                    line.reserve_amount,
+                    line.expected_cash_amount,
+                    line.status.value,
+                    line.assessed_at,
+                    line.reconciliation_line_contract_version,
+                ),
+            )
+            inserted = cursor.fetchone() is not None
+            cursor.execute(
+                """
+                SELECT tenant_account_id, period_id, provider_account_reference,
+                       currency_code, internal_currency_code, provider_currency_code,
+                       cash_currency_code, internal_expected_amount, provider_actual_amount,
+                       cash_actual_amount, provider_fee_amount, withheld_tax_amount,
+                       reserve_amount, expected_cash_amount, reconciliation_line_status,
+                       assessed_at, reconciliation_line_contract_version
+                FROM billing_core.reconciliation_line
+                WHERE reconciliation_line_id = %s
+                """,
+                (line.reconciliation_line_id,),
+            )
+            parent = cursor.fetchone()
+            if parent is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation line insert did not return a parent row")
+            if parent != (
+                tenant_account_id,
+                line.period_id,
+                line.provider_account_reference,
+                line.currency_code,
+                line.internal_currency_code,
+                line.provider_currency_code,
+                line.cash_currency_code,
+                line.internal_expected_amount,
+                line.provider_actual_amount,
+                line.cash_actual_amount,
+                line.provider_fee_amount,
+                line.withheld_tax_amount,
+                line.reserve_amount,
+                line.expected_cash_amount,
+                line.status.value,
+                line.assessed_at,
+                line.reconciliation_line_contract_version,
+            ):
+                raise ValueError("reconciliation line identity cannot change after persistence")
+            expected_exceptions = tuple(
+                (exception_number, exception.exception_code.value, exception.next_action)
+                for exception_number, exception in enumerate(line.exceptions, start=1)
+            )
+            if not inserted:
+                cursor.execute(
+                    """
+                    SELECT exception_number, exception_code, next_action
+                    FROM billing_core.reconciliation_exception
+                    WHERE reconciliation_line_id = %s
+                    ORDER BY exception_number
+                    """,
+                    (line.reconciliation_line_id,),
+                )
+                if tuple(cursor.fetchall()) != expected_exceptions:
+                    raise ValueError("reconciliation line exception history cannot change")
+            else:
+                for exception_number, exception in enumerate(line.exceptions, start=1):
+                    cursor.execute(
+                        """
+                        INSERT INTO billing_core.reconciliation_exception
+                            (reconciliation_line_id, exception_number, exception_code, next_action)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (
+                            line.reconciliation_line_id,
+                            exception_number,
+                            exception.exception_code.value,
+                            exception.next_action,
+                        ),
+                    )
+            existing = self._fetch_reconciliation_line(cursor, line.reconciliation_line_id)
+            if existing is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation line insert did not return a row")
+            return existing
+
+    def list_reconciliation_lines(
+        self, tenant_reference: str, period_id: UUID | None = None
+    ) -> tuple[ReconciliationLine, ...]:
+        """Return reconciliation lines for one tenant, optionally one period."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            if period_id is None:
+                cursor.execute(
+                    """
+                    SELECT reconciliation_line_id
+                    FROM billing_core.reconciliation_line
+                    WHERE tenant_account_id = %s
+                    ORDER BY assessed_at, reconciliation_line_id
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT reconciliation_line_id
+                    FROM billing_core.reconciliation_line
+                    WHERE tenant_account_id = %s AND period_id = %s
+                    ORDER BY assessed_at, reconciliation_line_id
+                    """,
+                    (tenant_account_id, period_id),
+                )
+            lines = tuple(
+                self._fetch_reconciliation_line(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(line for line in lines if line is not None)
+
+    def list_reconciliation_exception_aging(
+        self,
+        tenant_reference: str,
+        as_of: datetime,
+        period_id: UUID | None = None,
+    ) -> tuple[ReconciliationExceptionAging, ...]:
+        """Return tenant-scoped exception aging derived from immutable lines."""
+        return tuple(
+            age_reconciliation_exception(line, exception.exception_code, as_of)
+            for line in self.list_reconciliation_lines(tenant_reference, period_id)
+            for exception in line.exceptions
+        )
+
+    def get_reconciliation_evidence(
+        self, tenant_reference: str, evidence_id: UUID
+    ) -> ReconciliationEvidence | None:
+        """Return one tenant-scoped hash-backed evidence record."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_reconciliation_evidence(
+                cursor, evidence_id, tenant_account_id=tenant_account_id
+            )
+
+    def insert_reconciliation_evidence(
+        self, tenant_reference: str, evidence: ReconciliationEvidence
+    ) -> ReconciliationEvidence:
+        """Persist one tenant-owned evidence record for an existing exception."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            cursor.execute(
+                """
+                SELECT 1
+                FROM billing_core.reconciliation_line AS line
+                JOIN billing_core.reconciliation_exception AS exception
+                  ON exception.reconciliation_line_id = line.reconciliation_line_id
+                WHERE line.tenant_account_id = %s
+                  AND line.reconciliation_line_id = %s
+                  AND exception.exception_code = %s
+                """,
+                (
+                    tenant_account_id,
+                    evidence.reconciliation_line_id,
+                    evidence.exception_code.value,
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise KeyError(evidence.exception_code.value)
+            cursor.execute(
+                """
+                INSERT INTO billing_core.reconciliation_evidence
+                    (evidence_id, reconciliation_line_id, exception_code, evidence_kind,
+                     evidence_reference, evidence_sha256, captured_by, captured_at,
+                     reconciliation_evidence_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (evidence_id) DO NOTHING
+                """,
+                (
+                    evidence.evidence_id,
+                    evidence.reconciliation_line_id,
+                    evidence.exception_code.value,
+                    evidence.evidence_kind,
+                    evidence.evidence_reference,
+                    evidence.evidence_sha256,
+                    evidence.captured_by,
+                    evidence.captured_at,
+                    evidence.reconciliation_evidence_contract_version,
+                ),
+            )
+            stored = self._fetch_reconciliation_evidence(cursor, evidence.evidence_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation evidence insert did not return a row")
+            if stored.as_contract_dict() != evidence.as_contract_dict():
+                raise ValueError("reconciliation evidence identity cannot change")
+            return stored
+
+    def list_reconciliation_evidence(
+        self,
+        tenant_reference: str,
+        reconciliation_line_id: UUID | None = None,
+    ) -> tuple[ReconciliationEvidence, ...]:
+        """Return evidence for one tenant, optionally one reconciliation line."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            if reconciliation_line_id is None:
+                cursor.execute(
+                    """
+                    SELECT evidence_id
+                    FROM billing_core.reconciliation_evidence AS evidence
+                    JOIN billing_core.reconciliation_line AS line
+                      ON line.reconciliation_line_id = evidence.reconciliation_line_id
+                    WHERE line.tenant_account_id = %s
+                    ORDER BY evidence.captured_at, evidence.evidence_id
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT evidence_id
+                    FROM billing_core.reconciliation_evidence AS evidence
+                    JOIN billing_core.reconciliation_line AS line
+                      ON line.reconciliation_line_id = evidence.reconciliation_line_id
+                    WHERE line.tenant_account_id = %s
+                      AND evidence.reconciliation_line_id = %s
+                    ORDER BY evidence.captured_at, evidence.evidence_id
+                    """,
+                    (tenant_account_id, reconciliation_line_id),
+                )
+            evidence = tuple(
+                self._fetch_reconciliation_evidence(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(item for item in evidence if item is not None)
+
+    def get_reconciliation_run(
+        self, tenant_reference: str, run_id: UUID
+    ) -> ReconciliationRun | None:
+        """Return one tenant-scoped immutable completed reconciliation run."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_reconciliation_run(
+                cursor, run_id, tenant_account_id=tenant_account_id
+            )
+
+    def insert_reconciliation_run(
+        self, tenant_reference: str, run: ReconciliationRun
+    ) -> ReconciliationRun:
+        """Persist one tenant-owned run and its ordered line membership atomically."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            cursor.execute(
+                """
+                SELECT tenant_account_id
+                FROM billing_core.billing_period
+                WHERE period_id = %s
+                """,
+                (run.period_id,),
+            )
+            period = cursor.fetchone()
+            if period is None or UUID(str(period[0])) != tenant_account_id:
+                raise KeyError(run.period_id)
+            cursor.execute(
+                """
+                INSERT INTO billing_core.reconciliation_run
+                    (run_id, tenant_account_id, period_id, started_at, completed_at,
+                     blocking_exception_count, reconciliation_run_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id) DO NOTHING
+                RETURNING run_id
+                """,
+                (
+                    run.run_id,
+                    tenant_account_id,
+                    run.period_id,
+                    run.started_at,
+                    run.completed_at,
+                    run.blocking_exception_count,
+                    run.reconciliation_run_contract_version,
+                ),
+            )
+            inserted = cursor.fetchone() is not None
+            if not inserted:
+                cursor.execute(
+                    """
+                    SELECT tenant_account_id
+                    FROM billing_core.reconciliation_run
+                    WHERE run_id = %s
+                    FOR UPDATE
+                    """,
+                    (run.run_id,),
+                )
+                parent = cursor.fetchone()
+                if parent is None or UUID(str(parent[0])) != tenant_account_id:
+                    raise ValueError("reconciliation run identity cannot change")
+            else:
+                for line_number, reconciliation_line_id in enumerate(
+                    run.reconciliation_line_ids, start=1
+                ):
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM billing_core.reconciliation_line
+                        WHERE tenant_account_id = %s
+                          AND period_id = %s
+                          AND reconciliation_line_id = %s
+                        """,
+                        (tenant_account_id, run.period_id, reconciliation_line_id),
+                    )
+                    if cursor.fetchone() is None:
+                        raise KeyError(reconciliation_line_id)
+                    cursor.execute(
+                        """
+                        INSERT INTO billing_core.reconciliation_run_line
+                            (run_id, tenant_account_id, period_id, line_number,
+                             reconciliation_line_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (run_id, line_number) DO NOTHING
+                        """,
+                        (
+                            run.run_id,
+                            tenant_account_id,
+                            run.period_id,
+                            line_number,
+                            reconciliation_line_id,
+                        ),
+                    )
+                    cursor.execute(
+                        """
+                        SELECT tenant_account_id, period_id, reconciliation_line_id
+                        FROM billing_core.reconciliation_run_line
+                        WHERE run_id = %s AND line_number = %s
+                        """,
+                        (run.run_id, line_number),
+                    )
+                    row = cursor.fetchone()
+                    if row != (tenant_account_id, run.period_id, reconciliation_line_id):  # pragma: no cover - protected by composite identity constraints
+                        raise ValueError("reconciliation run line identity cannot change")
+            stored = self._fetch_reconciliation_run(
+                cursor, run.run_id, tenant_account_id=tenant_account_id
+            )
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation run insert did not return a row")
+            if stored.as_contract_dict() != run.as_contract_dict():
+                raise ValueError("reconciliation run identity cannot change")
+            return stored
+
+    def list_reconciliation_runs(
+        self, tenant_reference: str, period_id: UUID | None = None
+    ) -> tuple[ReconciliationRun, ...]:
+        """Return completed runs for one tenant, optionally one period."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            if period_id is None:
+                cursor.execute(
+                    """
+                    SELECT run_id
+                    FROM billing_core.reconciliation_run
+                    WHERE tenant_account_id = %s
+                    ORDER BY completed_at, run_id
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT run_id
+                    FROM billing_core.reconciliation_run
+                    WHERE tenant_account_id = %s AND period_id = %s
+                    ORDER BY completed_at, run_id
+                    """,
+                    (tenant_account_id, period_id),
+                )
+            runs = tuple(
+                self._fetch_reconciliation_run(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(item for item in runs if item is not None)
+
+    def get_reconciliation_resolution(
+        self, tenant_reference: str, resolution_id: UUID
+    ) -> ReconciliationResolution | None:
+        """Return one tenant-scoped immutable maker-checker resolution."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            return self._fetch_reconciliation_resolution(
+                cursor, resolution_id, tenant_account_id=tenant_account_id
+            )
+
+    def insert_reconciliation_resolution(
+        self, tenant_reference: str, resolution: ReconciliationResolution
+    ) -> ReconciliationResolution:
+        """Persist one tenant-owned exception resolution without replacing approvals."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            cursor.execute(
+                """
+                SELECT 1
+                FROM billing_core.reconciliation_line AS line
+                JOIN billing_core.reconciliation_exception AS exception
+                  ON exception.reconciliation_line_id = line.reconciliation_line_id
+                WHERE line.tenant_account_id = %s
+                  AND line.reconciliation_line_id = %s
+                  AND exception.exception_code = %s
+                """,
+                (
+                    tenant_account_id,
+                    resolution.reconciliation_line_id,
+                    resolution.exception_code.value,
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise KeyError(resolution.exception_code.value)
+            cursor.execute(
+                """
+                INSERT INTO billing_core.reconciliation_resolution
+                    (resolution_id, reconciliation_line_id, exception_code,
+                     resolution_status, owner_reference, resolution_reason,
+                     evidence_reference, maker_reference, checker_reference,
+                     resolved_at, reconciliation_resolution_contract_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (resolution_id) DO NOTHING
+                """,
+                (
+                    resolution.resolution_id,
+                    resolution.reconciliation_line_id,
+                    resolution.exception_code.value,
+                    resolution.resolution_status.value,
+                    resolution.owner_reference,
+                    resolution.resolution_reason,
+                    resolution.evidence_reference,
+                    resolution.maker_reference,
+                    resolution.checker_reference,
+                    resolution.resolved_at,
+                    resolution.reconciliation_resolution_contract_version,
+                ),
+            )
+            stored = self._fetch_reconciliation_resolution(cursor, resolution.resolution_id)
+            if stored is None:  # pragma: no cover - the insert or conflict must expose a row
+                raise RuntimeError("reconciliation resolution insert did not return a row")
+            if stored.as_contract_dict() != resolution.as_contract_dict():
+                raise ValueError("reconciliation resolution identity cannot change")
+            return stored
+
+    def list_reconciliation_resolutions(
+        self,
+        tenant_reference: str,
+        reconciliation_line_id: UUID | None = None,
+    ) -> tuple[ReconciliationResolution, ...]:
+        """Return resolution history for one tenant, optionally one line."""
+        with self._cursor() as cursor:
+            tenant_account_id = self._tenant_account_id_with_cursor(cursor, tenant_reference)
+            if reconciliation_line_id is None:
+                cursor.execute(
+                    """
+                    SELECT resolution_id
+                    FROM billing_core.reconciliation_resolution AS resolution
+                    JOIN billing_core.reconciliation_line AS line
+                      ON line.reconciliation_line_id = resolution.reconciliation_line_id
+                    WHERE line.tenant_account_id = %s
+                    ORDER BY resolution.resolved_at, resolution.resolution_id
+                    """,
+                    (tenant_account_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT resolution_id
+                    FROM billing_core.reconciliation_resolution AS resolution
+                    JOIN billing_core.reconciliation_line AS line
+                      ON line.reconciliation_line_id = resolution.reconciliation_line_id
+                    WHERE line.tenant_account_id = %s
+                      AND resolution.reconciliation_line_id = %s
+                    ORDER BY resolution.resolved_at, resolution.resolution_id
+                    """,
+                    (tenant_account_id, reconciliation_line_id),
+                )
+            resolutions = tuple(
+                self._fetch_reconciliation_resolution(cursor, UUID(str(row[0])))
+                for row in cursor.fetchall()
+            )
+        return tuple(resolution for resolution in resolutions if resolution is not None)
 
     def register_tenant(self, tenant_reference: str) -> TenantAccount:
         """Insert or return one tenant authority row."""
@@ -5659,6 +6411,336 @@ class PostgresUsageLedger:
         if row is None:
             raise KeyError(reference)
         return self._credential_from_row(row)
+
+    @staticmethod
+    def _tenant_account_id_with_cursor(cursor: Any, tenant_reference: str) -> UUID:
+        """Resolve a tenant inside an existing transaction without opening a cursor."""
+        cursor.execute(
+            """
+            SELECT tenant_account_id
+            FROM billing_core.tenant_account
+            WHERE tenant_reference = %s
+            """,
+            (tenant_reference,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise KeyError(tenant_reference)
+        return UUID(str(row[0]))
+
+    @staticmethod
+    def _fetch_billing_period(
+        cursor: Any,
+        period_id: UUID,
+        *,
+        lock: bool = False,
+        tenant_account_id: UUID | None = None,
+    ) -> BillingPeriod | None:
+        """Hydrate a period and its append-only transitions on one cursor."""
+        query = """
+            SELECT period_id, tenant_account_id, tenant_reference, period_start,
+                   period_end, opened_at, opened_by, period_contract_version
+            FROM billing_core.billing_period
+            JOIN billing_core.tenant_account USING (tenant_account_id)
+            WHERE period_id = %s
+        """
+        parameters: tuple[Any, ...] = (period_id,)
+        if tenant_account_id is not None:
+            query += " AND billing_period.tenant_account_id = %s"
+            parameters += (tenant_account_id,)
+        if lock:
+            query += " FOR UPDATE"
+        cursor.execute(query, parameters)
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        cursor.execute(
+            """
+            SELECT transition_number, transition_id, from_status, to_status, actor_reference,
+                   authorization_reference, transition_reason, transitioned_at
+            FROM billing_core.billing_period_transition
+            WHERE tenant_account_id = %s AND period_id = %s
+            ORDER BY transition_number
+            """,
+            (row[1], period_id),
+        )
+        transitions = tuple(
+            BillingPeriodTransition(
+                transition_id=UUID(str(transition[1])),
+                from_status=transition[2],
+                to_status=transition[3],
+                actor_reference=transition[4],
+                authorization_reference=transition[5],
+                reason=transition[6],
+                transitioned_at=transition[7],
+            )
+            for transition in cursor.fetchall()
+        )
+        return BillingPeriod(
+            period_id=UUID(str(row[0])),
+            tenant_reference=row[2],
+            period_start=row[3],
+            period_end=row[4],
+            opened_at=row[5],
+            opened_by=row[6],
+            status=transitions[-1].to_status if transitions else BillingPeriodStatus.OPEN,
+            transitions=transitions,
+            period_contract_version=row[7],
+        )
+
+    @staticmethod
+    def _fetch_fx_rate(cursor: Any, fx_rate_id: UUID) -> FxRate | None:
+        """Hydrate one exact FX rate snapshot."""
+        cursor.execute(
+            """
+            SELECT fx_rate_id, rate_source, rate_type, base_currency, quote_currency,
+                   fx_rate_value, rate_precision, effective_at, recorded_at,
+                   fx_rate_contract_version
+            FROM billing_core.fx_rate
+            WHERE fx_rate_id = %s
+            """,
+            (fx_rate_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return FxRate(
+            fx_rate_id=UUID(str(row[0])),
+            rate_source=row[1],
+            rate_type=row[2],
+            base_currency=row[3],
+            quote_currency=row[4],
+            rate=row[5],
+            rate_precision=row[6],
+            effective_at=row[7],
+            recorded_at=row[8],
+            fx_rate_contract_version=row[9],
+        )
+
+    @staticmethod
+    def _fetch_fx_conversion(cursor: Any, fx_conversion_id: UUID) -> FxConversion | None:
+        """Hydrate one frozen conversion result."""
+        cursor.execute(
+            """
+            SELECT fx_conversion_id, fx_rate_id, source_amount, source_currency,
+                   quote_amount, quote_currency, quote_minor_units, fx_rate_value,
+                   rate_precision, rounding_mode, converted_at,
+                   fx_conversion_contract_version
+            FROM billing_core.fx_conversion
+            WHERE fx_conversion_id = %s
+            """,
+            (fx_conversion_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        if row[9] != "ROUND_HALF_UP":  # pragma: no cover - protected by the table check
+            raise ValueError("unsupported FX rounding mode")
+        return FxConversion(
+            fx_conversion_id=UUID(str(row[0])),
+            fx_rate_id=UUID(str(row[1])),
+            source_amount=row[2],
+            source_currency=row[3],
+            quote_amount=row[4],
+            quote_currency=row[5],
+            quote_minor_units=row[6],
+            rate=row[7],
+            rate_precision=row[8],
+            converted_at=row[10],
+            fx_conversion_contract_version=row[11],
+        )
+
+    @staticmethod
+    def _fetch_reconciliation_line(
+        cursor: Any,
+        reconciliation_line_id: UUID,
+        *,
+        tenant_account_id: UUID | None = None,
+    ) -> ReconciliationLine | None:
+        """Hydrate one reconciliation line and its normalized exception children."""
+        query = """
+            SELECT reconciliation_line_id, period_id, provider_account_reference,
+                   currency_code, internal_currency_code, provider_currency_code,
+                   cash_currency_code, internal_expected_amount, provider_actual_amount,
+                   cash_actual_amount, provider_fee_amount, withheld_tax_amount,
+                   reserve_amount, expected_cash_amount, reconciliation_line_status,
+                   assessed_at, reconciliation_line_contract_version
+            FROM billing_core.reconciliation_line
+            WHERE reconciliation_line_id = %s
+        """
+        parameters: tuple[Any, ...] = (reconciliation_line_id,)
+        if tenant_account_id is not None:
+            query += " AND tenant_account_id = %s"
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        cursor.execute(
+            """
+            SELECT exception_code, next_action
+            FROM billing_core.reconciliation_exception
+            WHERE reconciliation_line_id = %s
+            ORDER BY exception_number
+            """,
+            (reconciliation_line_id,),
+        )
+        exceptions = tuple(
+            ReconciliationException(exception_code=item[0], next_action=item[1])
+            for item in cursor.fetchall()
+        )
+        return ReconciliationLine(
+            reconciliation_line_id=UUID(str(row[0])),
+            period_id=UUID(str(row[1])),
+            provider_account_reference=row[2],
+            currency_code=row[3],
+            internal_currency_code=row[4],
+            provider_currency_code=row[5],
+            cash_currency_code=row[6],
+            internal_expected_amount=row[7],
+            provider_actual_amount=row[8],
+            cash_actual_amount=row[9],
+            provider_fee_amount=row[10],
+            withheld_tax_amount=row[11],
+            reserve_amount=row[12],
+            expected_cash_amount=row[13],
+            status=row[14],
+            exceptions=exceptions,
+            assessed_at=row[15],
+            reconciliation_line_contract_version=row[16],
+        )
+
+    @staticmethod
+    def _fetch_reconciliation_resolution(
+        cursor: Any,
+        resolution_id: UUID,
+        *,
+        tenant_account_id: UUID | None = None,
+    ) -> ReconciliationResolution | None:
+        """Hydrate one immutable maker-checker resolution."""
+        query = """
+            SELECT resolution_id, reconciliation_line_id, exception_code,
+                   resolution_status, owner_reference, resolution_reason,
+                   evidence_reference, maker_reference, checker_reference,
+                   resolved_at, reconciliation_resolution_contract_version
+            FROM billing_core.reconciliation_resolution
+            WHERE resolution_id = %s
+        """
+        parameters: tuple[Any, ...] = (resolution_id,)
+        if tenant_account_id is not None:
+            query += """
+                AND EXISTS (
+                    SELECT 1
+                    FROM billing_core.reconciliation_line
+                    WHERE reconciliation_line_id =
+                        reconciliation_resolution.reconciliation_line_id
+                      AND tenant_account_id = %s
+                )
+            """
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return ReconciliationResolution(
+            resolution_id=UUID(str(row[0])),
+            reconciliation_line_id=UUID(str(row[1])),
+            exception_code=row[2],
+            resolution_status=row[3],
+            owner_reference=row[4],
+            resolution_reason=row[5],
+            evidence_reference=row[6],
+            maker_reference=row[7],
+            checker_reference=row[8],
+            resolved_at=row[9],
+            reconciliation_resolution_contract_version=row[10],
+        )
+
+    @staticmethod
+    def _fetch_reconciliation_evidence(
+        cursor: Any,
+        evidence_id: UUID,
+        *,
+        tenant_account_id: UUID | None = None,
+    ) -> ReconciliationEvidence | None:
+        """Hydrate one immutable hash-backed evidence record."""
+        query = """
+            SELECT evidence_id, reconciliation_line_id, exception_code, evidence_kind,
+                   evidence_reference, evidence_sha256, captured_by, captured_at,
+                   reconciliation_evidence_contract_version
+            FROM billing_core.reconciliation_evidence
+            WHERE evidence_id = %s
+        """
+        parameters: tuple[Any, ...] = (evidence_id,)
+        if tenant_account_id is not None:
+            query += """
+                AND EXISTS (
+                    SELECT 1
+                    FROM billing_core.reconciliation_line
+                    WHERE reconciliation_line_id = reconciliation_evidence.reconciliation_line_id
+                      AND tenant_account_id = %s
+                )
+            """
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return ReconciliationEvidence(
+            evidence_id=UUID(str(row[0])),
+            reconciliation_line_id=UUID(str(row[1])),
+            exception_code=row[2],
+            evidence_kind=row[3],
+            evidence_reference=row[4],
+            evidence_sha256=row[5],
+            captured_by=row[6],
+            captured_at=row[7],
+            reconciliation_evidence_contract_version=row[8],
+        )
+
+    @staticmethod
+    def _fetch_reconciliation_run(
+        cursor: Any,
+        run_id: UUID,
+        *,
+        tenant_account_id: UUID | None = None,
+    ) -> ReconciliationRun | None:
+        """Hydrate one completed run with ordered line membership."""
+        query = """
+            SELECT run_id, period_id, started_at, completed_at,
+                   blocking_exception_count, reconciliation_run_contract_version
+            FROM billing_core.reconciliation_run
+            WHERE run_id = %s
+        """
+        parameters: tuple[Any, ...] = (run_id,)
+        if tenant_account_id is not None:
+            query += " AND tenant_account_id = %s"
+            parameters += (tenant_account_id,)
+        cursor.execute(query, parameters)
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        line_query = """
+            SELECT reconciliation_line_id
+            FROM billing_core.reconciliation_run_line
+            WHERE run_id = %s
+        """
+        line_parameters: tuple[Any, ...] = (run_id,)
+        if tenant_account_id is not None:
+            line_query += " AND tenant_account_id = %s"
+            line_parameters += (tenant_account_id,)
+        line_query += " ORDER BY line_number"
+        cursor.execute(line_query, line_parameters)
+        line_ids = tuple(UUID(str(item[0])) for item in cursor.fetchall())
+        return ReconciliationRun(
+            run_id=UUID(str(row[0])),
+            period_id=UUID(str(row[1])),
+            started_at=row[2],
+            completed_at=row[3],
+            reconciliation_line_ids=line_ids,
+            blocking_exception_count=row[4],
+            reconciliation_run_contract_version=row[5],
+        )
 
     def _find_event(self, query: str, parameters: tuple[Any, ...]) -> StoredUsageEvent | None:
         """Run one fixed identity query and hydrate its measurements."""

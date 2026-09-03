@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/reconciliation-run/v1",
+  "title": "Reconciliation Run",
+  "description": "Immutable completed reconciliation run with ordered line membership.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reconciliation_run_contract_version",
+    "run_id",
+    "period_id",
+    "started_at",
+    "completed_at",
+    "reconciliation_line_ids",
+    "blocking_exception_count"
+  ],
+  "properties": {
+    "reconciliation_run_contract_version": {"type": "integer", "minimum": 1},
+    "run_id": {"type": "string", "format": "uuid"},
+    "period_id": {"type": "string", "format": "uuid"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "reconciliation_line_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "format": "uuid"}
+    },
+    "blocking_exception_count": {"type": "integer", "minimum": 0}
+  }
+}

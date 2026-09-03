@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/billing-period/v1",
+  "title": "Billing Period",
+  "description": "Immutable tenant billing-period snapshot with authorized append-only forward transitions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "period_contract_version",
+    "period_id",
+    "tenant_reference",
+    "period_start",
+    "period_end",
+    "opened_at",
+    "opened_by",
+    "period_status",
+    "transitions"
+  ],
+  "properties": {
+    "period_contract_version": {"type": "integer", "minimum": 1},
+    "period_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "period_start": {"type": "string", "format": "date"},
+    "period_end": {"type": "string", "format": "date"},
+    "opened_at": {"type": "string", "format": "date-time"},
+    "opened_by": {"type": "string", "minLength": 1},
+    "period_status": {
+      "type": "string",
+      "enum": ["open", "soft_closed", "reconciled", "invoiced", "hard_closed"]
+    },
+    "transitions": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {"$ref": "#/$defs/period_transition"}
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "period_status": {"const": "open"},
+        "transitions": {"minItems": 0, "maxItems": 0}
+      }
+    },
+    {
+      "properties": {
+        "period_status": {"const": "soft_closed"},
+        "transitions": {
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [{"$ref": "#/$defs/open_to_soft_closed"}]
+        }
+      }
+    },
+    {
+      "properties": {
+        "period_status": {"const": "reconciled"},
+        "transitions": {
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"$ref": "#/$defs/open_to_soft_closed"},
+            {"$ref": "#/$defs/soft_closed_to_reconciled"}
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "period_status": {"const": "invoiced"},
+        "transitions": {
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {"$ref": "#/$defs/open_to_soft_closed"},
+            {"$ref": "#/$defs/soft_closed_to_reconciled"},
+            {"$ref": "#/$defs/reconciled_to_invoiced"}
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "period_status": {"const": "hard_closed"},
+        "transitions": {
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            {"$ref": "#/$defs/open_to_soft_closed"},
+            {"$ref": "#/$defs/soft_closed_to_reconciled"},
+            {"$ref": "#/$defs/reconciled_to_invoiced"},
+            {"$ref": "#/$defs/invoiced_to_hard_closed"}
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "period_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transition_id",
+        "from_status",
+        "to_status",
+        "actor_reference",
+        "authorization_reference",
+        "reason",
+        "transitioned_at"
+      ],
+      "properties": {
+        "transition_id": {"type": "string", "format": "uuid"},
+        "from_status": {
+          "type": "string",
+          "enum": ["open", "soft_closed", "reconciled", "invoiced"]
+        },
+        "to_status": {
+          "type": "string",
+          "enum": ["soft_closed", "reconciled", "invoiced", "hard_closed"]
+        },
+        "actor_reference": {"type": "string", "minLength": 1},
+        "authorization_reference": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "transitioned_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "open_to_soft_closed": {
+      "allOf": [
+        {"$ref": "#/$defs/period_transition"},
+        {"properties": {"from_status": {"const": "open"}, "to_status": {"const": "soft_closed"}}}
+      ]
+    },
+    "soft_closed_to_reconciled": {
+      "allOf": [
+        {"$ref": "#/$defs/period_transition"},
+        {"properties": {"from_status": {"const": "soft_closed"}, "to_status": {"const": "reconciled"}}}
+      ]
+    },
+    "reconciled_to_invoiced": {
+      "allOf": [
+        {"$ref": "#/$defs/period_transition"},
+        {"properties": {"from_status": {"const": "reconciled"}, "to_status": {"const": "invoiced"}}}
+      ]
+    },
+    "invoiced_to_hard_closed": {
+      "allOf": [
+        {"$ref": "#/$defs/period_transition"},
+        {"properties": {"from_status": {"const": "invoiced"}, "to_status": {"const": "hard_closed"}}}
+      ]
+    }
+  }
+}

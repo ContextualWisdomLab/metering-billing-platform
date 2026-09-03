@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/fx-rate/v1",
+  "title": "FX Rate",
+  "description": "Immutable exact exchange-rate evidence with source, type, precision, and effective/recorded instants.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fx_rate_contract_version",
+    "fx_rate_id",
+    "rate_source",
+    "rate_type",
+    "base_currency",
+    "quote_currency",
+    "rate",
+    "rate_precision",
+    "effective_at",
+    "recorded_at"
+  ],
+  "properties": {
+    "fx_rate_contract_version": {"type": "integer", "minimum": 1},
+    "fx_rate_id": {"type": "string", "format": "uuid"},
+    "rate_source": {"type": "string", "minLength": 1},
+    "rate_type": {"type": "string", "enum": ["spot", "accounting", "provider"]},
+    "base_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "quote_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "rate": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "rate_precision": {"type": "integer", "minimum": 0},
+    "effective_at": {"type": "string", "format": "date-time"},
+    "recorded_at": {"type": "string", "format": "date-time"}
+  }
+}
