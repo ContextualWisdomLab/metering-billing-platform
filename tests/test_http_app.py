@@ -6,6 +6,9 @@ import io
 import json
 import os
 import runpy
+import signal
+import socket
+import threading
 import unittest
 from decimal import Decimal
 from typing import Any, Mapping
@@ -29,13 +32,16 @@ from metering_billing.http_app import (
     HttpRequestError,
     _dispatch_write,
     _parse_uuid,
+    _read_json_object,
     _send_json,
     _status_for_contract,
     _status_for_result,
     create_http_app,
     main,
+    RequestTimeoutWSGIRequestHandler,
     ThreadingWSGIServer,
 )
+from wsgiref.simple_server import make_server as stdlib_make_server
 from metering_billing.invoice_draft import InvoiceDraftService
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_settlement import PaymentSettlementService
@@ -602,7 +608,37 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         self.assertEqual(port, 8000)
         self.assertIs(maker.call_args.kwargs["server_class"], ThreadingWSGIServer)
         self.assertTrue(callable(app))
+        self.assertIs(
+            maker.call_args.kwargs["handler_class"], RequestTimeoutWSGIRequestHandler
+        )
         fake_server.serve_forever.assert_called_once()
+        fake_server.server_close.assert_called_once()
+
+        shutdown_server = mock.Mock()
+        registered_handlers: dict[int, Any] = {}
+
+        def register_handler(signal_number: int, handler: Any) -> object:
+            registered_handlers[signal_number] = handler
+            return object()
+
+        def serve_until_shutdown() -> None:
+            registered_handlers[signal.SIGTERM](signal.SIGTERM, None)
+            registered_handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        shutdown_server.serve_forever.side_effect = serve_until_shutdown
+        with mock.patch("metering_billing.http_app.signal.signal", side_effect=register_handler):
+            with mock.patch("metering_billing.http_app.make_server", return_value=shutdown_server):
+                with mock.patch(
+                    "metering_billing.http_app.threading.Thread"
+                ) as shutdown_thread:
+                    shutdown_thread.return_value.start.side_effect = (
+                        lambda: shutdown_server.shutdown()
+                    )
+                    self.assertEqual(main(()), 0)
+        shutdown_server.shutdown.assert_called_once()
+        shutdown_server.server_close.assert_called_once()
+        shutdown_thread.assert_called_once()
+        shutdown_thread.return_value.start.assert_called_once()
 
         fake_server_two = mock.Mock()
         with mock.patch("metering_billing.http_app.make_server", return_value=fake_server_two) as maker_two:
@@ -629,6 +665,53 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
                     runpy.run_module("metering_billing.http_app", run_name="__main__")
         self.assertEqual(exited.exception.code, 0)
         fake_server_three.serve_forever.assert_called_once()
+
+    def test_sigterm_with_partial_body_finishes_server_close(self) -> None:
+        """SIGTERM must not wait forever for a client that withholds its body."""
+        body_read_started = threading.Event()
+        body_read_timed_out = threading.Event()
+
+        def read_json(environ: dict[str, Any]) -> dict[str, Any]:
+            body_read_started.set()
+            try:
+                return _read_json_object(environ)
+            except HttpRequestError:
+                body_read_timed_out.set()
+                raise
+
+        application = create_http_app(MemoryUsageLedger())
+
+        with mock.patch.object(RequestTimeoutWSGIRequestHandler, "timeout", 0.05):
+            httpd = stdlib_make_server(
+                "127.0.0.1",
+                0,
+                application,
+                server_class=ThreadingWSGIServer,
+                handler_class=RequestTimeoutWSGIRequestHandler,
+            )
+            client = socket.create_connection(("127.0.0.1", httpd.server_address[1]))
+            self.addCleanup(client.close)
+            client.sendall(
+                b"POST /v1/usage-events HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Length: 100\r\n"
+                b"Connection: close\r\n\r\n"
+                b"{"
+            )
+
+            def terminate_on_body_read() -> None:
+                body_read_started.wait(1.0)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+            signal_thread = threading.Thread(target=terminate_on_body_read)
+            signal_thread.start()
+            with mock.patch("metering_billing.http_app.make_server", return_value=httpd):
+                with mock.patch("metering_billing.http_app._read_json_object", side_effect=read_json):
+                    self.assertEqual(main(()), 0)
+            signal_thread.join(1.0)
+            self.assertTrue(body_read_started.is_set())
+            self.assertTrue(body_read_timed_out.is_set())
+            self.assertFalse(signal_thread.is_alive())
 
 
 if __name__ == "__main__":

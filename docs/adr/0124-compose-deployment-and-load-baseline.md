@@ -29,11 +29,18 @@ deployment surface, never invented.
   migrations, and seed helper, drops to a non-root user, exposes port 8000,
   and starts `python -m metering_billing.http_app`.  No multi-stage build is
   needed for a stdlib-plus-psycopg application.
-- Make the web tier multithreaded: `main()` now serves through a new
-  module-level `ThreadingWSGIServer` (`ThreadingMixIn` over the stdlib
-  `WSGIServer`) with daemon threads, so concurrent tenant requests are
-  handled in parallel.  Everything else about the entrypoint stays identical,
-  including `PORT` handling with the 8000 default.
+- Make the web tier multithreaded: `main()` now serves through a module-level
+  `ThreadingWSGIServer` (`ThreadingMixIn` over the stdlib `WSGIServer`) with
+  non-daemon request threads and `block_on_close=True`, so concurrent tenant
+  requests are handled in parallel and active work drains when the listener
+  closes.  `RequestTimeoutWSGIRequestHandler` applies a 10-second socket read
+  timeout so a stalled partial request cannot hold that drain indefinitely.
+  `server_close()` first closes the listener through the superclass and then
+  joins active request threads.  `SIGTERM` and `SIGINT` stop the accept loop
+  through a separate shutdown thread, restore the prior process handlers, and
+  close the server.
+  Everything else about the entrypoint stays identical, including `PORT`
+  handling with the 8000 default.
 - Add `compose/docker-compose.yml` with fixed project name
   `metering-billing-platform` and three services:
   `postgres_database` (PostgreSQL 18, `pg_isready` healthcheck, named data
@@ -42,9 +49,9 @@ deployment surface, never invented.
   through the advisory-locked path, `restart: "no"`, gating the API), and
   `billing_api` (built image running with
   `METERING_BILLING_LEDGER_BACKEND=postgres`, DSN pointed at the project
-  service, and a stdlib `urllib` `/readyz` healthcheck so the image needs no
-  curl).  First boot therefore applies migrations idempotently before the
-  first request is served.
+  service, a 30-second `stop_grace_period`, and a stdlib `urllib` `/readyz`
+  healthcheck so the image needs no curl).  First boot therefore applies
+  migrations idempotently before the first request is served.
 - Document every variable in `compose/.env.example` with dev-safe defaults
   and production-change guidance; Compose reads that file as `.env`.
 - Record an end-to-end k6 baseline in `compose/k6/e2e_smoke.js`: ramp to a
@@ -65,9 +72,11 @@ deployment surface, never invented.
 - One command boots the full platform and `--wait` returns only when the API
   reports the PostgreSQL backend ready, so operators get a truthful
   start-to-ready signal without reading source code.
-- The threaded server removes head-of-line blocking between tenants while
-  keeping behavior byte-for-byte otherwise; existing entrypoint tests pin the
-  server class so a future regression back to serial serving fails CI.
+- The threaded server removes head-of-line blocking between tenants and drains
+  active requests during normal termination; Compose bounds the drain at 30
+  seconds before the container runtime force-stops the process. Existing
+  entrypoint tests pin the server class and signal path so a future regression
+  back to serial or abrupt serving fails CI.
 - The image cannot drift from the lockfile: hash verification fails the build
   if any wheel hash changes, and `--only-binary=:all:` forbids accidental
   source builds.

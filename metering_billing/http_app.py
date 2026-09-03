@@ -284,11 +284,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 from socketserver import ThreadingMixIn
+import threading
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qs, unquote
 from uuid import UUID
-from wsgiref.simple_server import WSGIServer, make_server
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
 from metering_billing.ais_outbox_drain import AisOutboxDrainService
@@ -448,10 +450,20 @@ from metering_billing.usage_rating import UsageRatingService
 WSGIApp = Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]
 
 
-class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
-    """Serve one daemon thread per connection so tenant reads never serialize."""
+REQUEST_READ_TIMEOUT_SECONDS = 10.0
 
-    daemon_threads = True
+
+class RequestTimeoutWSGIRequestHandler(WSGIRequestHandler):
+    """Bound socket reads so graceful shutdown has a finite drain ceiling."""
+
+    timeout = REQUEST_READ_TIMEOUT_SECONDS
+
+
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Serve concurrent requests and wait for active work during shutdown."""
+
+    daemon_threads = False
+    block_on_close = True
 
 
 COLLECTION_CASE_COLLECTION_PATH = "/v1/collection-cases"
@@ -2825,7 +2837,9 @@ def main(arguments: tuple[str, ...] | None = None) -> int:
     plus ``METERING_BILLING_POSTGRES_DSN`` select the durable system of
     record exactly as documented for ``create_http_app``.  Serving uses
     :class:`ThreadingWSGIServer` so concurrent tenant requests are handled on
-    separate daemon threads instead of serializing behind one request loop.
+    separate non-daemon threads that drain on server close instead of
+    serializing behind one request loop.  ``SIGTERM`` and ``SIGINT`` stop the
+    accept loop through a separate shutdown thread and restore prior handlers.
     """
     del arguments
     port = int(os.environ.get("PORT", "8000"))
@@ -2835,8 +2849,33 @@ def main(arguments: tuple[str, ...] | None = None) -> int:
         port,
         create_http_app(create_default_ledger(), ais_base_url=ais_base_url),
         server_class=ThreadingWSGIServer,
+        handler_class=RequestTimeoutWSGIRequestHandler,
     )
-    httpd.serve_forever()
+    shutdown_requested = False
+
+    def request_shutdown(signum: int, frame: Any) -> None:
+        """Stop accepting work while allowing active requests to drain."""
+        del signum, frame
+        nonlocal shutdown_requested
+        if shutdown_requested:
+            return
+        shutdown_requested = True
+        threading.Thread(
+            target=httpd.shutdown,
+            name="metering-billing-http-shutdown",
+            daemon=True,
+        ).start()
+
+    previous_handlers = {
+        signal_number: signal.signal(signal_number, request_shutdown)
+        for signal_number in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        httpd.serve_forever()
+    finally:
+        for signal_number, previous_handler in previous_handlers.items():
+            signal.signal(signal_number, previous_handler)
+        httpd.server_close()
     return 0
 
 
@@ -3426,7 +3465,10 @@ def _read_json_object(environ: WSGIEnvironment) -> dict[str, Any]:
     input_stream = environ.get("wsgi.input")
     if content_length < 0 or input_stream is None:
         raise HttpRequestError("request_invalid")
-    raw = input_stream.read(content_length)
+    try:
+        raw = input_stream.read(content_length)
+    except TimeoutError as error:
+        raise HttpRequestError("request_invalid") from error
     if not raw:
         raise HttpRequestError("request_invalid")
     try:

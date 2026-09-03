@@ -1,8 +1,8 @@
 # Product and Technical Gap Baseline
 
-**Status:** Proposed completion baseline  
-**Assessment date:** 2026-08-21
-**Assessed candidate:** PR [#82](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/82), head `1356b3e148715a568f035608462f55e509374aa0`
+**Status:** Active current-state gap baseline
+**Assessment date:** 2026-08-29
+**Assessed head:** `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274` (PR [#141](https://github.com/ContextualWisdomLab/metering-billing-platform/pull/141))
 **Default branch:** `develop`  
 **Purpose:** Define the evidence required to move Metering Billing Platform from a contract-rich candidate stack to a releasable commercial product.
 
@@ -12,29 +12,28 @@ The candidate stack is a substantial **commercial-domain prototype and contract 
 
 The strongest existing work is the explicit separation of usage, rating, commercial invoice intent, payment/collection facts, accounting proposals, provider projections, and tenant-scoped presentment. The implementation also has unusually strong local exact-decimal, idempotency, schema, documentation, and test discipline.
 
-Completion is blocked by nine product-level gaps:
+Completion is blocked by eight product-level gaps. Release integration #83 is complete and is retained below as historical evidence:
 
-1. the implemented product is not on the default branch and the current release train still has multiple open, stacked candidates;
-2. only the usage-ingestion vertical slice has a durable PostgreSQL runtime; the broader commercial runtime is still centered on the in-memory reference ledger;
-3. published spend budgets do not authorize, reserve, commit, release, or deny work;
-4. no live commerce adapter currently collects money or imports authoritative provider settlement evidence;
-5. billing-period close, three-way reconciliation, FX, and standardized finance export are incomplete;
-6. production identity, authorization, secrets, egress, compliance evidence, and release provenance are incomplete;
-7. Storybook presentment is not an authenticated operator/customer application;
-8. canonical SDKs and heterogeneous CWL producer integrations are not complete;
-9. GA operability, performance, disaster recovery, release, and support evidence is not complete.
+1. PostgreSQL adapters and a Compose API deployment exist, but restart/concurrency, database isolation, raw evidence, partitioning, backup/restore, and worker recovery evidence required for a complete production path are incomplete;
+2. published spend budgets do not authorize, reserve, commit, release, or deny work;
+3. no live commerce adapter currently collects money or imports authoritative provider settlement evidence;
+4. billing-period close, three-way reconciliation, FX, and standardized finance export are incomplete;
+5. production identity, authorization, secrets, egress, compliance evidence, and release provenance are incomplete;
+6. Storybook presentment is not an authenticated operator/customer application;
+7. the canonical Python producer reference and a durable outbox slice are open in stacked PRs, but canonical SDK coverage and heterogeneous CWL producer integrations are not complete;
+8. GA operability, performance, disaster recovery, release, and support evidence is not complete.
 
 Until those conditions are satisfied, the accurate product statement is:
 
-> Metering Billing Platform is a provider-neutral commercial-control-plane candidate with extensive immutable contracts and deterministic reference behavior. It is not yet a merged, provider-connected, durable, operated, or certified billing service.
+> Metering Billing Platform is a merged provider-neutral commercial-control-plane candidate with extensive immutable contracts, a durable PostgreSQL adapter, and a reproducible Compose surface. It is not yet a provider-connected, fully operated, reconciled, or certified GA billing service.
 
 ## Assessment basis
 
 This baseline examined:
 
 - the `develop` branch;
-- all open issues and pull requests visible on 2026-08-20;
-- the current cumulative candidate tip in PR #82;
+- all open issues and pull requests visible on 2026-08-29;
+- the exact `develop` head after the PR #141 merge;
 - current-head review and GitHub Actions state;
 - `README.md`, `PRD.md`, `TRD.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`, `SECURITY.md`, Storybook documentation, ADRs, schemas, migrations, implementation, and tests present on the candidate branch;
 - the earlier provider-neutral billing design principles already reflected in the repository;
@@ -44,41 +43,46 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
-> **Status update (2026-08-25):** the verified release train has merged. The
-> cumulative candidate stack (`#82` plus descendants `#93`–`#132`, recreated
-> as `#133`–`#136`) and the contributor/validation docs (`#137`) are on
-> `develop`. Superseded snapshots (`#1`, `#3`, `#4`, `#92`–`#94`) are closed
-> as absorbed. Issue `#83` (collapse superseded snapshot PRs into a verified
-> release train) is complete: zero open pull requests remain, and the exact
-> head was validated offline — 39 PostgreSQL migrations applied, full unit
-> suite OK, 100% statement/branch coverage (16,971 statements, 5,870
-> branches), repository contracts valid, compile clean. The gap backlog
-> `#84`–`#91` is unchanged and now applies directly to the default branch.
+> **Status update (2026-08-29):** GitHub reports fourteen open pull requests
+> (`#142`–`#146`, `#153`–`#160`, and `#163`). All of these PRs target `develop`.
+> PR `#147` was merged into the canonical producer SDK branch from PR `#146`,
+> and PR `#161` was merged into the provider capability branch from PR `#160`;
+> neither merge is on `develop` yet. PRs `#148` and `#149` were
+> merged on 2026-08-28 and are no longer open-PR evidence.
+> The current default branch is
+> `develop` at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`, merged from PR #141
+> on 2026-08-26. The merged release train and the Compose, threaded API,
+> durable credential, and k6 baseline work are on `develop`. Issue #83 is
+> closed; the remaining open gap backlog is #84–#91. At this assessment,
+> all fourteen open PRs are `BLOCKED`; #147 and #161 are merged only into
+> their respective feature parents, not `develop`. The live inventory has zero
+> qualifying approvals. Review threads and Checks remain GitHub-authoritative
+> per PR; none is merge evidence for `develop`.
 
 ### Default branch
 
-As of the status update above, `develop` contains the complete candidate
-product including durable PostgreSQL persistence for the commercial ledger,
-spend-budget publication/evaluation/observation, journal-proposal
-persistence, and operator-console Storybook presentment.
+`develop` contains the merged candidate product including PostgreSQL adapters
+for the normalized commercial records, environment-selected durable API
+startup, spend-budget publication/evaluation/observation, journal-proposal
+persistence, and operator-console Storybook presentment. `MemoryUsageLedger`
+remains the deterministic reference/test adapter. The production-path
+acceptance evidence in #84 is still incomplete: the repository does not yet
+prove the full restart, isolation, raw-evidence, recovery, and high-volume
+operational contract.
 
 ### Pull-request topology
 
-At assessment time (2026-08-20):
+As queried from GitHub on 2026-08-29:
 
-- ordinary open issues before this assessment: **9** (`#83`–`#91`), all completion-gap issues;
-- open pull requests: **5** (`#1`, `#3`, `#4`, `#82`, and draft `#92`);
-- current cumulative tip: PR #82;
-- PR #82 at the assessed head: **133 commits**, **437 changed files**, about **91.9k additions**;
-- PR #82 targets `develop` directly.
+- open issues: **8** (`#84`–`#91`);
+- open pull requests: **14** (`#142`–`#146`, `#153`–`#160`, and `#163`), all targeting `develop`; #147 and #161 are merged into feature-parent branches and are not default-branch evidence;
+- producer work: `#146` provides the canonical Python producer reference and now contains the `#147` durable producer outbox merge; the Rust reference from `#148` and TypeScript reference from `#149` were merged on 2026-08-28; provider capability routing in `#160` now contains the `#161` provider-sticky object mapping merge;
+- latest default-branch merge: PR #141 at `d514e9a29ff33531b9df3d231cd3b4ff02bcc274`; stacked merges #147 (`9f3455370331802efe5e0158290a88e95e182d5f`) and #161 (`55cd9a37d320eed35e6838378abc81152b98ea2c`) remain off `develop`;
+- the merged PR #141 rollup included a failed `Semgrep (multi-language SAST)` job alongside successful repository, analysis, dependency, coverage, and other checks; therefore the merge is not a blanket claim that every release/security gate is complete.
 
-The top PR is mergeable at the Git graph level, but that is not release evidence. At the assessed head `1356b3e148715a568f035608462f55e509374aa0`:
-
-- Foundation CI, Security Scan, SAST Semgrep, and the required OpenCode/Noema/scheduler jobs: pending;
-- independent approval: required and absent;
-- unresolved review threads: none observed, but the only formal review was a commented automated security review.
-
-PR #82 has 599 local Python tests, 100% statement/branch coverage for the declared Python scope including a dedicated PostgreSQL 18 integration database, a green repository validator, optimized-Python resolver checks, local Semgrep with zero findings, a real PostgreSQL 18 migration/constraint smoke run, an advisory-locking checksum/drift-detecting migration runner, and a hash-locked runtime dependency export. Those are useful candidate-branch claims, but hosted exact-head Checks and independent review must verify the head that merges.
+The current head has useful implementation and hosted-check evidence, but the
+remaining issue acceptance criteria require additional exact-head integration,
+security, recovery, provider, frontend, and operational evidence.
 
 ### Candidate capabilities already present
 
@@ -86,15 +90,15 @@ The cumulative candidate provides meaningful foundations:
 
 | Capability | Candidate evidence | Current limitation |
 |---|---|---|
-| Usage attribution | Tenant, billing account, principal, credential, project, cost center, product, meter, quality, immutable source hash | Real producer SDK/adoption and durable production ingestion remain incomplete |
+| Usage attribution | Tenant, billing account, principal, credential, project, cost center, product, meter, quality, immutable source hash; canonical Python builder and durable producer outbox slices are present in open PRs | Real producer SDK adoption, heterogeneous integrations, and durable production ingestion remain incomplete |
 | Metering and rating | Exact-decimal quantity/money, billability quality policy, versioned flat rate cards, half-open windows, replay-safe rating | Tiered/package/commitment pricing and full contract engine are incomplete |
 | Invoice and collections | Draft/issue/void commercial invoices, credit notes, collections, dunning, disputes, write-offs, payments, unapplied cash, refunds, settlement facts | No live provider collection or legal invoice authority |
 | Tax | Versioned static rate and deterministic draft assessment | Not a jurisdictional tax engine; exemptions, nexus, legal tax documents, MoR authority, and global compliance are incomplete |
 | Accounting boundary | Balanced proposal-only journals and AIS posting-receipt observations | Correctly does not own statutory books; end-to-end released AIS integration still requires operational proof |
 | Webhooks and API | Tenant-scoped HTTP adapter, HMAC webhook outbox, AIS outbox drain, local API credentials, bounded URL controls | Production identity, KMS, egress gateway, durable queue, and provider webhook normalization are incomplete |
 | Presentment | Storybook components for many exact-decimal commercial statements | No production SPA, customer portal, login, workflow queue, or full accessibility evidence |
-| Database design | PostgreSQL 18 migrations and normalized constraints exist; migrations `0036` and `0037` add tenant proposal-reference uniqueness, non-overlapping credential intervals, and durable tenant/credential URN identity; `PostgresUsageLedger` now runs durable catalog, usage, measurement, and receipt writes with atomic replay/conflict handling; CI applies the migration set through an advisory-locking, checksum/drift-detecting runner | The broader commercial services still use the in-memory reference ledger; rollback/recovery tests, raw-payload storage, backup/restore, and hot partitioning remain open |
-| Quality policy | Extensive schemas, ADRs, docs, local 100% coverage claim, commit-pinned Actions | Candidate remains unmerged; exact-head hosted and release-artifact evidence is incomplete |
+| Database design | PostgreSQL 18 migrations and normalized constraints exist; migrations `0036` and `0037` add tenant proposal-reference uniqueness, non-overlapping credential intervals, and durable tenant/credential URN identity; `PostgresUsageLedger` has durable catalog, usage, measurement, rating, invoice, collection, payment, credit, budget, journal, and receipt paths with atomic replay/conflict handling; CI applies migrations through an advisory-locking, checksum/drift-detecting runner | Full restart/concurrency/isolation evidence, immutable object storage, backup/restore, failed-migration recovery, worker leases, and measured hot-partition behavior remain open |
+| Quality policy | Extensive schemas, ADRs, docs, merged default-branch implementation, and commit-pinned Actions | Current head has only the observed push Checks above; complete GA exact-head and release-artifact evidence remains open |
 | Spend visibility | Rated-spend views by product/project/credential/principal/cost center and an append-only spend budget | Budget publication does not reserve, enforce, deny, or grant entitlement |
 
 ## Authority and product boundary
@@ -126,7 +130,7 @@ The assessment produced the following issues. Their acceptance criteria constitu
 
 | Priority | Issue | Completion outcome |
 |---:|---|---|
-| P0 | [#83 — Collapse the superseded snapshot PRs into a verified release train](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/83) | Product baseline is merged, traceable, independently approved, and exact-head verified |
+| P0 | [#83 — Collapse the superseded snapshot PRs into a verified release train](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/83) | **Complete:** merged release train on `develop`; remaining capability gaps are tracked below |
 | P0 | [#84 — Replace the in-memory reference ledger with a durable PostgreSQL production path](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/84) | Production commands survive restart, concurrency, failover, backup, restore, and hot partitions |
 | P0 | [#85 — Enforce spend budgets with atomic authorization, quotas, and entitlements](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/85) | Pre-execution reserve/commit/release control and effective-dated entitlements work safely |
 | P0 | [#86 — Ship capability-based provider adapters and first production collection channels](https://github.com/ContextualWisdomLab/metering-billing-platform/issues/86) | Lemon Squeezy MoR plus manual invoice/wire collect money without owning the core ledger |
@@ -140,7 +144,7 @@ The assessment produced the following issues. Their acceptance criteria constitu
 
 ```text
 M0  Release topology and integration
-    #83
+    #83 (complete)
 
 M1  Durable authority and security foundation
     #84 + #88
@@ -163,23 +167,38 @@ M6  GA evidence and release
 
 Work can be stacked when public contracts are stable, but each PR must remain independently reviewable. A new cumulative mega-PR must not recreate the current integration problem.
 
-## Open pull-request inventory
+## Current pull-request inventory
 
-The current repository inventory on 2026-08-20 contains five open candidates:
+GitHub reports **thirteen open pull requests** on 2026-08-29. The latest merge to
+`develop` is PR #141; the following open PR heads are current snapshots and are
+not merge evidence:
 
-| PR | Scope | Base | Current evidence |
+| PR | Scope | Base | Current-head gate evidence |
 |---:|---|---|---|
-| #1 | Provider-neutral billing foundation | `develop` | Checks pending; no formal approval |
-| #3 | Operator README, ADR, APA references, and validation documentation | PR #1 | Draft; repository contracts pending |
-| #4 | Buyer/operator README and contributor documentation | `develop` | Historical Checks passed; no formal approval |
-| #82 | Cumulative commercial lifecycle and spend-budget publication with security hardening | `develop` | Head `59051d4`; review required; required Checks pending |
-| #92 | This product and technical gap baseline | PR #82 | Draft; repository contracts pending |
+| #142 | Product-gap baseline refresh and duplicate migration-table cleanup | `develop` | open, blocked; this self-authored inventory intentionally omits a fixed head for #142; query GitHub for its exact current head, Checks, reviews, and merge state; zero qualifying approvals observed in this assessment |
+| #143 | Durable spend-authorization lifecycle | `develop` | `a8f4ad630f6e21ef21dc25a20271850021b36796`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #144 | Webhook redirect hardening | `develop` | `1808e723f72b7335a0f82d7dd923c31c04280793`; open, blocked, review required; implementation, security, coverage, Noema, and OpenCode checks passed; zero qualifying approvals |
+| #145 | Default configured HTTP ledger to PostgreSQL | `develop` | `2eb77788eb2aa4043e46678a5f7dad3081d91c4d`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #146 | Canonical Python/Rust/TypeScript producer SDK references and CloudEvents conformance vector for #90 | `develop` | `09efbfb05ac048a4d95c8f36b58105ace7f35fa5`; open, blocked and review required after receipt-binding, usage-presentment, release-coverage, and TypeScript file-sync remediation; current hosted checks were not terminal at snapshot, zero unresolved review threads, and zero qualifying approvals |
+| #163 | Immutable period-close, exact FX, and three-way reconciliation foundation for #87 | `develop` | `6c37f149530a4bb2c8b7c2154a2640315e70f89e`; open, blocked and review required; Foundation CI and Repository contracts passed while security/review checks were pending at snapshot; zero unresolved review threads and zero qualifying approvals |
+| #153 | Bounded PostgreSQL connection pool and lifecycle hardening for #84 | `develop` | `309c0151758d49e0ae46a32d63c40502191a0830`; open, blocked; implementation/security/coverage/Noema/Devin checks passed, current OpenCode check is provider-failed; zero qualifying approvals |
+| #154 | Opt-in OpenTelemetry HTTP tracing for #91 | `develop` | `f8414fcbcde07d99b50add8b7e698a1a85d99902`; open, blocked, review required; current OpenCode check is provider-failed; zero qualifying approvals |
+| #155 | Stoppable AIS outbox scheduler and drain-cycle reporting for #91 | `develop` | `47b8f2ef6a01ae2b95f911a6abf39e08a03a007e`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #156 | Usage-event schema compatibility and fail-closed versioning for #90 | `develop` | `b5c8c966b9cf49528814cc1d41701d5d537519bc`; open, blocked, review required; current OpenCode check is provider-failed; zero qualifying approvals |
+| #157 | Validated incident runbooks for #91 | `develop` | `38c8e46a8a4721cf123b6f075af61d42731094a0`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #158 | Exact-head release evidence manifest for #91 | `develop` | `c55a1925c9063da727fc25dd42d1cf2810e6c587`; open, blocked, no formal review decision; Repository contracts passed and remaining hosted checks are re-running after the latest push; zero qualifying approvals |
+| #159 | PostgreSQL backup and restore rehearsal for #84 | `develop` | `35a1e467b6b6dd77ab5594d3adcbc2293dc9af67`; open, blocked, review required; current OpenCode and Strix checks are provider-failed; zero qualifying approvals |
+| #160 | Provider capability routing foundation for #86 | `develop` | `b06bf5cfcb42592fcedf0c49afa0b7ec3c46ba9c`; open, blocked after the #161 stacked merge and review fixes; hosted checks are re-running after the concurrent-test quality fix, zero qualifying approvals |
 
-PRs #5–#81 are closed as superseded snapshots. Their closure is not merge or
-production evidence. PR #92 is the current detailed baseline candidate and
-must remain synchronized with the open-PR list, issue backlog, exact heads,
-review decisions, and hosted Checks. The GitHub records are authoritative for
-live status; this table is the reviewable product snapshot.
+PRs #147 (durable producer outbox) and #161 (provider-sticky object mappings)
+merged into their feature-parent branches on 2026-08-29. PRs #148 (Rust SDK)
+and #149 (TypeScript SDK) merged on 2026-08-28. Their historical heads and
+stacked merge commits are retained in GitHub, but must not be reused as
+default-branch release evidence.
+
+Earlier PRs are closed or superseded. Their closure is not proof that the
+remaining #84–#91 acceptance criteria are complete. GitHub records remain
+authoritative for live status; this section is the current reviewable snapshot.
 
 ## Target commercial vertical
 
@@ -316,8 +335,8 @@ A GA claim requires all of the following evidence on the released exact head:
 
 At the assessed head, do **not** describe the product as:
 
-- merged or releasable from `develop`;
-- a durable production PostgreSQL billing service;
+- a complete GA release from `develop`;
+- a fully evidenced durable production PostgreSQL billing service;
 - a real-time budget-enforcement or entitlement engine;
 - connected to a production payment/MoR/PG channel;
 - a global tax engine or statutory invoice service;
