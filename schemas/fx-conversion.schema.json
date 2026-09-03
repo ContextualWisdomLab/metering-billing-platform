@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/fx-conversion/v1",
+  "title": "FX Conversion",
+  "description": "Frozen exact FX result carrying the source amount, pinned rate identity/value, target minor units, and rounding mode.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fx_conversion_contract_version",
+    "fx_conversion_id",
+    "fx_rate_id",
+    "source_amount",
+    "source_currency",
+    "quote_amount",
+    "quote_currency",
+    "quote_minor_units",
+    "rate",
+    "rate_precision",
+    "rounding_mode",
+    "converted_at"
+  ],
+  "properties": {
+    "fx_conversion_contract_version": {"type": "integer", "minimum": 1},
+    "fx_conversion_id": {"type": "string", "format": "uuid"},
+    "fx_rate_id": {"type": "string", "format": "uuid"},
+    "source_amount": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 40
+    },
+    "source_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "quote_amount": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 40
+    },
+    "quote_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "quote_minor_units": {"type": "integer", "minimum": 0, "maximum": 4},
+    "rate": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "rate_precision": {"type": "integer", "minimum": 0},
+    "rounding_mode": {"type": "string", "const": "ROUND_HALF_UP"},
+    "converted_at": {"type": "string", "format": "date-time"}
+  }
+}

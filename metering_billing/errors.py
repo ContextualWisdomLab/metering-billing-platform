@@ -1002,3 +1002,7 @@ class JournalLineAmountScaleError(ValueError):
 
 class TimeWindowError(ValueError):
     """Raised when a time window or timestamp violates ISO 8601 timezone rules."""
+
+
+class PeriodCloseValidationError(ValueError):
+    """Raised when a period, FX, or reconciliation fact fails closed validation."""

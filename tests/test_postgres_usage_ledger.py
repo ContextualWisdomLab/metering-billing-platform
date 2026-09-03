@@ -93,6 +93,13 @@ from metering_billing.issued_invoice_void import (
     compute_issued_invoice_void_payload_hash,
 )
 from metering_billing.payment_settlement import PaymentSettlementService
+from metering_billing.period_close import (
+    ReconciliationExceptionCode,
+    assess_reconciliation_line,
+    convert_currency_amount,
+    create_billing_period,
+    create_fx_rate,
+)
 from metering_billing.rate_card import RateCardService
 from metering_billing.spend_budget import compute_spend_budget_payload_hash
 from metering_billing.tenant_api_credential import (
@@ -109,7 +116,6 @@ from metering_billing.usage_ledger import (
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
     StoredTenantApiCredential,
-    StoredUnappliedCash,
     StoredUnappliedCashApplication,
     StoredUnappliedCashRefund,
     StoredSpendBudget,
@@ -184,8 +190,8 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         cls.connection.commit()
         migration_directory = Path(ROOT) / "database" / "migrations"
         applied = apply_migrations(cls.connection, migration_directory)
-        if len(applied) != 39:
-            raise AssertionError(f"expected 39 migrations, got {len(applied)}")
+        if len(applied) != 40:
+            raise AssertionError(f"expected 40 migrations, got {len(applied)}")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -197,6 +203,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.reconciliation_exception,
+                billing_core.reconciliation_line,
+                billing_core.fx_conversion,
+                billing_core.fx_rate,
+                billing_core.billing_period_transition,
+                billing_core.billing_period,
                 billing_core.spend_budget,
                 billing_core.journal_proposal_line,
                 billing_core.journal_proposal,
@@ -371,6 +383,207 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         with self.assertRaises(KeyError):
             self.ledger.require_tenant("urn:cwl:missing_tenant")
+
+    def test_period_close_facts_are_durable_and_append_only(self) -> None:
+        """Persist period, FX, and reconciliation facts with replay-safe identities."""
+        period = create_billing_period(
+            TENANT_ONE,
+            CATALOG_START.date(),
+            (CATALOG_START + timedelta(days=31)).date(),
+            opened_by="operator:finance_001",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        )
+        self.assertEqual(self.ledger.insert_billing_period(period), period)
+        with self.assertRaises(ValueError):
+            self.ledger.insert_billing_period(
+                replace(period, period_start=CATALOG_START.date() + timedelta(days=1))
+            )
+        soft_closed = period.advance(
+            "soft_closed",
+            actor_reference="operator:finance_002",
+            authorization_reference="approval:period_001",
+            reason="close usage window",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+            transition_id=uuid4(),
+        )
+        self.assertEqual(self.ledger.insert_billing_period(soft_closed), soft_closed)
+        reconciled = soft_closed.advance(
+            "reconciled",
+            actor_reference="operator:finance_005",
+            authorization_reference="approval:period_003",
+            reason="reconcile usage window",
+            transitioned_at=CATALOG_START + timedelta(hours=1),
+            transition_id=uuid4(),
+        )
+        self.assertEqual(self.ledger.insert_billing_period(reconciled), reconciled)
+        invoiced = reconciled.advance(
+            "invoiced",
+            actor_reference="operator:finance_006",
+            authorization_reference="approval:period_004",
+            reason="issue invoice",
+            transitioned_at=CATALOG_START + timedelta(hours=2),
+            transition_id=uuid4(),
+        )
+        hard_closed = invoiced.advance(
+            "hard_closed",
+            actor_reference="operator:finance_007",
+            authorization_reference="approval:period_005",
+            reason="finalize period",
+            transitioned_at=CATALOG_START + timedelta(hours=3),
+            transition_id=uuid4(),
+        )
+        self.assertEqual(self.ledger.insert_billing_period(hard_closed), hard_closed)
+        self.assertEqual(self.ledger.get_billing_period(TENANT_ONE, period.period_id), hard_closed)
+        self.assertIsNone(self.ledger.get_billing_period(TENANT_ONE, uuid4()))
+        self.assertIsNone(self.ledger.get_billing_period(TENANT_TWO, period.period_id))
+        second_period = create_billing_period(
+            TENANT_ONE,
+            CATALOG_START.date(),
+            (CATALOG_START + timedelta(days=31)).date(),
+            opened_by="operator:finance_003",
+            opened_at=CATALOG_START,
+            period_id=uuid4(),
+        ).advance(
+            "soft_closed",
+            actor_reference="operator:finance_004",
+            authorization_reference="approval:period_002",
+            reason="close second usage window",
+            transitioned_at=CATALOG_START + timedelta(hours=2),
+            transition_id=soft_closed.transitions[0].transition_id,
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_billing_period(second_period)
+        self.assertEqual(self.ledger.list_billing_periods(TENANT_TWO), ())
+        self.assertEqual(self.ledger.list_billing_periods(TENANT_ONE), (hard_closed,))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_billing_period(
+                replace(
+                    hard_closed,
+                    transitions=(
+                        replace(hard_closed.transitions[0], reason="rewrite"),
+                        *hard_closed.transitions[1:],
+                    )
+                )
+            )
+
+        rate = create_fx_rate(
+            "provider:fx_001",
+            "provider",
+            "USD",
+            "KRW",
+            "1350.1234",
+            4,
+            CATALOG_START,
+            CATALOG_START + timedelta(minutes=1),
+            fx_rate_id=uuid4(),
+        )
+        self.assertEqual(self.ledger.insert_fx_rate(rate), rate)
+        self.assertEqual(self.ledger.insert_fx_rate(rate), rate)
+        self.assertEqual(self.ledger.get_fx_rate(rate.fx_rate_id), rate)
+        self.assertIsNone(self.ledger.get_fx_rate(uuid4()))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_fx_rate(replace(rate, rate_source="provider:other"))
+        conversion = convert_currency_amount(
+            "10.25",
+            "USD",
+            0,
+            rate,
+            fx_conversion_id=uuid4(),
+            converted_at=CATALOG_START + timedelta(minutes=2),
+        )
+        self.assertEqual(self.ledger.insert_fx_conversion(conversion), conversion)
+        self.assertIsNone(self.ledger.get_fx_conversion(uuid4()))
+        self.assertEqual(self.ledger.get_fx_conversion(conversion.fx_conversion_id), conversion)
+        with self.assertRaises(KeyError):
+            self.ledger.insert_fx_conversion(replace(conversion, fx_rate_id=uuid4()))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_fx_conversion(replace(conversion, source_currency="EUR"))
+        with self.assertRaises(ValueError):
+            self.ledger.insert_fx_conversion(
+                replace(
+                    conversion,
+                    source_amount=Decimal("10"),
+                    quote_amount=Decimal("13501"),
+                )
+            )
+
+        matched = assess_reconciliation_line(
+            period.period_id,
+            "provider:account_001",
+            "USD",
+            "10",
+            "10",
+            "10",
+            assessed_at=CATALOG_START + timedelta(minutes=3),
+            reconciliation_line_id=uuid4(),
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        exception = assess_reconciliation_line(
+            period.period_id,
+            "provider:account_001",
+            "USD",
+            "10",
+            "9",
+            "9",
+            assessed_at=CATALOG_START + timedelta(minutes=4),
+            reconciliation_line_id=uuid4(),
+            internal_currency_code="USD",
+            provider_currency_code="EUR",
+            cash_currency_code="USD",
+        )
+        self.assertEqual(self.ledger.insert_reconciliation_line(matched), matched)
+        self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
+        self.assertEqual(self.ledger.insert_reconciliation_line(exception), exception)
+        self.assertIsNone(self.ledger.get_reconciliation_line(TENANT_ONE, uuid4()))
+        self.assertIsNone(
+            self.ledger.get_reconciliation_line(TENANT_TWO, matched.reconciliation_line_id)
+        )
+        self.assertEqual(
+            {line.reconciliation_line_id for line in self.ledger.list_reconciliation_lines(TENANT_ONE)},
+            {matched.reconciliation_line_id, exception.reconciliation_line_id},
+        )
+        self.assertEqual(
+            self.ledger.list_reconciliation_lines(
+                TENANT_ONE, period_id=period.period_id
+            ),
+            (matched, exception),
+        )
+        self.assertEqual(
+            {
+                item.exception_code
+                for item in self.ledger.get_reconciliation_line(
+                    TENANT_ONE, exception.reconciliation_line_id
+                ).exceptions
+            },
+            {
+                ReconciliationExceptionCode.CURRENCY_MISMATCH,
+                ReconciliationExceptionCode.PRICE_MISMATCH,
+            },
+        )
+        with self.assertRaises(ValueError):
+            self.ledger.insert_reconciliation_line(
+                replace(matched, provider_account_reference="provider:other")
+            )
+        missing_period_line = assess_reconciliation_line(
+            uuid4(),
+            "provider:account_001",
+            "USD",
+            "1",
+            "1",
+            "1",
+            assessed_at=CATALOG_START + timedelta(minutes=5),
+            reconciliation_line_id=uuid4(),
+            internal_currency_code="USD",
+            provider_currency_code="USD",
+            cash_currency_code="USD",
+        )
+        with self.assertRaises(KeyError):
+            self.ledger.insert_reconciliation_line(missing_period_line)
+        with self.assertRaises(KeyError):
+            self.ledger.list_reconciliation_lines("urn:cwl:missing_tenant")
 
     def test_migration_runner_is_idempotent_and_detects_drift(self) -> None:
         """The runner records checksums and refuses a changed applied migration."""
@@ -4106,7 +4319,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         second_case_amount = Decimal("20.00")
         leftover_apply_remaining = Decimal("19.999")
         exclusive_amount = Decimal("100.00")
-        tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
         credit_exclusive = Decimal("10.00")
         credit_tax = Decimal("1.00")
@@ -4809,8 +5021,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         exclusive_amount = Decimal("100.00")
         tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
-        credit_exclusive = Decimal("10.00")
-        credit_tax = Decimal("1.00")
         credit_voided_amount = Decimal("11.00")
         UsageIngestionService(self.ledger).ingest_usage_event(make_event())
         RateCardService(self.ledger).publish_rate_card(
