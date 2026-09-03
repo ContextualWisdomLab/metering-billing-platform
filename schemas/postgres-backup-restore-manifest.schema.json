@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextualwisdomlab.org/schemas/postgres-backup-restore-manifest.schema.json",
+  "title": "PostgreSQL backup restore manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "backup_format",
+    "backup_file",
+    "backup_sha256",
+    "row_counts"
+  ],
+  "properties": {
+    "manifest_version": { "const": 1 },
+    "backup_format": { "const": "custom" },
+    "backup_file": {
+      "type": "string",
+      "pattern": "^[^/\\\\]+$",
+      "minLength": 1
+    },
+    "backup_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "row_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration_history_count",
+        "tenant_account_count",
+        "usage_event_count"
+      ],
+      "properties": {
+        "migration_history_count": { "type": "integer", "minimum": 0 },
+        "tenant_account_count": { "type": "integer", "minimum": 0 },
+        "usage_event_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
