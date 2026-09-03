@@ -10,7 +10,7 @@ AIS pins `payload_reference` for `event_type_code=posting_receipt`.  Billing mus
 
 ## Decision
 
-- Expose `AisOutboxDrainService.drain_ais_outbox(tenant_reference)`.  There is no scheduler beyond the service call and `POST /v1/ais-outbox-drains`.
+- Expose `AisOutboxDrainService.drain_ais_outbox(tenant_reference)` and the optional `AisOutboxScheduler` worker loop. `POST /v1/ais-outbox-drains` remains the explicit operator trigger.
 - `GET {AIS_BASE_URL}/outbox-events?event_type_code=posting_receipt` with `X-CWL-Tenant-Reference`.  Read body `outbox_events` and `next_cursor` only.  Never read body `items` or body `cursor`.  A missing `outbox_events` key fails closed.
 - Empty `outbox_events` plus `next_cursor` null is success and performs zero receipt GETs.
 - For `event_type_code=posting_receipt`, construct the AIS-pinned URNs from our stored `proposal_id` and match by equality:
@@ -25,6 +25,6 @@ AIS pins `payload_reference` for `event_type_code=posting_receipt`.  Billing mus
 
 ## Consequences
 
-- Operators drain the AIS outbox, then store the receipt observation.  AIS may keep being polled only when the outbox is non-empty.
+- Operators or the optional scheduler drain the AIS outbox, then store the receipt observation.  AIS may keep being polled only when the outbox is non-empty.
 - The #16 posting-receipt client stays the only receipt transport.  The drain adds outbox list and publish on that client.
 - A later persistent ledger can replace `MemoryUsageLedger` without changing URN equality, the stored-key lookup, or fail-closed publish rules.

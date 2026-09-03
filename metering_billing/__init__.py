@@ -31,7 +31,7 @@ open collection case, or voided once while unused, without inventing a
 journal, tax unwind, or webhook.
 """
 
-from metering_billing.ais_outbox_drain import AisOutboxDrainService
+from metering_billing.ais_outbox_drain import AisOutboxDrainService, AisOutboxScheduler
 from metering_billing.accounting_export import AccountingExportService
 from metering_billing.collection_case import CollectionCaseService
 from metering_billing.account_statement_presentment import AccountStatementPresentmentService
@@ -421,6 +421,7 @@ __all__ = (
     "AisOutboxDrainOutcomeCode",
     "AisOutboxDrainRejectionReasonCode",
     "AisOutboxDrainService",
+    "AisOutboxScheduler",
     "AccountingExportService",
     "AccountStatementPresentmentQueryError",
     "AccountStatementPresentmentService",

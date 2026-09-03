@@ -7,6 +7,7 @@ The buyer-facing path is:
 3. Match each row by equality to URNs constructed from our ``proposal_id``.
 4. Pull ``GET /posting-receipts?idempotency_key=`` with the stored Billing key.
 5. POST ``/outbox-events/{outbox_event_id}/publish`` after a stored observation.
+6. Optionally repeat the tenant-scoped drain on a stop-event-aware interval.
 
 ``payload_reference`` is never parsed and is never used as the receipt query
 (Fielding et al., 2022).  ``journal_reversal`` and ``period_close`` are not
@@ -17,6 +18,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from collections.abc import Iterable
+import math
+from threading import Event
 from typing import Callable
 from uuid import UUID
 
@@ -92,7 +96,7 @@ class AisOutboxDrainResult:
 
 
 class AisOutboxDrainService:
-    """Run one tenant-scoped AIS outbox drain.  There is no scheduler."""
+    """Run one tenant-scoped AIS outbox drain."""
 
     def __init__(
         self,
@@ -224,6 +228,49 @@ class AisOutboxDrainService:
         except AttributeError:
             return False
         return published.status_code in {200, 204}
+
+
+class AisOutboxScheduler:
+    """Periodically run tenant-scoped drains until cooperative shutdown."""
+
+    def __init__(
+        self,
+        drain_service: AisOutboxDrainService,
+        tenant_references: Callable[[], Iterable[str]],
+        *,
+        interval_seconds: int | float = 60,
+        stop_event: Event | None = None,
+        on_cycle: Callable[[tuple[tuple[str, AisOutboxDrainResult], ...]], None] | None = None,
+    ) -> None:
+        """Bind a dynamic tenant source, interval, and optional result observer."""
+        if type(interval_seconds) not in (int, float):
+            raise ValueError("interval_seconds must be a positive number")
+        try:
+            normalized_interval = float(interval_seconds)
+        except OverflowError as error:
+            raise ValueError("interval_seconds must be a positive number") from error
+        if not math.isfinite(normalized_interval) or normalized_interval <= 0:
+            raise ValueError("interval_seconds must be a positive number")
+        self._drain_service = drain_service
+        self._tenant_references = tenant_references
+        self._interval_seconds = normalized_interval
+        self._stop_event = stop_event if stop_event is not None else Event()
+        self._on_cycle = on_cycle
+
+    def run_once(self) -> tuple[tuple[str, AisOutboxDrainResult], ...]:
+        """Drain each tenant currently returned by the configured tenant source."""
+        return tuple(
+            (tenant_reference, self._drain_service.drain_ais_outbox(tenant_reference))
+            for tenant_reference in self._tenant_references()
+        )
+
+    def run_forever(self) -> None:
+        """Run drains until ``stop_event`` is set, waking promptly for shutdown."""
+        while not self._stop_event.is_set():
+            cycle_results = self.run_once()
+            if self._on_cycle is not None:
+                self._on_cycle(cycle_results)
+            self._stop_event.wait(self._interval_seconds)
 
 
 def _rejected(reason: AisOutboxDrainRejectionReasonCode) -> AisOutboxDrainResult:
