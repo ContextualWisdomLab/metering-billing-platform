@@ -40,6 +40,15 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 - `settlement_reconciliation`: expected versus provider versus cash evidence.
 - `accounting_export`: journal proposals and posting receipts.
 
+`metering_billing.SpendAuthorizationService` is the first #85 control-engine
+slice. It reserves exact exposure against an immutable published budget and
+records commit, release, and expiry receipts. PostgreSQL locks the budget row
+before the exposure sum, so concurrent requests cannot over-reserve the same
+hard limit. Tenant ownership, idempotency, bounded validity, actor/purpose
+metadata, and policy version are enforced at the command boundary. Hierarchy
+policies, quotas, credits, and entitlement authorities remain separate
+effective-dated contexts.
+
 ## Authority matrix
 
 | Fact | Authority |

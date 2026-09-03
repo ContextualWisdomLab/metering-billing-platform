@@ -33,6 +33,35 @@ CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 SOURCE_PAYLOAD_HASH_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
+def _authorization_identity(authorization: "StoredSpendAuthorization") -> tuple[object, ...]:
+    """Return client-supplied immutable fields used to validate replays."""
+    return (
+        authorization.spend_budget_id,
+        authorization.requested_amount,
+        authorization.idempotency_key,
+        authorization.actor_reference,
+        authorization.purpose_code,
+        authorization.policy_version,
+        authorization.currency_code,
+        authorization.valid_until,
+    )
+
+
+def _authorization_status(
+    requested_amount: Decimal,
+    committed_amount: Decimal,
+    released_amount: Decimal,
+    target_status: str | None = None,
+) -> str:
+    """Derive the lifecycle projection from conserved exact amounts."""
+    if target_status == "expired":
+        return "expired"
+    remaining = requested_amount - committed_amount - released_amount
+    if remaining == 0:
+        return "committed" if released_amount == 0 else "released"
+    return "partially_committed" if committed_amount > 0 else "reserved"
+
+
 def generate_record_id(uuid_module: ModuleType = uuid) -> UUID:
     """Return a UUIDv7 when available, otherwise a random UUID4."""
     factory: Callable[[], UUID] = getattr(uuid_module, "uuid7", uuid_module.uuid4)
@@ -807,6 +836,85 @@ class StoredSpendBudget:
 
 
 @dataclass(frozen=True)
+class StoredSpendAuthorization:
+    """Current projection for one tenant-scoped spend authorization."""
+
+    spend_authorization_id: UUID
+    tenant_account_id: UUID
+    billing_account_id: UUID
+    spend_budget_id: UUID
+    spend_authorization_contract_version: int
+    idempotency_key: str
+    actor_reference: str
+    purpose_code: str
+    policy_version: str
+    currency_code: str
+    requested_amount: Decimal
+    reserved_amount: Decimal
+    committed_amount: Decimal
+    released_amount: Decimal
+    valid_from: datetime
+    valid_until: datetime
+    authorization_status: str
+    rejection_reason_code: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredSpendReservation:
+    """Immutable monetary reservation receipt for one authorization."""
+
+    spend_reservation_id: UUID
+    tenant_account_id: UUID
+    spend_authorization_id: UUID
+    reserved_amount: Decimal
+    idempotency_key: str
+    reserved_at: datetime
+    valid_until: datetime
+
+
+@dataclass(frozen=True)
+class StoredSpendCommitment:
+    """Immutable actual-usage commitment receipt."""
+
+    spend_commitment_id: UUID
+    tenant_account_id: UUID
+    spend_authorization_id: UUID
+    idempotency_key: str
+    committed_amount: Decimal
+    actual_usage_reference: str
+    committed_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredSpendRelease:
+    """Immutable release or expiry receipt for unused exposure."""
+
+    spend_release_id: UUID
+    tenant_account_id: UUID
+    spend_authorization_id: UUID
+    idempotency_key: str
+    released_amount: Decimal
+    release_reason_code: str
+    released_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredSpendAuthorizationTransition:
+    """Immutable state-transition receipt with its causation reference."""
+
+    spend_authorization_transition_id: UUID
+    tenant_account_id: UUID
+    spend_authorization_id: UUID
+    from_status: str
+    to_status: str
+    causation_key: str
+    actor_reference: str
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
 class StoredPostingReceiptObservation:
     """Append-only commercial observation of one AIS posting receipt.
 
@@ -989,6 +1097,17 @@ class MemoryUsageLedger:
     spend_budget_index: dict[
         tuple[UUID, UUID, datetime, datetime, str, str, int], UUID
     ] = field(default_factory=dict)
+    spend_authorizations: dict[UUID, StoredSpendAuthorization] = field(default_factory=dict)
+    spend_authorization_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
+    spend_reservations: dict[UUID, StoredSpendReservation] = field(default_factory=dict)
+    spend_reservation_index: dict[UUID, UUID] = field(default_factory=dict)
+    spend_commitments: dict[UUID, StoredSpendCommitment] = field(default_factory=dict)
+    spend_commitment_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
+    spend_releases: dict[UUID, StoredSpendRelease] = field(default_factory=dict)
+    spend_release_index: dict[tuple[UUID, str], UUID] = field(default_factory=dict)
+    spend_authorization_transitions: list[StoredSpendAuthorizationTransition] = field(
+        default_factory=list
+    )
     journal_proposal_lines: list[StoredJournalProposalLine] = field(default_factory=list)
     collection_cases: dict[UUID, StoredCollectionCase] = field(default_factory=dict)
     collection_case_index: dict[tuple[UUID, UUID], UUID] = field(default_factory=dict)
@@ -3042,6 +3161,226 @@ class MemoryUsageLedger:
             for budget in budgets
             if budget.tenant_account_id == tenant_account_id
         )
+
+    def find_spend_authorization(
+        self, tenant_account_id: UUID, idempotency_key: str
+    ) -> StoredSpendAuthorization | None:
+        """Return one tenant-scoped authorization by request idempotency key."""
+        authorization_id = self.spend_authorization_index.get(
+            (tenant_account_id, idempotency_key)
+        )
+        return (
+            None
+            if authorization_id is None
+            else self.spend_authorizations[authorization_id]
+        )
+
+    def get_spend_authorization(
+        self, tenant_account_id: UUID, spend_authorization_id: UUID
+    ) -> StoredSpendAuthorization | None:
+        """Return an authorization only when it belongs to the tenant."""
+        authorization = self.spend_authorizations.get(spend_authorization_id)
+        if authorization is None or authorization.tenant_account_id != tenant_account_id:
+            return None
+        return authorization
+
+    def create_spend_authorization(
+        self,
+        authorization: StoredSpendAuthorization,
+        reservation: StoredSpendReservation,
+    ) -> tuple[StoredSpendAuthorization, str]:
+        """Atomically reserve against the published budget in the reference ledger."""
+        existing = self.find_spend_authorization(
+            authorization.tenant_account_id, authorization.idempotency_key
+        )
+        if existing is not None:
+            if _authorization_identity(existing) != _authorization_identity(authorization):
+                raise ValueError("idempotency key already stores a different authorization")
+            return existing, "duplicate_replay"
+        budget = self.get_spend_budget(authorization.spend_budget_id)
+        if budget is None or budget.tenant_account_id != authorization.tenant_account_id:
+            raise KeyError(authorization.spend_budget_id)
+        used = sum(
+            (
+                row.requested_amount - row.released_amount
+                for row in self.spend_authorizations.values()
+                if row.spend_budget_id == authorization.spend_budget_id
+                and row.authorization_status != "denied"
+            ),
+            Decimal("0"),
+        )
+        if used + authorization.requested_amount > budget.budget_amount:
+            denied = replace(
+                authorization,
+                authorization_status="denied",
+                rejection_reason_code="authorization_exposure_exceeded",
+                updated_at=authorization.created_at,
+            )
+            self.spend_authorizations[denied.spend_authorization_id] = denied
+            self.spend_authorization_index[
+                (denied.tenant_account_id, denied.idempotency_key)
+            ] = denied.spend_authorization_id
+            self.spend_authorization_transitions.append(
+                StoredSpendAuthorizationTransition(
+                    generate_record_id(),
+                    denied.tenant_account_id,
+                    denied.spend_authorization_id,
+                    "requested",
+                    "denied",
+                    denied.idempotency_key,
+                    denied.actor_reference,
+                    denied.created_at,
+                )
+            )
+            return denied, "authorization_exposure_exceeded"
+        reserved = replace(authorization, authorization_status="reserved")
+        self.spend_authorizations[reserved.spend_authorization_id] = reserved
+        self.spend_authorization_index[
+            (reserved.tenant_account_id, reserved.idempotency_key)
+        ] = reserved.spend_authorization_id
+        self.spend_reservations[reservation.spend_reservation_id] = reservation
+        self.spend_reservation_index[authorization.spend_authorization_id] = (
+            reservation.spend_reservation_id
+        )
+        self.spend_authorization_transitions.append(
+            StoredSpendAuthorizationTransition(
+                generate_record_id(),
+                authorization.tenant_account_id,
+                reserved.spend_authorization_id,
+                "requested",
+                "reserved",
+                reserved.idempotency_key,
+                reserved.actor_reference,
+                reserved.created_at,
+            )
+        )
+        return reserved, "accepted"
+
+    def apply_spend_commitment(
+        self,
+        tenant_account_id: UUID,
+        commitment: StoredSpendCommitment,
+        now: datetime,
+    ) -> tuple[StoredSpendAuthorization, str, UUID | None]:
+        """Append one commitment and update its authorization projection."""
+        authorization = self.get_spend_authorization(
+            tenant_account_id, commitment.spend_authorization_id
+        )
+        if authorization is None:
+            raise KeyError(commitment.spend_authorization_id)
+        existing_id = self.spend_commitment_index.get(
+            (commitment.spend_authorization_id, commitment.idempotency_key)
+        )
+        if existing_id is not None:
+            existing = self.spend_commitments[existing_id]
+            if existing.committed_amount != commitment.committed_amount:
+                raise ValueError("idempotency key already stores a different commitment")
+            return authorization, "duplicate_replay", existing.spend_commitment_id
+        if authorization.authorization_status == "expired":
+            return authorization, "authorization_expired", None
+        if authorization.authorization_status == "denied":
+            return authorization, "authorization_status_invalid", None
+        if now >= authorization.valid_until:
+            return authorization, "authorization_expired", None
+        remaining = (
+            authorization.requested_amount
+            - authorization.committed_amount
+            - authorization.released_amount
+        )
+        if commitment.committed_amount > remaining:
+            return authorization, "commitment_amount_exceeded", None
+        committed = authorization.committed_amount + commitment.committed_amount
+        status = _authorization_status(
+            authorization.requested_amount,
+            committed,
+            authorization.released_amount,
+        )
+        updated = replace(
+            authorization,
+            committed_amount=committed,
+            authorization_status=status,
+            updated_at=now,
+        )
+        self.spend_commitments[commitment.spend_commitment_id] = commitment
+        self.spend_commitment_index[
+            (commitment.spend_authorization_id, commitment.idempotency_key)
+        ] = commitment.spend_commitment_id
+        self.spend_authorizations[authorization.spend_authorization_id] = updated
+        if authorization.authorization_status != status:
+            self.spend_authorization_transitions.append(
+                StoredSpendAuthorizationTransition(
+                    generate_record_id(),
+                    tenant_account_id,
+                    authorization.spend_authorization_id,
+                    authorization.authorization_status,
+                    status,
+                    commitment.idempotency_key,
+                    authorization.actor_reference,
+                    now,
+                )
+            )
+        return updated, "accepted", commitment.spend_commitment_id
+
+    def apply_spend_release(
+        self,
+        tenant_account_id: UUID,
+        release: StoredSpendRelease,
+        now: datetime,
+        target_status: str = "released",
+    ) -> tuple[StoredSpendAuthorization, str, UUID | None]:
+        """Append one release and update its authorization projection."""
+        authorization = self.get_spend_authorization(
+            tenant_account_id, release.spend_authorization_id
+        )
+        if authorization is None:
+            raise KeyError(release.spend_authorization_id)
+        existing_id = self.spend_release_index.get(
+            (release.spend_authorization_id, release.idempotency_key)
+        )
+        if existing_id is not None:
+            existing = self.spend_releases[existing_id]
+            if existing.released_amount != release.released_amount:
+                raise ValueError("idempotency key already stores a different release")
+            return authorization, "duplicate_replay", existing.spend_release_id
+        remaining = (
+            authorization.requested_amount
+            - authorization.committed_amount
+            - authorization.released_amount
+        )
+        if release.released_amount > remaining:
+            return authorization, "release_amount_exceeded", None
+        released = authorization.released_amount + release.released_amount
+        status = _authorization_status(
+            authorization.requested_amount,
+            authorization.committed_amount,
+            released,
+            target_status,
+        )
+        updated = replace(
+            authorization,
+            released_amount=released,
+            authorization_status=status,
+            updated_at=now,
+        )
+        self.spend_releases[release.spend_release_id] = release
+        self.spend_release_index[
+            (release.spend_authorization_id, release.idempotency_key)
+        ] = release.spend_release_id
+        self.spend_authorizations[authorization.spend_authorization_id] = updated
+        if authorization.authorization_status != status:
+            self.spend_authorization_transitions.append(
+                StoredSpendAuthorizationTransition(
+                    generate_record_id(),
+                    tenant_account_id,
+                    authorization.spend_authorization_id,
+                    authorization.authorization_status,
+                    status,
+                    release.idempotency_key,
+                    authorization.actor_reference,
+                    now,
+                )
+            )
+        return updated, "accepted", release.spend_release_id
 
     def find_journal_proposal(
         self,

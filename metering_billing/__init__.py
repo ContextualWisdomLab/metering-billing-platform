@@ -37,6 +37,11 @@ from metering_billing.collection_case import CollectionCaseService
 from metering_billing.account_statement_presentment import AccountStatementPresentmentService
 from metering_billing.rated_spend_presentment import RatedSpendPresentmentService
 from metering_billing.spend_budget import SpendBudgetService
+from metering_billing.spend_authorization import (
+    SPEND_AUTHORIZATION_CONTRACT_VERSION,
+    SpendAuthorizationResult,
+    SpendAuthorizationService,
+)
 from metering_billing.spend_budget_presentment import SpendBudgetPresentmentService
 from metering_billing.spend_budget_evaluation_presentment import (
     SpendBudgetEvaluationPresentmentService,
@@ -66,6 +71,8 @@ from metering_billing.contracts import (
     ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME,
     RATED_SPEND_PRESENTMENT_SCHEMA_NAME,
     SPEND_BUDGET_SCHEMA_NAME,
+    SPEND_AUTHORIZATION_SCHEMA_NAME,
+    SPEND_AUTHORIZATION_PRESENTMENT_SCHEMA_NAME,
     SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME,
     SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME,
     SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME,
@@ -123,6 +130,8 @@ from metering_billing.contracts import (
     validate_account_statement_presentment,
     validate_rated_spend_presentment,
     validate_spend_budget,
+    validate_spend_authorization,
+    validate_spend_authorization_presentment,
     validate_spend_budget_over_signal,
     validate_spend_budget_over_signal_presentment,
     validate_spend_budget_approaching_signal,
@@ -189,6 +198,9 @@ from metering_billing.errors import (
     CreditAdjustmentQueryError,
     CreditAdjustmentRejectionReasonCode,
     SpendBudgetOutcomeCode,
+    SpendAuthorizationOutcomeCode,
+    SpendAuthorizationQueryError,
+    SpendAuthorizationRejectionReasonCode,
     SpendBudgetOverSignalOutcomeCode,
     SpendBudgetApproachingSignalOutcomeCode,
     SpendBudgetEvaluationPresentmentQueryError,
@@ -370,6 +382,8 @@ __all__ = (
     "COLLECTION_CASE_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_SCHEMA_NAME",
+    "SPEND_AUTHORIZATION_SCHEMA_NAME",
+    "SPEND_AUTHORIZATION_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME",
@@ -427,6 +441,12 @@ __all__ = (
     "RatedSpendPresentmentQueryError",
     "RatedSpendPresentmentService",
     "SpendBudgetOutcomeCode",
+    "SpendAuthorizationOutcomeCode",
+    "SpendAuthorizationQueryError",
+    "SpendAuthorizationRejectionReasonCode",
+    "SpendAuthorizationResult",
+    "SpendAuthorizationService",
+    "SPEND_AUTHORIZATION_CONTRACT_VERSION",
     "SpendBudgetOverSignalOutcomeCode",
     "SpendBudgetApproachingSignalOutcomeCode",
     "SpendBudgetApproachingSignalPresentmentQueryError",
@@ -607,6 +627,8 @@ __all__ = (
     "validate_account_statement_presentment",
     "validate_rated_spend_presentment",
     "validate_spend_budget",
+    "validate_spend_authorization",
+    "validate_spend_authorization_presentment",
     "validate_spend_budget_over_signal",
     "validate_spend_budget_over_signal_presentment",
     "validate_spend_budget_approaching_signal",

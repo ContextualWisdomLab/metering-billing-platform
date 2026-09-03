@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/spend-authorization/v1",
+  "title": "Spend Authorization",
+  "description": "Tenant-scoped pre-execution spend authorization command. Monetary values are exact-decimal strings and the accepted lifecycle is reserved, partially_committed, committed, released, or expired.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spend_authorization_contract_version",
+    "spend_authorization_operation_code",
+    "spend_authorization_outcome_code",
+    "next_operator_action"
+  ],
+  "properties": {
+    "spend_authorization_contract_version": {"type": "integer", "minimum": 1},
+    "spend_authorization_operation_code": {"type": "string", "enum": ["request", "commitment", "release", "expire"]},
+    "spend_authorization_outcome_code": {"type": "string", "enum": ["accepted", "duplicate_replay", "rejected"]},
+    "spend_authorization_id": {"type": "string", "format": "uuid"},
+    "mutation_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "tenant_account_id": {"type": "string", "format": "uuid"},
+    "billing_account_id": {"type": "string", "format": "uuid"},
+    "spend_budget_id": {"type": "string", "format": "uuid"},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
+    "actor_reference": {"type": "string", "minLength": 1, "maxLength": 200},
+    "purpose_code": {"type": "string", "minLength": 1, "maxLength": 100},
+    "policy_version": {"type": "string", "minLength": 1, "maxLength": 100},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "requested_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "reserved_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "committed_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "released_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "remaining_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "valid_from": {"type": "string", "format": "date-time"},
+    "valid_until": {"type": "string", "format": "date-time"},
+    "authorization_status": {"type": "string", "enum": ["requested", "reserved", "partially_committed", "committed", "released", "expired", "denied"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "rejection_reason_code": {
+      "type": "string",
+      "enum": [
+        "tenant_not_found", "billing_account_not_found", "billing_account_forbidden",
+        "spend_budget_not_found", "spend_authorization_not_found",
+        "spend_authorization_forbidden", "authorization_status_invalid",
+        "authorization_expired", "authorization_exposure_exceeded",
+        "idempotency_key_invalid", "idempotency_key_conflict", "actor_reference_invalid",
+        "purpose_invalid", "policy_version_invalid", "requested_amount_invalid",
+        "commitment_amount_invalid", "commitment_amount_exceeded",
+        "release_amount_invalid", "release_amount_exceeded", "validity_window_invalid",
+        "request_invalid"
+      ]
+    },
+    "next_operator_action": {"type": "string", "minLength": 1}
+  }
+}

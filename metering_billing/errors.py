@@ -981,6 +981,48 @@ class SpendBudgetApproachingSignalPresentmentQueryError(ValueError):
         self.rejection_reason_code = rejection_reason_code
 
 
+class SpendAuthorizationOutcomeCode(StrEnum):
+    """Terminal result of an authorization, commitment, or release command."""
+
+    ACCEPTED = "accepted"
+    DUPLICATE_REPLAY = "duplicate_replay"
+    REJECTED = "rejected"
+
+
+class SpendAuthorizationRejectionReasonCode(StrEnum):
+    """Why a spend-control command was refused without consuming exposure."""
+
+    TENANT_NOT_FOUND = "tenant_not_found"
+    BILLING_ACCOUNT_NOT_FOUND = "billing_account_not_found"
+    BILLING_ACCOUNT_FORBIDDEN = "billing_account_forbidden"
+    SPEND_BUDGET_NOT_FOUND = "spend_budget_not_found"
+    AUTHORIZATION_NOT_FOUND = "spend_authorization_not_found"
+    AUTHORIZATION_FORBIDDEN = "spend_authorization_forbidden"
+    AUTHORIZATION_STATUS_INVALID = "authorization_status_invalid"
+    AUTHORIZATION_EXPIRED = "authorization_expired"
+    AUTHORIZATION_EXPOSURE_EXCEEDED = "authorization_exposure_exceeded"
+    IDEMPOTENCY_KEY_INVALID = "idempotency_key_invalid"
+    IDEMPOTENCY_KEY_CONFLICT = "idempotency_key_conflict"
+    ACTOR_REFERENCE_INVALID = "actor_reference_invalid"
+    PURPOSE_INVALID = "purpose_invalid"
+    POLICY_VERSION_INVALID = "policy_version_invalid"
+    REQUESTED_AMOUNT_INVALID = "requested_amount_invalid"
+    COMMITMENT_AMOUNT_INVALID = "commitment_amount_invalid"
+    COMMITMENT_AMOUNT_EXCEEDED = "commitment_amount_exceeded"
+    RELEASE_AMOUNT_INVALID = "release_amount_invalid"
+    RELEASE_AMOUNT_EXCEEDED = "release_amount_exceeded"
+    VALIDITY_WINDOW_INVALID = "validity_window_invalid"
+    REQUEST_INVALID = "request_invalid"
+
+
+class SpendAuthorizationQueryError(ValueError):
+    """Raised when an authorization cannot be authorized or presented."""
+
+    def __init__(self, rejection_reason_code: str) -> None:
+        super().__init__(rejection_reason_code)
+        self.rejection_reason_code = rejection_reason_code
+
+
 class PaymentSettlementRejectionReasonCode(StrEnum):
     """Why a settlement request was refused without capturing money or posting."""
 

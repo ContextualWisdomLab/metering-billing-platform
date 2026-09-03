@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/spend-authorization-presentment/v1",
+  "title": "Spend Authorization Presentment",
+  "description": "Tenant-scoped read projection of a spend authorization with exact conservation arithmetic.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spend_authorization_presentment_contract_version", "spend_authorization_id",
+    "tenant_reference", "billing_account_id", "spend_budget_id", "idempotency_key",
+    "actor_reference", "purpose_code", "policy_version", "currency_code",
+    "requested_amount", "reserved_amount", "committed_amount", "released_amount",
+    "remaining_amount", "valid_from", "valid_until", "authorization_status",
+    "created_at", "updated_at", "next_operator_action"
+  ],
+  "properties": {
+    "spend_authorization_presentment_contract_version": {"type": "integer", "minimum": 1},
+    "spend_authorization_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "tenant_account_id": {"type": "string", "format": "uuid"},
+    "billing_account_id": {"type": "string", "format": "uuid"},
+    "spend_budget_id": {"type": "string", "format": "uuid"},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
+    "actor_reference": {"type": "string", "minLength": 1, "maxLength": 200},
+    "purpose_code": {"type": "string", "minLength": 1, "maxLength": 100},
+    "policy_version": {"type": "string", "minLength": 1, "maxLength": 100},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "requested_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "reserved_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "committed_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "released_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "remaining_amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$", "maxLength": 39},
+    "valid_from": {"type": "string", "format": "date-time"},
+    "valid_until": {"type": "string", "format": "date-time"},
+    "authorization_status": {"type": "string", "enum": ["reserved", "partially_committed", "committed", "released", "expired", "denied"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "next_operator_action": {"type": "string", "minLength": 1}
+  }
+}
