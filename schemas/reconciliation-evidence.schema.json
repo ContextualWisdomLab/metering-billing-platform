@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/reconciliation-evidence/v1",
+  "title": "Reconciliation Evidence",
+  "description": "Immutable hash-backed source evidence for one reconciliation exception.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reconciliation_evidence_contract_version",
+    "evidence_id",
+    "reconciliation_line_id",
+    "exception_code",
+    "evidence_kind",
+    "evidence_reference",
+    "evidence_sha256",
+    "captured_by",
+    "captured_at"
+  ],
+  "properties": {
+    "reconciliation_evidence_contract_version": {"type": "integer", "minimum": 1},
+    "evidence_id": {"type": "string", "format": "uuid"},
+    "reconciliation_line_id": {"type": "string", "format": "uuid"},
+    "exception_code": {
+      "type": "string",
+      "enum": [
+        "quantity_mismatch",
+        "price_mismatch",
+        "tax_mismatch",
+        "currency_mismatch",
+        "payment_missing",
+        "duplicate_charge",
+        "refund_mismatch",
+        "dispute_mismatch",
+        "settlement_mismatch",
+        "provider_fee_mismatch",
+        "cash_timing_difference",
+        "unmapped_provider_object"
+      ]
+    },
+    "evidence_kind": {"type": "string", "minLength": 1},
+    "evidence_reference": {"type": "string", "minLength": 1},
+    "evidence_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "captured_by": {"type": "string", "minLength": 1},
+    "captured_at": {"type": "string", "format": "date-time"}
+  }
+}

@@ -97,6 +97,21 @@ class RepositoryContractTests(unittest.TestCase):
             ("$[0]: schema is false",),
         )
 
+    def test_schema_ref_siblings_are_validated(self) -> None:
+        """Draft 2020-12 constraints beside a local reference remain effective."""
+        schema = {
+            "$defs": {"short_text": {"type": "string"}},
+            "type": "object",
+            "properties": {
+                "value": {"$ref": "#/$defs/short_text", "minLength": 3},
+            },
+            "additionalProperties": False,
+        }
+        self.assertEqual(
+            validate_schema_instance(schema, {"value": "ok"}),
+            ("$.value: string is shorter than minLength",),
+        )
+
     def test_reusable_workflow_action_refs_are_pinned(self) -> None:
         """Reusable workflow paths must obey the same immutable-ref policy."""
         mutable = "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@main"
@@ -4461,6 +4476,38 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIn(expected_fragment, sql)
 
+    def test_fx_conversion_migration_pins_the_referenced_rate_snapshot(self) -> None:
+        """Database inserts must retain the exact referenced FX rate evidence."""
+        sql = (ROOT / "database/migrations/0048_fx_conversion_rate_integrity.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE OR REPLACE FUNCTION billing_core.validate_fx_conversion_snapshot()",
+            "NEW.source_currency IS DISTINCT FROM referenced_rate.base_currency",
+            "NEW.quote_currency IS DISTINCT FROM referenced_rate.quote_currency",
+            "NEW.fx_rate_value IS DISTINCT FROM referenced_rate.fx_rate_value",
+            "NEW.rate_precision IS DISTINCT FROM referenced_rate.rate_precision",
+            "CREATE TRIGGER fx_conversion_rate_snapshot_validate",
+            "BEFORE INSERT ON billing_core.fx_conversion",
+        ):
+            self.assertIn(expected_fragment, sql)
+
+    def test_reconciliation_gate_migration_protects_period_and_line_boundaries(self) -> None:
+        """Direct PostgreSQL writes cannot bypass reconciliation or reopen a period."""
+        sql = (ROOT / "database/migrations/0049_reconciliation_gate_integrity.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "CREATE OR REPLACE FUNCTION billing_core.assert_reconciliation_gate(",
+            "CREATE OR REPLACE FUNCTION billing_core.validate_billing_period_transition()",
+            "CREATE TRIGGER billing_period_transition_gate",
+            "CREATE OR REPLACE FUNCTION billing_core.reject_reconciliation_line_after_close()",
+            "CREATE TRIGGER reconciliation_line_period_gate",
+            "FOR UPDATE",
+            "resolution.resolution_status IN ('resolved', 'waived')",
+        ):
+            self.assertIn(expected_fragment, sql)
+
     def test_schema_validator_reports_required_type_and_reference_errors(self) -> None:
         """The offline validator covers required, type, reference, and one-of rules."""
         schema = self._schema("accounting-journal-proposal.schema.json")
@@ -4620,6 +4667,18 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("$[0]: integer is below the minimum", errors)
         self.assertEqual(
             validate_schema_instance({"type": "array", "items": True}, [1]), ()
+        )
+        prefix_items_schema = {
+            "type": "array",
+            "prefixItems": [{"type": "string"}],
+            "items": {"type": "integer"},
+        }
+        self.assertEqual(
+            validate_schema_instance(prefix_items_schema, ["ok", 1]), ()
+        )
+        self.assertEqual(
+            validate_schema_instance(prefix_items_schema, ["ok", "bad"]),
+            ("$[1]: expected integer",),
         )
 
         object_schema = {
