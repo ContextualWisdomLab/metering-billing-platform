@@ -11,6 +11,7 @@ Start as a modular, contract-first repository. Runtime services can later be dep
 - UUIDv7 identifiers for new records where PostgreSQL 18 generates IDs.
 - Idempotency keys on all state-changing external commands.
 - Usage ingestion deduplicates on tenant-scoped `source_event_key` and on `source_payload_hash` plus `event_contract_version`.
+- Usage-event v1 is a closed contract: existing optional attribution and operation fields remain additive-compatible, while a semantic breaking change must publish a new version and schema. The current runtime accepts only version 1 and rejects unknown versions before hash, attribution, or persistence work.
 - CloudEvents-compatible envelopes in the event milestone.
 
 ## Usage-ingestion plane

@@ -93,6 +93,9 @@ controls are complete. The durable vertical now includes subscription metadata,
 delivery attempts, and outbox delivered status, but the one-time webhook secret
 remains process-local; issue #84 remains open for a secure secret provider and
 the remaining commercial, recovery, HA, readiness, and production-default work.
+The v1 usage payload is closed: existing optional attribution and operation
+fields are additive-compatible, while a breaking semantic change requires a
+new schema/version. Unsupported versions fail closed as `schema_invalid`.
 
 ## Publish a rate card
 
