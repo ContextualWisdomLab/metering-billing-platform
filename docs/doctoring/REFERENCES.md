@@ -49,3 +49,7 @@ PCI Security Standards Council. (2024). *Payment Card Industry Data Security Sta
 TM Forum. (2024). *TMF620 Product Catalog Management API (Version 5.0.0).* https://www.tmforum.org/oda/open-apis/directory/product-catalog-management-api-TMF620
 
 PostgreSQL Global Development Group. (2026). *PostgreSQL versioning policy.* https://www.postgresql.org/support/versioning/
+
+Lemon Squeezy. (n.d.). *Sync with webhooks.* Retrieved August 29, 2026, from https://docs.lemonsqueezy.com/guides/developer-guide/webhooks
+
+Lemon Squeezy. (n.d.). *Usage-based billing.* Retrieved August 29, 2026, from https://docs.lemonsqueezy.com/help/products/usage-based-billing

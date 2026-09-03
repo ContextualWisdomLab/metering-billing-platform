@@ -27,3 +27,5 @@
 | OECD International VAT/GST Guidelines | A published tenant tax rate is separate from later invoice calculation. This slice applies one flat persisted rate and does not implement nexus, exemptions, or an OSS engine. |
 | IAS 12 | Statutory tax presentation belongs to AIS. Billing emits semantic `tax_payable` on taxed invoice journals and debits the same role on taxed credits; AIS must map that role onto its chart. |
 | PostgreSQL 18 | UUIDv7 and exact numeric persistence support ordered identifiers and monetary precision. |
+| Lemon Squeezy webhooks | The exact raw request body is authenticated with the provider signing secret before JSON parsing; asynchronous processing receives only a bounded event/resource reference. |
+| Lemon Squeezy usage-based billing | Usage records remain a provider integration concern; the capability manifest declares `metered_usage_push` without making provider usage or billing state authoritative in Billing. |

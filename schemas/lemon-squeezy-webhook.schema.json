@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/lemon-squeezy-webhook/v1",
+  "title": "Verified Lemon Squeezy Webhook Reference",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "lemon_squeezy_webhook_contract_version",
+    "provider_code",
+    "event_name",
+    "provider_object_type",
+    "provider_object_reference"
+  ],
+  "properties": {
+    "lemon_squeezy_webhook_contract_version": {"const": 1},
+    "provider_code": {"const": "lemon_squeezy"},
+    "event_name": {"type": "string", "minLength": 1, "maxLength": 100},
+    "provider_object_type": {"type": "string", "minLength": 1, "maxLength": 100},
+    "provider_object_reference": {"type": "string", "minLength": 1, "maxLength": 200}
+  }
+}

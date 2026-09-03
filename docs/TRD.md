@@ -59,7 +59,21 @@ readiness, recovery, HA, and telemetry requirements remain tracked by issue
 
 ## Provider plane
 
-Provider integration is capability-based. Checkout, subscription, usage export, invoice export, collection, refund, dispute, tax document, and settlement are separate ports. A provider implements only declared capabilities.
+Provider integration is capability-based. `ProviderCapabilityManifest` publishes
+effective half-open capability intervals plus optional currency, jurisdiction,
+contract, and tenant-policy dimensions. `ProviderCapabilityRegistry.select`
+requires every requested capability and dimension, rejects unhealthy providers,
+and uses deterministic provider-code/effective-date ordering. The shipped
+Lemon Squeezy and manual-enterprise manifests are declarations only; they do
+not call an external provider or create a payment. Lemon Squeezy webhook
+verification authenticates the exact raw body with HMAC-SHA256 before parsing
+and emits only a bounded event/resource reference contract. Checkout,
+subscription, usage export, invoice export, collection, refund, dispute, tax
+document, settlement, and webhook verification remain separate future adapter
+ports. `ProviderObjectMappingRegistry` keeps internal and external object
+references provider-sticky, rejects overlap, and permits change only through
+an explicit effective-dated replacement. Provider mappings remain separate
+from credentials and raw provider payloads.
 
 ## Accounting plane
 
