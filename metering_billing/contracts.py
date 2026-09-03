@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import UUID
+
+from metering_billing.errors import PeriodCloseValidationError
 
 from scripts.validate_repository import (
     validate_accounting_journal_proposal,
@@ -20,141 +24,151 @@ from scripts.validate_repository import (
 
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
-    "PROVIDER_CAPABILITY_SCHEMA_NAME",
-    "COLLECTION_CASE_SCHEMA_NAME",
-    "PAYMENT_INTENT_SCHEMA_NAME",
-    "PAYMENT_RECEIPT_SCHEMA_NAME",
-    "CREDIT_ADJUSTMENT_SCHEMA_NAME",
-    "SPEND_BUDGET_SCHEMA_NAME",
-    "SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME",
-    "SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME",
-    "SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME",
-    "SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME",
-    "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
-    "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
+    "ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME",
+    "ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME",
+    "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
     "BILLING_ACCOUNT_BUDGET_STATUS_PRESENTMENT_SCHEMA_NAME",
-    "RATE_CARD_SCHEMA_NAME",
-    "TAX_RATE_SCHEMA_NAME",
-    "TAX_ASSESSMENT_SCHEMA_NAME",
+    "BILLING_PERIOD_SCHEMA_NAME",
+    "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_CASE_SCHEMA_NAME",
+    "COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_CASE_SETTLEMENT_SCHEMA_NAME",
+    "COLLECTION_DISPUTE_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_DISPUTE_RELEASE_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_DISPUTE_RELEASE_SCHEMA_NAME",
+    "COLLECTION_DISPUTE_SCHEMA_NAME",
+    "COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME",
+    "COLLECTION_WRITE_OFF_SCHEMA_NAME",
+    "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
+    "CREDIT_ADJUSTMENT_SCHEMA_NAME",
+    "CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME",
+    "CREDIT_NOTE_APPLICATION_SCHEMA_NAME",
+    "DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME",
+    "FX_CONVERSION_SCHEMA_NAME",
+    "FX_RATE_SCHEMA_NAME",
     "INVOICE_DRAFT_SCHEMA_NAME",
     "INVOICE_PRESENTMENT_SCHEMA_NAME",
-    "COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME",
-    "COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME",
-    "ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME",
-    "RATED_SPEND_PRESENTMENT_SCHEMA_NAME",
-    "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
-    "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
-    "CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME",
-    "RATE_CARD_PRESENTMENT_SCHEMA_NAME",
-    "USAGE_EVENT_PRESENTMENT_SCHEMA_NAME",
-    "RATING_RUN_PRESENTMENT_SCHEMA_NAME",
-    "TENANT_API_CREDENTIAL_SCHEMA_NAME",
-    "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
-    "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
-    "DUNNING_EVENT_PRESENTMENT_SCHEMA_NAME",
-    "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
-    "ISSUED_INVOICE_SCHEMA_NAME",
-    "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
-    "ISSUED_CREDIT_NOTE_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_PRESENTMENT_SCHEMA_NAME",
-    "CREDIT_NOTE_APPLICATION_SCHEMA_NAME",
-    "CREDIT_NOTE_APPLICATION_PRESENTMENT_SCHEMA_NAME",
-    "COLLECTION_CASE_SETTLEMENT_SCHEMA_NAME",
-    "COLLECTION_CASE_SETTLEMENT_PRESENTMENT_SCHEMA_NAME",
-    "COLLECTION_WRITE_OFF_SCHEMA_NAME",
-    "COLLECTION_WRITE_OFF_PRESENTMENT_SCHEMA_NAME",
-    "COLLECTION_DISPUTE_SCHEMA_NAME",
-    "COLLECTION_DISPUTE_PRESENTMENT_SCHEMA_NAME",
-    "COLLECTION_DISPUTE_RELEASE_SCHEMA_NAME",
-    "COLLECTION_DISPUTE_RELEASE_PRESENTMENT_SCHEMA_NAME",
-    "ISSUED_INVOICE_VOID_SCHEMA_NAME",
-    "ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME",
-    "ISSUED_CREDIT_NOTE_VOID_SCHEMA_NAME",
+    "ISSUED_CREDIT_NOTE_SCHEMA_NAME",
     "ISSUED_CREDIT_NOTE_VOID_PRESENTMENT_SCHEMA_NAME",
-    "UNAPPLIED_CASH_SCHEMA_NAME",
-    "UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME",
-    "UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME",
-    "UNAPPLIED_CASH_APPLICATION_PRESENTMENT_SCHEMA_NAME",
-    "UNAPPLIED_CASH_REFUND_SCHEMA_NAME",
-    "UNAPPLIED_CASH_REFUND_PRESENTMENT_SCHEMA_NAME",
-    "WEBHOOK_DELIVERY_SCHEMA_NAME",
-    "AIS_OUTBOX_DRAIN_SCHEMA_NAME",
+    "ISSUED_CREDIT_NOTE_VOID_SCHEMA_NAME",
+    "ISSUED_INVOICE_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_INVOICE_SCHEMA_NAME",
+    "ISSUED_INVOICE_VOID_PRESENTMENT_SCHEMA_NAME",
+    "ISSUED_INVOICE_VOID_SCHEMA_NAME",
+    "PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME",
+    "PAYMENT_INTENT_SCHEMA_NAME",
+    "PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME",
+    "PAYMENT_RECEIPT_SCHEMA_NAME",
+    "PROVIDER_CAPABILITY_SCHEMA_NAME",
+    "RATED_SPEND_PRESENTMENT_SCHEMA_NAME",
+    "RATE_CARD_PRESENTMENT_SCHEMA_NAME",
+    "RATE_CARD_SCHEMA_NAME",
+    "RATING_RUN_PRESENTMENT_SCHEMA_NAME",
     "RATING_RUN_SCHEMA_NAME",
+    "RECONCILIATION_LINE_SCHEMA_NAME",
+    "RECONCILIATION_RESOLUTION_SCHEMA_NAME",
+    "SPEND_BUDGET_APPROACHING_SIGNAL_PRESENTMENT_SCHEMA_NAME",
+    "SPEND_BUDGET_APPROACHING_SIGNAL_SCHEMA_NAME",
+    "SPEND_BUDGET_EVALUATION_PRESENTMENT_SCHEMA_NAME",
+    "SPEND_BUDGET_OVER_SIGNAL_PRESENTMENT_SCHEMA_NAME",
+    "SPEND_BUDGET_OVER_SIGNAL_SCHEMA_NAME",
+    "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
+    "SPEND_BUDGET_SCHEMA_NAME",
+    "TAX_ASSESSMENT_SCHEMA_NAME",
+    "TAX_RATE_SCHEMA_NAME",
+    "TENANT_API_CREDENTIAL_SCHEMA_NAME",
+    "UNAPPLIED_CASH_APPLICATION_PRESENTMENT_SCHEMA_NAME",
+    "UNAPPLIED_CASH_APPLICATION_SCHEMA_NAME",
+    "UNAPPLIED_CASH_PRESENTMENT_SCHEMA_NAME",
+    "UNAPPLIED_CASH_REFUND_PRESENTMENT_SCHEMA_NAME",
+    "UNAPPLIED_CASH_REFUND_SCHEMA_NAME",
+    "UNAPPLIED_CASH_SCHEMA_NAME",
+    "USAGE_EVENT_PRESENTMENT_SCHEMA_NAME",
     "USAGE_EVENT_SCHEMA_NAME",
     "USAGE_INGESTION_RECEIPT_SCHEMA_NAME",
+    "WEBHOOK_DELIVERY_SCHEMA_NAME",
+    "WEBHOOK_OUTBOX_EVENT_PRESENTMENT_SCHEMA_NAME",
+    "WEBHOOK_SUBSCRIPTION_PRESENTMENT_SCHEMA_NAME",
+    "WEBHOOK_SUBSCRIPTION_SCHEMA_NAME",
+    "default_consumed_schemas_directory",
     "default_schemas_directory",
     "load_json_schema",
-    "validate_accounting_journal_proposal",
-    "validate_collection_case",
-    "validate_invoice_draft",
-    "validate_invoice_presentment",
-    "validate_collection_case_presentment",
-    "validate_collection_aging_presentment",
     "validate_account_statement_presentment",
-    "validate_rated_spend_presentment",
-    "validate_payment_intent_presentment",
-    "validate_payment_receipt_presentment",
-    "validate_credit_adjustment_presentment",
-    "validate_spend_budget_presentment",
-    "validate_spend_budget_evaluation_presentment",
+    "validate_accounting_journal_proposal",
+    "validate_ais_outbox_drain",
     "validate_billing_account_budget_status_presentment",
-    "validate_rate_card_presentment",
-    "validate_usage_event_presentment",
-    "validate_rating_run_presentment",
-    "validate_tax_assessment_presentment",
-    "validate_posting_receipt_observation_presentment",
-    "validate_tenant_api_credential",
-    "validate_tenant_api_credential_presentment",
-    "validate_webhook_subscription",
-    "validate_webhook_delivery",
-    "validate_webhook_delivery_presentment",
-    "validate_webhook_subscription_presentment",
-    "validate_dunning_event_presentment",
-    "validate_webhook_outbox_event_presentment",
-    "validate_issued_invoice",
-    "validate_issued_invoice_presentment",
-    "validate_issued_credit_note",
-    "validate_issued_credit_note_presentment",
-    "validate_credit_note_application",
-    "validate_credit_note_application_presentment",
+    "validate_billing_period",
+    "validate_collection_aging_presentment",
+    "validate_collection_case",
+    "validate_collection_case_presentment",
     "validate_collection_case_settlement",
     "validate_collection_case_settlement_presentment",
-    "validate_collection_write_off",
-    "validate_collection_write_off_presentment",
     "validate_collection_dispute",
     "validate_collection_dispute_presentment",
     "validate_collection_dispute_release",
     "validate_collection_dispute_release_presentment",
-    "validate_issued_invoice_void",
-    "validate_issued_invoice_void_presentment",
+    "validate_collection_write_off",
+    "validate_collection_write_off_presentment",
+    "validate_consumed_posting_receipt",
+    "validate_credit_adjustment",
+    "validate_credit_adjustment_presentment",
+    "validate_credit_note_application",
+    "validate_credit_note_application_presentment",
+    "validate_dunning_event_presentment",
+    "validate_fx_conversion",
+    "validate_fx_rate",
+    "validate_invoice_draft",
+    "validate_invoice_presentment",
+    "validate_issued_credit_note",
+    "validate_issued_credit_note_presentment",
     "validate_issued_credit_note_void",
     "validate_issued_credit_note_void_presentment",
-    "validate_unapplied_cash",
-    "validate_unapplied_cash_presentment",
-    "validate_unapplied_cash_application",
-    "validate_unapplied_cash_application_presentment",
-    "validate_unapplied_cash_refund",
-    "validate_unapplied_cash_refund_presentment",
-    "validate_ais_outbox_drain",
+    "validate_issued_invoice",
+    "validate_issued_invoice_presentment",
+    "validate_issued_invoice_void",
+    "validate_issued_invoice_void_presentment",
+    "validate_journal_proposal",
     "validate_payment_intent",
+    "validate_payment_intent_presentment",
     "validate_payment_receipt",
-    "validate_credit_adjustment",
+    "validate_payment_receipt_presentment",
+    "validate_posting_receipt_observation_presentment",
+    "validate_rate_card",
+    "validate_rate_card_presentment",
+    "validate_rated_spend_presentment",
+    "validate_rating_run",
+    "validate_rating_run_presentment",
+    "validate_reconciliation_line",
+    "validate_reconciliation_resolution",
+    "validate_schema_instance",
     "validate_spend_budget",
-    "validate_spend_budget_over_signal",
-    "validate_spend_budget_over_signal_presentment",
     "validate_spend_budget_approaching_signal",
     "validate_spend_budget_approaching_signal_presentment",
-    "validate_rate_card",
-    "validate_tax_rate",
+    "validate_spend_budget_evaluation_presentment",
+    "validate_spend_budget_over_signal",
+    "validate_spend_budget_over_signal_presentment",
+    "validate_spend_budget_presentment",
     "validate_tax_assessment",
-    "validate_journal_proposal",
-    "validate_rating_run",
-    "validate_schema_instance",
+    "validate_tax_assessment_presentment",
+    "validate_tax_rate",
+    "validate_tenant_api_credential",
+    "validate_tenant_api_credential_presentment",
+    "validate_unapplied_cash",
+    "validate_unapplied_cash_application",
+    "validate_unapplied_cash_application_presentment",
+    "validate_unapplied_cash_presentment",
+    "validate_unapplied_cash_refund",
+    "validate_unapplied_cash_refund_presentment",
     "validate_usage_event",
+    "validate_usage_event_presentment",
     "validate_usage_ingestion_receipt",
-    "ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME",
-    "default_consumed_schemas_directory",
-    "validate_consumed_posting_receipt",
+    "validate_webhook_delivery",
+    "validate_webhook_delivery_presentment",
+    "validate_webhook_outbox_event_presentment",
+    "validate_webhook_subscription",
+    "validate_webhook_subscription_presentment",
 )
 
 USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
@@ -261,6 +275,11 @@ TAX_ASSESSMENT_SCHEMA_NAME = "tax-assessment.schema.json"
 ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME = "accounting-journal-proposal.schema.json"
 PROVIDER_CAPABILITY_SCHEMA_NAME = "provider-capability.schema.json"
 ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json"
+BILLING_PERIOD_SCHEMA_NAME = "billing-period.schema.json"
+FX_RATE_SCHEMA_NAME = "fx-rate.schema.json"
+FX_CONVERSION_SCHEMA_NAME = "fx-conversion.schema.json"
+RECONCILIATION_LINE_SCHEMA_NAME = "reconciliation-line.schema.json"
+RECONCILIATION_RESOLUTION_SCHEMA_NAME = "reconciliation-resolution.schema.json"
 
 
 def default_schemas_directory() -> Path:
@@ -302,6 +321,227 @@ def load_json_schema(
     if not isinstance(loaded, dict):
         raise ValueError(f"schema root must be an object: {schema_file_name}")
     return loaded
+
+
+def validate_billing_period(
+    period: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate an immutable billing-period snapshot and transition history."""
+    schema = load_json_schema(BILLING_PERIOD_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, period))
+    if errors or not isinstance(period, Mapping):
+        return tuple(errors)
+    errors.extend(_billing_period_semantic_errors(period))
+    return tuple(errors)
+
+
+def validate_fx_rate(
+    rate: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one versioned exact FX-rate evidence document."""
+    schema = load_json_schema(FX_RATE_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, rate))
+    if errors or not isinstance(rate, Mapping):
+        return tuple(errors)
+    errors.extend(_fx_rate_semantic_errors(rate))
+    return tuple(errors)
+
+
+def validate_fx_conversion(
+    conversion: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one frozen exact FX conversion result."""
+    schema = load_json_schema(FX_CONVERSION_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, conversion))
+    if errors or not isinstance(conversion, Mapping):
+        return tuple(errors)
+    errors.extend(_fx_conversion_semantic_errors(conversion))
+    return tuple(errors)
+
+
+def validate_reconciliation_line(
+    line: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one provider/account/period/currency reconciliation line."""
+    schema = load_json_schema(RECONCILIATION_LINE_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, line))
+    if errors or not isinstance(line, Mapping):
+        return tuple(errors)
+    errors.extend(_reconciliation_line_semantic_errors(line))
+    return tuple(errors)
+
+
+def validate_reconciliation_resolution(
+    resolution: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate one immutable maker-checker exception resolution."""
+    schema = load_json_schema(RECONCILIATION_RESOLUTION_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, resolution))
+    if errors or not isinstance(resolution, Mapping):
+        return tuple(errors)
+    errors.extend(_reconciliation_resolution_semantic_errors(resolution))
+    return tuple(errors)
+
+
+def _contract_uuid(value: Any) -> UUID:
+    """Parse a schema-valid UUID for a domain-object semantic check."""
+    return UUID(str(value))
+
+
+def _contract_date(value: Any) -> date:
+    """Parse a schema-valid ISO date for a domain-object semantic check."""
+    return date.fromisoformat(str(value))
+
+
+def _contract_datetime(value: Any) -> datetime:
+    """Parse a schema-valid ISO instant for a domain-object semantic check."""
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _semantic_error(builder: Any) -> tuple[str, ...]:
+    """Turn one domain invariant failure into a stable contract diagnostic."""
+    try:
+        builder()
+    except (PeriodCloseValidationError, TypeError, ValueError) as error:
+        return (f"$: {error}",)
+    return ()
+
+
+def _billing_period_semantic_errors(period: Mapping[str, Any]) -> tuple[str, ...]:
+    """Apply the immutable period aggregate invariants after schema validation."""
+    from metering_billing.period_close import BillingPeriod, BillingPeriodTransition
+
+    def build() -> None:
+        transitions = tuple(
+            BillingPeriodTransition(
+                transition_id=_contract_uuid(item["transition_id"]),
+                from_status=item["from_status"],
+                to_status=item["to_status"],
+                actor_reference=item["actor_reference"],
+                authorization_reference=item["authorization_reference"],
+                reason=item["reason"],
+                transitioned_at=_contract_datetime(item["transitioned_at"]),
+            )
+            for item in period["transitions"]
+        )
+        BillingPeriod(
+            period_id=_contract_uuid(period["period_id"]),
+            tenant_reference=period["tenant_reference"],
+            period_start=_contract_date(period["period_start"]),
+            period_end=_contract_date(period["period_end"]),
+            opened_at=_contract_datetime(period["opened_at"]),
+            opened_by=period["opened_by"],
+            status=period["period_status"],
+            transitions=transitions,
+            period_contract_version=period["period_contract_version"],
+        )
+
+    return _semantic_error(build)
+
+
+def _fx_rate_semantic_errors(rate: Mapping[str, Any]) -> tuple[str, ...]:
+    """Apply positive-rate and precision coverage invariants after schema validation."""
+    from metering_billing.period_close import FxRate
+
+    return _semantic_error(
+        lambda: FxRate(
+            fx_rate_id=_contract_uuid(rate["fx_rate_id"]),
+            rate_source=rate["rate_source"],
+            rate_type=rate["rate_type"],
+            base_currency=rate["base_currency"],
+            quote_currency=rate["quote_currency"],
+            rate=Decimal(rate["rate"]),
+            rate_precision=rate["rate_precision"],
+            effective_at=_contract_datetime(rate["effective_at"]),
+            recorded_at=_contract_datetime(rate["recorded_at"]),
+            fx_rate_contract_version=rate["fx_rate_contract_version"],
+        )
+    )
+
+
+def _fx_conversion_semantic_errors(conversion: Mapping[str, Any]) -> tuple[str, ...]:
+    """Apply target-scale and exact-product invariants after schema validation."""
+    from metering_billing.period_close import FxConversion
+
+    return _semantic_error(
+        lambda: FxConversion(
+            fx_conversion_id=_contract_uuid(conversion["fx_conversion_id"]),
+            fx_rate_id=_contract_uuid(conversion["fx_rate_id"]),
+            source_amount=Decimal(conversion["source_amount"]),
+            source_currency=conversion["source_currency"],
+            quote_amount=Decimal(conversion["quote_amount"]),
+            quote_currency=conversion["quote_currency"],
+            quote_minor_units=conversion["quote_minor_units"],
+            rate=Decimal(conversion["rate"]),
+            rate_precision=conversion["rate_precision"],
+            converted_at=_contract_datetime(conversion["converted_at"]),
+            fx_conversion_contract_version=conversion["fx_conversion_contract_version"],
+        )
+    )
+
+
+def _reconciliation_line_semantic_errors(line: Mapping[str, Any]) -> tuple[str, ...]:
+    """Apply arithmetic, currency, and exception/status invariants after schema validation."""
+    from metering_billing.period_close import (
+        ReconciliationException,
+        ReconciliationLine,
+    )
+
+    def build() -> None:
+        exceptions = tuple(
+            ReconciliationException(
+                exception_code=item["exception_code"],
+                next_action=item["next_action"],
+            )
+            for item in line["exceptions"]
+        )
+        ReconciliationLine(
+            reconciliation_line_id=_contract_uuid(line["reconciliation_line_id"]),
+            period_id=_contract_uuid(line["period_id"]),
+            provider_account_reference=line["provider_account_reference"],
+            currency_code=line["currency_code"],
+            internal_expected_amount=Decimal(line["internal_expected_amount"]),
+            provider_actual_amount=Decimal(line["provider_actual_amount"]),
+            cash_actual_amount=Decimal(line["cash_actual_amount"]),
+            provider_fee_amount=Decimal(line["provider_fee_amount"]),
+            withheld_tax_amount=Decimal(line["withheld_tax_amount"]),
+            reserve_amount=Decimal(line["reserve_amount"]),
+            expected_cash_amount=Decimal(line["expected_cash_amount"]),
+            status=line["reconciliation_line_status"],
+            exceptions=exceptions,
+            assessed_at=_contract_datetime(line["assessed_at"]),
+            internal_currency_code=line["internal_currency_code"],
+            provider_currency_code=line["provider_currency_code"],
+            cash_currency_code=line["cash_currency_code"],
+            reconciliation_line_contract_version=line["reconciliation_line_contract_version"],
+        )
+
+    return _semantic_error(build)
+
+
+def _reconciliation_resolution_semantic_errors(
+    resolution: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Apply maker-checker and evidence invariants after schema validation."""
+    from metering_billing.period_close import ReconciliationResolution
+
+    return _semantic_error(
+        lambda: ReconciliationResolution(
+            resolution_id=_contract_uuid(resolution["resolution_id"]),
+            reconciliation_line_id=_contract_uuid(resolution["reconciliation_line_id"]),
+            exception_code=resolution["exception_code"],
+            resolution_status=resolution["resolution_status"],
+            owner_reference=resolution["owner_reference"],
+            resolution_reason=resolution["resolution_reason"],
+            evidence_reference=resolution["evidence_reference"],
+            maker_reference=resolution["maker_reference"],
+            checker_reference=resolution["checker_reference"],
+            resolved_at=_contract_datetime(resolution["resolved_at"]),
+            reconciliation_resolution_contract_version=resolution[
+                "reconciliation_resolution_contract_version"
+            ],
+        )
+    )
 
 
 def validate_usage_event(

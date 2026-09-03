@@ -13,6 +13,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
+import metering_billing.contracts as contracts_module
+
 from metering_billing.contracts import (
     validate_ais_outbox_drain,
     validate_account_statement_presentment,
@@ -72,6 +74,11 @@ class RepositoryContractTests(unittest.TestCase):
     def test_repository_contracts_are_valid(self) -> None:
         """The checked-in repository must satisfy every foundation invariant."""
         self.assertEqual(validate_repository(ROOT), ())
+
+    def test_period_close_contracts_are_wildcard_exported(self) -> None:
+        """Resolution schema and validator remain discoverable public exports."""
+        self.assertIn("RECONCILIATION_RESOLUTION_SCHEMA_NAME", contracts_module.__all__)
+        self.assertIn("validate_reconciliation_resolution", contracts_module.__all__)
 
     def test_missing_required_file_is_reported(self) -> None:
         """A partial checkout must produce an actionable missing-file error."""
