@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/reconciliation-resolution/v1",
+  "title": "Reconciliation Resolution",
+  "description": "Immutable owner, evidence, and distinct maker-checker disposition for one reconciliation exception.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reconciliation_resolution_contract_version",
+    "resolution_id",
+    "reconciliation_line_id",
+    "exception_code",
+    "resolution_status",
+    "owner_reference",
+    "resolution_reason",
+    "evidence_reference",
+    "maker_reference",
+    "checker_reference",
+    "resolved_at"
+  ],
+  "properties": {
+    "reconciliation_resolution_contract_version": {"type": "integer", "minimum": 1},
+    "resolution_id": {"type": "string", "format": "uuid"},
+    "reconciliation_line_id": {"type": "string", "format": "uuid"},
+    "exception_code": {
+      "type": "string",
+      "enum": [
+        "quantity_mismatch",
+        "price_mismatch",
+        "tax_mismatch",
+        "currency_mismatch",
+        "payment_missing",
+        "duplicate_charge",
+        "refund_mismatch",
+        "dispute_mismatch",
+        "settlement_mismatch",
+        "provider_fee_mismatch",
+        "cash_timing_difference",
+        "unmapped_provider_object"
+      ]
+    },
+    "resolution_status": {"type": "string", "enum": ["resolved", "waived"]},
+    "owner_reference": {"type": "string", "minLength": 1},
+    "resolution_reason": {"type": "string", "minLength": 1},
+    "evidence_reference": {"type": "string", "minLength": 1},
+    "maker_reference": {"type": "string", "minLength": 1},
+    "checker_reference": {"type": "string", "minLength": 1},
+    "resolved_at": {"type": "string", "format": "date-time"}
+  }
+}

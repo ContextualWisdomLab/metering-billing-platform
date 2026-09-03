@@ -97,6 +97,21 @@ class RepositoryContractTests(unittest.TestCase):
             ("$[0]: schema is false",),
         )
 
+    def test_schema_ref_siblings_are_validated(self) -> None:
+        """Draft 2020-12 constraints beside a local reference remain effective."""
+        schema = {
+            "$defs": {"short_text": {"type": "string"}},
+            "type": "object",
+            "properties": {
+                "value": {"$ref": "#/$defs/short_text", "minLength": 3},
+            },
+            "additionalProperties": False,
+        }
+        self.assertEqual(
+            validate_schema_instance(schema, {"value": "ok"}),
+            ("$.value: string is shorter than minLength",),
+        )
+
     def test_reusable_workflow_action_refs_are_pinned(self) -> None:
         """Reusable workflow paths must obey the same immutable-ref policy."""
         mutable = "uses: ContextualWisdomLab/.github/.github/workflows/reusable.yml@main"
