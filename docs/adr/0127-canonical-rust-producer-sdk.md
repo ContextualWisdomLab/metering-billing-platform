@@ -1,0 +1,30 @@
+# ADR 0127: Canonical Rust producer SDK reference
+
+## Context
+
+Issue #90 requires heterogeneous CWL products to emit one provider-neutral
+usage contract. The Python reference and conformance vector in ADR 0125 are
+the compatibility authority; producer applications must not implement their
+own pricing or billing logic.
+
+## Decision
+
+Publish a small Rust reference package under sdks/rust that:
+
+- exposes a closed typed usage event and CloudEvents 1.0 envelope;
+- validates identifiers, quality, timestamps, and exact-decimal quantity
+  strings before construction;
+- canonicalizes the source payload with sorted keys, normalized UTC
+  timestamps, and normalized decimal text;
+- computes the same SHA-256 source-payload hash as the Python reference; and
+- verifies the committed cross-language conformance vector in package tests.
+
+The package performs no price calculation, credential persistence, or network
+ingestion. Durable buffering remains the producer outbox boundary.
+
+## Consequences
+
+Rust producer integrations can share the Python reference's hash and contract
+without copying private content into usage events. TypeScript remains the
+remaining SDK implementation work for issue #90, followed by real producer
+smoke and replay evidence.

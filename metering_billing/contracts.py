@@ -10,13 +10,20 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from importlib import resources  # nosemgrep: python.lang.compatibility.python37.python37-compatibility-importlib2
 from pathlib import Path
 from typing import Any, Mapping
 
-from scripts.validate_repository import (
-    validate_accounting_journal_proposal,
-    validate_schema_instance,
-)
+try:
+    from metering_billing._repository_validation.validate_repository import (
+        validate_accounting_journal_proposal,
+        validate_schema_instance,
+    )
+except ModuleNotFoundError:
+    from scripts.validate_repository import (
+        validate_accounting_journal_proposal,
+        validate_schema_instance,
+    )
 
 __all__ = (
     "ACCOUNTING_JOURNAL_PROPOSAL_SCHEMA_NAME",
@@ -158,6 +165,7 @@ __all__ = (
 )
 
 USAGE_EVENT_SCHEMA_NAME = "usage-event.schema.json"
+SUPPORTED_USAGE_EVENT_CONTRACT_VERSIONS = frozenset({1})
 USAGE_INGESTION_RECEIPT_SCHEMA_NAME = "usage-ingestion-receipt.schema.json"
 RATING_RUN_SCHEMA_NAME = "rating-run.schema.json"
 INVOICE_DRAFT_SCHEMA_NAME = "invoice-draft.schema.json"
@@ -264,7 +272,11 @@ ACCOUNTING_POSTING_RECEIPT_SCHEMA_NAME = "accounting-posting-receipt.schema.json
 
 
 def default_schemas_directory() -> Path:
-    """Return the repository ``schemas/`` directory next to this package."""
+    """Return the packaged schema directory or its source-tree equivalent."""
+    try:
+        return Path(str(resources.files("metering_billing._schemas")))
+    except ModuleNotFoundError:
+        pass
     return Path(__file__).resolve().parents[1] / "schemas"
 
 
@@ -309,7 +321,17 @@ def validate_usage_event(
 ) -> tuple[str, ...]:
     """Validate a usage event against the published usage-event contract."""
     schema = load_json_schema(USAGE_EVENT_SCHEMA_NAME, schemas_directory)
-    return validate_schema_instance(schema, event)
+    errors = list(validate_schema_instance(schema, event))
+    if isinstance(event, Mapping):
+        contract_version = event.get("event_contract_version")
+        if (
+            type(contract_version) is int
+            and contract_version not in SUPPORTED_USAGE_EVENT_CONTRACT_VERSIONS
+        ):
+            errors.append(
+                "$.event_contract_version: unsupported usage-event contract version"
+            )
+    return tuple(errors)
 
 
 def validate_usage_ingestion_receipt(

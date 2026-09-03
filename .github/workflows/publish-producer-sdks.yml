@@ -1,0 +1,274 @@
+name: Publish producer SDKs
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: producer-sdk-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-release:
+    name: Resolve immutable release commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release-sha: ${{ steps.resolve.outputs.release-sha }}
+    steps:
+      - name: Resolve release tag once
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          read -r object_type object_sha < <(
+            gh api "repos/${REPOSITORY}/git/ref/tags/${RELEASE_TAG}" \
+              --jq '.object.type + " " + .object.sha'
+          )
+          for _ in 1 2 3 4; do
+            case "$object_type" in
+              commit)
+                printf 'release-sha=%s\n' "$object_sha" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              tag)
+                read -r object_type object_sha < <(
+                  gh api "repos/${REPOSITORY}/git/tags/${object_sha}" \
+                    --jq '.object.type + " " + .object.sha'
+                )
+                ;;
+              *)
+                echo "unsupported release tag target: ${object_type}" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "release tag target did not resolve to a commit" >&2
+          exit 1
+
+  build-python:
+    name: Build Python distribution
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve-release.outputs.release-sha }}
+          persist-credentials: false
+      - name: Install pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.11.19"
+      - name: Build wheel and source distribution
+        run: uv build --out-dir dist
+      - name: Install runtime dependencies for SDK conformance
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r requirements-runtime.txt
+      - name: Run Python producer SDK conformance tests
+        run: python -m unittest discover -s tests -p 'test_producer_sdk.py' -v
+      - name: Store Python artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: producer-python-dist
+          path: dist/*
+          if-no-files-found: error
+
+  build-rust:
+    name: Package Rust crate
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve-release.outputs.release-sha }}
+          persist-credentials: false
+      - name: Run Rust producer SDK conformance tests
+        run: cargo test --locked --manifest-path sdks/rust/Cargo.toml
+      - name: Validate publishable crate
+        run: cargo package --locked --manifest-path sdks/rust/Cargo.toml
+      - name: Store Rust artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: producer-rust-dist
+          path: sdks/rust/target/package/*.crate
+          if-no-files-found: error
+
+  build-typescript:
+    name: Package TypeScript module
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve-release.outputs.release-sha }}
+          persist-credentials: false
+      - name: Install pinned Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+      - name: Install TypeScript build dependencies
+        working-directory: sdks/typescript
+        run: npm ci --ignore-scripts
+      - name: Build TypeScript package
+        working-directory: sdks/typescript
+        run: npm run build
+      - name: Create npm package
+        working-directory: sdks/typescript
+        run: mkdir -p package-artifacts && npm pack --ignore-scripts --pack-destination package-artifacts
+      - name: Run TypeScript producer SDK conformance tests
+        run: >-
+          node --experimental-strip-types --test --experimental-test-coverage
+          --test-coverage-include=sdks/typescript/src/index.ts
+          --test-coverage-lines=100
+          --test-coverage-branches=100
+          --test-coverage-functions=100
+          sdks/typescript/test/conformance.test.ts
+      - name: Store TypeScript artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: producer-typescript-dist
+          path: sdks/typescript/package-artifacts/*.tgz
+          if-no-files-found: error
+
+  publish:
+    name: Publish verified producer artifacts
+    needs:
+      - resolve-release
+      - build-python
+      - build-rust
+      - build-typescript
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: producer-release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve-release.outputs.release-sha }}
+          persist-credentials: false
+      - name: Download Python artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: producer-python-dist
+          path: dist/python
+      - name: Download Rust artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: producer-rust-dist
+          path: dist/rust
+      - name: Verify Rust artifact before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo package --locked --manifest-path sdks/rust/Cargo.toml
+          mapfile -t uploaded < <(printf '%s\n' dist/rust/*.crate)
+          mapfile -t rebuilt < <(printf '%s\n' sdks/rust/target/package/*.crate)
+          test "${#uploaded[@]}" -eq 1
+          test "${#rebuilt[@]}" -eq 1
+          test "$(sha256sum "${uploaded[0]}" | awk '{print $1}')" = \
+            "$(sha256sum "${rebuilt[0]}" | awk '{print $1}')"
+      - name: Download TypeScript artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: producer-typescript-dist
+          path: dist/typescript
+      - name: Generate deterministic SPDX 3.0.1 SBOM
+        env:
+          RELEASE_SHA: ${{ needs.resolve-release.outputs.release-sha }}
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
+          created_at="$(date -u -d "@$source_date_epoch" '+%Y-%m-%dT%H:%M:%SZ')"
+          python scripts/build_spdx_sbom.py \
+            --artifact-root dist \
+            --output dist/evidence/producer-sdks.spdx.json \
+            --release-sha "$RELEASE_SHA" \
+            --created-at "$created_at"
+      - name: Attest SLSA build provenance
+        id: attest-provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            dist/python/*
+            dist/rust/*
+            dist/typescript/*
+      - name: Attest SPDX 3.0.1 SBOM
+        id: attest-sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            dist/python/*
+            dist/rust/*
+            dist/typescript/*
+          predicate-type: https://spdx.dev/Document/v3
+          predicate-path: dist/evidence/producer-sdks.spdx.json
+      - name: Record artifact checksums and attestation bundles
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.attest-provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.attest-sbom.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum python/* rust/* typescript/* > evidence/subjects.sha256)
+          cp "$PROVENANCE_BUNDLE" dist/evidence/producer-sdks.provenance.sigstore.json
+          cp "$SBOM_BUNDLE" dist/evidence/producer-sdks.sbom.sigstore.json
+      - name: Store release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: producer-release-evidence
+          path: dist
+          if-no-files-found: error
+      - name: Verify signed attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for artifact in dist/python/* dist/rust/* dist/typescript/*; do
+            gh attestation verify "$artifact" \
+              --repo ContextualWisdomLab/metering-billing-platform \
+              --predicate-type https://slsa.dev/provenance/v1
+            gh attestation verify "$artifact" \
+              --repo ContextualWisdomLab/metering-billing-platform \
+              --predicate-type https://spdx.dev/Document/v3
+          done
+      - name: Publish Python distribution with OIDC provenance
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: dist/python/
+      - name: Install pinned Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish TypeScript package with provenance
+        run: npm publish dist/typescript/*.tgz --provenance --access public
+      - name: Publish Rust crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --manifest-path sdks/rust/Cargo.toml --token "$CARGO_REGISTRY_TOKEN"

@@ -16,6 +16,107 @@
 
 ### Added
 
+- A protected hourly producer smoke workflow now exercises contextual-orchestrator,
+  NewsDOM, and fast-mlsirm count-only adapters through the durable outbox across
+  an injected Billing outage, process reopen, and server duplicate replay. It is
+  pre-release evidence and does not claim real producer deployment or registry
+  publication.
+- A protected release workflow now builds the Python, Rust, and TypeScript
+  producer artifacts from a published tag, publishes Python and npm with OIDC
+  provenance, and publishes the Rust crate with a scoped registry token. The
+  package manifests include repository metadata and exclude repository-only
+  tests from published artifacts; actual registry publication remains pending
+  release-environment configuration and protected merge evidence.
+- The producer release jobs now run Python, Rust, and TypeScript conformance
+  tests before any artifact can reach a registry.
+- The producer release job now resolves the published tag to one immutable
+  commit for every checkout and compares the uploaded Rust crate with a fresh
+  package from that commit before publishing, keeping the verified package
+  boundary explicit.
+- The producer release job now emits a deterministic SPDX 3.0.1 SBOM and
+  SHA-256 subject manifest for the three published artifacts, creates signed
+  GitHub artifact attestations for SLSA build provenance and that SBOM, and
+  stores both Sigstore bundles as release evidence. Registry publication still
+  requires the protected release environment and the actual attestation run.
+- Usage-event validation now rejects unpublished contract versions until their
+  separate schema and compatibility policy are released.
+- The platform now builds an installable Python distribution containing the
+  canonical producer SDK and its checked-in schemas, so producer repositories
+  can consume the same builder instead of copying contract logic.
+- Python, Rust, and TypeScript producer SDKs now include a durable local
+  outbox with bounded batch delivery, per-event partial receipts, explicit
+  dead-letter replay, and hash-checked removal. Python uses SQLite; Rust and
+  TypeScript use atomic local files. A transport callback owns credentials and
+  scheduling, and the existing server idempotency remains the monetary-effect
+  authority (ADR 0129). This is outage-buffer groundwork; real producer
+  onboarding and released consumer pins under issue #90 remain open.
+- All three SDK outboxes now require the receipt tenant to match the queued
+  event before acknowledging accepted or duplicate-replayed delivery; missing
+  tenant evidence remains retryable rather than removing the fact.
+- Producer outbox re-enqueue now fails closed when a byte-identical fact is
+  supplied with a different persisted delivery context, preventing a silent
+  context mismatch from making the fact undrainable.
+- Producer integration adapters now restrict source identifiers, references,
+  model names, and backend codes to bounded capability-port syntax, rejecting
+  prompt-like or document-content strings before they reach an event or outbox.
+- Accepted, duplicate-replay, and rejected SDK receipts now require the full
+  tenant/source-hash/contract-version binding; transports require HTTPS and a
+  bounded timeout, and file outboxes sync the parent directory after rename.
+- Usage-event presentment now projects persisted contract, attribution,
+  allowlisted-dimension, availability, correction-lineage, and meter-version
+  metadata without exposing credentials or internal account identifiers.
+- Producer contract migrations stage new checks as `NOT VALID` and validate
+  them in a following append-only migration, avoiding an unbounded lock during
+  rollout.
+- The canonical usage-event schema and Python, Rust, and TypeScript producer
+  SDK references now accept a bounded allowlist of non-sensitive provider,
+  model, workflow, role, backend, and job-reference dimensions. The dimensions
+  participate in the source-payload hash and survive durable PostgreSQL
+  ingestion in `usage_event.usage_dimensions`; arbitrary content, prompts, responses,
+  document text, and secrets remain rejected. This is contract groundwork for
+  the three real producer integrations required by issue #90, not an integration
+  claim.
+- The contextual-orchestrator producer adapter now rejects missing,
+  unavailable, or unknown measurement provenance instead of relabeling it as
+  an estimate; only `measured` and `estimated` ledger claims map to canonical
+  usage quality codes.
+- Usage-event contract metadata now includes producer-contract version, meter
+  version, repository and trace/correlation/causation references, availability
+  time, and correction lineage. The PostgreSQL ledger persists these fields in
+  the append-only event row through migration 0042 and rejects a supplied meter
+  version that differs from the effective catalog version; old v1 events remain
+  valid through the additive optional-field path.
+- A Rust producer SDK reference under sdks/rust builds the closed typed usage
+  event, verifies exact-decimal and CloudEvents boundaries, and produces the
+  same canonical source-payload JSON and SHA-256 hash as the Python conformance
+  vector (ADR 0127). It does not calculate prices, persist credentials, or
+  perform ingestion; TypeScript and real producer onboarding remain open under
+  issue #90.
+- A TypeScript producer SDK reference under sdks/typescript builds the closed
+  typed usage event, verifies exact-decimal and CloudEvents boundaries, and
+  produces the same canonical source-payload JSON and SHA-256 hash as the
+  Python conformance vector (ADR 0128). It uses Node's standard crypto and
+  test runner without a new runtime dependency; real producer onboarding
+  remains open under issue #90.
+- A dependency-free Python producer SDK reference now builds the closed
+  canonical usage-event contract, computes the shared byte-stable source
+  payload hash, rejects float quantities and arbitrary sensitive fields, and
+  wraps validated data in a CloudEvents 1.0 JSON envelope. The checked-in
+  conformance vector is the handoff target for future Rust and TypeScript SDKs;
+  tracing extensions and real producer onboarding remain follow-up work for
+  issue #90 (ADR 0125).
+- A dependency-free SQLite producer outbox now durably buffers validated usage
+  events, keeps bearer credentials out of storage, leases bounded batches,
+  applies partial accepted/duplicate/rejected receipts, retries temporary
+  transport failures with capped exponential backoff, and dead-letters
+  exhausted or explicitly rejected events. `replay_dead_letter` explicitly
+  resets a matching dead-letter event for operator recovery; re-enqueueing does
+  not silently resurrect it. Claims match tenant and delivery context, which
+  producers preserve as a stable delivery-group selector across enqueue and
+  drain. Claims are crash-safe before a result is received, stale late results
+  cannot overwrite a newer lease, and transport I/O does not block local
+  enqueue (ADR 0126).
+- The PostgreSQL readiness probe now uses a static migration-history query.
 - The HTTP accept surface selects its ledger backend from the environment: `create_http_app(ledger=...)` now accepts either the deterministic `MemoryUsageLedger` reference adapter or the durable `PostgresUsageLedger` production system of record through the new `UsageLedger` union, and `metering_billing.http_app.create_default_ledger(environ=None)` builds the selected backend — `METERING_BILLING_LEDGER_BACKEND=postgres` constructs `PostgresUsageLedger` via the existing `PostgresUsageLedger.connect` convention from `METERING_BILLING_POSTGRES_DSN`, a missing or empty DSN raises a startup `ValueError` naming `METERING_BILLING_POSTGRES_DSN`, and every other value including unset keeps returning `MemoryUsageLedger()` so tests stay unchanged. Unauthenticated `GET /readyz` joins `GET /healthz` in the same dispatch style: healthy backends answer `200 {"status": "ready", "backend": "memory" | "postgres"}`, and a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` using one cheap migration-history row count (`public.metering_billing_schema_migration`) executed through the ledger's own connection and transaction conventions with no ad-hoc psycopg connections and no raw exception text. Memory stays the deterministic reference/test adapter; postgres becomes the selectable production system of record as partial progress on issue #84. Service constructor signatures, existing routes, exact-decimal money, journal boundaries, AIS pull behavior, and the #24 outbox stay unchanged. ADR 0123 documents the decision. There is no new third-party dependency, schema change, secret, or provider call on this path.
 - ADR 0123 for environment-driven PostgreSQL ledger backend selection and the `/readyz` backend probe.
 - Compose becomes the deployment surface: a root `Dockerfile` on `python:3.13-slim` installs only the hash-locked runtime dependency set with CI's exact pip flags (`--disable-pip-version-check --only-binary=:all: --require-hashes -r requirements-runtime.txt`), copies the package plus migration assets, runs as a non-root user, exposes port 8000, and starts `python -m metering_billing.http_app`; `compose/docker-compose.yml` fixes the project name to `metering-billing-platform` and boots `postgres_database` (PostgreSQL 18 with a `pg_isready` healthcheck and named data volume), a one-shot idempotent `schema_migration` service running the advisory-locked `scripts/migrate_postgres.py` before the API starts, and `billing_api` gated on both, serving the durable PostgreSQL system of record behind a stdlib `urllib` `/readyz` healthcheck so the image needs no curl; `compose/.env.example` documents every variable with dev-safe defaults and production guidance; `compose/k6/e2e_smoke.js` records an end-to-end baseline (ramp to 50 virtual users over 60 seconds, sustain 60 seconds, status-only checks, per-request-kind duration trends over `/healthz`, `/readyz`, and one authenticated tenant read seeded by idempotent `compose/k6/seed.py`) whose real measured numbers live in `docs/operations/load-test-baseline.md`; isolated test containers and volumes are removed after each run (ADR 0124). No new Python dependency, schema change, secret, or provider call is introduced.

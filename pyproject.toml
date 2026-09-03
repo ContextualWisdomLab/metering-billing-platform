@@ -2,10 +2,22 @@
 name = "metering-billing-platform"
 version = "0.2.0"
 description = "Provider-neutral commercial metering and billing control plane"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "psycopg[binary]>=3.2,<4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ContextualWisdomLab/metering-billing-platform"
+Repository = "https://github.com/ContextualWisdomLab/metering-billing-platform"
+Documentation = "https://github.com/ContextualWisdomLab/metering-billing-platform/tree/develop/docs"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
@@ -13,4 +25,14 @@ dev = [
 ]
 
 [tool.uv]
-package = false
+package = true
+
+[tool.setuptools]
+packages = ["metering_billing", "metering_billing._schemas", "metering_billing._repository_validation"]
+
+[tool.setuptools.package-dir]
+"metering_billing._schemas" = "schemas"
+"metering_billing._repository_validation" = "scripts"
+
+[tool.setuptools.package-data]
+"metering_billing._schemas" = ["**/*.json"]

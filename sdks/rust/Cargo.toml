@@ -1,0 +1,25 @@
+[package]
+name = "cwl-metering-producer"
+version = "0.1.0"
+edition = "2021"
+description = "Canonical CWL metering producer event builder"
+license = "Apache-2.0"
+homepage = "https://github.com/ContextualWisdomLab/metering-billing-platform"
+repository = "https://github.com/ContextualWisdomLab/metering-billing-platform"
+readme = "README.md"
+keywords = ["metering", "billing", "cloudevents"]
+categories = ["web-programming"]
+exclude = ["tests/coverage.rs"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)"] }
+
+[features]
+coverage = []
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["alloc", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = "1"

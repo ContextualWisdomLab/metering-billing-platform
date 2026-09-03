@@ -1,0 +1,41 @@
+{
+  "name": "@contextualwisdomlab/metering-producer",
+  "version": "0.1.0",
+  "description": "Canonical CWL metering producer event builder",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/ContextualWisdomLab/metering-billing-platform/tree/develop/sdks/typescript",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ContextualWisdomLab/metering-billing-platform.git",
+    "directory": "sdks/typescript"
+  },
+  "files": [
+    "README.md",
+    "dist"
+  ],
+  "keywords": [
+    "metering",
+    "billing",
+    "cloudevents"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test --experimental-test-coverage --test-coverage-include=src/index.ts --test-coverage-lines=100 --test-coverage-branches=100 --test-coverage-functions=100 test/conformance.test.ts",
+    "test:package": "node --test test/packaged-import.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.21",
+    "typescript": "5.9.2"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

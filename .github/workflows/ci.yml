@@ -72,3 +72,52 @@ jobs:
         run: python scripts/validate_repository.py .
       - name: Compile quality tooling
         run: python -m compileall -q scripts tests metering_billing
+      - name: Run Rust producer SDK tests
+        run: cargo test --manifest-path sdks/rust/Cargo.toml --locked
+      - name: Install pinned Rust coverage toolchain
+        run: |
+          rustup toolchain install nightly-2026-08-21 --profile minimal --no-self-update
+          rustup component add llvm-tools-preview --toolchain nightly-2026-08-21
+          cargo install cargo-llvm-cov --version 0.8.6 --locked
+      - name: Report Rust producer SDK coverage
+        run: >-
+          cargo +nightly-2026-08-21 llvm-cov
+          --locked
+          --manifest-path sdks/rust/Cargo.toml
+          --features coverage
+          --branch
+          --fail-under-lines 100
+          --fail-under-functions 100
+          --summary-only
+      - name: Enforce Rust producer SDK branch coverage
+        run: |
+          set -o pipefail
+          cargo +nightly-2026-08-21 llvm-cov \
+            --locked \
+            --manifest-path sdks/rust/Cargo.toml \
+            --features coverage \
+            --branch \
+            --json \
+            --summary-only \
+            | python -c 'import json, sys; branches = json.load(sys.stdin)["data"][0]["totals"]["branches"]; assert branches["covered"] == branches["count"], "Rust branch coverage is {}/{}".format(branches["covered"], branches["count"])'
+      - name: Install pinned Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22.14.0"
+      - name: Install TypeScript producer SDK dependencies
+        working-directory: sdks/typescript
+        run: npm ci --ignore-scripts
+      - name: Build TypeScript producer SDK
+        working-directory: sdks/typescript
+        run: npm run build
+      - name: Run TypeScript producer SDK tests
+        run: >-
+          node --experimental-strip-types --test --experimental-test-coverage
+          --test-coverage-include=sdks/typescript/src/index.ts
+          --test-coverage-lines=100
+          --test-coverage-branches=100
+          --test-coverage-functions=100
+          sdks/typescript/test/conformance.test.ts
+      - name: Verify packed TypeScript producer SDK
+        working-directory: sdks/typescript
+        run: npm run test:package

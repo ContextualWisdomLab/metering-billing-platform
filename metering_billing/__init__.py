@@ -344,7 +344,41 @@ from metering_billing.webhook_outbox_event_presentment import (
 from metering_billing.webhook_subscription_presentment import (
     WebhookSubscriptionPresentmentService,
 )
-from metering_billing.payload_integrity import compute_source_payload_hash
+from metering_billing.payload_integrity import (
+    canonical_source_payload_json,
+    compute_source_payload_hash,
+)
+from metering_billing.producer_sdk import (
+    CLOUD_EVENTS_SPECVERSION,
+    ProducerContractError,
+    USAGE_CLOUD_EVENT_TYPE,
+    build_usage_cloud_event,
+    build_usage_event,
+)
+from metering_billing.producer_outbox import (
+    DurableUsageOutbox,
+    HttpUsageIngestionTransport,
+    OutboxFlushResult,
+    PermanentDeliveryError,
+    ProducerAuthContext,
+    ProducerDeliveryResult,
+    ProducerDrainReceipt,
+    ProducerEnqueueReceipt,
+    ProducerOutbox,
+    ProducerOutboxConflict,
+    ProducerOutboxError,
+    ProducerOutboxStatus,
+    ProducerOutboxTransport,
+    TransientDeliveryError,
+)
+from metering_billing.producer_integrations import (
+    build_contextual_cloud_event,
+    build_contextual_usage_event,
+    build_fast_mlsirm_cloud_event,
+    build_fast_mlsirm_usage_event,
+    build_newsdom_cloud_event,
+    build_newsdom_usage_event,
+)
 from metering_billing.payment_intent import PaymentIntentService
 from metering_billing.payment_intent_presentment import PaymentIntentPresentmentService
 from metering_billing.credit_adjustment_presentment import CreditAdjustmentPresentmentService
@@ -589,6 +623,32 @@ __all__ = (
     "TimeWindow",
     "UsageIngestionService",
     "UsageRatingService",
+    "CLOUD_EVENTS_SPECVERSION",
+    "ProducerContractError",
+    "USAGE_CLOUD_EVENT_TYPE",
+    "build_usage_cloud_event",
+    "build_usage_event",
+    "ProducerAuthContext",
+    "ProducerDeliveryResult",
+    "ProducerDrainReceipt",
+    "ProducerEnqueueReceipt",
+    "ProducerOutbox",
+    "ProducerOutboxConflict",
+    "ProducerOutboxError",
+    "ProducerOutboxStatus",
+    "ProducerOutboxTransport",
+    "DurableUsageOutbox",
+    "HttpUsageIngestionTransport",
+    "OutboxFlushResult",
+    "PermanentDeliveryError",
+    "TransientDeliveryError",
+    "build_contextual_cloud_event",
+    "build_contextual_usage_event",
+    "build_fast_mlsirm_cloud_event",
+    "build_fast_mlsirm_usage_event",
+    "build_newsdom_cloud_event",
+    "build_newsdom_usage_event",
+    "canonical_source_payload_json",
     "compute_source_payload_hash",
     "create_http_app",
     "default_consumed_schemas_directory",

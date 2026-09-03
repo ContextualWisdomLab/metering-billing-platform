@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from decimal import Decimal
@@ -109,6 +110,43 @@ class RepositoryContractTests(unittest.TestCase):
             ("ContextualWisdomLab/.github/.github/workflows/reusable.yml@main",),
         )
         self.assertEqual(find_mutable_action_references(pinned), ())
+
+    def test_producer_release_artifacts_have_bounded_publish_contracts(self) -> None:
+        """Published manifests omit repository-only tests and carry provenance metadata."""
+        cargo = tomllib.loads(
+            (ROOT / "sdks/rust/Cargo.toml").read_text(encoding="utf-8")
+        )["package"]
+        self.assertEqual(cargo["readme"], "README.md")
+        self.assertEqual(
+            cargo["repository"],
+            "https://github.com/ContextualWisdomLab/metering-billing-platform",
+        )
+        self.assertEqual(cargo["exclude"], ["tests/coverage.rs"])
+
+        npm = json.loads(
+            (ROOT / "sdks/typescript/package.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(npm["files"], ["README.md", "dist"])
+        self.assertEqual(npm["exports"]["."]["types"], "./dist/index.d.ts")
+        self.assertEqual(npm["exports"]["."]["default"], "./dist/index.js")
+        self.assertEqual(npm["scripts"]["build"], "tsc -p tsconfig.json")
+        self.assertEqual(npm["repository"]["directory"], "sdks/typescript")
+
+        workflow = (ROOT / ".github/workflows/publish-producer-sdks.yml").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "release:",
+            "types:\n      - published",
+            "environment: producer-release",
+            "id-token: write",
+            "--provenance",
+            "cargo publish --locked",
+            "npm ci --ignore-scripts",
+            "npm run build",
+            "package-artifacts",
+        ):
+            self.assertIn(required, workflow)
 
     def test_node_modules_placeholders_are_ignored(self) -> None:
         """Storybook install trees must not fail repository contract scans."""
@@ -370,7 +408,6 @@ class RepositoryContractTests(unittest.TestCase):
             "FOREIGN KEY (meter_definition_id, quality_code)",
         ):
             self.assertIn(expected_fragment, sql)
-
     def test_persistence_integrity_migration_protects_references_and_intervals(self) -> None:
         """Database constraints preserve proposal identity and half-open assignments."""
         sql = (
@@ -384,7 +421,6 @@ class RepositoryContractTests(unittest.TestCase):
             "tstzrange(valid_from, COALESCE(valid_to, 'infinity'::timestamptz), '[)')",
         ):
             self.assertIn(expected_fragment, sql)
-
     def test_catalog_reference_migration_preserves_resolver_identity(self) -> None:
         """Catalog rows must retain the URNs used by the in-memory resolver."""
         sql = (ROOT / "database/migrations/0037_catalog_reference_identity.sql").read_text(
@@ -418,6 +454,48 @@ class RepositoryContractTests(unittest.TestCase):
             "ingestion_outcome_code",
         ):
             self.assertIn(expected_fragment, sql)
+
+    def test_usage_event_contract_metadata_migration_is_append_only(self) -> None:
+        """The event table persists producer, trace, availability, and correction metadata."""
+        sql = (ROOT / "database/migrations/0042_usage_event_contract_metadata.sql").read_text(
+            encoding="utf-8"
+        )
+        for expected_fragment in (
+            "ADD COLUMN producer_contract_version integer NOT NULL DEFAULT 1",
+            "ADD COLUMN repository_reference text",
+            "ADD COLUMN trace_reference text",
+            "ADD COLUMN correlation_reference text",
+            "ADD COLUMN causation_reference text",
+            "ADD COLUMN available_at timestamptz",
+            "ADD COLUMN correction_lineage jsonb",
+            "usage_event_producer_contract_version_positive",
+            "usage_event_correction_lineage_object",
+        ):
+            self.assertIn(expected_fragment, sql)
+        self.assertNotRegex(sql, r"(?im)^\s*(?:DROP|DELETE|UPDATE)\b")
+
+    def test_correction_uuid_follow_up_migration_matches_schema_uuid_validation(self) -> None:
+        """The follow-up keeps schema-valid non-RFC4122 UUID variants insertable."""
+        sql = (
+            ROOT
+            / "database/migrations/0043_align_correction_uuid_validation.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DROP CONSTRAINT usage_event_correction_lineage_object", sql)
+        self.assertIn("ADD CONSTRAINT usage_event_correction_lineage_object", sql)
+        self.assertIn(
+            "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            sql,
+        )
+        self.assertIn(") NOT VALID", sql)
+        validation_sql = (
+            ROOT / "database/migrations/0044_validate_usage_event_contract_constraints.sql"
+        ).read_text(encoding="utf-8")
+        for constraint in (
+            "usage_event_usage_dimensions_object",
+            "usage_event_producer_contract_version_positive",
+            "usage_event_correction_lineage_object",
+        ):
+            self.assertIn(f"VALIDATE CONSTRAINT {constraint}", validation_sql)
 
     def test_rating_run_accepts_exact_invoice_intent_totals(self) -> None:
         """A rating-run contract records exact decimal invoice-intent lines."""
@@ -4624,13 +4702,22 @@ class RepositoryContractTests(unittest.TestCase):
 
         object_schema = {
             "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1,
             "required": ["known_value"],
             "properties": {"known_value": {"type": "string"}},
             "additionalProperties": False,
         }
         self.assertEqual(
             validate_schema_instance(object_schema, {}),
-            ("$: required property is missing: known_value",),
+            (
+                "$: required property is missing: known_value",
+                "$: object has fewer than minProperties",
+            ),
+        )
+        self.assertIn(
+            "$: object has more than maxProperties",
+            validate_schema_instance(object_schema, {"known_value": "ok", "extra": "x"}),
         )
 
     def test_offline_schema_validator_covers_formats_types_and_references(self) -> None:
@@ -4724,6 +4811,16 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(
             validate_sql_object_names("ALTER TABLE usage_event ADD COLUMN status text;\n"),
             ("column name must contain at least two snake_case words: status",),
+        )
+
+    def test_applied_legacy_dimensions_migration_is_allowlisted_by_path(self) -> None:
+        """The immutable 0040 migration remains valid while new SQL stays strict."""
+        self.assertEqual(validate_repository(ROOT), ())
+        self.assertEqual(
+            validate_sql_object_names(
+                "ALTER TABLE usage_event ADD COLUMN dimensions jsonb;\n"
+            ),
+            ("column name must contain at least two snake_case words: dimensions",),
         )
 
     def test_repository_prefixes_sql_name_errors_with_migration_path(self) -> None:

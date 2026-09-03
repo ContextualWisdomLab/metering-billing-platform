@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Collection
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -149,6 +150,11 @@ REQUIRED_FILES = (
     "docs/adr/0116-postgres-issued-credit-note-void-journal.md",
     "docs/adr/0117-postgres-invoice-draft-journal.md",
     "docs/adr/0118-operator-invoice-draft-journal-storybook.md",
+    "docs/adr/0125-canonical-producer-sdk-reference.md",
+    "docs/adr/0127-canonical-rust-producer-sdk.md",
+    "docs/adr/0128-canonical-typescript-producer-sdk.md",
+    "docs/adr/0129-durable-producer-sdk-outbox.md",
+    "docs/operations/release-producer-sdks.md",
     "docs/STORYBOOK.md",
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
@@ -261,6 +267,11 @@ REQUIRED_FILES = (
     "database/migrations/0037_catalog_reference_identity.sql",
     "database/migrations/0038_postgres_rating_vertical_slice.sql",
     "database/migrations/0039_spend_budget_status.sql",
+    "database/migrations/0040_usage_event_dimensions.sql",
+    "database/migrations/0041_rename_usage_event_dimensions.sql",
+    "database/migrations/0042_usage_event_contract_metadata.sql",
+    "database/migrations/0043_align_correction_uuid_validation.sql",
+    "database/migrations/0044_validate_usage_event_contract_constraints.sql",
     "metering_billing/__init__.py",
     "metering_billing/usage_ingestion.py",
     "metering_billing/usage_rating.py",
@@ -333,6 +344,7 @@ REQUIRED_FILES = (
     "pyproject.toml",
     "uv.lock",
     ".github/workflows/ci.yml",
+    ".github/workflows/publish-producer-sdks.yml",
 )
 ACTION_REFERENCE_PATTERN = re.compile(
     r"\buses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)@([^\s#]+)"
@@ -348,7 +360,7 @@ SCHEMA_NAME_PATTERN = re.compile(
 )
 COLUMN_NAME_PATTERN = re.compile(
     r"(?:^\s+|ADD\s+COLUMN\s+)([a-zA-Z_][a-zA-Z0-9_]*)\s+"
-    r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean)\b",
+    r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean|jsonb)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 TABLE_NAME_PATTERN = re.compile(
@@ -373,8 +385,10 @@ def find_placeholder_tokens(text: str) -> tuple[str, ...]:
     return tuple(sorted({match.group(1) for match in PLACEHOLDER_PATTERN.finditer(text)}))
 
 
-def validate_sql_object_names(sql_text: str) -> tuple[str, ...]:
-    """Require created PostgreSQL schemas and tables to use two-word snake case."""
+def validate_sql_object_names(
+    sql_text: str, *, legacy_column_names: Collection[str] = ()
+) -> tuple[str, ...]:
+    """Require PostgreSQL object names to use two-word snake case."""
     errors: list[str] = []
     for schema_name in SCHEMA_NAME_PATTERN.findall(sql_text):
         if SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(schema_name) is None:
@@ -387,7 +401,10 @@ def validate_sql_object_names(sql_text: str) -> tuple[str, ...]:
                 f"table name must contain at least two snake_case words: {table_name}"
             )
     for column_name in COLUMN_NAME_PATTERN.findall(sql_text):
-        if SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(column_name) is None:
+        if (
+            SNAKE_CASE_TWO_WORD_PATTERN.fullmatch(column_name) is None
+            and column_name not in legacy_column_names
+        ):
             errors.append(
                 f"column name must contain at least two snake_case words: {column_name}"
             )
@@ -448,7 +465,14 @@ def validate_repository(root: Path) -> tuple[str, ...]:
         for migration_path in sorted(migrations_directory.glob("*.sql")):
             sql_text = migration_path.read_text(encoding="utf-8")
             relative_path = migration_path.relative_to(root).as_posix()
-            for sql_error in validate_sql_object_names(sql_text):
+            legacy_column_names = (
+                {"dimensions"}
+                if relative_path == "database/migrations/0040_usage_event_dimensions.sql"
+                else set()
+            )
+            for sql_error in validate_sql_object_names(
+                sql_text, legacy_column_names=legacy_column_names
+            ):
                 errors.append(f"{relative_path}: {sql_error}")
             if "provider_customer_id" in sql_text or "stripe_customer_id" in sql_text:
                 errors.append(
@@ -690,6 +714,12 @@ def _validate_object(
     for required_name in required:
         if required_name not in instance:
             errors.append(f"{path}: required property is missing: {required_name}")
+    minimum_properties = schema.get("minProperties")
+    maximum_properties = schema.get("maxProperties")
+    if minimum_properties is not None and len(instance) < minimum_properties:
+        errors.append(f"{path}: object has fewer than minProperties")
+    if maximum_properties is not None and len(instance) > maximum_properties:
+        errors.append(f"{path}: object has more than maxProperties")
     properties = schema.get("properties", {})
     if schema.get("additionalProperties") is False:
         for property_name in sorted(set(instance) - set(properties)):
