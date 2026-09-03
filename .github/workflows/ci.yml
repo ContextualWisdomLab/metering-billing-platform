@@ -2,10 +2,16 @@ name: Foundation CI
 
 on:
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
   push:
     branches:
       - develop
       - main
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
 
 permissions:
   contents: read
