@@ -266,6 +266,12 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
             credential_status="revoked",
             revoked_at=ISSUED_EVENING,
         )
+        tenant_one_secret = TenantApiCredentialService(ledger).issue_credential(
+            TENANT_ONE, "recovery_key"
+        ).api_credential_secret
+        tenant_two_secret = TenantApiCredentialService(ledger).issue_credential(
+            TENANT_TWO, "operator_key"
+        ).api_credential_secret
         app = create_http_app(ledger)
         missing_status, missing_body = invoke_http(
             app,
@@ -279,6 +285,7 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
             "GET",
             f"/v1/tenant-api-credentials/{stored.tenant_api_credential_id}",
             query={"tenant_reference": TENANT_TWO},
+            headers={"Authorization": f"Bearer {tenant_two_secret}"},
         )
         self.assertEqual(other_status, 404)
         self.assertEqual(other_body["rejection_reason_code"], "api_credential_not_found")
@@ -290,6 +297,7 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
             "GET",
             f"/v1/tenant-api-credentials/{uuid4()}",
             query={"tenant_reference": TENANT_ONE},
+            headers={"Authorization": f"Bearer {tenant_one_secret}"},
         )
         self.assertEqual(unknown_status, 404)
         self.assertEqual(unknown_body["rejection_reason_code"], "api_credential_not_found")
@@ -313,12 +321,16 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
             credential_status="revoked",
             revoked_at=ISSUED_EVENING,
         )
+        secret = TenantApiCredentialService(ledger).issue_credential(
+            TENANT_ONE, "recovery_key"
+        ).api_credential_secret
         app = create_http_app(ledger)
         limit_status, limit_body = invoke_http(
             app,
             "GET",
             "/v1/tenant-api-credentials",
             query={"tenant_reference": TENANT_ONE, "page_limit": "0"},
+            headers={"Authorization": f"Bearer {secret}"},
         )
         self.assertEqual(limit_status, 422)
         self.assertEqual(limit_body["rejection_reason_code"], "request_invalid")
@@ -327,6 +339,7 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
             "GET",
             "/v1/tenant-api-credentials",
             query={"tenant_reference": TENANT_ONE, "cursor": "not-a-cursor"},
+            headers={"Authorization": f"Bearer {secret}"},
         )
         self.assertEqual(cursor_status, 422)
         self.assertEqual(cursor_body["rejection_reason_code"], "request_invalid")
@@ -346,6 +359,7 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
                 "GET",
                 "/v1/tenant-api-credentials",
                 query={"tenant_reference": TENANT_ONE},
+                headers={"Authorization": f"Bearer {secret}"},
             )
         self.assertEqual(not_found_status, 404)
         self.assertEqual(not_found_body["rejection_reason_code"], "api_credential_not_found")
@@ -358,6 +372,7 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
                 "GET",
                 "/v1/tenant-api-credentials",
                 query={"tenant_reference": TENANT_ONE},
+                headers={"Authorization": f"Bearer {secret}"},
             )
         self.assertEqual(value_status, 422)
         self.assertEqual(value_body["rejection_reason_code"], "request_invalid")
@@ -367,7 +382,7 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
             empty.list_tenant_api_credentials(TENANT_ONE)
         service = TenantApiCredentialPresentmentService(ledger)
         listed = service.list_tenant_api_credentials(TENANT_ONE, cursor="")
-        self.assertEqual(len(listed.tenant_api_credentials), 1)
+        self.assertEqual(len(listed.tenant_api_credentials), 2)
         with self.assertRaises(TenantApiCredentialPresentmentQueryError):
             service.list_tenant_api_credentials(TENANT_ONE, page_limit=True)
         with self.assertRaises(TenantApiCredentialPresentmentQueryError):
@@ -382,9 +397,9 @@ class TenantApiCredentialPresentmentTests(unittest.TestCase):
         self.assertEqual(list_missing_status, 422)
         self.assertEqual(list_missing_body["rejection_reason_code"], "tenant_not_found")
         default_limit = service.list_tenant_api_credentials(TENANT_ONE, page_limit=None)
-        self.assertEqual(len(default_limit.tenant_api_credentials), 1)
+        self.assertEqual(len(default_limit.tenant_api_credentials), 2)
         empty_limit = service.list_tenant_api_credentials(TENANT_ONE, page_limit="")
-        self.assertEqual(len(empty_limit.tenant_api_credentials), 1)
+        self.assertEqual(len(empty_limit.tenant_api_credentials), 2)
         self.assertEqual(
             service.list_tenant_api_credentials(TENANT_ONE, page_limit=50).next_cursor,
             None,

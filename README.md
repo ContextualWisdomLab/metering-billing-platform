@@ -233,7 +233,7 @@ python3 -c "from metering_billing.http_app import create_default_ledger, create_
 
 Unauthenticated `GET /healthz` stays a static liveness reply, and `GET /readyz` reports the serving backend: healthy processes answer `200 {"status": "ready", "backend": "memory" | "postgres"}` while a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` with stable reason codes only (see ADR 0123).
 
-Until a tenant has an active API credential, the existing tenant pin is enough (bootstrap window). AIS can keep pulling with `X-CWL-Tenant-Reference` until a key is issued for that tenant. After a key exists, send it on every `/v1` call.
+Until a tenant has any API credential history, the existing tenant pin is enough for the first key issue. AIS can keep pulling with `X-CWL-Tenant-Reference` until the first key is issued for that tenant. After that, including key issue and after all keys are revoked, send an active key on every `/v1` call.
 
 ## Issue a tenant API credential
 
@@ -245,7 +245,7 @@ python3 -c "from metering_billing import TenantApiCredentialService"
 # POST /v1/tenant-api-credentials/{id}/revoke
 ```
 
-Call `TenantApiCredentialService.issue_credential` with a tenant and an optional two-or-more-word `snake_case` `credential_label`. The response includes the secret once. The ledger stores only a keyed HMAC. A second issue always mints a new secret. After one or more active keys exist, every `/v1` write and GET except credential issue requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals `X-CWL-Tenant-Reference` / `tenant_reference`. `GET /v1/tenant-api-credentials/{tenant_api_credential_id}` and `GET /v1/tenant-api-credentials` present stored metadata as `{tenant_api_credentials, next_cursor}` and never the secret or hash. `GET /healthz` stays unauthenticated. Issue a key, then send it on every `/v1` call; revoke when leaked.
+Call `TenantApiCredentialService.issue_credential` with a tenant and an optional two-or-more-word `snake_case` `credential_label`. The response includes the secret once. The ledger stores only a keyed HMAC. A second issue always mints a new secret. Only the first HTTP key issue may use the tenant pin; after any credential history exists, every `/v1` write and GET, including credential issue, requires `Authorization: Bearer <secret>` or `X-CWL-Api-Key: <secret>` whose tenant equals `X-CWL-Tenant-Reference` / `tenant_reference`. `GET /v1/tenant-api-credentials/{tenant_api_credential_id}` and `GET /v1/tenant-api-credentials` present stored metadata as `{tenant_api_credentials, next_cursor}` and never the secret or hash. `GET /healthz` stays unauthenticated. Issue a key, then send it on every `/v1` call; revoke when leaked.
 
 ## Register a webhook callback
 

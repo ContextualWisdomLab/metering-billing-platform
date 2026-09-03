@@ -17,10 +17,11 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from types import ModuleType
-from typing import Callable
+from threading import RLock
+from typing import Any, Callable
 from uuid import UUID
 
-from metering_billing.errors import RejectionReasonCode
+from metering_billing.errors import RejectionReasonCode, TenantApiCredentialQueryError
 from metering_billing.exact_decimal import (
     format_exact_decimal,
     parse_exact_decimal,
@@ -927,6 +928,9 @@ class MemoryUsageLedger:
     billing_accounts: dict[str, BillingAccount] = field(default_factory=dict)
     billing_principals: dict[str, BillingPrincipal] = field(default_factory=dict)
     credential_records: dict[str, CredentialRecord] = field(default_factory=dict)
+    _credential_bootstrap_lock: Any = field(
+        default_factory=RLock, init=False, repr=False, compare=False
+    )
     credential_assignments: list[CredentialAssignment] = field(default_factory=list)
     meter_definitions: list[MeterDefinition] = field(default_factory=list)
     meter_quality_rules: dict[tuple[UUID, str], MeterQualityRule] = field(default_factory=dict)
@@ -3812,21 +3816,29 @@ class MemoryUsageLedger:
         )
 
     def insert_tenant_api_credential(
-        self, credential: StoredTenantApiCredential
+        self,
+        credential: StoredTenantApiCredential,
+        *,
+        require_empty_history: bool = False,
     ) -> StoredTenantApiCredential:
         """Persist one API credential.  Secrets are never replayed or stored."""
-        if credential.credential_status not in {"active", "revoked"}:
-            raise ValueError("credential_status must be active or revoked")
-        if not credential.credential_secret_hash.startswith("hmac-sha256:"):
-            raise ValueError("credential_secret_hash must be a keyed HMAC")
-        if credential.tenant_api_credential_id in self.tenant_api_credentials:
-            raise ValueError("tenant_api_credential_id already stored")
-        if credential.credential_secret_hash in self.tenant_api_credential_hash_index:
-            raise ValueError("credential_secret_hash already stored")
-        self.tenant_api_credentials[credential.tenant_api_credential_id] = credential
-        self.tenant_api_credential_hash_index[credential.credential_secret_hash] = (
-            credential.tenant_api_credential_id
-        )
+        with self._credential_bootstrap_lock:
+            if credential.credential_status not in {"active", "revoked"}:
+                raise ValueError("credential_status must be active or revoked")
+            if not credential.credential_secret_hash.startswith("hmac-sha256:"):
+                raise ValueError("credential_secret_hash must be a keyed HMAC")
+            if require_empty_history and self.list_tenant_api_credentials(
+                credential.tenant_account_id
+            ):
+                raise TenantApiCredentialQueryError("api_credential_missing")
+            if credential.tenant_api_credential_id in self.tenant_api_credentials:
+                raise ValueError("tenant_api_credential_id already stored")
+            if credential.credential_secret_hash in self.tenant_api_credential_hash_index:
+                raise ValueError("credential_secret_hash already stored")
+            self.tenant_api_credentials[credential.tenant_api_credential_id] = credential
+            self.tenant_api_credential_hash_index[credential.credential_secret_hash] = (
+                credential.tenant_api_credential_id
+            )
         return credential
 
     def get_tenant_api_credential(
