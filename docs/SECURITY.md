@@ -28,6 +28,15 @@ Drain AIS outbox, then store the receipt observation; AIS may keep being polled 
 
 `GET /healthz` stays unauthenticated.
 
+## Webhook egress
+
+Webhook callback registration rejects malformed authorities, URL userinfo,
+fragments, and non-standard HTTPS ports. Delivery accepts HTTPS on port 443 or
+local HTTP for development/test callbacks, and its transport refuses redirects
+so a provider-controlled 30x response cannot retarget the request. DNS/IP
+resolution revalidation, centralized destination policy, and secret-manager
+storage remain production hardening work under issue #88.
+
 ## Bootstrap window
 
 A tenant with zero active credentials keeps the existing tenant pin.  AIS can keep pulling journal proposals with `X-CWL-Tenant-Reference` until an operator issues a key for that tenant.  After one or more active keys exist, missing, unknown, and revoked secrets fail closed.  Revoking the last active key reopens the bootstrap window.  `POST /v1/tenant-api-credentials` may still use the tenant pin alone so an operator can mint a replacement.

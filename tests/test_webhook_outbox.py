@@ -1578,6 +1578,10 @@ class WebhookOutboxTests(unittest.TestCase):
         self.assertFalse(callback_url_is_allowed("https://"))
         self.assertFalse(callback_url_is_allowed(""))
         self.assertFalse(callback_url_is_allowed("ftp://localhost/hook"))
+        self.assertFalse(callback_url_is_allowed("https://user:pass@hooks.example.test/cwl"))
+        self.assertFalse(callback_url_is_allowed("https://hooks.example.test/cwl#fragment"))
+        self.assertFalse(callback_url_is_allowed("https://hooks.example.test:8443/cwl"))
+        self.assertFalse(callback_url_is_allowed("https://[invalid/cwl"))
 
     def test_http_routes_follow_tenant_pin_and_omit_secret_on_list(self) -> None:
         """WSGI register, list, revoke, and deliver must use the #22 key rule."""
@@ -1974,6 +1978,39 @@ class WebhookOutboxTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+        redirect_target_server, redirect_target_url, redirect_received = _start_recorder(200)
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            """Redirect a webhook to prove the transport never follows it."""
+
+            def do_POST(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", redirect_target_url)
+                self.end_headers()
+
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+        redirect_server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_thread = threading.Thread(
+            target=redirect_server.serve_forever, daemon=True
+        )
+        redirect_thread.start()
+        redirect_host, redirect_port = redirect_server.server_address[:2]
+        try:
+            redirect_status, redirect_failure = post_signed_webhook(
+                f"http://{redirect_host}:{redirect_port}/redirect",
+                b"{}",
+                {"Content-Type": "application/json"},
+            )
+            self.assertEqual(redirect_status, 302)
+            self.assertEqual(redirect_failure, "webhook_http_error")
+            self.assertEqual(redirect_received, [])
+        finally:
+            redirect_server.shutdown()
+            redirect_server.server_close()
+            redirect_target_server.shutdown()
+            redirect_target_server.server_close()
         refused_status, refused_failure = post_signed_webhook(
             "http://127.0.0.1:1/missing", b"{}", {"Content-Type": "application/json"}
         )

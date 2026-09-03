@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
 from metering_billing.errors import (
@@ -111,6 +111,23 @@ FORBIDDEN_PAYLOAD_KEYS = frozenset(
 )
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Turn provider-controlled redirects into an explicit HTTP failure."""
+
+    def redirect_request(self, request, file, code, message, headers, new_url):
+        del new_url
+        raise HTTPError(
+            request.full_url,
+            code,
+            "webhook redirects are disabled",
+            headers,
+            file,
+        )
+
+
+urlopen = build_opener(_NoRedirectHandler()).open
+
+
 def mint_webhook_secret() -> tuple[str, str]:
     """Return ``(webhook_secret_prefix, webhook_secret)`` for one register."""
     secret = f"{WEBHOOK_SECRET_TOKEN}{secrets.token_urlsafe(32)}"
@@ -136,8 +153,19 @@ def callback_url_is_allowed(callback_url: str) -> bool:
     """Return whether *callback_url* is https, or http on a local test host."""
     if not isinstance(callback_url, str) or not callback_url:
         return False
-    parsed = urlparse(callback_url)
-    if parsed.scheme == "https" and parsed.netloc:
+    try:
+        parsed = urlparse(callback_url)
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        return False
+    if parsed.scheme == "https" and parsed.netloc and port in (None, 443):
         return True
     if parsed.scheme == "http" and parsed.hostname in LOCAL_HTTP_HOSTS:
         return True
