@@ -62,6 +62,9 @@ services:
       METERING_BILLING_LEDGER_BACKEND: postgres
       METERING_BILLING_POSTGRES_DSN: ${METERING_BILLING_POSTGRES_DSN:-postgresql://metering_billing:metering_billing_dev_only_change_me@postgres_database:5432/metering_billing}
       AIS_BASE_URL: ${AIS_BASE_URL:-}
+      METERING_BILLING_OTEL_ENABLED: ${METERING_BILLING_OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-metering-billing-platform}
     healthcheck:
       # Stdlib-only probe: no curl needed inside the image.
       test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/readyz', timeout=3)"]

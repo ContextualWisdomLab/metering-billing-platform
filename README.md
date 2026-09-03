@@ -233,6 +233,8 @@ python3 -c "from metering_billing.http_app import create_default_ledger, create_
 
 Unauthenticated `GET /healthz` stays a static liveness reply, and `GET /readyz` reports the serving backend: healthy processes answer `200 {"status": "ready", "backend": "memory" | "postgres"}` while a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` with stable reason codes only (see ADR 0123).
 
+OpenTelemetry request tracing is opt-in. Set `METERING_BILLING_OTEL_ENABLED=true` and `OTEL_EXPORTER_OTLP_ENDPOINT` to an OTLP/HTTP collector; startup fails closed when tracing is enabled without an endpoint. Spans contain only bounded method, internal route, response status, and duration, and accept only W3C `traceparent`/`tracestate` propagation. Request bodies, query strings, tenant pins, API keys, response payloads, and exception messages are excluded (ADR 0126).
+
 Until a tenant has an active API credential, the existing tenant pin is enough (bootstrap window). AIS can keep pulling with `X-CWL-Tenant-Reference` until a key is issued for that tenant. After a key exists, send it on every `/v1` call.
 
 ## Issue a tenant API credential
