@@ -10,6 +10,12 @@
 
 The candidate stack is a substantial **commercial-domain prototype and contract baseline**. It is **not yet a GA product**.
 
+The release-evidence slice now supplies a versioned exact-head source manifest
+and fail-closed tracked-byte verification. It does not close the broader
+release gap: SBOM, provenance, signatures, install/upgrade/rollback,
+backup/restore, compatibility, and protected release receipts still require
+their own current evidence.
+
 The strongest existing work is the explicit separation of usage, rating, commercial invoice intent, payment/collection facts, accounting proposals, provider projections, and tenant-scoped presentment. The implementation also has unusually strong local exact-decimal, idempotency, schema, documentation, and test discipline.
 
 Completion is blocked by nine product-level gaps:

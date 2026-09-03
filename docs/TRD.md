@@ -4,6 +4,11 @@
 
 Start as a modular, contract-first repository. Runtime services can later be deployed as a modular monolith and split at stable ports when throughput or PCI/network boundaries justify separation.
 
+Release automation uses `scripts/release_evidence.py` to hash the exact Git
+`HEAD` and tracked source inventory. Verification fails closed on source,
+inventory, or byte drift; artifact signatures, SBOM, SLSA provenance, and
+operational receipts remain separate release gates.
+
 ## Contract plane
 
 - JSON Schema Draft 2020-12 for external payloads.

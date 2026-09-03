@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add an exact-head source manifest and fail-closed verification procedure for
+  controlled release reproducibility; this does not claim SBOM, provenance,
+  signatures, or GA readiness.
+
 - Extended the real PostgreSQL runtime slice through tenant-scoped rate-card
   publish, rating, invoice drafting, issued-invoice snapshots, tax-rate
   publish, tax assessments, collection cases and dunning events, payment
