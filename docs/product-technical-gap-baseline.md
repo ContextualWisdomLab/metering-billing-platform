@@ -303,7 +303,9 @@ A GA claim requires all of the following evidence on the released exact head:
 - liveness/readiness, graceful drain, backpressure, lease, and restart recovery;
 - measured SLOs, error budgets, capacity envelope, load/soak/fault tests;
 - backup, point-in-time restore, disaster recovery, and tenant export/offboarding rehearsals;
-- executable incident and finance-operation runbooks with owners and evidence.
+- executable incident and finance-operation [runbooks](operations/runbooks.md)
+  with owners and evidence; the current procedures are tabletop-ready and do
+  not close the live recovery, backup, or RPO/RTO gap.
 
 ### Release
 

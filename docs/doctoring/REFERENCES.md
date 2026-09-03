@@ -42,6 +42,10 @@ American Institute of Certified Public Accountants. (2017). *Trust services crit
 
 National Institute of Standards and Technology. (2020). *Digital identity guidelines: Authentication and lifecycle management* (NIST Special Publication 800-63B). https://doi.org/10.6028/NIST.SP.800-63b
 
+National Institute of Standards and Technology. (2025). *Incident response recommendations and considerations for cybersecurity risk management: A CSF 2.0 community profile* (NIST Special Publication 800-61 Rev. 3). https://doi.org/10.6028/NIST.SP.800-61r3
+
+National Institute of Standards and Technology. (2010). *Contingency planning guide for federal information systems* (NIST Special Publication 800-34 Rev. 1). https://doi.org/10.6028/NIST.SP.800-34r1
+
 OWASP. (2023). *API security top 10 2023: API2:2023 Broken authentication.* https://owasp.org/API-Security/editions/2023/en/0xa2-broken-authentication/
 
 PCI Security Standards Council. (2024). *Payment Card Industry Data Security Standard: Requirements and testing procedures* (Version 4.0.1). https://www.pcisecuritystandards.org/document_library/

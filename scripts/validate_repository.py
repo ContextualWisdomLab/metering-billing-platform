@@ -153,6 +153,7 @@ REQUIRED_FILES = (
     "docs/SECURITY.md",
     "docs/doctoring/REFERENCES.md",
     "docs/doctoring/STANDARD_TRACEABILITY.md",
+    "docs/operations/postgres-backup-restore.md",
     "schemas/usage-event.schema.json",
     "schemas/provider-capability.schema.json",
     "schemas/accounting-journal-proposal.schema.json",
@@ -328,6 +329,7 @@ REQUIRED_FILES = (
     "operator_console/tokens/design_tokens.json",
     "operator_console/fixtures/taxed_partial_credit.json",
     "scripts/migrate_postgres.py",
+    "scripts/postgres_backup.py",
     "requirements-quality.txt",
     "requirements-runtime.txt",
     "pyproject.toml",
@@ -351,6 +353,33 @@ COLUMN_NAME_PATTERN = re.compile(
     r"(?:uuid|text|timestamptz|timestamp|integer|bigint|numeric|date|boolean)\b",
     re.IGNORECASE | re.MULTILINE,
 )
+RUNBOOK_REQUIRED_HEADINGS = (
+    "Owner",
+    "Severity and escalation",
+    "Customer communication",
+    "Recovery objective",
+    "Evidence preservation",
+    "Detection",
+    "Containment",
+    "Diagnosis",
+    "Recovery",
+    "Validation receipt",
+    "Exit and RCA",
+)
+EXPECTED_RUNBOOK_FILES = (
+    "usage-rejection-duplicate-spike.md",
+    "rating-price-mismatch.md",
+    "budget-control-failure.md",
+    "provider-outage-throttling.md",
+    "reconciliation-mismatch.md",
+    "database-failover-restore.md",
+    "credential-or-webhook-secret-leak.md",
+    "commercial-correction.md",
+    "tenant-export-offboarding.md",
+    "vulnerability-dependency-emergency.md",
+)
+RUNBOOK_INDEX_SECTION_PATTERN = re.compile(r"(?ms)^## Runbook index$\n(.*?)(?=^## |\Z)")
+RUNBOOK_INDEX_LINK_PATTERN = re.compile(r"\]\(([^)#\s]+\.md)\)")
 TABLE_NAME_PATTERN = re.compile(
     r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
     r"(?:(?:[a-zA-Z_][a-zA-Z0-9_]*)\.)?([a-zA-Z_][a-zA-Z0-9_]*)",
@@ -467,6 +496,8 @@ def validate_repository(root: Path) -> tuple[str, ...]:
         if "--hash=sha256:" not in runtime_requirements_text:
             errors.append("runtime dependencies must be hash locked")
 
+    errors.extend(validate_runbooks(root))
+
     for file_path in _iter_contract_files(root):
         text = file_path.read_text(encoding="utf-8")
         relative_path = file_path.relative_to(root).as_posix()
@@ -479,6 +510,71 @@ def validate_repository(root: Path) -> tuple[str, ...]:
                 )
 
     return tuple(errors)
+
+
+def validate_runbooks(root: Path) -> tuple[str, ...]:
+    """Require each operational runbook to expose its support-control sections."""
+    directory = root / "docs/operations/runbooks"
+    if not directory.is_dir():
+        return ("missing runbook directory: docs/operations/runbooks",)
+    runbook_paths = tuple(sorted(directory.glob("*.md")))
+    if not runbook_paths:
+        return ("runbook directory must contain Markdown runbooks",)
+    errors: list[str] = []
+    runbook_names = {runbook_path.name for runbook_path in runbook_paths}
+    for expected_name in EXPECTED_RUNBOOK_FILES:
+        if expected_name not in runbook_names:
+            errors.append(f"missing required runbook file: {expected_name}")
+    index_path = root / "docs/operations/runbooks.md"
+    if not index_path.is_file():
+        errors.append("missing runbook index: docs/operations/runbooks.md")
+        indexed_paths: tuple[Path, ...] = ()
+    else:
+        index_text = index_path.read_text(encoding="utf-8")
+        index_section_match = RUNBOOK_INDEX_SECTION_PATTERN.search(index_text)
+        index_section = index_section_match.group(1) if index_section_match else ""
+        relative_targets = RUNBOOK_INDEX_LINK_PATTERN.findall(_visible_markdown(index_section))
+        indexed_paths = tuple(
+            (index_path.parent / relative_target).resolve()
+            for relative_target in relative_targets
+        )
+        if not indexed_paths:
+            errors.append("runbook index must link Markdown runbooks")
+        for relative_target in relative_targets:
+            target_path = (index_path.parent / relative_target).resolve()
+            if not target_path.is_relative_to(directory.resolve()):
+                errors.append(f"runbook index target escapes runbook directory: {relative_target}")
+            elif not target_path.is_file():
+                errors.append(f"runbook index target does not exist: {relative_target}")
+
+    indexed_path_set = set(indexed_paths)
+    for runbook_path in runbook_paths:
+        if runbook_path.resolve() not in indexed_path_set:
+            relative_path = runbook_path.relative_to(root).as_posix()
+            errors.append(f"runbook is not indexed: {relative_path}")
+    for runbook_path in runbook_paths:
+        text = runbook_path.read_text(encoding="utf-8")
+        relative_path = runbook_path.relative_to(root).as_posix()
+        visible_text = _visible_markdown(text)
+        for heading in RUNBOOK_REQUIRED_HEADINGS:
+            heading_match = re.search(
+                rf"^## {re.escape(heading)}$\n(.*?)(?=^## |\Z)",
+                visible_text,
+                re.MULTILINE | re.DOTALL,
+            )
+            if heading_match is None:
+                errors.append(f"{relative_path}: missing required runbook section: {heading}")
+            elif not heading_match.group(1).strip():
+                errors.append(f"{relative_path}: empty required runbook section: {heading}")
+    return tuple(errors)
+
+
+def _visible_markdown(text: str) -> str:
+    """Remove fenced code and HTML comments before validating rendered Markdown."""
+    text_without_fenced_code = re.sub(
+        r"(?ms)^(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^(?P=fence)\s*$\n?", "", text
+    )
+    return re.sub(r"(?s)<!--.*?-->", "", text_without_fenced_code)
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

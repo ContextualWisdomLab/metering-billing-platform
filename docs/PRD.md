@@ -618,6 +618,20 @@ contextual-orchestrator usage
 - Time-window queries return only the tenant's events whose `occurred_at` lies in `[window_started_at, window_ended_at)`.
 - Ingestion does not create a posted accounting journal.
 
+## Operational-support acceptance
+
+- The repository publishes an indexed set of incident and finance-operation
+  runbooks covering usage rejection/duplicates, rating, budget control,
+  provider outage, reconciliation, database recovery, secret exposure,
+  commercial correction, tenant export, and dependency emergency.
+- Every runbook names its owner and escalation path and defines customer
+  communication, evidence preservation, detection, containment, diagnosis,
+  recovery, validation receipt, and exit/RCA controls.
+- Validation fails closed when the runbook directory is missing, empty, or
+  missing any required control section.
+- Runbook documentation is tabletop evidence only; live provider, backup,
+  restore, chaos, RPO, RTO, and signed-release evidence remain required for GA.
+
 ## Initial milestone acceptance
 
 - All published schemas declare Draft 2020-12 and pass the repository's offline conformance fixtures.

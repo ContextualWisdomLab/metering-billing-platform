@@ -57,7 +57,10 @@ from scripts.validate_repository import (
     find_mutable_action_references,
     find_placeholder_tokens,
     validate_accounting_journal_proposal,
+    EXPECTED_RUNBOOK_FILES,
+    RUNBOOK_REQUIRED_HEADINGS,
     validate_repository,
+    validate_runbooks,
     validate_schema_instance,
     validate_sql_object_names,
 )
@@ -78,6 +81,250 @@ class RepositoryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             errors = validate_repository(Path(temporary_directory))
         self.assertIn("missing required file: README.md", errors)
+
+    def test_missing_runbook_directory_is_reported(self) -> None:
+        """A checkout without operational runbooks reports the missing directory."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            errors = validate_runbooks(Path(temporary_directory))
+        self.assertEqual(errors, ("missing runbook directory: docs/operations/runbooks",))
+
+    def test_empty_runbook_directory_is_reported(self) -> None:
+        """An empty runbook directory cannot satisfy the support contract."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory) / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            errors = validate_runbooks(Path(temporary_directory))
+        self.assertEqual(errors, ("runbook directory must contain Markdown runbooks",))
+
+    def test_incomplete_runbook_section_is_reported(self) -> None:
+        """Every operational runbook must declare each support-control section."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory) / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            (directory / "incident.md").write_text("# Incident\n## Owner\n", encoding="utf-8")
+            errors = validate_runbooks(Path(temporary_directory))
+        self.assertIn(
+            "docs/operations/runbooks/incident.md: missing required runbook section: Recovery",
+            errors,
+        )
+
+    def test_missing_indexed_runbook_is_reported(self) -> None:
+        """A deleted indexed runbook cannot silently leave a coverage gap."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n[deleted](runbooks/deleted.md)\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertIn("runbook index target does not exist: runbooks/deleted.md", errors)
+
+    def test_missing_required_runbook_file_is_reported(self) -> None:
+        """The published scenario set cannot shrink with its index."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            present_files = EXPECTED_RUNBOOK_FILES[1:]
+            for filename in present_files:
+                (directory / filename).write_text(
+                    f"# Incident\n\n{sections}\n", encoding="utf-8"
+                )
+            index_links = "\n".join(f"[scenario](runbooks/{filename})" for filename in present_files)
+            (root / "docs/operations/runbooks.md").write_text(
+                f"## Runbook index\n{index_links}", encoding="utf-8"
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            f"missing required runbook file: {EXPECTED_RUNBOOK_FILES[0]}", errors
+        )
+
+    def test_unindexed_runbook_is_reported(self) -> None:
+        """A scenario file must be reachable from the operational index."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (directory / "orphan.md").write_text(f"# Orphan\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n", encoding="utf-8"
+            )
+            errors = validate_runbooks(root)
+        self.assertIn("runbook is not indexed: docs/operations/runbooks/orphan.md", errors)
+
+    def test_hidden_runbook_links_are_not_index_entries(self) -> None:
+        """Code fences and comments cannot satisfy rendered index coverage."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n"
+                "```markdown\n[incident](runbooks/incident.md)\n```\n"
+                "<!-- [incident](runbooks/incident.md) -->\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertIn("runbook index must link Markdown runbooks", errors)
+
+    def test_empty_runbook_section_is_reported(self) -> None:
+        """A heading without operator content cannot satisfy the support contract."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(
+                f"## {heading}\n" if heading == "Recovery" else f"## {heading}\ncovered"
+                for heading in RUNBOOK_REQUIRED_HEADINGS
+            )
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n", encoding="utf-8"
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            "docs/operations/runbooks/incident.md: empty required runbook section: Recovery",
+            errors,
+        )
+
+    def test_each_required_runbook_section_is_checked(self) -> None:
+        """Every required support section has an explicit missing-section check."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n", encoding="utf-8"
+            )
+            for missing_heading in RUNBOOK_REQUIRED_HEADINGS:
+                sections = "\n".join(
+                    f"## {heading}\ncovered"
+                    for heading in RUNBOOK_REQUIRED_HEADINGS
+                    if heading != missing_heading
+                )
+                (directory / "incident.md").write_text(
+                    f"# Incident\n\n{sections}\n", encoding="utf-8"
+                )
+                errors = validate_runbooks(root)
+                self.assertIn(
+                    f"docs/operations/runbooks/incident.md: missing required runbook section: {missing_heading}",
+                    errors,
+                )
+
+    def test_fenced_runbook_headings_are_not_sections(self) -> None:
+        """Markdown headings inside a code fence cannot satisfy the contract."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            fenced_headings = "\n".join(f"## {heading}" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(
+                f"# Incident\n\n```markdown\n{fenced_headings}\n```\n",
+                encoding="utf-8",
+            )
+            (root / "docs/operations/runbooks.md").write_text(
+                "[incident](runbooks/incident.md)\n", encoding="utf-8"
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            "docs/operations/runbooks/incident.md: missing required runbook section: Owner",
+            errors,
+        )
+
+    def test_hidden_runbook_headings_are_not_sections(self) -> None:
+        """Tilde fences and HTML comments cannot hide missing operator guidance."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            hidden_headings = "\n".join(f"## {heading}" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(
+                f"# Incident\n\n~~~markdown\n{hidden_headings}\n~~~\n"
+                f"<!-- {hidden_headings} -->\n",
+                encoding="utf-8",
+            )
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            "docs/operations/runbooks/incident.md: missing required runbook section: Owner",
+            errors,
+        )
+
+    def test_runbook_index_without_links_is_reported(self) -> None:
+        """An index without scenario links cannot define the support set."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text("# Runbooks\n", encoding="utf-8")
+            errors = validate_runbooks(root)
+        self.assertIn("runbook index must link Markdown runbooks", errors)
+
+    def test_runbook_index_escape_is_reported(self) -> None:
+        """An index link cannot escape the controlled runbook directory."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n[escape](runbooks/../outside.md)\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            "runbook index target escapes runbook directory: runbooks/../outside.md", errors
+        )
+
+    def test_runbook_index_direct_escape_is_reported(self) -> None:
+        """A direct relative link cannot bypass the runbook boundary check."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n[escape](../outside.md)\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertIn(
+            "runbook index target escapes runbook directory: ../outside.md", errors
+        )
+
+    def test_runbook_index_ignores_unrelated_links_outside_procedure_section(self) -> None:
+        """Deployment references outside the index are not treated as procedures."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "docs/operations/runbooks"
+            directory.mkdir(parents=True)
+            sections = "\n".join(f"## {heading}\ncovered" for heading in RUNBOOK_REQUIRED_HEADINGS)
+            (directory / "incident.md").write_text(f"# Incident\n\n{sections}\n", encoding="utf-8")
+            (root / "docs/operations/runbooks.md").write_text(
+                "## Runbook index\n[incident](runbooks/incident.md)\n"
+                "\n## Deployment-owned references\n[escape](../outside.md)\n",
+                encoding="utf-8",
+            )
+            errors = validate_runbooks(root)
+        self.assertNotIn(
+            "runbook index target escapes runbook directory: ../outside.md", errors
+        )
 
     def test_boolean_json_schema_nodes_are_supported(self) -> None:
         """Draft 2020-12 boolean schemas must accept true and reject false."""
