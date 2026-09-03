@@ -31,7 +31,10 @@ connections beside it.
 - Add `create_default_ledger(environ=None)` to `metering_billing/http_app.py`.
   `METERING_BILLING_LEDGER_BACKEND=postgres` builds `PostgresUsageLedger`
   from `METERING_BILLING_POSTGRES_DSN` through the existing
-  `PostgresUsageLedger.connect` convention; no new pooling is introduced.
+  `PostgresUsageLedger.connect` convention.  That constructor uses the
+  bounded lazy session pool defined by ADR 0125; injected connections remain
+  the one-session compatibility form for tests and externally managed
+  lifecycles.
   A missing or empty DSN raises a `ValueError` naming the variable at startup.
   Every other value, including an unset variable, returns
   `MemoryUsageLedger()`, so tests keep working unchanged.

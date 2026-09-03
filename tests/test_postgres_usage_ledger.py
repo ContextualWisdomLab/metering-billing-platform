@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from threading import Barrier
+import queue
+from threading import Barrier, Event, Thread
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -12,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
+from unittest import mock
 
 import psycopg
 
@@ -93,6 +95,14 @@ from metering_billing.issued_invoice_void import (
     compute_issued_invoice_void_payload_hash,
 )
 from metering_billing.payment_settlement import PaymentSettlementService
+from metering_billing.postgres_usage_ledger import (
+    DEFAULT_POSTGRES_POOL_SIZE,
+    POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE,
+    _ConnectionPool,
+    _environment_pool_size,
+    _resolve_pool_size,
+    _session_is_usable,
+)
 from metering_billing.rate_card import RateCardService
 from metering_billing.spend_budget import compute_spend_budget_payload_hash
 from metering_billing.tenant_api_credential import (
@@ -109,7 +119,6 @@ from metering_billing.usage_ledger import (
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
     StoredTenantApiCredential,
-    StoredUnappliedCash,
     StoredUnappliedCashApplication,
     StoredUnappliedCashRefund,
     StoredSpendBudget,
@@ -166,6 +175,227 @@ AND unapplied_cash_application_id IS NULL
 AND issued_invoice_void_id IS NULL
 AND issued_credit_note_void_id IS NULL
 """
+
+
+class ConnectionPoolTests(unittest.TestCase):
+    """Exercise the pooled-session lifecycle without requiring SQL fixtures."""
+
+    class Session:
+        """Small session double exposing the health and close contract."""
+
+        def __init__(self, *, closed: bool = False, broken: bool = False) -> None:
+            self.closed = closed
+            self.broken = broken
+            self.close_calls = 0
+
+        def close(self) -> None:
+            """Record an owned-session close."""
+            self.close_calls += 1
+            self.closed = True
+
+    def test_pool_size_and_constructor_validation(self) -> None:
+        """Reject invalid pool configuration and preserve the default."""
+        self.assertEqual(_resolve_pool_size(2), 2)
+        self.assertEqual(_environment_pool_size({}), DEFAULT_POSTGRES_POOL_SIZE)
+        with mock.patch.dict(
+            os.environ, {POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE: "3"}
+        ):
+            self.assertEqual(_environment_pool_size(os.environ), 3)
+        for invalid in (0, -1, True, "1"):
+            with self.assertRaises(ValueError):
+                _resolve_pool_size(invalid)
+        with self.assertRaises(ValueError):
+            _environment_pool_size({POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE: "nope"})
+        with self.assertRaises(ValueError):
+            _environment_pool_size({POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE: "0"})
+
+        with self.assertRaises(ValueError):
+            PostgresUsageLedger()
+        session = self.Session()
+        with self.assertRaises(ValueError):
+            PostgresUsageLedger(session, pool_size=1)
+        with self.assertRaises(ValueError):
+            PostgresUsageLedger(session, connection_factory=lambda: session)
+        with mock.patch.dict(
+            os.environ, {POSTGRES_POOL_SIZE_ENVIRONMENT_VARIABLE: "2"}
+        ):
+            ledger = PostgresUsageLedger(connection_factory=lambda: session)
+        self.assertEqual(ledger._pool.size, 2)
+        ledger.close()
+
+        owned_session = self.Session()
+        owned_ledger = PostgresUsageLedger(owned_session, owns_connection=True)
+        owned_ledger.close()
+        self.assertEqual(owned_session.close_calls, 1)
+
+        injected_session = self.Session()
+        injected_ledger = PostgresUsageLedger(injected_session)
+        self.assertIs(injected_ledger._pool._factory(), injected_session)
+        leased = injected_ledger._pool.checkout()
+        injected_ledger._pool.close()
+        injected_ledger._pool.checkin(leased)
+        self.assertEqual(injected_session.close_calls, 0)
+        self.assertEqual(injected_ledger._pool.open_count, 0)
+
+    def test_pool_retires_unhealthy_sessions_and_waits_for_capacity(self) -> None:
+        """Discard unhealthy sessions, replace them, and handle a waiting lease."""
+        created: list[ConnectionPoolTests.Session] = []
+
+        def factory() -> ConnectionPoolTests.Session:
+            session = self.Session()
+            created.append(session)
+            return session
+
+        pool = _ConnectionPool(1, factory, owns_sessions=True)
+        unhealthy = self.Session(closed=True)
+        pool._open_count = 1
+        pool._idle.put(unhealthy)
+        replacement = pool.checkout()
+        self.assertIs(replacement, created[0])
+        self.assertEqual(unhealthy.close_calls, 1)
+        self.assertTrue(_session_is_usable(replacement))
+        replacement.broken = True
+        pool.checkin(replacement)
+        self.assertEqual(pool.open_count, 0)
+        self.assertEqual(replacement.close_calls, 1)
+
+        replacement = pool.checkout()
+        pool.checkin(replacement)
+        pool.close()
+        self.assertEqual(replacement.close_calls, 1)
+
+        waiting = _ConnectionPool(1, factory, owns_sessions=True)
+        waiting._open_count = 1
+        waiting._idle = mock.Mock()
+        waiting._idle.get_nowait.side_effect = queue.Empty
+        waiting._idle.get.return_value = self.Session(broken=True)
+        waited = waiting.checkout()
+        self.assertIsInstance(waited, self.Session)
+        waiting.close()
+
+        closed = _ConnectionPool(1, factory, owns_sessions=False)
+        closed._open_count = 1
+        closed._retire(object())
+        closed.close()
+        with self.assertRaises(RuntimeError):
+            closed.checkout()
+
+    def test_pool_factory_failure_and_close_defensively(self) -> None:
+        """Restore capacity after factory failure and swallow close failures."""
+        def fail() -> object:
+            raise RuntimeError("factory failed")
+
+        pool = _ConnectionPool(1, fail, owns_sessions=True)
+        with self.assertRaisesRegex(RuntimeError, "factory failed"):
+            pool.checkout()
+        self.assertEqual(pool.open_count, 0)
+
+        _ConnectionPool._close_quietly(object())
+
+        class FailingSession:
+            """Session whose close fails during best-effort shutdown."""
+
+            def close(self) -> None:
+                """Raise a secondary shutdown error."""
+                raise RuntimeError("close failed")
+
+        _ConnectionPool._close_quietly(FailingSession())
+
+    def test_pool_close_serializes_with_checkin(self) -> None:
+        """Drain a session returned while shutdown is waiting for the pool gate."""
+        class BlockingQueue(queue.Queue):
+            """Pause check-in so close ordering is deterministic."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.put_started = Event()
+                self.release_put = Event()
+
+            def put(self, item, block=True, timeout=None):
+                self.put_started.set()
+                self.release_put.wait(timeout=1)
+                return super().put(item, block, timeout)
+
+        session = self.Session()
+        pool = _ConnectionPool(1, lambda: session, owns_sessions=True)
+        pool._idle = BlockingQueue()
+        leased = pool.checkout()
+        checkin = Thread(target=pool.checkin, args=(leased,))
+        checkin.start()
+        self.assertTrue(pool._idle.put_started.wait(timeout=1))
+
+        closed = Event()
+        shutdown = Thread(target=lambda: (pool.close(), closed.set()))
+        shutdown.start()
+        self.assertFalse(closed.wait(timeout=0.05))
+
+        pool._idle.release_put.set()
+        checkin.join(timeout=1)
+        shutdown.join(timeout=1)
+        self.assertFalse(checkin.is_alive())
+        self.assertFalse(shutdown.is_alive())
+        self.assertTrue(closed.is_set())
+        self.assertEqual(session.close_calls, 1)
+        self.assertEqual(pool.open_count, 0)
+        self.assertTrue(pool._idle.empty())
+
+    def test_ledger_leases_replace_operational_failures_and_close(self) -> None:
+        """Pool-backed leases return normally and retire operational failures."""
+        sessions: list[ConnectionPoolTests.Session] = []
+
+        def factory() -> ConnectionPoolTests.Session:
+            session = self.Session()
+            sessions.append(session)
+            return session
+
+        ledger = PostgresUsageLedger.connect(
+            "unused", pool_size=1, connection_factory=factory
+        )
+        cursor_session = self.Session()
+        cursor_session.transaction = mock.Mock(return_value=mock.MagicMock())
+        cursor_session.cursor = mock.Mock(return_value=mock.MagicMock())
+        cursor_ledger = PostgresUsageLedger.connect(
+            "unused", pool_size=1, connection_factory=lambda: cursor_session
+        )
+        with cursor_ledger._cursor() as cursor:
+            self.assertIs(
+                cursor, cursor_session.cursor.return_value.__enter__.return_value
+            )
+        cursor_ledger.close()
+        with ledger.lease() as session:
+            self.assertIs(session, sessions[0])
+        ledger.close()
+
+        business_ledger = PostgresUsageLedger.connect(
+            "unused", pool_size=1, connection_factory=factory
+        )
+        try:
+            with self.assertRaises(ValueError):
+                with business_ledger.lease():
+                    raise ValueError("business failure")
+        finally:
+            business_ledger.close()
+
+    def test_ledger_leases_retire_operational_failures(self) -> None:
+        """Operational failures retire the broken pooled session."""
+        sessions: list[ConnectionPoolTests.Session] = []
+
+        def factory() -> ConnectionPoolTests.Session:
+            session = self.Session()
+            sessions.append(session)
+            return session
+
+        failure_ledger = PostgresUsageLedger.connect(
+            "unused", pool_size=1, connection_factory=factory
+        )
+        try:
+            with self.assertRaises(psycopg.OperationalError):
+                with failure_ledger.lease() as session:
+                    session.broken = True
+                    raise psycopg.OperationalError("connection failed")
+        finally:
+            self.assertEqual(failure_ledger._pool.open_count, 0)
+            failure_ledger.close()
 
 
 class PostgresUsageLedgerTests(unittest.TestCase):
@@ -4106,7 +4336,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         second_case_amount = Decimal("20.00")
         leftover_apply_remaining = Decimal("19.999")
         exclusive_amount = Decimal("100.00")
-        tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
         credit_exclusive = Decimal("10.00")
         credit_tax = Decimal("1.00")
@@ -4809,8 +5038,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         exclusive_amount = Decimal("100.00")
         tax_amount = Decimal("10.00")
         invoice_voided_amount = Decimal("110.00")
-        credit_exclusive = Decimal("10.00")
-        credit_tax = Decimal("1.00")
         credit_voided_amount = Decimal("11.00")
         UsageIngestionService(self.ledger).ingest_usage_event(make_event())
         RateCardService(self.ledger).publish_rate_card(
