@@ -672,16 +672,25 @@ def create_default_ledger(
     ``METERING_BILLING_LEDGER_BACKEND=postgres`` selects the durable
     :class:`PostgresUsageLedger` production system of record, built from
     ``METERING_BILLING_POSTGRES_DSN`` through the existing
-    :meth:`PostgresUsageLedger.connect` connection convention.  A missing or
-    empty DSN fails closed at startup with a :class:`ValueError` naming the
-    missing variable.  Every other value, including an unset variable,
-    returns the deterministic :class:`MemoryUsageLedger` reference adapter so
-    tests and local runs keep working unchanged.
+    :meth:`PostgresUsageLedger.connect` connection convention.  An unset
+    backend variable selects PostgreSQL when a non-empty DSN is present;
+    ``METERING_BILLING_LEDGER_BACKEND=memory`` explicitly selects the
+    deterministic reference adapter.  A missing or empty DSN fails closed at
+    startup when PostgreSQL is selected, while an unset backend with no
+    non-empty DSN keeps the memory default for tests and local runs.
     """
     settings = os.environ if environ is None else environ
-    if settings.get(LEDGER_BACKEND_ENVIRONMENT_VARIABLE) != POSTGRES_BACKEND_LABEL:
-        return MemoryUsageLedger()
+    backend = settings.get(LEDGER_BACKEND_ENVIRONMENT_VARIABLE)
     dsn = settings.get(POSTGRES_DSN_ENVIRONMENT_VARIABLE)
+    if backend is None:
+        backend = POSTGRES_BACKEND_LABEL if dsn else MEMORY_BACKEND_LABEL
+    if backend == MEMORY_BACKEND_LABEL:
+        return MemoryUsageLedger()
+    if backend != POSTGRES_BACKEND_LABEL:
+        raise ValueError(
+            f"{LEDGER_BACKEND_ENVIRONMENT_VARIABLE} must be either "
+            f"{MEMORY_BACKEND_LABEL} or {POSTGRES_BACKEND_LABEL}"
+        )
     if not dsn:
         raise ValueError(
             f"{POSTGRES_DSN_ENVIRONMENT_VARIABLE} must be set to a non-empty "
@@ -2823,7 +2832,8 @@ def main(arguments: tuple[str, ...] | None = None) -> int:
     the tier without code changes.  The bound ledger comes from
     :func:`create_default_ledger`, so ``METERING_BILLING_LEDGER_BACKEND``
     plus ``METERING_BILLING_POSTGRES_DSN`` select the durable system of
-    record exactly as documented for ``create_http_app``.  Serving uses
+    record exactly as documented for ``create_http_app``; a supplied DSN
+    selects it even when the backend selector is unset.  Serving uses
     :class:`ThreadingWSGIServer` so concurrent tenant requests are handled on
     separate daemon threads instead of serializing behind one request loop.
     """

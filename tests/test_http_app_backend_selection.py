@@ -72,15 +72,55 @@ def invoke_http(
 
 
 class CreateDefaultLedgerTests(unittest.TestCase):
-    """Verify environment-driven ledger selection fails closed and defaults safe."""
+    """Verify environment-driven ledger selection fails closed and defaults safely."""
 
     def test_empty_or_memory_selection_returns_reference_adapter(self) -> None:
-        """Unset and non-postgres selections both return the memory adapter."""
+        """An empty selection and explicit memory both return the reference adapter."""
         self.assertIsInstance(create_default_ledger({}), MemoryUsageLedger)
+        self.assertIsInstance(
+            create_default_ledger({POSTGRES_DSN_ENVIRONMENT_VARIABLE: ""}),
+            MemoryUsageLedger,
+        )
         self.assertIsInstance(
             create_default_ledger({LEDGER_BACKEND_ENVIRONMENT_VARIABLE: "memory"}),
             MemoryUsageLedger,
         )
+
+    def test_postgres_dsn_is_the_safe_production_default(self) -> None:
+        """A DSN alone selects PostgreSQL when no backend override is supplied."""
+        ledger = create_default_ledger(
+            {POSTGRES_DSN_ENVIRONMENT_VARIABLE: LOCAL_POSTGRES_DSN}
+        )
+        try:
+            self.assertIsInstance(ledger, PostgresUsageLedger)
+            self.assertGreaterEqual(ledger.migration_history_row_count(), 1)
+        finally:
+            ledger.close()
+
+    def test_explicit_memory_overrides_a_configured_postgres_dsn(self) -> None:
+        """The reference adapter remains available as an explicit opt-out."""
+        self.assertIsInstance(
+            create_default_ledger(
+                {
+                    LEDGER_BACKEND_ENVIRONMENT_VARIABLE: "memory",
+                    POSTGRES_DSN_ENVIRONMENT_VARIABLE: LOCAL_POSTGRES_DSN,
+                }
+            ),
+            MemoryUsageLedger,
+        )
+
+    def test_unknown_backend_fails_closed(self) -> None:
+        """A misspelled backend cannot silently serve memory-backed writes."""
+        with self.assertRaises(ValueError) as error:
+            create_default_ledger(
+                {
+                    LEDGER_BACKEND_ENVIRONMENT_VARIABLE: "redshift",
+                    POSTGRES_DSN_ENVIRONMENT_VARIABLE: LOCAL_POSTGRES_DSN,
+                }
+            )
+        self.assertIn(LEDGER_BACKEND_ENVIRONMENT_VARIABLE, str(error.exception))
+        with self.assertRaises(ValueError):
+            create_default_ledger({LEDGER_BACKEND_ENVIRONMENT_VARIABLE: ""})
 
     def test_missing_environ_mapping_reads_the_process_environment(self) -> None:
         """``environ=None`` falls back to ``os.environ`` without selecting postgres."""

@@ -85,10 +85,6 @@ from metering_billing.usage_ledger import (
 )
 
 
-MIGRATION_HISTORY_TABLE = "public.metering_billing_schema_migration"
-"""Migration-history table mirrored from ``scripts/migrate_postgres.py``."""
-
-
 class PostgresUsageLedger:
     """Persist usage attribution and immutable facts in PostgreSQL.
 
@@ -181,7 +177,7 @@ class PostgresUsageLedger:
         ad-hoc PostgreSQL connection beside the ledger's own session.
         """
         with self._cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE}")
+            cursor.execute("SELECT COUNT(*) FROM public.metering_billing_schema_migration")
             row = cursor.fetchone()
         if row is None:  # pragma: no cover - COUNT(*) always returns one row
             raise RuntimeError("migration history count did not return a row")
