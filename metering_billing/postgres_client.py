@@ -12,6 +12,7 @@ from __future__ import annotations
 import getpass
 import os
 import re
+import ssl
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import parse_qs, unquote, urlparse
@@ -74,30 +75,29 @@ class PostgresConnection:
         """Commit one unit of work, or roll it back when the block fails.
 
         Nested callers receive a savepoint so the outer commercial transaction
-        stays open.  The durable ledger itself avoids nesting through
-        ``_transaction_active``.
+        stays open.  Depth increment and ``SAVEPOINT`` share the ``finally``
+        that restores depth so a refused savepoint cannot leak nesting.  The
+        durable ledger itself avoids nesting through ``_transaction_active``.
         """
-        self._transaction_depth += 1
-        savepoint_name = (
-            f"metering_billing_sp_{self._transaction_depth}"
-            if self._transaction_depth > 1
-            else None
-        )
-        if savepoint_name is not None:
-            self.execute(f"SAVEPOINT {savepoint_name}")
+        savepoint_name: str | None = None
         try:
-            yield
-        except Exception:
-            if savepoint_name is not None:
-                self.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            self._transaction_depth += 1
+            if self._transaction_depth > 1:
+                savepoint_name = f"metering_billing_sp_{self._transaction_depth}"
+                self.execute(f"SAVEPOINT {savepoint_name}")
+            try:
+                yield
+            except Exception:
+                if savepoint_name is not None:
+                    self.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                else:
+                    self._raw_connection.rollback()
+                raise
             else:
-                self._raw_connection.rollback()
-            raise
-        else:
-            if savepoint_name is not None:
-                self.execute(f"RELEASE SAVEPOINT {savepoint_name}")
-            else:
-                self._raw_connection.commit()
+                if savepoint_name is not None:
+                    self.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                else:
+                    self._raw_connection.commit()
         finally:
             self._transaction_depth -= 1
 
@@ -307,12 +307,33 @@ def raise_translated_database_error(error: BaseException) -> None:
 
 
 def is_foreign_key_violation(error: BaseException) -> bool:
-    """Return whether *error* is a PostgreSQL foreign-key failure."""
-    sqlstate = getattr(error, "sqlstate", None)
-    if sqlstate == "23503":
-        return True
+    """Return whether *error* is a PostgreSQL foreign-key failure.
+
+    When a SQLSTATE is present, only ``23503`` is treated as a foreign-key
+    violation.  Message-text matching is a fallback for drivers that omit
+    the code, not a way to override a different SQLSTATE.
+    """
+    sqlstate = _postgres_sqlstate(error)
+    if sqlstate is not None:
+        return sqlstate == "23503"
     text = str(error).lower()
     return "foreign key" in text or "23503" in text
+
+
+def _postgres_sqlstate(error: BaseException) -> str | None:
+    """Read SQLSTATE from ``error.sqlstate`` or a pg8000 error payload."""
+    sqlstate = getattr(error, "sqlstate", None)
+    if isinstance(sqlstate, str) and sqlstate:
+        return sqlstate
+    args = getattr(error, "args", ())
+    if not args:
+        return None
+    payload = args[0]
+    if isinstance(payload, Mapping):
+        code = payload.get("C")
+        if isinstance(code, str) and code:
+            return code
+    return None
 
 
 def _parse_uri_dsn(dsn: str) -> dict[str, str]:
@@ -377,7 +398,35 @@ def _connect_keywords(fields: Mapping[str, str]) -> dict[str, Any]:
         else:
             keywords["host"] = "localhost"
             keywords["port"] = port
+    if "sslmode" in fields:
+        ssl_context = _ssl_context_for_mode(fields["sslmode"])
+        if ssl_context is not None:
+            keywords["ssl_context"] = ssl_context
     return keywords
+
+
+def _ssl_context_for_mode(sslmode: str) -> ssl.SSLContext | None:
+    """Translate one libpq ``sslmode`` into a ``pg8000`` TLS context.
+
+    ``allow`` and ``prefer`` do not implement libpq's fallback negotiation.
+    ``allow`` stays clear-text; ``prefer`` opens TLS without verifying the
+    peer certificate, matching ``require``.
+    """
+    mode = sslmode.lower()
+    if mode in {"disable", "allow"}:
+        return None
+    if mode in {"prefer", "require"}:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+    if mode == "verify-ca":
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        return context
+    if mode == "verify-full":
+        return ssl.create_default_context()
+    raise ValueError(f"unsupported PostgreSQL sslmode: {sslmode}")
 
 
 def _existing_unix_socket(port: int) -> str | None:

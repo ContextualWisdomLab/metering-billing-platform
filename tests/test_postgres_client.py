@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ssl
 import unittest
 from unittest import mock
+
+from pg8000.exceptions import DatabaseError
 
 from metering_billing.postgres_client import (
     ForeignKeyViolation,
@@ -123,6 +126,44 @@ class PostgresClientUnitTests(unittest.TestCase):
         self.assertEqual(keywords["host"], "postgres_database")
         self.assertEqual(keywords["port"], 6543)
         self.assertEqual(keywords["database"], "metering_billing")
+        self.assertNotIn("ssl_context", keywords)
+
+    def test_libpq_sslmode_maps_onto_pg8000_ssl_context(self) -> None:
+        """libpq sslmode becomes an explicit TLS context or a fail-closed error."""
+        allow = parse_postgres_dsn(
+            "dbname=metering_billing user=postgres host=127.0.0.1 sslmode=allow"
+        )
+        self.assertNotIn("ssl_context", allow)
+
+        require = parse_postgres_dsn(
+            "postgresql://postgres@127.0.0.1/metering_billing?sslmode=require"
+        )
+        self.assertIsInstance(require["ssl_context"], ssl.SSLContext)
+        self.assertFalse(require["ssl_context"].check_hostname)
+        self.assertEqual(require["ssl_context"].verify_mode, ssl.CERT_NONE)
+
+        prefer = parse_postgres_dsn(
+            "dbname=metering_billing user=postgres host=127.0.0.1 sslmode=PREFER"
+        )
+        self.assertEqual(prefer["ssl_context"].verify_mode, ssl.CERT_NONE)
+        self.assertFalse(prefer["ssl_context"].check_hostname)
+
+        verify_ca = parse_postgres_dsn(
+            "postgresql://postgres@127.0.0.1/metering_billing?sslmode=verify-ca"
+        )
+        self.assertFalse(verify_ca["ssl_context"].check_hostname)
+        self.assertEqual(verify_ca["ssl_context"].verify_mode, ssl.CERT_REQUIRED)
+
+        verify_full = parse_postgres_dsn(
+            "dbname=metering_billing user=postgres host=127.0.0.1 sslmode=verify-full"
+        )
+        self.assertTrue(verify_full["ssl_context"].check_hostname)
+        self.assertEqual(verify_full["ssl_context"].verify_mode, ssl.CERT_REQUIRED)
+
+        with self.assertRaisesRegex(ValueError, "unsupported PostgreSQL sslmode: mystery"):
+            parse_postgres_dsn(
+                "postgresql://postgres@127.0.0.1/metering_billing?sslmode=mystery"
+            )
 
     def test_uri_dsn_reads_query_credentials_and_legacy_scheme(self) -> None:
         """Query-only userinfo and postgres:// still produce connect keywords."""
@@ -327,6 +368,30 @@ class PostgresClientUnitTests(unittest.TestCase):
         )
         self.assertEqual(nested_fail.rollbacks, 1)
 
+    def test_transaction_restores_depth_when_savepoint_fails(self) -> None:
+        """A refused SAVEPOINT must not leak nested transaction depth."""
+        raw = FakeConnection()
+        connection = PostgresConnection(raw)
+        with connection.transaction():
+            raw.execute_error = RuntimeError("savepoint refused")
+            with self.assertRaisesRegex(RuntimeError, "savepoint refused"):
+                with connection.transaction():
+                    pass
+            self.assertEqual(connection._transaction_depth, 1)
+            raw.execute_error = None
+            with connection.transaction():
+                connection.execute("SELECT recovered_inner")
+            self.assertEqual(connection._transaction_depth, 1)
+        self.assertEqual(connection._transaction_depth, 0)
+        self.assertIn(
+            "SAVEPOINT metering_billing_sp_2",
+            [sql for sql, _params in raw.queries],
+        )
+        self.assertIn(
+            "RELEASE SAVEPOINT metering_billing_sp_2",
+            [sql for sql, _params in raw.queries],
+        )
+
     def test_foreign_key_errors_are_translated(self) -> None:
         """SQLSTATE 23503 and foreign-key text become ForeignKeyViolation."""
         self.assertTrue(is_foreign_key_violation(ForeignKeyError("x", sqlstate="23503")))
@@ -345,6 +410,41 @@ class PostgresClientUnitTests(unittest.TestCase):
         connection = PostgresConnection(raw)
         with self.assertRaises(ForeignKeyViolation):
             connection.execute("INSERT INTO billing_core.usage_measurement VALUES (1)")
+
+    def test_pg8000_database_error_reads_sqlstate_payload(self) -> None:
+        """pg8000 stores SQLSTATE in args[0]['C']; that code wins over message text."""
+        foreign_key = DatabaseError(
+            {
+                "S": "ERROR",
+                "C": "23503",
+                "M": "insert or update on table violates foreign key constraint",
+            }
+        )
+        unique = DatabaseError(
+            {
+                "S": "ERROR",
+                "C": "23505",
+                "M": "duplicate key value mentions foreign key 23503",
+            }
+        )
+        self.assertTrue(is_foreign_key_violation(foreign_key))
+        self.assertFalse(is_foreign_key_violation(unique))
+        with self.assertRaises(ForeignKeyViolation):
+            raise_translated_database_error(foreign_key)
+        with self.assertRaises(DatabaseError):
+            raise_translated_database_error(unique)
+
+        empty_sqlstate = ForeignKeyError("mentions 23503 in text only")
+        empty_sqlstate.sqlstate = ""
+        self.assertTrue(is_foreign_key_violation(empty_sqlstate))
+
+        class IntSqlstateError(Exception):
+            sqlstate = 23503
+
+        self.assertFalse(is_foreign_key_violation(IntSqlstateError("syntax")))
+        self.assertFalse(is_foreign_key_violation(Exception()))
+        self.assertFalse(is_foreign_key_violation(Exception({"C": "", "M": "syntax"})))
+        self.assertFalse(is_foreign_key_violation(Exception({"C": 12, "M": "syntax"})))
 
     def test_commit_rollback_and_connect_use_the_commercial_driver(self) -> None:
         """Explicit commit/rollback reach the raw session; connect wraps pg8000."""

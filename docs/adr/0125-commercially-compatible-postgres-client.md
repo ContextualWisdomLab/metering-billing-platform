@@ -28,9 +28,10 @@ PostgreSQL client for issue #157.
 ## Decision
 
 - Replace the runtime PostgreSQL client with BSD-3-Clause `pg8000`
-  (`pg8000>=1.31,<2`), a pure-Python DB-API driver whose only runtime
-  dependency is MIT `scramp`. Install it as a hash-locked wheel with
-  `--only-binary=:all:`.
+  (`pg8000>=1.31,<2`), a pure-Python DB-API driver. Install it as a
+  hash-locked wheel with `--only-binary=:all:`. The locked tree is
+  `pg8000`, MIT `scramp` and `asn1crypto`, Apache-2.0 / BSD
+  `python-dateutil`, and MIT `six`.
 - Expose the existing ledger/migration session surface through
   `metering_billing.postgres_client`. `PostgresUsageLedger.connect` and
   `scripts/migrate_postgres.py` open sessions only through that adapter.
@@ -38,17 +39,32 @@ PostgreSQL client for issue #157.
 - Parse the existing CI, Compose, and local DSNs: keyword
   (`dbname=... user=... host=127.0.0.1`), URI
   (`postgresql://user:pass@host:5432/db`), and unix-socket
-  (`postgresql:///db?host=/tmp&port=5433`).
+  (`postgresql:///db?host=/tmp&port=5433`). Map libpq `sslmode` onto
+  `pg8000.dbapi.connect(ssl_context=...)`: `disable` / `allow` omit TLS;
+  `prefer` / `require` open TLS without certificate verification;
+  `verify-ca` verifies the CA without a hostname check; `verify-full`
+  uses the default verifying context. Unknown modes fail closed.
+  `allow` and `prefer` do not implement libpq's fallback negotiation.
 - Split unparameterized migration bodies on top-level semicolons so
   `apply_migrations` can still `connection.execute` a multi-statement
-  script. Nested `transaction()` blocks use savepoints.
-- Map PostgreSQL SQLSTATE `23503` and foreign-key error text onto
-  `metering_billing.postgres_client.ForeignKeyViolation`.
-- Reject copyleft PostgreSQL clients in `pyproject.toml`,
-  `requirements-runtime.txt`, and `uv.lock`. Public operator docs
-  (README, ARCHITECTURE, CONTRIBUTING, VALIDATION) must not present the
-  replaced client as an acceptable commercial install. README must name
-  `pg8000` and claim the durable client is license-clean.
+  script. Nested `transaction()` blocks use savepoints. Depth increment
+  and `SAVEPOINT` share the `finally` that restores depth so a refused
+  savepoint cannot leak nesting.
+- Read SQLSTATE from `error.sqlstate` or the pg8000 `DatabaseError`
+  payload `args[0]["C"]`. When a SQLSTATE is present, only `23503` maps
+  onto `metering_billing.postgres_client.ForeignKeyViolation`. Message
+  text is a fallback only when no SQLSTATE is present.
+- Reject copyleft PostgreSQL clients case-insensitively, including
+  `psycopg3`, `psycopg-c`, and `psycopg_binary`, in `pyproject.toml`,
+  `requirements-runtime.txt`, and `uv.lock`. `uv.lock` must also name
+  `pg8000`. Public operator docs (README, CHANGELOG, ARCHITECTURE,
+  CONTRIBUTING, VALIDATION) must not present the replaced client as an
+  acceptable commercial install. README must name `pg8000` and claim
+  the durable client is license-clean.
+- Record the locked commercially compatible dependency-tree licenses:
+  `pg8000` BSD-3-Clause, `scramp` MIT, `asn1crypto` MIT,
+  `python-dateutil` Apache-2.0 / BSD, and `six` MIT. Do not add a
+  GPL/LGPL/AGPL client to that tree.
 
 ## Consequences
 

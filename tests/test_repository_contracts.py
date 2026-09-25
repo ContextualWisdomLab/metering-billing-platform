@@ -4562,7 +4562,7 @@ class RepositoryContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (copied_root / "uv.lock").write_text(
-                'name = "psycopg"\nname = "psycopg-binary"\n',
+                'name = "psycopg"\nname = "psycopg-binary"\nname = "PSYCOPG3"\n',
                 encoding="utf-8",
             )
             errors = validate_repository(copied_root)
@@ -4583,7 +4583,15 @@ class RepositoryContractTests(unittest.TestCase):
             errors,
         )
         self.assertIn(
+            "uv.lock: copyleft PostgreSQL client psycopg3 is not a commercially compatible runtime",
+            errors,
+        )
+        self.assertIn(
             "pyproject.toml: commercially compatible PostgreSQL client pg8000 is required",
+            errors,
+        )
+        self.assertIn(
+            "uv.lock: commercially compatible PostgreSQL client pg8000 is required",
             errors,
         )
 
@@ -4594,6 +4602,12 @@ class RepositoryContractTests(unittest.TestCase):
             find_copyleft_postgres_clients("do not install psycopg-binary"),
             ("psycopg-binary",),
         )
+        self.assertEqual(
+            find_copyleft_postgres_clients(
+                "PSYCOPG3 plus psycopg-c and psycopg_binary"
+            ),
+            ("psycopg-c", "psycopg3", "psycopg_binary"),
+        )
         with tempfile.TemporaryDirectory() as temporary_directory:
             copied_root = Path(temporary_directory) / "repository"
             shutil.copytree(ROOT, copied_root)
@@ -4603,9 +4617,19 @@ class RepositoryContractTests(unittest.TestCase):
                 + "\nInstall psycopg[binary] for PostgreSQL.\n",
                 encoding="utf-8",
             )
+            changelog = copied_root / "CHANGELOG.md"
+            changelog.write_text(
+                changelog.read_text(encoding="utf-8")
+                + "\nInstall Psycopg for the ledger.\n",
+                encoding="utf-8",
+            )
             errors = validate_commercial_postgres_runtime(copied_root)
         self.assertIn(
             "README.md: public docs must not present psycopg as a commercial PostgreSQL install",
+            errors,
+        )
+        self.assertIn(
+            "CHANGELOG.md: public docs must not present psycopg as a commercial PostgreSQL install",
             errors,
         )
 

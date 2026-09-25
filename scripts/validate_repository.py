@@ -341,7 +341,9 @@ ACTION_REFERENCE_PATTERN = re.compile(
 )
 FULL_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 COPYLEFT_POSTGRES_CLIENT_PATTERN = re.compile(
-    r"\b(psycopg2-binary|psycopg2|psycopg-binary|psycopg)\b"
+    r"\b(psycopg2-binary|psycopg2|psycopg-binary|psycopg_binary|"
+    r"psycopg-c|psycopg3|psycopg)\b",
+    re.IGNORECASE,
 )
 COMMERCIAL_POSTGRES_CLIENT_NAME = "pg8000"
 COPYLEFT_RUNTIME_FILES = (
@@ -351,6 +353,7 @@ COPYLEFT_RUNTIME_FILES = (
 )
 PUBLIC_LICENSE_DOCUMENTS = (
     "README.md",
+    "CHANGELOG.md",
     "docs/ARCHITECTURE.md",
     "docs/CONTRIBUTING.md",
     "docs/doctoring/VALIDATION.md",
@@ -392,15 +395,18 @@ def find_placeholder_tokens(text: str) -> tuple[str, ...]:
 
 def find_copyleft_postgres_clients(text: str) -> tuple[str, ...]:
     """Return GPL/LGPL/AGPL PostgreSQL client names mentioned in *text*."""
-    return tuple(sorted(set(COPYLEFT_POSTGRES_CLIENT_PATTERN.findall(text))))
+    return tuple(
+        sorted({match.lower() for match in COPYLEFT_POSTGRES_CLIENT_PATTERN.findall(text)})
+    )
 
 
 def validate_commercial_postgres_runtime(root: Path) -> tuple[str, ...]:
     """Require a commercially compatible PostgreSQL client in the runtime set.
 
     Public docs may describe the replacement of a copyleft driver in an ADR,
-    but the install surface and operator docs must not present ``psycopg`` as
-    an acceptable commercial dependency.
+    but the install surface, CHANGELOG, and operator docs must not present
+    ``psycopg`` or its copyleft aliases as an acceptable commercial
+    dependency.
     """
     errors: list[str] = []
     for relative_path in COPYLEFT_RUNTIME_FILES:
@@ -413,12 +419,11 @@ def validate_commercial_postgres_runtime(root: Path) -> tuple[str, ...]:
                 f"{relative_path}: copyleft PostgreSQL client {client_name} "
                 "is not a commercially compatible runtime"
             )
-        if relative_path in {"pyproject.toml", "requirements-runtime.txt"}:
-            if COMMERCIAL_POSTGRES_CLIENT_NAME not in text:
-                errors.append(
-                    f"{relative_path}: commercially compatible PostgreSQL client "
-                    f"{COMMERCIAL_POSTGRES_CLIENT_NAME} is required"
-                )
+        if COMMERCIAL_POSTGRES_CLIENT_NAME not in text:
+            errors.append(
+                f"{relative_path}: commercially compatible PostgreSQL client "
+                f"{COMMERCIAL_POSTGRES_CLIENT_NAME} is required"
+            )
     for relative_path in PUBLIC_LICENSE_DOCUMENTS:
         path = root / relative_path
         if not path.is_file():
