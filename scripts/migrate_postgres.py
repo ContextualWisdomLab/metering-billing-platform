@@ -5,8 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import sys
 from pathlib import Path
 from typing import Any, Sequence
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+
+from metering_billing.postgres_client import connect
 
 
 MIGRATION_HISTORY_TABLE = "public.metering_billing_schema_migration"
@@ -100,9 +106,9 @@ def apply_migrations(connection: Any, migration_directory: Path) -> tuple[str, .
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-    """Apply migrations from the command line using a psycopg connection."""
+    """Apply migrations from the command line using a commercially compatible connection."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dsn", required=True, help="psycopg connection string")
+    parser.add_argument("--dsn", required=True, help="PostgreSQL connection string")
     parser.add_argument(
         "--migrations",
         type=Path,
@@ -110,11 +116,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         help="directory containing ordered SQL migrations",
     )
     options = parser.parse_args(arguments)
-    try:
-        import psycopg
-    except ImportError as error:  # pragma: no cover - packaging smoke covers this boundary
-        raise RuntimeError("PostgreSQL support requires psycopg[binary]") from error
-    with psycopg.connect(options.dsn) as connection:
+    with connect(options.dsn) as connection:
         applied = apply_migrations(connection, options.migrations)
     print(f"applied {len(applied)} PostgreSQL migrations")
     return 0

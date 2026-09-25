@@ -54,9 +54,11 @@ from metering_billing.contracts import (
 )
 from scripts.validate_repository import (
     main,
+    find_copyleft_postgres_clients,
     find_mutable_action_references,
     find_placeholder_tokens,
     validate_accounting_journal_proposal,
+    validate_commercial_postgres_runtime,
     validate_repository,
     validate_schema_instance,
     validate_sql_object_names,
@@ -4516,7 +4518,7 @@ class RepositoryContractTests(unittest.TestCase):
             requirements = copied_root / "requirements-quality.txt"
             requirements.write_text("coverage==7.15.4\n", encoding="utf-8")
             runtime_requirements = copied_root / "requirements-runtime.txt"
-            runtime_requirements.write_text("psycopg==3.3.4\n", encoding="utf-8")
+            runtime_requirements.write_text("example-runtime==1.0.0\n", encoding="utf-8")
             workflow = copied_root / ".github/workflows/ci.yml"
             workflow.write_text(
                 workflow.read_text(encoding="utf-8")
@@ -4543,6 +4545,86 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("unresolved placeholder in README.md: TODO", errors)
         self.assertIn(
             "mutable GitHub Action reference in .github/workflows/ci.yml: actions/checkout@v4",
+            errors,
+        )
+
+    def test_runtime_rejects_copyleft_postgres_clients(self) -> None:
+        """Hash-locked psycopg is still not a commercially compatible runtime."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            copied_root = Path(temporary_directory) / "repository"
+            shutil.copytree(ROOT, copied_root)
+            (copied_root / "pyproject.toml").write_text(
+                '[project]\ndependencies = ["psycopg[binary]>=3.2,<4"]\n',
+                encoding="utf-8",
+            )
+            (copied_root / "requirements-runtime.txt").write_text(
+                "psycopg==3.3.4 \\\n    --hash=sha256:" + ("ab" * 32) + "\n",
+                encoding="utf-8",
+            )
+            (copied_root / "uv.lock").write_text(
+                'name = "psycopg"\nname = "psycopg-binary"\n',
+                encoding="utf-8",
+            )
+            errors = validate_repository(copied_root)
+        self.assertIn(
+            "pyproject.toml: copyleft PostgreSQL client psycopg is not a commercially compatible runtime",
+            errors,
+        )
+        self.assertIn(
+            "requirements-runtime.txt: copyleft PostgreSQL client psycopg is not a commercially compatible runtime",
+            errors,
+        )
+        self.assertIn(
+            "uv.lock: copyleft PostgreSQL client psycopg is not a commercially compatible runtime",
+            errors,
+        )
+        self.assertIn(
+            "uv.lock: copyleft PostgreSQL client psycopg-binary is not a commercially compatible runtime",
+            errors,
+        )
+        self.assertIn(
+            "pyproject.toml: commercially compatible PostgreSQL client pg8000 is required",
+            errors,
+        )
+
+    def test_public_docs_do_not_recommend_psycopg(self) -> None:
+        """README and operator docs must not present psycopg as a commercial install."""
+        self.assertEqual(find_copyleft_postgres_clients("pg8000 only"), ())
+        self.assertEqual(
+            find_copyleft_postgres_clients("do not install psycopg-binary"),
+            ("psycopg-binary",),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            copied_root = Path(temporary_directory) / "repository"
+            shutil.copytree(ROOT, copied_root)
+            readme = copied_root / "README.md"
+            readme.write_text(
+                readme.read_text(encoding="utf-8")
+                + "\nInstall psycopg[binary] for PostgreSQL.\n",
+                encoding="utf-8",
+            )
+            errors = validate_commercial_postgres_runtime(copied_root)
+        self.assertIn(
+            "README.md: public docs must not present psycopg as a commercial PostgreSQL install",
+            errors,
+        )
+
+    def test_readme_must_claim_license_clean_pg8000_runtime(self) -> None:
+        """The public README must name pg8000 and claim a license-clean client."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            copied_root = Path(temporary_directory) / "repository"
+            shutil.copytree(ROOT, copied_root)
+            (copied_root / "README.md").write_text(
+                "# Metering Billing Platform\n\nNo client named.\n",
+                encoding="utf-8",
+            )
+            errors = validate_commercial_postgres_runtime(copied_root)
+        self.assertIn(
+            "README.md: must name the commercially compatible PostgreSQL client pg8000",
+            errors,
+        )
+        self.assertIn(
+            "README.md: must claim the durable PostgreSQL client is license-clean",
             errors,
         )
 

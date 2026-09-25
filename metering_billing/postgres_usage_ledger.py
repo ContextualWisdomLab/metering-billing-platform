@@ -25,6 +25,7 @@ from metering_billing.errors import (
     RejectionReasonCode,
     UsageEventConflict,
 )
+from metering_billing.postgres_client import connect as connect_postgres
 from metering_billing.exact_decimal import (
     format_exact_decimal,
     parse_exact_decimal,
@@ -92,7 +93,8 @@ MIGRATION_HISTORY_TABLE = "public.metering_billing_schema_migration"
 class PostgresUsageLedger:
     """Persist usage attribution and immutable facts in PostgreSQL.
 
-    ``connection`` is a psycopg 3 connection.  It is injected so callers can
+    ``connection`` is a commercially compatible PostgreSQL session from
+    ``metering_billing.postgres_client``.  It is injected so callers can
     control pooling and lifecycle; :meth:`connect` is the small convenience
     entry point for a standalone process.  The connection is not closed by
     :meth:`close` unless this repository created it.
@@ -103,21 +105,15 @@ class PostgresUsageLedger:
         self._owns_connection = owns_connection
         self._transaction_active = False
         self.webhook_subscription_secrets: dict[UUID, str] = {}
-        # One psycopg connection serializes its transactions; the threaded web
+        # One PostgreSQL connection serializes its transactions; the threaded web
         # tier must funnel every session touch through this reentrant lock so
         # concurrent requests never interleave transaction nesting.
         self._connection_lock = RLock()
 
     @classmethod
     def connect(cls, dsn: str) -> "PostgresUsageLedger":
-        """Open a psycopg connection for the current migration set."""
-        try:
-            import psycopg
-        except ImportError as error:  # pragma: no cover - exercised by packaging smoke
-            raise RuntimeError(
-                "PostgreSQL support requires the project dependency psycopg[binary]"
-            ) from error
-        return cls(psycopg.connect(dsn), owns_connection=True)
+        """Open a commercially compatible PostgreSQL session for this migration set."""
+        return cls(connect_postgres(dsn), owns_connection=True)
 
     @contextmanager
     def _cursor(self) -> Iterator[Any]:

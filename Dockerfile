@@ -1,5 +1,5 @@
 # Runtime image for `python -m metering_billing.http_app`.
-# Single stage on purpose: the app is stdlib plus one hash-locked wheel.
+# Single stage on purpose: the app is stdlib plus hash-locked commercially compatible wheels.
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

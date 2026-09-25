@@ -13,8 +13,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-import psycopg
-
 from metering_billing import (
     CollectionCaseService,
     CollectionCaseSettlementService,
@@ -65,6 +63,7 @@ from metering_billing.unapplied_cash_application import (
 from metering_billing.unapplied_cash_refund import (
     compute_unapplied_cash_refund_payload_hash,
 )
+from metering_billing.postgres_client import ForeignKeyViolation, connect
 from metering_billing.errors import (
     CollectionDisputePresentmentQueryError,
     CollectionDisputeRejectionReasonCode,
@@ -178,7 +177,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             raise RuntimeError(
                 "METERING_BILLING_POSTGRES_DSN must point to a dedicated test database"
             )
-        cls.connection = psycopg.connect(POSTGRES_DSN)
+        cls.connection = connect(POSTGRES_DSN)
         cls.connection.execute(f"DROP TABLE IF EXISTS {MIGRATION_HISTORY_TABLE}")
         cls.connection.execute("DROP SCHEMA IF EXISTS billing_core CASCADE")
         cls.connection.commit()
@@ -974,7 +973,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             event_payload_hash="sha256:" + "c" * 64,
             measurements=(bad_measurement,),
         )
-        with self.assertRaises(psycopg.errors.ForeignKeyViolation):
+        with self.assertRaises(ForeignKeyViolation):
             self.ledger.insert_usage_event(bad_event)
         self.assertIsNone(self.ledger.get_usage_event(bad_event.usage_event_id))
 
@@ -994,7 +993,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 return result
 
         def ingest_once(_: int) -> str:
-            with psycopg.connect(POSTGRES_DSN) as connection:
+            with connect(POSTGRES_DSN) as connection:
                 receipt = UsageIngestionService(BarrierLedger(connection)).ingest_usage_event(event)
                 return receipt.ingestion_outcome_code.value
 
@@ -1041,7 +1040,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
 
         def ingest_once(event):
-            with psycopg.connect(POSTGRES_DSN) as connection:
+            with connect(POSTGRES_DSN) as connection:
                 return UsageIngestionService(BarrierLedger(connection)).ingest_usage_event(event)
 
         with ThreadPoolExecutor(max_workers=2) as pool:

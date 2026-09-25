@@ -18,7 +18,7 @@ whole unit suite depends on it staying the default. Production selection must
 fail closed at startup, not on the first request, when a PostgreSQL DSN is
 missing. Operators also need one readiness endpoint that reports which backend
 is serving without leaking exception internals, and the probe must reuse the
-ledger's own connection conventions instead of opening ad-hoc psycopg
+ledger's own connection conventions instead of opening ad-hoc PostgreSQL
 connections beside it.
 
 ## Decision

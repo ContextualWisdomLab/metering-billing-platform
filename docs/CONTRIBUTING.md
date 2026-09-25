@@ -51,7 +51,7 @@ The default branch carries the repository-local workflow
   `actions/checkout`;
 - installs Python 3.13 with a commit-pinned `actions/setup-python`;
 - installs hash-locked quality tooling from `requirements-quality.txt` and
-  runtime dependencies from `requirements-runtime.txt`;
+  the commercially compatible `pg8000` runtime from `requirements-runtime.txt`;
 - starts a PostgreSQL 18 service container and applies every checked-in
   migration through `scripts/migrate_postgres.py`;
 - runs the unit suite under branch coverage, fails under 100% statement and
