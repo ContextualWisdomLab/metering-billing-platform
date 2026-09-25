@@ -1710,6 +1710,7 @@ test("validated unused invoice-void journal shows exact usage-revenue debit and 
   const taxedIssued = loadFixture("issued_taxed_hundred.json");
   const assessedVat = loadFixture("assessed_morning_vat.json");
   const writeOffJournal = loadFixture("validated_morning_write_off_journal.json");
+  const leftoverWriteOff = loadFixture("recorded_leftover_collection_write_off.json");
   const leftoverApply = loadFixture("applied_morning_unapplied_cash.json");
   const html = renderJournalProposal(statement);
   assert.match(html, /100\.00 USD/);
@@ -1733,9 +1734,21 @@ test("validated unused invoice-void journal shows exact usage-revenue debit and 
     `urn:cwl:tenant_001:issued_invoice_void:${unusedInvoiceVoid.issued_invoice_void_id}`,
   );
   assert.equal(unusedInvoiceVoid.voided_amount, "110.00");
+  assert.equal(unusedInvoiceVoid.issued_invoice_void_status, "recorded");
   assert.equal(unusedInvoiceVoid.issued_invoice_id, taxedIssued.issued_invoice_id);
   assert.equal(unusedInvoiceVoid.invoice_draft_id, taxedIssued.invoice_draft_id);
   assert.equal(taxedIssued.invoice_draft_id, assessedVat.invoice_draft_id);
+  assert.equal(
+    statement.idempotency_key,
+    `urn:cwl:tenant_001:issued_invoice_void:${unusedInvoiceVoid.issued_invoice_void_id}:${unusedInvoiceVoid.source_payload_hash}:v1`,
+  );
+  assert.equal(
+    statement.source_payload_hash,
+    "sha256:1818181818181818181818181818181818181818181818181818181818181818",
+  );
+  assert.notEqual(statement.source_payload_hash, unusedInvoiceVoid.source_payload_hash);
+  assert.equal(leftoverWriteOff.remaining_outstanding_amount, "0");
+  assert.equal(leftoverWriteOff.collection_write_off_status, "recorded");
   assert.equal(leftoverApply.remaining_outstanding_amount, "19.999");
   assert.notEqual(statement.proposal_id, writeOffJournal.proposal_id);
   assert.ok(!("next_operator_action" in statement));

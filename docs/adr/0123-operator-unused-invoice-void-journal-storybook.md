@@ -55,12 +55,14 @@ unchanged.
 - Fixture lines reverse the taxed invoice-draft journal: debit
   `usage_revenue` exclusive `100.00`, debit `tax_payable` tax `10.00`, and
   credit `accounts_receivable` inclusive `110.00` from
-  `propose_void_journal` leftover compose /
+  `propose_void_journal` unused-void compose /
   `test_issued_invoice_void_journal_is_durable` /
   `test_taxed_void_reverses_tax_payable_on_the_same_journal`.
-  `proposal_status` stays `validated`. Unused issued-invoice void inclusive
-  `voided_amount` stays `110.00`. Next operator action copy is `wait`. The
-  published journal-proposal contract has no `next_operator_action` field.
+  Journal `source_payload_hash` is the compose payload hash, not the unused
+  void-row hash that the idempotency key embeds. `proposal_status` stays
+  `validated`. Unused issued-invoice void inclusive `voided_amount` stays
+  `110.00`. Next operator action copy is `wait`. The published
+  journal-proposal contract has no `next_operator_action` field.
   Float money fails closed.
 - Pin fixture `X-CWL-Tenant-Reference` to the commercial `tenant_account`
   (`urn:cwl:tenant_001`). Do not auto-create tenants. The unused
@@ -83,12 +85,14 @@ unchanged.
 ## Consequences
 
 - Operators can open one validated unused invoice-void journal in
-  Storybook and see exact usage-revenue debit, tax-payable debit, AR
-  credit, validated status, tenant pin, and the next action: wait. Cash,
-  invoice-draft, leftover, leftover-apply, leftover-refund, and write-off
-  journal stories stay those presentments. Unused issued-invoice-void
-  Storybook stays the unused-void row presentment. Unused issued-invoice
-  void inclusive `voided_amount` stays `110.00`.
+  Storybook and see exact usage-revenue debit `100.00` on `AmountDue`,
+  validated status, tenant pin, and the next action: wait. Stored fixture
+  lines also reverse tax-payable debit `10.00` and AR credit `110.00`.
+  The reused `JournalProposal` renderer does not print those later lines.
+  Cash, invoice-draft, leftover, leftover-apply, leftover-refund, and
+  write-off journal stories stay those presentments. Unused
+  issued-invoice-void Storybook stays the unused-void row presentment.
+  Unused issued-invoice void inclusive `voided_amount` stays `110.00`.
 - Python remains the commercial authority. The console only presents
   stored #63 JSON.
 - Unused invoice-void journal persist, HTTP write, GET, and #24 outbox

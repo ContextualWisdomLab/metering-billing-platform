@@ -1278,6 +1278,26 @@ class OperatorConsoleTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            unused_invoice_void_journal["idempotency_key"],
+            (
+                "urn:cwl:tenant_001:issued_invoice_void:"
+                f"{unused_invoice_void['issued_invoice_void_id']}:"
+                f"{unused_invoice_void['source_payload_hash']}:v1"
+            ),
+        )
+        self.assertEqual(
+            unused_invoice_void_journal["source_payload_hash"],
+            "sha256:1818181818181818181818181818181818181818181818181818181818181818",
+        )
+        self.assertNotEqual(
+            unused_invoice_void_journal["source_payload_hash"],
+            unused_invoice_void["source_payload_hash"],
+        )
+        self.assertEqual(
+            unused_invoice_void["issued_invoice_void_status"],
+            "recorded",
+        )
+        self.assertEqual(
             unused_invoice_void_journal["lines"][0]["account_role_code"],
             "usage_revenue",
         )
@@ -1501,6 +1521,10 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertIn("Void an unused issued invoice, then wait", inventory)
         self.assertIn("Write off leftover remaining, then settle", inventory)
         self.assertIn("Let AIS pull the validated journal", inventory)
+        self.assertIn(
+            "write-off, or unused invoice-void amount and the next operator action",
+            inventory,
+        )
 
     def test_node_renderer_prints_exact_decimal_strings(self) -> None:
         """Vanilla modules must emit fixture amounts as strings, never floats."""
