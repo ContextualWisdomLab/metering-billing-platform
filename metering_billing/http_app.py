@@ -109,6 +109,10 @@ The application is a thin WSGI adapter:
     identity returns the stored ``spend_budget_id``.  GET item and list
     present the stored row.  The write does not compare rated spend,
     stop rating, or compose a journal.
+    ``GET /v1/spend-budgets/{spend_budget_id}/evaluation`` compares that
+    stored budget to exclusive already-rated product spend for the same
+    billing account, half-open window, and currency.  The read does not
+    persist an evaluation row or compose a journal.
     ``POST /v1/issued-invoices/{issued_invoice_id}/voids`` records one
     commercial void of an unused issued invoice.  Replay of the same
     tenant and issued invoice returns the stored
@@ -252,6 +256,7 @@ from metering_billing.credit_adjustment import CreditAdjustmentService
 from metering_billing.errors import (
     AccountStatementPresentmentQueryError,
     RatedSpendPresentmentQueryError,
+    SpendBudgetEvaluationQueryError,
     SpendBudgetPresentmentQueryError,
     CollectionAgingPresentmentQueryError,
     CollectionCasePresentmentQueryError,
@@ -343,6 +348,7 @@ from metering_billing.account_statement_presentment import (
 )
 from metering_billing.rated_spend_presentment import RatedSpendPresentmentService
 from metering_billing.spend_budget import SpendBudgetService
+from metering_billing.spend_budget_evaluation import SpendBudgetEvaluationService
 from metering_billing.spend_budget_presentment import SpendBudgetPresentmentService
 from metering_billing.collection_aging_presentment import (
     Clock,
@@ -396,6 +402,9 @@ BILLING_ACCOUNT_SPEND_BUDGETS_PATH = re.compile(
 )
 SPEND_BUDGET_COLLECTION_PATH = "/v1/spend-budgets"
 SPEND_BUDGET_ITEM_PATH = re.compile(r"^/v1/spend-budgets/([0-9a-fA-F-]{36})$")
+SPEND_BUDGET_EVALUATION_PATH = re.compile(
+    r"^/v1/spend-budgets/([0-9a-fA-F-]{36})/evaluation$"
+)
 COLLECTION_CASE_ITEM_PATH = re.compile(r"^/v1/collection-cases/([0-9a-fA-F-]{36})$")
 COLLECTION_DUNNING_PATH = re.compile(
     r"^/v1/collection-cases/([0-9a-fA-F-]{36})/dunning-events$"
@@ -662,6 +671,7 @@ def create_http_app(
     rated_spend_presentments = RatedSpendPresentmentService(shared_ledger)
     spend_budgets = SpendBudgetService(shared_ledger, clock=clock)
     spend_budget_presentments = SpendBudgetPresentmentService(shared_ledger)
+    spend_budget_evaluations = SpendBudgetEvaluationService(shared_ledger)
     dunning_presentments = DunningEventPresentmentService(shared_ledger)
     intent_presentments = PaymentIntentPresentmentService(shared_ledger)
     receipt_presentments = PaymentReceiptPresentmentService(shared_ledger)
@@ -1554,6 +1564,32 @@ def create_http_app(
                     status_code = 403
                 else:
                     status_code = 422
+                return _send_json(
+                    start_response,
+                    status_code,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except HttpRequestError as error:
+                return _send_json(
+                    start_response,
+                    422,
+                    {"rejection_reason_code": error.rejection_reason_code},
+                )
+            except (ExactDecimalError, TimeWindowError, ValueError):
+                return _send_json(start_response, 422, {"rejection_reason_code": "request_invalid"})
+        if route_name == "evaluate_spend_budget":
+            try:
+                query = _read_query(environ)
+                tenant_reference = _authorized_tenant(environ, query)
+                result = spend_budget_evaluations.evaluate_spend_budget(
+                    tenant_reference,
+                    _parse_uuid(path_values["spend_budget_id"], "spend_budget_id"),
+                )
+                return _send_json(start_response, 200, result.as_contract_dict())
+            except SpendBudgetEvaluationQueryError as error:
+                status_code = (
+                    404 if error.rejection_reason_code == "spend_budget_not_found" else 422
+                )
                 return _send_json(
                     start_response,
                     status_code,
@@ -2695,6 +2731,13 @@ def _resolve_route(method: str, path: str) -> tuple[str | None, dict[str, str]]:
     if path == SPEND_BUDGET_COLLECTION_PATH:
         if method == "GET":
             return "list_spend_budgets", {}
+        return "method_not_allowed", {}
+    evaluation_match = SPEND_BUDGET_EVALUATION_PATH.fullmatch(path)
+    if evaluation_match is not None:
+        if method == "GET":
+            return "evaluate_spend_budget", {
+                "spend_budget_id": evaluation_match.group(1)
+            }
         return "method_not_allowed", {}
     budget_match = SPEND_BUDGET_ITEM_PATH.fullmatch(path)
     if budget_match is not None:

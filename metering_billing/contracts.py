@@ -26,6 +26,7 @@ __all__ = (
     "PAYMENT_RECEIPT_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_SCHEMA_NAME",
+    "SPEND_BUDGET_EVALUATION_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
     "TAX_RATE_SCHEMA_NAME",
@@ -89,6 +90,7 @@ __all__ = (
     "validate_payment_intent_presentment",
     "validate_payment_receipt_presentment",
     "validate_credit_adjustment_presentment",
+    "validate_spend_budget_evaluation",
     "validate_spend_budget_presentment",
     "validate_rate_card_presentment",
     "validate_usage_event_presentment",
@@ -158,6 +160,7 @@ PAYMENT_INTENT_PRESENTMENT_SCHEMA_NAME = "payment-intent-presentment.schema.json
 PAYMENT_RECEIPT_PRESENTMENT_SCHEMA_NAME = "payment-receipt-presentment.schema.json"
 CREDIT_ADJUSTMENT_PRESENTMENT_SCHEMA_NAME = "credit-adjustment-presentment.schema.json"
 SPEND_BUDGET_SCHEMA_NAME = "spend-budget.schema.json"
+SPEND_BUDGET_EVALUATION_SCHEMA_NAME = "spend-budget-evaluation.schema.json"
 SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME = "spend-budget-presentment.schema.json"
 RATE_CARD_PRESENTMENT_SCHEMA_NAME = "rate-card-presentment.schema.json"
 USAGE_EVENT_PRESENTMENT_SCHEMA_NAME = "usage-event-presentment.schema.json"
@@ -1327,6 +1330,78 @@ def _missing_success_payment_receipt_fields(
         if field_name not in payment_receipt:
             missing.append(f"$: {outcome} payment receipts must include {field_name}")
     return tuple(missing)
+
+
+def validate_spend_budget_evaluation(
+    statement: Any, schemas_directory: Path | None = None
+) -> tuple[str, ...]:
+    """Validate spend-budget evaluation shape plus complementary amount invariants."""
+    schema = load_json_schema(SPEND_BUDGET_EVALUATION_SCHEMA_NAME, schemas_directory)
+    errors = list(validate_schema_instance(schema, statement))
+    if not isinstance(statement, Mapping):
+        return tuple(errors)
+    budget_amount = statement.get("budget_amount")
+    rated_amount = statement.get("rated_amount")
+    remaining_amount = statement.get("remaining_amount")
+    over_amount = statement.get("over_amount")
+    action = statement.get("next_operator_action")
+    status = statement.get("spend_budget_status")
+    utilization = statement.get("utilization_status")
+    parsed_budget = _parse_evaluation_amount(budget_amount, "budget_amount", errors, minimum=None)
+    if parsed_budget is not None and parsed_budget <= Decimal("0"):
+        errors.append("$: budget_amount must be greater than zero")
+    parsed_rated = _parse_evaluation_amount(rated_amount, "rated_amount", errors)
+    parsed_remaining = _parse_evaluation_amount(remaining_amount, "remaining_amount", errors)
+    parsed_over = _parse_evaluation_amount(over_amount, "over_amount", errors)
+    if (
+        parsed_budget is not None
+        and parsed_rated is not None
+        and parsed_remaining is not None
+        and parsed_over is not None
+        and parsed_budget > Decimal("0")
+        and parsed_rated >= Decimal("0")
+        and parsed_remaining >= Decimal("0")
+        and parsed_over >= Decimal("0")
+    ):
+        if utilization == "under":
+            expected_remaining = parsed_budget - parsed_rated
+            if parsed_remaining != expected_remaining or parsed_over != Decimal("0"):
+                errors.append(
+                    "$: under remaining_amount must equal budget_amount minus rated_amount"
+                )
+        elif utilization == "at":
+            if parsed_remaining != Decimal("0") or parsed_over != Decimal("0"):
+                errors.append("$: at remaining_amount and over_amount must be zero")
+        elif utilization == "over":
+            expected_over = parsed_rated - parsed_budget
+            if parsed_over != expected_over or parsed_remaining != Decimal("0"):
+                errors.append(
+                    "$: over over_amount must equal rated_amount minus budget_amount"
+                )
+    if status == "published" and action != "wait":
+        errors.append("$: published spend budgets must wait")
+    if "card_pan" in statement:
+        errors.append("$: spend budget evaluation must not include card_pan")
+    if "retained_earnings" in statement:
+        errors.append("$: spend budget evaluation must not include retained_earnings")
+    return tuple(errors)
+
+
+def _parse_evaluation_amount(
+    value: Any, field_name: str, errors: list[str], minimum: Decimal | None = Decimal("0")
+) -> Decimal | None:
+    """Parse one evaluation amount or record an exact-decimal error."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = Decimal(value)
+    except Exception:
+        errors.append(f"$: {field_name} must be an exact decimal")
+        return None
+    if minimum is not None and parsed < minimum:
+        errors.append(f"$: {field_name} must be greater than or equal to zero")
+        return parsed
+    return parsed
 
 
 def validate_spend_budget_presentment(

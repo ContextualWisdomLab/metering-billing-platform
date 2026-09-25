@@ -23,6 +23,7 @@ from metering_billing.contracts import (
     validate_payment_receipt_presentment,
     validate_credit_adjustment_presentment,
     validate_spend_budget,
+    validate_spend_budget_evaluation,
     validate_spend_budget_presentment,
     validate_rate_card_presentment,
     validate_usage_event_presentment,
@@ -1473,6 +1474,110 @@ class RepositoryContractTests(unittest.TestCase):
         )
         non_string_presentment = dict(instance, budget_amount=100)
         self.assertNotEqual(validate_spend_budget_presentment(non_string_presentment), ())
+
+    def test_spend_budget_evaluation_accepts_under_at_over_and_rejects_posted(self) -> None:
+        """Evaluation records complementary exact amounts and cannot claim posting."""
+        schema = self._schema("spend-budget-evaluation.schema.json")
+        instance = {
+            "spend_budget_evaluation_contract_version": 1,
+            "spend_budget_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf680",
+            "tenant_reference": "urn:cwl:tenant_001",
+            "billing_account_id": "019d7b92-1aa0-7a7f-b61c-962c0f4bf681",
+            "currency_code": "USD",
+            "budget_amount": "100.00",
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "spend_budget_status": "published",
+            "rated_amount": "40.00",
+            "remaining_amount": "60.00",
+            "over_amount": "0",
+            "utilization_status": "under",
+            "next_operator_action": "wait",
+        }
+        self.assertEqual(validate_schema_instance(schema, instance), ())
+        self.assertEqual(validate_spend_budget_evaluation(instance), ())
+        at_eval = dict(instance, rated_amount="100.00", remaining_amount="0", over_amount="0")
+        at_eval = dict(at_eval, utilization_status="at")
+        self.assertEqual(validate_spend_budget_evaluation(at_eval), ())
+        over_eval = dict(
+            instance,
+            rated_amount="150.00",
+            remaining_amount="0",
+            over_amount="50.00",
+            utilization_status="over",
+        )
+        self.assertEqual(validate_spend_budget_evaluation(over_eval), ())
+        posted = dict(instance, utilization_status="posted")
+        self.assertIn(
+            "$.utilization_status: value is not in the allowed enumeration",
+            validate_schema_instance(schema, posted),
+        )
+        self.assertNotEqual(validate_spend_budget_evaluation([]), ())
+        zeroed = dict(instance, budget_amount="0")
+        self.assertIn(
+            "$: budget_amount must be greater than zero",
+            validate_spend_budget_evaluation(zeroed),
+        )
+        bad_budget = dict(instance, budget_amount="not-decimal")
+        self.assertTrue(
+            any("budget_amount must be an exact decimal" in error for error in validate_spend_budget_evaluation(bad_budget))
+        )
+        bad_rated = dict(instance, rated_amount="not-decimal")
+        self.assertTrue(
+            any("rated_amount must be an exact decimal" in error for error in validate_spend_budget_evaluation(bad_rated))
+        )
+        bad_remaining = dict(instance, remaining_amount="not-decimal")
+        self.assertTrue(
+            any(
+                "remaining_amount must be an exact decimal" in error
+                for error in validate_spend_budget_evaluation(bad_remaining)
+            )
+        )
+        bad_over = dict(instance, over_amount="not-decimal")
+        self.assertTrue(
+            any("over_amount must be an exact decimal" in error for error in validate_spend_budget_evaluation(bad_over))
+        )
+        negative_rated = dict(instance, rated_amount="-1")
+        self.assertIn(
+            "$: rated_amount must be greater than or equal to zero",
+            validate_spend_budget_evaluation(negative_rated),
+        )
+        negative_remaining = dict(instance, remaining_amount="-1")
+        self.assertIn(
+            "$: remaining_amount must be greater than or equal to zero",
+            validate_spend_budget_evaluation(negative_remaining),
+        )
+        negative_over = dict(instance, over_amount="-1")
+        self.assertIn(
+            "$: over_amount must be greater than or equal to zero",
+            validate_spend_budget_evaluation(negative_over),
+        )
+        inconsistent_under = dict(instance, remaining_amount="1.00")
+        self.assertIn(
+            "$: under remaining_amount must equal budget_amount minus rated_amount",
+            validate_spend_budget_evaluation(inconsistent_under),
+        )
+        inconsistent_at = dict(at_eval, remaining_amount="1.00")
+        self.assertIn(
+            "$: at remaining_amount and over_amount must be zero",
+            validate_spend_budget_evaluation(inconsistent_at),
+        )
+        inconsistent_over = dict(over_eval, over_amount="1.00")
+        self.assertIn(
+            "$: over over_amount must equal rated_amount minus budget_amount",
+            validate_spend_budget_evaluation(inconsistent_over),
+        )
+        waiting = dict(instance, next_operator_action="collect")
+        self.assertIn("$: published spend budgets must wait", validate_spend_budget_evaluation(waiting))
+        pan = dict(instance, card_pan="4111111111111111")
+        self.assertIn("$: spend budget evaluation must not include card_pan", validate_spend_budget_evaluation(pan))
+        earnings = dict(instance, retained_earnings="1")
+        self.assertIn(
+            "$: spend budget evaluation must not include retained_earnings",
+            validate_spend_budget_evaluation(earnings),
+        )
+        non_string = dict(instance, rated_amount=40)
+        self.assertNotEqual(validate_spend_budget_evaluation(non_string), ())
 
     def test_spend_budget_migration_is_tenant_scoped_and_append_only(self) -> None:
         """Spend-budget rows stay tenant-scoped and append-only."""

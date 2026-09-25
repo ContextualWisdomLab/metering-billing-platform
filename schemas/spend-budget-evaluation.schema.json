@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contextualwisdomlab.org/metering-billing/spend-budget-evaluation/v1",
+  "title": "Spend Budget Evaluation",
+  "description": "Tenant-scoped commercial comparison of one stored spend_budget to exclusive already-rated product spend for the same billing account, half-open window, and currency. Amounts are exact-decimal strings. Utilization is under, at, or over. Next operator action is wait. The document is not a persisted evaluation row, posting, webhook, or statutory identifier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spend_budget_evaluation_contract_version",
+    "spend_budget_id",
+    "tenant_reference",
+    "billing_account_id",
+    "currency_code",
+    "budget_amount",
+    "window_started_at",
+    "window_ended_at",
+    "spend_budget_status",
+    "rated_amount",
+    "remaining_amount",
+    "over_amount",
+    "utilization_status",
+    "next_operator_action"
+  ],
+  "properties": {
+    "spend_budget_evaluation_contract_version": {"type": "integer", "minimum": 1},
+    "spend_budget_id": {"type": "string", "format": "uuid"},
+    "tenant_reference": {"type": "string", "pattern": "^urn:cwl:"},
+    "billing_account_id": {"type": "string", "format": "uuid"},
+    "currency_code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "budget_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "window_started_at": {"type": "string", "format": "date-time"},
+    "window_ended_at": {"type": "string", "format": "date-time"},
+    "spend_budget_status": {
+      "type": "string",
+      "enum": ["published"]
+    },
+    "rated_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "remaining_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "over_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "maxLength": 39
+    },
+    "utilization_status": {
+      "type": "string",
+      "enum": ["under", "at", "over"]
+    },
+    "next_operator_action": {
+      "type": "string",
+      "enum": ["wait"]
+    }
+  }
+}

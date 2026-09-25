@@ -5,7 +5,7 @@ Metering Billing Platform.  Callers can import JSON Schema contracts, ingest
 canonical usage events, publish versioned rate cards, present those cards as statements, present stored usage events, rate tenant-scoped
 windows against a persisted version, present those rating runs, draft invoice-intent documents, present
 those drafts as statements, present already-rated spend for one billing
-account and window grouped by product, optional project, optional credential, optional principal, or optional cost center, publish one commercial spend budget for one billing account and window, issue an immutable commercial invoice snapshot
+account and window grouped by product, optional project, optional credential, optional principal, or optional cost center, publish one commercial spend budget for one billing account and window, evaluate that stored budget against exclusive already-rated product spend, issue an immutable commercial invoice snapshot
 from a stored draft, present that issued invoice, issue an immutable
 commercial credit-note snapshot from a stored credit adjustment, present
 that issued credit note, void one unused issued credit note, publish tax rates, assess tax on a draft, present
@@ -37,6 +37,7 @@ from metering_billing.collection_case import CollectionCaseService
 from metering_billing.account_statement_presentment import AccountStatementPresentmentService
 from metering_billing.rated_spend_presentment import RatedSpendPresentmentService
 from metering_billing.spend_budget import SpendBudgetService
+from metering_billing.spend_budget_evaluation import SpendBudgetEvaluationService
 from metering_billing.spend_budget_presentment import SpendBudgetPresentmentService
 from metering_billing.collection_aging_presentment import CollectionAgingPresentmentService
 from metering_billing.collection_case_presentment import CollectionCasePresentmentService
@@ -53,6 +54,7 @@ from metering_billing.contracts import (
     ACCOUNT_STATEMENT_PRESENTMENT_SCHEMA_NAME,
     RATED_SPEND_PRESENTMENT_SCHEMA_NAME,
     SPEND_BUDGET_SCHEMA_NAME,
+    SPEND_BUDGET_EVALUATION_SCHEMA_NAME,
     SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME,
     COLLECTION_AGING_PRESENTMENT_SCHEMA_NAME,
     COLLECTION_CASE_PRESENTMENT_SCHEMA_NAME,
@@ -106,6 +108,7 @@ from metering_billing.contracts import (
     validate_account_statement_presentment,
     validate_rated_spend_presentment,
     validate_spend_budget,
+    validate_spend_budget_evaluation,
     validate_spend_budget_presentment,
     validate_collection_aging_presentment,
     validate_collection_case_presentment,
@@ -166,6 +169,7 @@ from metering_billing.errors import (
     CreditAdjustmentQueryError,
     CreditAdjustmentRejectionReasonCode,
     SpendBudgetOutcomeCode,
+    SpendBudgetEvaluationQueryError,
     SpendBudgetPresentmentQueryError,
     SpendBudgetQueryError,
     SpendBudgetRejectionReasonCode,
@@ -341,6 +345,7 @@ __all__ = (
     "COLLECTION_CASE_SCHEMA_NAME",
     "CREDIT_ADJUSTMENT_SCHEMA_NAME",
     "SPEND_BUDGET_SCHEMA_NAME",
+    "SPEND_BUDGET_EVALUATION_SCHEMA_NAME",
     "SPEND_BUDGET_PRESENTMENT_SCHEMA_NAME",
     "RATE_CARD_SCHEMA_NAME",
     "TAX_RATE_SCHEMA_NAME",
@@ -394,6 +399,8 @@ __all__ = (
     "RatedSpendPresentmentQueryError",
     "RatedSpendPresentmentService",
     "SpendBudgetOutcomeCode",
+    "SpendBudgetEvaluationQueryError",
+    "SpendBudgetEvaluationService",
     "SpendBudgetPresentmentQueryError",
     "SpendBudgetPresentmentService",
     "SpendBudgetQueryError",
@@ -563,6 +570,7 @@ __all__ = (
     "validate_account_statement_presentment",
     "validate_rated_spend_presentment",
     "validate_spend_budget",
+    "validate_spend_budget_evaluation",
     "validate_spend_budget_presentment",
     "validate_collection_aging_presentment",
     "validate_collection_case_presentment",
