@@ -176,6 +176,7 @@ JOURNAL_PROPOSAL_FIXTURE_NAMES = (
     "validated_morning_leftover_apply_journal.json",
     "validated_morning_leftover_refund_journal.json",
     "validated_morning_write_off_journal.json",
+    "validated_unused_invoice_void_journal.json",
 )
 COLLECTION_WRITE_OFF_MONEY_FIELDS = (
     "write_off_amount",
@@ -1257,6 +1258,105 @@ class OperatorConsoleTests(unittest.TestCase):
         self.assertNotIn("310100", json.dumps(write_off_journal))
         self.assertNotIn("510100", json.dumps(write_off_journal))
         self.assertNotIn("110100", json.dumps(write_off_journal))
+        unused_invoice_void_journal = self._fixture(
+            "validated_unused_invoice_void_journal.json"
+        )
+        unused_invoice_void = self._fixture("voided_unused_issued_invoice.json")
+        taxed_issued = self._fixture("issued_taxed_hundred.json")
+        assessed_vat = self._fixture("assessed_morning_vat.json")
+        self.assertEqual(validate_journal_proposal(unused_invoice_void_journal), ())
+        self.assertEqual(
+            unused_invoice_void_journal["tenant_reference"], "urn:cwl:tenant_001"
+        )
+        self.assertEqual(unused_invoice_void_journal["proposal_status"], "validated")
+        self.assertEqual(unused_invoice_void_journal["transaction_currency"], "USD")
+        self.assertEqual(
+            unused_invoice_void_journal["source_event_references"],
+            [
+                "urn:cwl:tenant_001:issued_invoice_void:"
+                f"{unused_invoice_void['issued_invoice_void_id']}"
+            ],
+        )
+        self.assertEqual(
+            unused_invoice_void_journal["lines"][0]["account_role_code"],
+            "usage_revenue",
+        )
+        self.assertEqual(
+            unused_invoice_void_journal["lines"][0]["debit_amount"],
+            taxed_issued["tax_exclusive_amount"],
+        )
+        self.assertEqual(unused_invoice_void_journal["lines"][0]["credit_amount"], "0")
+        self.assertEqual(
+            unused_invoice_void_journal["lines"][1]["account_role_code"],
+            "tax_payable",
+        )
+        self.assertEqual(
+            unused_invoice_void_journal["lines"][1]["debit_amount"],
+            taxed_issued["tax_amount"],
+        )
+        self.assertEqual(unused_invoice_void_journal["lines"][1]["credit_amount"], "0")
+        self.assertEqual(
+            unused_invoice_void_journal["lines"][2]["account_role_code"],
+            "accounts_receivable",
+        )
+        self.assertEqual(unused_invoice_void_journal["lines"][2]["debit_amount"], "0")
+        self.assertEqual(
+            unused_invoice_void_journal["lines"][2]["credit_amount"],
+            unused_invoice_void["voided_amount"],
+        )
+        self.assertEqual(len(unused_invoice_void_journal["lines"]), 3)
+        self.assertEqual(unused_invoice_void["voided_amount"], "110.00")
+        self.assertEqual(
+            unused_invoice_void["issued_invoice_id"], taxed_issued["issued_invoice_id"]
+        )
+        self.assertEqual(
+            unused_invoice_void["invoice_draft_id"], taxed_issued["invoice_draft_id"]
+        )
+        self.assertEqual(
+            taxed_issued["invoice_draft_id"], assessed_vat["invoice_draft_id"]
+        )
+        self.assertEqual(leftover_write_off["remaining_outstanding_amount"], "0")
+        self.assertEqual(leftover_apply["remaining_outstanding_amount"], "19.999")
+        self.assertNotEqual(
+            unused_invoice_void_journal["proposal_id"],
+            cash_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            unused_invoice_void_journal["proposal_id"],
+            morning_draft_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            unused_invoice_void_journal["proposal_id"],
+            taxed_draft_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            unused_invoice_void_journal["proposal_id"],
+            leftover_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            unused_invoice_void_journal["proposal_id"],
+            leftover_apply_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            unused_invoice_void_journal["proposal_id"],
+            leftover_refund_journal["proposal_id"],
+        )
+        self.assertNotEqual(
+            unused_invoice_void_journal["proposal_id"],
+            write_off_journal["proposal_id"],
+        )
+        self.assertNotIn("next_operator_action", unused_invoice_void_journal)
+        for line in unused_invoice_void_journal["lines"]:
+            for field_name in JOURNAL_PROPOSAL_MONEY_FIELDS:
+                self.assertIsInstance(line[field_name], str)
+                self.assertNotIsInstance(line[field_name], float)
+                parse_exact_decimal(line[field_name])
+        self.assertNotIn("journal_entry_id", unused_invoice_void_journal)
+        self.assertNotIn("card_pan", unused_invoice_void_journal)
+        self.assertNotIn("retained_earnings", unused_invoice_void_journal)
+        self.assertNotIn("310100", json.dumps(unused_invoice_void_journal))
+        self.assertNotIn("510100", json.dumps(unused_invoice_void_journal))
+        self.assertNotIn("110100", json.dumps(unused_invoice_void_journal))
 
     def test_design_tokens_cover_color_spacing_type_and_radius(self) -> None:
         """Repeated modules must share tokenized color, spacing, type, and radius."""
