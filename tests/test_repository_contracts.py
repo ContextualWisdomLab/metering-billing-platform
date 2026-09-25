@@ -1512,6 +1512,7 @@ class RepositoryContractTests(unittest.TestCase):
             "$.utilization_status: value is not in the allowed enumeration",
             validate_schema_instance(schema, posted),
         )
+        self.assertNotEqual(validate_spend_budget_evaluation(posted), ())
         self.assertNotEqual(validate_spend_budget_evaluation([]), ())
         zeroed = dict(instance, budget_amount="0")
         self.assertIn(

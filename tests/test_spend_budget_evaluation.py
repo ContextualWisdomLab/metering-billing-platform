@@ -259,6 +259,9 @@ class SpendBudgetEvaluationTests(unittest.TestCase):
         with self.assertRaises(SpendBudgetEvaluationQueryError) as empty:
             service.evaluate_spend_budget("", accepted.spend_budget_id)
         self.assertEqual(empty.exception.rejection_reason_code, "tenant_not_found")
+        with self.assertRaises(SpendBudgetEvaluationQueryError) as missing_tenant:
+            service.evaluate_spend_budget("urn:cwl:missing", accepted.spend_budget_id)
+        self.assertEqual(missing_tenant.exception.rejection_reason_code, "tenant_not_found")
         with self.assertRaises(SpendBudgetEvaluationQueryError) as unknown:
             service.evaluate_spend_budget(TENANT_ONE, uuid4())
         self.assertEqual(unknown.exception.rejection_reason_code, "spend_budget_not_found")
