@@ -141,6 +141,15 @@ class PostgresClientUnitTests(unittest.TestCase):
         self.assertEqual(query_database["database"], "query_database")
         self.assertEqual(query_database["user"], "only_user")
 
+        with mock.patch(
+            "metering_billing.postgres_client.os.path.exists", return_value=False
+        ):
+            missing_target = parse_postgres_dsn("postgresql://query_user@/")
+        self.assertEqual(missing_target["user"], "query_user")
+        self.assertIsNone(missing_target["database"])
+        self.assertEqual(missing_target["host"], "localhost")
+        self.assertEqual(missing_target["port"], 5432)
+
     def test_keyword_dsn_uses_unix_socket_for_directory_host(self) -> None:
         """A keyword host that is a directory becomes the libpq socket path."""
         keywords = parse_postgres_dsn(
@@ -209,8 +218,8 @@ class PostgresClientUnitTests(unittest.TestCase):
         statements = split_sql_statements(script)
         self.assertEqual(len(statements), 3)
         self.assertIn("'a;b'", statements[0])
-        self.assertTrue(statements[1].startswith("INSERT"))
-        self.assertTrue(statements[2].startswith("SELECT"))
+        self.assertIn("INSERT INTO billing_core.example_row", statements[1])
+        self.assertIn("SELECT", statements[2])
         self.assertTrue(statements[2].endswith("$tag$"))
 
     def test_escaped_quotes_and_empty_script_branches(self) -> None:
