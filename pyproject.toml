@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Provider-neutral commercial metering and billing control plane"
 requires-python = ">=3.13"
 dependencies = [
-    "psycopg[binary]>=3.2,<4",
+    "pg8000>=1.31,<2",
 ]
 
 [dependency-groups]

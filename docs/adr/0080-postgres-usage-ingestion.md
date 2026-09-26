@@ -21,7 +21,7 @@ also support keeping identity and interval rules in the database. Helland
 
 ## Decision
 
-- Add `PostgresUsageLedger`, a psycopg 3 repository for tenant, account,
+- Add `PostgresUsageLedger`, a commercially compatible `pg8000` repository for tenant, account,
   principal, credential, assignment, meter, quality, usage-event,
   measurement, and ingestion-receipt rows.
 - Keep the connection injectable for pools and tests; `connect()` is the

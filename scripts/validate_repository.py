@@ -323,6 +323,8 @@ REQUIRED_FILES = (
     "metering_billing/unapplied_cash_refund.py",
     "metering_billing/unapplied_cash_refund_presentment.py",
     "metering_billing/contracts.py",
+    "metering_billing/postgres_client.py",
+    "docs/adr/0125-commercially-compatible-postgres-client.md",
     "operator_console/package.json",
     "operator_console/src/index.js",
     "operator_console/tokens/design_tokens.json",
@@ -338,6 +340,24 @@ ACTION_REFERENCE_PATTERN = re.compile(
     r"\buses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)@([^\s#]+)"
 )
 FULL_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+COPYLEFT_POSTGRES_CLIENT_PATTERN = re.compile(
+    r"\b(psycopg2-binary|psycopg2|psycopg-binary|psycopg_binary|"
+    r"psycopg-c|psycopg3|psycopg)\b",
+    re.IGNORECASE,
+)
+COMMERCIAL_POSTGRES_CLIENT_NAME = "pg8000"
+COPYLEFT_RUNTIME_FILES = (
+    "pyproject.toml",
+    "requirements-runtime.txt",
+    "uv.lock",
+)
+PUBLIC_LICENSE_DOCUMENTS = (
+    "README.md",
+    "CHANGELOG.md",
+    "docs/ARCHITECTURE.md",
+    "docs/CONTRIBUTING.md",
+    "docs/doctoring/VALIDATION.md",
+)
 PLACEHOLDER_PATTERN = re.compile(
     r"\b(" + "|".join(("TO" + "DO", "T" + "BD", "FIX" + "ME")) + r")\b"
 )
@@ -371,6 +391,61 @@ def find_mutable_action_references(text: str) -> tuple[str, ...]:
 def find_placeholder_tokens(text: str) -> tuple[str, ...]:
     """Return unresolved implementation placeholder tokens in *text*."""
     return tuple(sorted({match.group(1) for match in PLACEHOLDER_PATTERN.finditer(text)}))
+
+
+def find_copyleft_postgres_clients(text: str) -> tuple[str, ...]:
+    """Return GPL/LGPL/AGPL PostgreSQL client names mentioned in *text*."""
+    return tuple(
+        sorted({match.lower() for match in COPYLEFT_POSTGRES_CLIENT_PATTERN.findall(text)})
+    )
+
+
+def validate_commercial_postgres_runtime(root: Path) -> tuple[str, ...]:
+    """Require a commercially compatible PostgreSQL client in the runtime set.
+
+    Public docs may describe the replacement of a copyleft driver in an ADR,
+    but the install surface, CHANGELOG, and operator docs must not present
+    ``psycopg`` or its copyleft aliases as an acceptable commercial
+    dependency.
+    """
+    errors: list[str] = []
+    for relative_path in COPYLEFT_RUNTIME_FILES:
+        path = root / relative_path
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for client_name in find_copyleft_postgres_clients(text):
+            errors.append(
+                f"{relative_path}: copyleft PostgreSQL client {client_name} "
+                "is not a commercially compatible runtime"
+            )
+        if COMMERCIAL_POSTGRES_CLIENT_NAME not in text:
+            errors.append(
+                f"{relative_path}: commercially compatible PostgreSQL client "
+                f"{COMMERCIAL_POSTGRES_CLIENT_NAME} is required"
+            )
+    for relative_path in PUBLIC_LICENSE_DOCUMENTS:
+        path = root / relative_path
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if find_copyleft_postgres_clients(text):
+            errors.append(
+                f"{relative_path}: public docs must not present psycopg as a "
+                "commercial PostgreSQL install"
+            )
+        if relative_path == "README.md":
+            lowered = text.lower()
+            if COMMERCIAL_POSTGRES_CLIENT_NAME not in text:
+                errors.append(
+                    "README.md: must name the commercially compatible PostgreSQL "
+                    f"client {COMMERCIAL_POSTGRES_CLIENT_NAME}"
+                )
+            if "license-clean" not in lowered:
+                errors.append(
+                    "README.md: must claim the durable PostgreSQL client is license-clean"
+                )
+    return tuple(errors)
 
 
 def validate_sql_object_names(sql_text: str) -> tuple[str, ...]:
@@ -466,6 +541,8 @@ def validate_repository(root: Path) -> tuple[str, ...]:
         runtime_requirements_text = runtime_requirements_path.read_text(encoding="utf-8")
         if "--hash=sha256:" not in runtime_requirements_text:
             errors.append("runtime dependencies must be hash locked")
+
+    errors.extend(validate_commercial_postgres_runtime(root))
 
     for file_path in _iter_contract_files(root):
         text = file_path.read_text(encoding="utf-8")

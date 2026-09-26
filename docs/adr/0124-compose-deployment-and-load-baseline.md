@@ -28,7 +28,7 @@ deployment surface, never invented.
   requirements-runtime.txt`), copies the package, migration runner, SQL
   migrations, and seed helper, drops to a non-root user, exposes port 8000,
   and starts `python -m metering_billing.http_app`.  No multi-stage build is
-  needed for a stdlib-plus-psycopg application.
+  needed for a stdlib-plus-pg8000 application.
 - Make the web tier multithreaded: `main()` now serves through a new
   module-level `ThreadingWSGIServer` (`ThreadingMixIn` over the stdlib
   `WSGIServer`) with daemon threads, so concurrent tenant requests are

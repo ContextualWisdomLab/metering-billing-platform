@@ -6,9 +6,10 @@ start page is the root [README](../../README.md). Contributor policy lives in
 
 ## Environment
 
-Python 3.13+ and a dedicated PostgreSQL 18 instance are required. The unit
-suite refuses to run unless `METERING_BILLING_POSTGRES_DSN` contains the
-substring `test` — always point it at a throwaway database.
+Python 3.13+ and a dedicated PostgreSQL 18 instance are required. The durable
+client is commercially compatible `pg8000`. The unit suite refuses to run
+unless `METERING_BILLING_POSTGRES_DSN` contains the substring `test` — always
+point it at a throwaway database.
 
 ```bash
 uv sync

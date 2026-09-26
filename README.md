@@ -61,7 +61,9 @@ uv run --locked --group dev python scripts/validate_repository.py
 
 The repository uses a project-local `.venv` managed by `uv`; the checked-in
 `uv.lock` pins the development and PostgreSQL runtime dependencies.  The
-integration suite expects PostgreSQL 18 at
+durable PostgreSQL client is license-clean BSD-licensed `pg8000` (ADR 0125);
+the hash-locked runtime set does not install a copyleft PostgreSQL driver.
+The integration suite expects PostgreSQL 18 at
 `METERING_BILLING_POSTGRES_DSN` and uses only a dedicated test database.
 The migration runner records SHA-256 checksums in
 `public.metering_billing_schema_migration` and takes a transaction-scoped

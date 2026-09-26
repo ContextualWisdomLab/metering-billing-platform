@@ -46,7 +46,7 @@ checks 100% (17,373 / 17,373), HTTP failures 0%.**
 
 ### Bottleneck observations
 
-- The durable backend serves every operation through **one shared psycopg
+- The durable backend serves every operation through **one shared pg8000
   connection** guarded by a reentrant lock, so all database work serializes.
   At the 50-VU peak this is the dominant latency source: the tenant read's
   median (237 ms) is roughly double `/readyz`'s (113 ms) because each read
