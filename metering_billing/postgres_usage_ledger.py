@@ -177,7 +177,9 @@ class PostgresUsageLedger:
         ad-hoc PostgreSQL connection beside the ledger's own session.
         """
         with self._cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) FROM billing_core.schema_migration")
+            cursor.execute(
+                "SELECT COUNT(*) FROM public.metering_billing_schema_migration"
+            )
             row = cursor.fetchone()
         if row is None:  # pragma: no cover - COUNT(*) always returns one row
             raise RuntimeError("migration history count did not return a row")
