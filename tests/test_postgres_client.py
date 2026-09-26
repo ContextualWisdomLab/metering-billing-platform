@@ -350,10 +350,19 @@ class PostgresClientUnitTests(unittest.TestCase):
         connection = PostgresConnection(nested)
         with connection.transaction():
             with connection.transaction():
-                connection.execute("SELECT inner_work")
+                with connection.transaction():
+                    connection.execute("SELECT inner_work")
         savepoints = [sql for sql, _params in nested.queries]
-        self.assertEqual(savepoints[0], "SAVEPOINT metering_billing_sp_2")
-        self.assertEqual(savepoints[-1], "RELEASE SAVEPOINT metering_billing_sp_2")
+        self.assertEqual(
+            savepoints,
+            [
+                "SAVEPOINT metering_billing_nested_transaction",
+                "SAVEPOINT metering_billing_nested_transaction",
+                "SELECT inner_work",
+                "RELEASE SAVEPOINT metering_billing_nested_transaction",
+                "RELEASE SAVEPOINT metering_billing_nested_transaction",
+            ],
+        )
         self.assertEqual(nested.commits, 1)
 
         nested_fail = FakeConnection()
@@ -363,7 +372,7 @@ class PostgresClientUnitTests(unittest.TestCase):
                 with connection.transaction():
                     raise RuntimeError("nested failure")
         self.assertIn(
-            "ROLLBACK TO SAVEPOINT metering_billing_sp_2",
+            "ROLLBACK TO SAVEPOINT metering_billing_nested_transaction",
             [sql for sql, _params in nested_fail.queries],
         )
         self.assertEqual(nested_fail.rollbacks, 1)
@@ -384,11 +393,11 @@ class PostgresClientUnitTests(unittest.TestCase):
             self.assertEqual(connection._transaction_depth, 1)
         self.assertEqual(connection._transaction_depth, 0)
         self.assertIn(
-            "SAVEPOINT metering_billing_sp_2",
+            "SAVEPOINT metering_billing_nested_transaction",
             [sql for sql, _params in raw.queries],
         )
         self.assertIn(
-            "RELEASE SAVEPOINT metering_billing_sp_2",
+            "RELEASE SAVEPOINT metering_billing_nested_transaction",
             [sql for sql, _params in raw.queries],
         )
 

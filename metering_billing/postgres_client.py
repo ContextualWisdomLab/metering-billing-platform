@@ -79,23 +79,27 @@ class PostgresConnection:
         that restores depth so a refused savepoint cannot leak nesting.  The
         durable ledger itself avoids nesting through ``_transaction_active``.
         """
-        savepoint_name: str | None = None
+        nested = False
         try:
             self._transaction_depth += 1
             if self._transaction_depth > 1:
-                savepoint_name = f"metering_billing_sp_{self._transaction_depth}"
-                self.execute(f"SAVEPOINT {savepoint_name}")
+                nested = True
+                self.execute("SAVEPOINT metering_billing_nested_transaction")
             try:
                 yield
             except Exception:
-                if savepoint_name is not None:
-                    self.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                if nested:
+                    self.execute(
+                        "ROLLBACK TO SAVEPOINT metering_billing_nested_transaction"
+                    )
                 else:
                     self._raw_connection.rollback()
                 raise
             else:
-                if savepoint_name is not None:
-                    self.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                if nested:
+                    self.execute(
+                        "RELEASE SAVEPOINT metering_billing_nested_transaction"
+                    )
                 else:
                     self._raw_connection.commit()
         finally:

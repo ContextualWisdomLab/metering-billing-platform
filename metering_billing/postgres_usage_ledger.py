@@ -1,7029 +1,1213 @@
-"""PostgreSQL repository for the durable usage-to-invoice vertical slice.
-
-The repository owns catalog rows, immutable usage facts, rating runs, invoice
-drafts, issued invoices, unused issued-invoice voids, issued credit notes,
-unused issued-credit-note voids, credit-note applications, parked leftover
-``unapplied_cash``, leftover-apply ``unapplied_cash_application``, leftover
-refund ``unapplied_cash_refund``, collection cases, collection-dispute
-holds, payment and
-credit facts, journal proposals, published spend budgets, and the atomic
-webhook outbox used by the first commercial path. Every public operation uses
-the supplied PostgreSQL connection; the implementation never falls back to an
-in-memory copy. Provider capture and remaining exception repositories remain
-subsequent slices of the persistence port.
-"""
-
-from __future__ import annotations
-
-from contextlib import contextmanager
-from datetime import datetime
-from threading import RLock
-from typing import Any, Iterator
-from uuid import UUID
-
-from metering_billing.errors import (
-    RejectionReasonCode,
-    UsageEventConflict,
-)
-from metering_billing.postgres_client import connect as connect_postgres
-from metering_billing.exact_decimal import (
-    format_exact_decimal,
-    parse_exact_decimal,
-    require_postable_journal_line_amounts,
-)
-from metering_billing.usage_ledger import (
-    CURRENCY_CODE_PATTERN,
-    SOURCE_PAYLOAD_HASH_PATTERN,
-    BillingAccount,
-    BillingPrincipal,
-    CredentialAssignment,
-    CredentialRecord,
-    MemoryUsageLedger,
-    MeterDefinition,
-    MeterQualityRule,
-    StoredCollectionCase,
-    StoredCollectionDispute,
-    StoredCollectionDunningEvent,
-    StoredCreditAdjustment,
-    StoredCollectionCaseSettlement,
-    StoredCollectionWriteOff,
-    StoredInvoiceDraft,
-    StoredInvoiceDraftLine,
-    StoredIngestionReceipt,
-    StoredCreditNoteApplication,
-    StoredIssuedCreditNote,
-    StoredIssuedCreditNoteVoid,
-    StoredIssuedInvoice,
-    StoredIssuedInvoiceLine,
-    StoredIssuedInvoiceVoid,
-    StoredUnappliedCash,
-    StoredUnappliedCashApplication,
-    StoredUnappliedCashRefund,
-    StoredJournalProposal,
-    StoredJournalProposalLine,
-    StoredRateCard,
-    StoredRateCardLine,
-    StoredRateCardVersion,
-    StoredRatingLine,
-    StoredRatingRun,
-    StoredTaxRateSchedule,
-    StoredTaxRateVersion,
-    StoredTenantApiCredential,
-    StoredTaxAssessment,
-    StoredPaymentIntent,
-    StoredPaymentReceipt,
-    StoredSpendBudget,
-    StoredUsageEvent,
-    StoredUsageMeasurement,
-    StoredWebhookDeliveryAttempt,
-    StoredWebhookOutboxEvent,
-    StoredWebhookSubscription,
-    TenantAccount,
-    _require_tenant_scoped_reference,
-    _resource_code,
-    _single_urn_segment,
-    generate_record_id,
-)
-
-
-MIGRATION_HISTORY_TABLE = "public.metering_billing_schema_migration"
-"""Migration-history table mirrored from ``scripts/migrate_postgres.py``."""
-
-
-class PostgresUsageLedger:
-    """Persist usage attribution and immutable facts in PostgreSQL.
-
-    ``connection`` is a commercially compatible PostgreSQL session from
-    ``metering_billing.postgres_client``.  It is injected so callers can
-    control pooling and lifecycle; :meth:`connect` is the small convenience
-    entry point for a standalone process.  The connection is not closed by
-    :meth:`close` unless this repository created it.
-    """
-
-    def __init__(self, connection: Any, *, owns_connection: bool = False) -> None:
-        self.connection = connection
-        self._owns_connection = owns_connection
-        self._transaction_active = False
-        self.webhook_subscription_secrets: dict[UUID, str] = {}
-        # One PostgreSQL connection serializes its transactions; the threaded web
-        # tier must funnel every session touch through this reentrant lock so
-        # concurrent requests never interleave transaction nesting.
-        self._connection_lock = RLock()
-
-    @classmethod
-    def connect(cls, dsn: str) -> "PostgresUsageLedger":
-        """Open a commercially compatible PostgreSQL session for this migration set."""
-        return cls(connect_postgres(dsn), owns_connection=True)
-
-    @contextmanager
-    def _cursor(self) -> Iterator[Any]:
-        """Yield a cursor in the caller transaction or a one-operation transaction."""
-        if self._transaction_active:
-            with self.connection.cursor() as cursor:
-                yield cursor
-            return
-        self._connection_lock.acquire()
-        try:
-            with self.connection.transaction():
-                with self.connection.cursor() as cursor:
-                    yield cursor
-        finally:
-            self._connection_lock.release()
-
-    @contextmanager
-    def ingestion_transaction(self) -> Iterator[None]:
-        """Commit one ingest decision and its audit receipt atomically."""
-        self._connection_lock.acquire()
-        try:
-            if self._transaction_active:
-                yield
-                return
-            self._transaction_active = True
-            try:
-                with self.connection.transaction():
-                    yield
-            finally:
-                self._transaction_active = False
-        finally:
-            self._connection_lock.release()
-
-    @contextmanager
-    def transaction(self) -> Iterator[None]:
-        """Commit one multi-record commercial command atomically."""
-        self._connection_lock.acquire()
-        try:
-            if self._transaction_active:
-                yield
-                return
-            self._transaction_active = True
-            try:
-                with self.connection.transaction():
-                    yield
-            finally:
-                self._transaction_active = False
-        finally:
-            self._connection_lock.release()
-
-    def close(self) -> None:
-        """Close the connection when this repository owns it."""
-        if self._owns_connection:
-            self.connection.close()
-
-    def migration_history_row_count(self) -> int:
-        """Return one cheap liveness-probe row count from the migration history.
-
-        The probe runs through the same connection and transaction conventions
-        as every other repository operation, so ``/readyz`` never opens an
-        ad-hoc PostgreSQL connection beside the ledger's own session.
-        """
-        with self._cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE}")
-            row = cursor.fetchone()
-        if row is None:  # pragma: no cover - COUNT(*) always returns one row
-            raise RuntimeError("migration history count did not return a row")
-        return int(row[0])
-
-    def register_tenant(self, tenant_reference: str) -> TenantAccount:
-        """Insert or return one tenant authority row."""
-        tenant_code = _single_urn_segment(tenant_reference)
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.tenant_account
-                    (tenant_account_id, tenant_account_code, tenant_reference)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (tenant_account_code) DO NOTHING
-                RETURNING tenant_account_id, tenant_reference, tenant_account_code
-                """,
-                (generate_record_id(), tenant_code, tenant_reference),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT tenant_account_id, tenant_reference, tenant_account_code
-                    FROM billing_core.tenant_account
-                    WHERE tenant_account_code = %s
-                    """,
-                    (tenant_code,),
-                )
-                row = cursor.fetchone()
-            if row is None:  # pragma: no cover - a committed unique row cannot disappear here
-                raise RuntimeError("tenant insert did not return a row")
-            if row[1] != tenant_reference:  # pragma: no cover - code derives from this URN
-                raise ValueError("tenant reference cannot move across identities")
-            return TenantAccount(UUID(str(row[0])), row[1], row[2])
-
-    def register_billing_account(
-        self,
-        tenant_reference: str,
-        billing_account_reference: str,
-        account_status_code: str = "active",
-    ) -> BillingAccount:
-        """Insert or return one tenant-scoped billing account."""
-        tenant = self._require_tenant(tenant_reference)
-        _require_tenant_scoped_reference(tenant_reference, billing_account_reference)
-        account_code = _resource_code(billing_account_reference)
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.billing_account
-                    (billing_account_id, tenant_account_id, billing_account_code,
-                     billing_account_reference, account_status_code)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (tenant_account_id, billing_account_code) DO NOTHING
-                RETURNING billing_account_id, tenant_account_id, billing_account_code,
-                          billing_account_reference, account_status_code
-                """,
-                (
-                    generate_record_id(),
-                    tenant.tenant_account_id,
-                    account_code,
-                    billing_account_reference,
-                    account_status_code,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT billing_account_id, tenant_account_id, billing_account_code,
-                           billing_account_reference, account_status_code
-                    FROM billing_core.billing_account
-                    WHERE tenant_account_id = %s AND billing_account_code = %s
-                    """,
-                    (tenant.tenant_account_id, account_code),
-                )
-                row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
-                raise RuntimeError("billing account insert did not return a row")
-            return BillingAccount(
-                UUID(str(row[0])),
-                UUID(str(row[1])),
-                row[3],
-                row[2],
-                row[4],
-            )
-
-    def register_billing_principal(
-        self,
-        tenant_reference: str,
-        billing_principal_reference: str,
-        principal_kind_code: str,
-        valid_from: datetime,
-        valid_to: datetime | None = None,
-    ) -> BillingPrincipal:
-        """Insert or return one effective-dated billing principal."""
-        tenant = self._require_tenant(tenant_reference)
-        _require_tenant_scoped_reference(tenant_reference, billing_principal_reference)
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.billing_principal
-                    (billing_principal_id, tenant_account_id, principal_kind_code,
-                     principal_reference, valid_from, valid_to)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (tenant_account_id, principal_reference, valid_from) DO NOTHING
-                RETURNING billing_principal_id, tenant_account_id, principal_kind_code,
-                          principal_reference, valid_from, valid_to
-                """,
-                (
-                    generate_record_id(),
-                    tenant.tenant_account_id,
-                    principal_kind_code,
-                    billing_principal_reference,
-                    valid_from,
-                    valid_to,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT billing_principal_id, tenant_account_id, principal_kind_code,
-                           principal_reference, valid_from, valid_to
-                    FROM billing_core.billing_principal
-                    WHERE tenant_account_id = %s
-                      AND principal_reference = %s
-                      AND valid_from = %s
-                    """,
-                    (tenant.tenant_account_id, billing_principal_reference, valid_from),
-                )
-                row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
-                raise RuntimeError("billing principal insert did not return a row")
-            return self._principal_from_row(row)
-
-    def register_credential_record(
-        self,
-        tenant_reference: str,
-        credential_reference: str,
-        credential_kind_code: str,
-        credential_fingerprint: str,
-    ) -> CredentialRecord:
-        """Insert or return one opaque, non-secret credential record."""
-        tenant = self._require_tenant(tenant_reference)
-        _require_tenant_scoped_reference(tenant_reference, credential_reference)
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.credential_record
-                    (credential_record_id, tenant_account_id, credential_reference,
-                     credential_kind_code, credential_fingerprint, issuer_reference, issued_at)
-                VALUES (%s, %s, %s, %s, %s, %s, clock_timestamp())
-                ON CONFLICT (tenant_account_id, credential_reference) DO NOTHING
-                RETURNING credential_record_id, tenant_account_id, credential_reference,
-                          credential_kind_code, credential_fingerprint
-                """,
-                (
-                    generate_record_id(),
-                    tenant.tenant_account_id,
-                    credential_reference,
-                    credential_kind_code,
-                    credential_fingerprint,
-                    tenant_reference,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT credential_record_id, tenant_account_id, credential_reference,
-                           credential_kind_code, credential_fingerprint
-                    FROM billing_core.credential_record
-                    WHERE tenant_account_id = %s AND credential_reference = %s
-                    """,
-                    (tenant.tenant_account_id, credential_reference),
-                )
-                row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
-                raise RuntimeError("credential insert did not return a row")
-            return self._credential_from_row(row)
-
-    def register_credential_assignment(
-        self,
-        tenant_reference: str,
-        credential_reference: str,
-        billing_principal_reference: str,
-        billing_account_reference: str,
-        valid_from: datetime,
-        valid_to: datetime | None = None,
-    ) -> CredentialAssignment:
-        """Insert one tenant-safe half-open credential assignment."""
-        tenant = self._require_tenant(tenant_reference)
-        credential = self._require_credential(tenant, credential_reference)
-        principal = self._require_principal(tenant, billing_principal_reference)
-        account = self._require_account(tenant, billing_account_reference)
-        if valid_to is not None and valid_to <= valid_from:
-            raise ValueError("credential assignment interval must be positive")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.credential_assignment
-                    (credential_assignment_id, tenant_account_id, credential_record_id,
-                     billing_principal_id, billing_account_id, valid_from, valid_to)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING credential_assignment_id, tenant_account_id, credential_record_id,
-                          billing_principal_id, billing_account_id, valid_from, valid_to
-                """,
-                (
-                    generate_record_id(),
-                    tenant.tenant_account_id,
-                    credential.credential_record_id,
-                    principal.billing_principal_id,
-                    account.billing_account_id,
-                    valid_from,
-                    valid_to,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT credential_assignment_id, tenant_account_id, credential_record_id,
-                           billing_principal_id, billing_account_id, valid_from, valid_to
-                    FROM billing_core.credential_assignment
-                    WHERE credential_record_id = %s AND valid_from = %s
-                    """,
-                    (credential.credential_record_id, valid_from),
-                )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - exclusion constraint protects the row
-                    raise ValueError("credential assignment intervals cannot overlap")
-            return self._assignment_from_row(row)
-
-    def register_meter_definition(
-        self,
-        meter_code: str,
-        meter_version: int,
-        unit_code: str,
-        aggregation_code: str,
-        valid_from: datetime,
-        valid_to: datetime | None = None,
-    ) -> MeterDefinition:
-        """Insert or return one versioned meter definition."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.meter_definition
-                    (meter_definition_id, meter_code, meter_version, unit_code,
-                     aggregation_code, valid_from, valid_to)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (meter_code, meter_version) DO NOTHING
-                RETURNING meter_definition_id, meter_code, meter_version, unit_code,
-                          aggregation_code, valid_from, valid_to
-                """,
-                (
-                    generate_record_id(),
-                    meter_code,
-                    meter_version,
-                    unit_code,
-                    aggregation_code,
-                    valid_from,
-                    valid_to,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT meter_definition_id, meter_code, meter_version, unit_code,
-                           aggregation_code, valid_from, valid_to
-                    FROM billing_core.meter_definition
-                    WHERE meter_code = %s AND meter_version = %s
-                    """,
-                    (meter_code, meter_version),
-                )
-                row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
-                raise RuntimeError("meter definition insert did not return a row")
-            return self._meter_from_row(row)
-
-    def register_meter_quality_rule(
-        self,
-        meter_definition_id: UUID,
-        quality_code: str,
-        billing_disposition_code: str,
-    ) -> MeterQualityRule:
-        """Insert or return one meter quality disposition."""
-        with self._cursor() as cursor:
-            rule_id = generate_record_id()
-            cursor.execute(
-                """
-                INSERT INTO billing_core.meter_quality_rule
-                    (meter_quality_rule_id, meter_definition_id, quality_code,
-                     billing_disposition_code)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (meter_definition_id, quality_code) DO NOTHING
-                RETURNING meter_quality_rule_id, meter_definition_id, quality_code,
-                          billing_disposition_code
-                """,
-                (rule_id, meter_definition_id, quality_code, billing_disposition_code),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT meter_quality_rule_id, meter_definition_id, quality_code,
-                           billing_disposition_code
-                    FROM billing_core.meter_quality_rule
-                    WHERE meter_definition_id = %s AND quality_code = %s
-                    """,
-                    (meter_definition_id, quality_code),
-                )
-                row = cursor.fetchone()
-            if row is None:  # pragma: no cover - database row is protected by the unique key
-                raise RuntimeError("meter quality rule insert did not return a row")
-            return MeterQualityRule(UUID(str(row[0])), UUID(str(row[1])), row[2], row[3])
-
-    def find_rate_card(
-        self, tenant_account_id: UUID, rate_card_name: str
-    ) -> StoredRateCard | None:
-        """Return one tenant-scoped price-book header by name."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT rate_card_id, tenant_account_id, rate_card_name,
-                       currency_code, valid_from
-                FROM billing_core.rate_card
-                WHERE tenant_account_id = %s AND rate_card_name = %s
-                """,
-                (tenant_account_id, rate_card_name),
-            )
-            row = cursor.fetchone()
-        return None if row is None else self._rate_card_from_row(row)
-
-    def get_rate_card(self, rate_card_id: UUID) -> StoredRateCard | None:
-        """Return one price-book header by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT rate_card_id, tenant_account_id, rate_card_name,
-                       currency_code, valid_from
-                FROM billing_core.rate_card
-                WHERE rate_card_id = %s
-                """,
-                (rate_card_id,),
-            )
-            row = cursor.fetchone()
-        return None if row is None else self._rate_card_from_row(row)
-
-    def insert_rate_card(self, rate_card: StoredRateCard) -> StoredRateCard:
-        """Persist one tenant price-book header without replacing history."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.rate_card
-                    (rate_card_id, rate_card_code, rate_card_version, currency_code,
-                     valid_from, tenant_account_id, rate_card_name)
-                VALUES (%s, %s, 1, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING rate_card_id, tenant_account_id, rate_card_name,
-                          currency_code, valid_from
-                """,
-                (
-                    rate_card.rate_card_id,
-                    rate_card.rate_card_name,
-                    rate_card.currency_code,
-                    rate_card.created_at,
-                    rate_card.tenant_account_id,
-                    rate_card.rate_card_name,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT rate_card_id, tenant_account_id, rate_card_name,
-                           currency_code, valid_from
-                    FROM billing_core.rate_card
-                    WHERE tenant_account_id = %s AND rate_card_name = %s
-                    """,
-                    (rate_card.tenant_account_id, rate_card.rate_card_name),
-                )
-                row = cursor.fetchone()
-            if row is None:  # pragma: no cover - unique identity protects the header
-                raise RuntimeError("rate-card insert did not return a row")
-        stored = self._rate_card_from_row(row)
-        if stored.currency_code != rate_card.currency_code:
-            raise ValueError("rate_card currency cannot change after publish")
-        return stored
-
-    def list_rate_cards(self, tenant_account_id: UUID) -> tuple[StoredRateCard, ...]:
-        """Return price-book headers limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT rate_card_id, tenant_account_id, rate_card_name,
-                       currency_code, valid_from
-                FROM billing_core.rate_card
-                WHERE tenant_account_id = %s
-                ORDER BY rate_card_name, rate_card_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(self._rate_card_from_row(row) for row in cursor.fetchall())
-
-    def find_rate_card_version_by_identity(
-        self,
-        tenant_account_id: UUID,
-        rate_card_id: UUID,
-        source_payload_hash: str,
-        rate_card_contract_version: int,
-    ) -> StoredRateCardVersion | None:
-        """Return one published version by its immutable payload identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT rate_card_version_id, tenant_account_id, rate_card_id,
-                       version_number, rate_card_contract_version, currency_code,
-                       source_payload_hash, published_at
-                FROM billing_core.rate_card_version
-                WHERE tenant_account_id = %s
-                  AND rate_card_id = %s
-                  AND source_payload_hash = %s
-                  AND rate_card_contract_version = %s
-                """,
-                (tenant_account_id, rate_card_id, source_payload_hash, rate_card_contract_version),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._rate_card_version_from_cursor(cursor, row)
-
-    def get_rate_card_version(self, rate_card_version_id: UUID) -> StoredRateCardVersion | None:
-        """Return one published price-book version by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT rate_card_version_id, tenant_account_id, rate_card_id,
-                       version_number, rate_card_contract_version, currency_code,
-                       source_payload_hash, published_at
-                FROM billing_core.rate_card_version
-                WHERE rate_card_version_id = %s
-                """,
-                (rate_card_version_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._rate_card_version_from_cursor(cursor, row)
-
-    def find_rate_card_version(
-        self,
-        tenant_account_id: UUID,
-        version_number: int,
-        rate_card_name: str | None = None,
-    ) -> StoredRateCardVersion | None:
-        """Return one tenant-scoped version number when it is unambiguous."""
-        with self._cursor() as cursor:
-            if rate_card_name is None:
-                cursor.execute(
-                    """
-                    SELECT rate_card_version_id, tenant_account_id, rate_card_id,
-                           version_number, rate_card_contract_version, currency_code,
-                           source_payload_hash, published_at
-                    FROM billing_core.rate_card_version
-                    WHERE tenant_account_id = %s AND version_number = %s
-                    """,
-                    (tenant_account_id, version_number),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT version.rate_card_version_id, version.tenant_account_id,
-                           version.rate_card_id, version.version_number,
-                           version.rate_card_contract_version, version.currency_code,
-                           version.source_payload_hash, version.published_at
-                    FROM billing_core.rate_card_version AS version
-                    JOIN billing_core.rate_card AS card
-                      ON card.tenant_account_id = version.tenant_account_id
-                     AND card.rate_card_id = version.rate_card_id
-                    WHERE version.tenant_account_id = %s
-                      AND card.rate_card_name = %s
-                      AND version.version_number = %s
-                    """,
-                    (tenant_account_id, rate_card_name, version_number),
-                )
-            rows = cursor.fetchall()
-            if len(rows) != 1:
-                return None
-            return self._rate_card_version_from_cursor(cursor, rows[0])
-
-    def next_rate_card_version_number(
-        self, tenant_account_id: UUID, rate_card_id: UUID
-    ) -> int:
-        """Return the next append-only version number for one price book."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT COALESCE(MAX(version_number), 0) + 1
-                FROM billing_core.rate_card_version
-                WHERE tenant_account_id = %s AND rate_card_id = %s
-                """,
-                (tenant_account_id, rate_card_id),
-            )
-            return int(cursor.fetchone()[0])
-
-    def insert_rate_card_version(
-        self, version: StoredRateCardVersion
-    ) -> StoredRateCardVersion:
-        """Persist one immutable price-book version and its normalized lines."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.rate_card_version
-                    (rate_card_version_id, tenant_account_id, rate_card_id,
-                     version_number, rate_card_contract_version, currency_code,
-                     source_payload_hash, published_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING rate_card_version_id, tenant_account_id, rate_card_id,
-                          version_number, rate_card_contract_version, currency_code,
-                          source_payload_hash, published_at
-                """,
-                (
-                    version.rate_card_version_id,
-                    version.tenant_account_id,
-                    version.rate_card_id,
-                    version.version_number,
-                    version.rate_card_contract_version,
-                    version.currency_code,
-                    version.source_payload_hash,
-                    version.published_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT rate_card_version_id, tenant_account_id, rate_card_id,
-                           version_number, rate_card_contract_version, currency_code,
-                           source_payload_hash, published_at
-                    FROM billing_core.rate_card_version
-                    WHERE tenant_account_id = %s
-                      AND rate_card_id = %s
-                      AND source_payload_hash = %s
-                      AND rate_card_contract_version = %s
-                    """,
-                    (
-                        version.tenant_account_id,
-                        version.rate_card_id,
-                        version.source_payload_hash,
-                        version.rate_card_contract_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - unique identity protects the version
-                    raise RuntimeError("rate-card version insert did not return a row")
-                return self._rate_card_version_from_cursor(cursor, row)
-            for line in version.rate_card_lines:
-                cursor.execute(
-                    """
-                    INSERT INTO billing_core.rate_card_line
-                        (rate_card_line_id, tenant_account_id, rate_card_version_id,
-                         metric_code, unit_amount, currency_code)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        line.rate_card_line_id,
-                        line.tenant_account_id,
-                        line.rate_card_version_id,
-                        line.metric_code,
-                        line.unit_amount,
-                        line.currency_code,
-                    ),
-                )
-            return self._rate_card_version_from_cursor(cursor, row)
-
-    def list_rate_card_versions(
-        self, tenant_account_id: UUID, rate_card_id: UUID | None = None
-    ) -> tuple[StoredRateCardVersion, ...]:
-        """Return published price-book versions for one tenant."""
-        with self._cursor() as cursor:
-            if rate_card_id is None:
-                cursor.execute(
-                    """
-                    SELECT rate_card_version_id, tenant_account_id, rate_card_id,
-                           version_number, rate_card_contract_version, currency_code,
-                           source_payload_hash, published_at
-                    FROM billing_core.rate_card_version
-                    WHERE tenant_account_id = %s
-                    ORDER BY rate_card_id, version_number
-                    """,
-                    (tenant_account_id,),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT rate_card_version_id, tenant_account_id, rate_card_id,
-                           version_number, rate_card_contract_version, currency_code,
-                           source_payload_hash, published_at
-                    FROM billing_core.rate_card_version
-                    WHERE tenant_account_id = %s AND rate_card_id = %s
-                    ORDER BY version_number
-                    """,
-                    (tenant_account_id, rate_card_id),
-                )
-            return tuple(
-                self._rate_card_version_from_cursor(cursor, row)
-                for row in cursor.fetchall()
-            )
-
-    def find_rate_card_line(
-        self, rate_card_version_id: UUID, metric_code: str
-    ) -> StoredRateCardLine | None:
-        """Return one exact unit price from a published version."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT rate_card_line_id, tenant_account_id, rate_card_version_id,
-                       metric_code, unit_amount, currency_code
-                FROM billing_core.rate_card_line
-                WHERE rate_card_version_id = %s AND metric_code = %s
-                """,
-                (rate_card_version_id, metric_code),
-            )
-            row = cursor.fetchone()
-        return None if row is None else self._rate_card_line_from_row(row)
-
-    def find_meter_quality_rule(
-        self, meter_definition_id: UUID, quality_code: str
-    ) -> MeterQualityRule | None:
-        """Return the billing disposition for one normalized meter quality."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT meter_quality_rule_id, meter_definition_id, quality_code,
-                       billing_disposition_code
-                FROM billing_core.meter_quality_rule
-                WHERE meter_definition_id = %s AND quality_code = %s
-                """,
-                (meter_definition_id, quality_code),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None
-        return MeterQualityRule(UUID(str(row[0])), UUID(str(row[1])), row[2], row[3])
-
-    def find_tax_rate_schedule(
-        self, tenant_account_id: UUID, tax_code: str
-    ) -> StoredTaxRateSchedule | None:
-        """Return one tenant-scoped tax-rate schedule by code."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tax_rate_schedule_id, tenant_account_id, tax_code, created_at
-                FROM billing_core.tax_rate_schedule
-                WHERE tenant_account_id = %s AND tax_code = %s
-                """,
-                (tenant_account_id, tax_code),
-            )
-            row = cursor.fetchone()
-        return None if row is None else self._tax_rate_schedule_from_row(row)
-
-    def get_tax_rate_schedule(
-        self, tax_rate_schedule_id: UUID
-    ) -> StoredTaxRateSchedule | None:
-        """Return one tax-rate schedule by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tax_rate_schedule_id, tenant_account_id, tax_code, created_at
-                FROM billing_core.tax_rate_schedule
-                WHERE tax_rate_schedule_id = %s
-                """,
-                (tax_rate_schedule_id,),
-            )
-            row = cursor.fetchone()
-        return None if row is None else self._tax_rate_schedule_from_row(row)
-
-    def insert_tax_rate_schedule(
-        self, schedule: StoredTaxRateSchedule
-    ) -> StoredTaxRateSchedule:
-        """Persist one tax-rate schedule without replacing its code identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.tax_rate_schedule
-                    (tax_rate_schedule_id, tenant_account_id, tax_code, created_at)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING tax_rate_schedule_id, tenant_account_id, tax_code, created_at
-                """,
-                (
-                    schedule.tax_rate_schedule_id,
-                    schedule.tenant_account_id,
-                    schedule.tax_code,
-                    schedule.created_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT tax_rate_schedule_id, tenant_account_id, tax_code, created_at
-                    FROM billing_core.tax_rate_schedule
-                    WHERE tenant_account_id = %s AND tax_code = %s
-                    """,
-                    (schedule.tenant_account_id, schedule.tax_code),
-                )
-                row = cursor.fetchone()
-            if row is None:
-                raise ValueError("tax-rate schedule identity already belongs to another row")
-        return self._tax_rate_schedule_from_row(row)
-
-    def list_tax_rate_schedules(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredTaxRateSchedule, ...]:
-        """Return tax-rate schedules limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tax_rate_schedule_id, tenant_account_id, tax_code, created_at
-                FROM billing_core.tax_rate_schedule
-                WHERE tenant_account_id = %s
-                ORDER BY tax_code, tax_rate_schedule_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(self._tax_rate_schedule_from_row(row) for row in cursor.fetchall())
-
-    def find_tax_rate_version_by_identity(
-        self,
-        tenant_account_id: UUID,
-        tax_rate_schedule_id: UUID,
-        source_payload_hash: str,
-        tax_rate_contract_version: int,
-    ) -> StoredTaxRateVersion | None:
-        """Return one published tax-rate version by immutable payload identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
-                       version_number, tax_rate_contract_version, tax_code, tax_rate,
-                       source_payload_hash, published_at
-                FROM billing_core.tax_rate_version
-                WHERE tenant_account_id = %s
-                  AND tax_rate_schedule_id = %s
-                  AND source_payload_hash = %s
-                  AND tax_rate_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    tax_rate_schedule_id,
-                    source_payload_hash,
-                    tax_rate_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-        return None if row is None else self._tax_rate_version_from_row(row)
-
-    def get_tax_rate_version(
-        self, tax_rate_version_id: UUID
-    ) -> StoredTaxRateVersion | None:
-        """Return one published tax-rate version by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
-                       version_number, tax_rate_contract_version, tax_code, tax_rate,
-                       source_payload_hash, published_at
-                FROM billing_core.tax_rate_version
-                WHERE tax_rate_version_id = %s
-                """,
-                (tax_rate_version_id,),
-            )
-            row = cursor.fetchone()
-        return None if row is None else self._tax_rate_version_from_row(row)
-
-    def find_tax_rate_version(
-        self,
-        tenant_account_id: UUID,
-        version_number: int,
-        tax_code: str | None = None,
-    ) -> StoredTaxRateVersion | None:
-        """Return one tenant-scoped version number when it is unambiguous."""
-        with self._cursor() as cursor:
-            if tax_code is None:
-                cursor.execute(
-                    """
-                    SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
-                           version_number, tax_rate_contract_version, tax_code, tax_rate,
-                           source_payload_hash, published_at
-                    FROM billing_core.tax_rate_version
-                    WHERE tenant_account_id = %s AND version_number = %s
-                    """,
-                    (tenant_account_id, version_number),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT version.tax_rate_version_id, version.tenant_account_id,
-                           version.tax_rate_schedule_id, version.version_number,
-                           version.tax_rate_contract_version, version.tax_code,
-                           version.tax_rate, version.source_payload_hash,
-                           version.published_at
-                    FROM billing_core.tax_rate_version AS version
-                    JOIN billing_core.tax_rate_schedule AS schedule
-                      ON schedule.tenant_account_id = version.tenant_account_id
-                     AND schedule.tax_rate_schedule_id = version.tax_rate_schedule_id
-                    WHERE version.tenant_account_id = %s
-                      AND schedule.tax_code = %s
-                      AND version.version_number = %s
-                    """,
-                    (tenant_account_id, tax_code, version_number),
-                )
-            rows = cursor.fetchall()
-        if len(rows) != 1:
-            return None
-        return self._tax_rate_version_from_row(rows[0])
-
-    def next_tax_rate_version_number(
-        self, tenant_account_id: UUID, tax_rate_schedule_id: UUID
-    ) -> int:
-        """Return the next append-only version number for one tax schedule."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT COALESCE(MAX(version_number), 0) + 1
-                FROM billing_core.tax_rate_version
-                WHERE tenant_account_id = %s AND tax_rate_schedule_id = %s
-                """,
-                (tenant_account_id, tax_rate_schedule_id),
-            )
-            return int(cursor.fetchone()[0])
-
-    def insert_tax_rate_version(
-        self, version: StoredTaxRateVersion
-    ) -> StoredTaxRateVersion:
-        """Persist one immutable tax-rate version and classify replay."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.tax_rate_version
-                    (tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
-                     version_number, tax_rate_contract_version, tax_code, tax_rate,
-                     source_payload_hash, published_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING tax_rate_version_id, tenant_account_id,
-                          tax_rate_schedule_id, version_number,
-                          tax_rate_contract_version, tax_code, tax_rate,
-                          source_payload_hash, published_at
-                """,
-                (
-                    version.tax_rate_version_id,
-                    version.tenant_account_id,
-                    version.tax_rate_schedule_id,
-                    version.version_number,
-                    version.tax_rate_contract_version,
-                    version.tax_code,
-                    version.tax_rate,
-                    version.source_payload_hash,
-                    version.published_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
-                           version_number, tax_rate_contract_version, tax_code, tax_rate,
-                           source_payload_hash, published_at
-                    FROM billing_core.tax_rate_version
-                    WHERE tenant_account_id = %s
-                      AND tax_rate_schedule_id = %s
-                      AND source_payload_hash = %s
-                      AND tax_rate_contract_version = %s
-                    """,
-                    (
-                        version.tenant_account_id,
-                        version.tax_rate_schedule_id,
-                        version.source_payload_hash,
-                        version.tax_rate_contract_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("tax-rate version identity already belongs to another row")
-            return self._tax_rate_version_from_row(row)
-
-    def list_tax_rate_versions(
-        self, tenant_account_id: UUID, tax_rate_schedule_id: UUID | None = None
-    ) -> tuple[StoredTaxRateVersion, ...]:
-        """Return published tax-rate versions limited to one tenant."""
-        with self._cursor() as cursor:
-            if tax_rate_schedule_id is None:
-                cursor.execute(
-                    """
-                    SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
-                           version_number, tax_rate_contract_version, tax_code, tax_rate,
-                           source_payload_hash, published_at
-                    FROM billing_core.tax_rate_version
-                    WHERE tenant_account_id = %s
-                    ORDER BY tax_rate_schedule_id, version_number
-                    """,
-                    (tenant_account_id,),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT tax_rate_version_id, tenant_account_id, tax_rate_schedule_id,
-                           version_number, tax_rate_contract_version, tax_code, tax_rate,
-                           source_payload_hash, published_at
-                    FROM billing_core.tax_rate_version
-                    WHERE tenant_account_id = %s AND tax_rate_schedule_id = %s
-                    ORDER BY version_number
-                    """,
-                    (tenant_account_id, tax_rate_schedule_id),
-                )
-            return tuple(self._tax_rate_version_from_row(row) for row in cursor.fetchall())
-
-    def find_tax_assessment(
-        self,
-        tenant_account_id: UUID,
-        invoice_draft_id: UUID,
-        tax_rate_version_id: UUID,
-        source_payload_hash: str,
-        tax_assessment_contract_version: int,
-    ) -> StoredTaxAssessment | None:
-        """Return one assessment by its tenant-scoped immutable identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT assessment.tax_assessment_id
-                FROM billing_core.tax_assessment AS assessment
-                WHERE assessment.tenant_account_id = %s
-                  AND assessment.invoice_draft_id = %s
-                  AND assessment.tax_rate_version_id = %s
-                  AND assessment.source_payload_hash = %s
-                  AND assessment.tax_assessment_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    invoice_draft_id,
-                    tax_rate_version_id,
-                    source_payload_hash,
-                    tax_assessment_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_tax_assessment(cursor, UUID(str(row[0])))
-
-    def get_tax_assessment(
-        self, tax_assessment_id: UUID
-    ) -> StoredTaxAssessment | None:
-        """Return one tax assessment by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tax_assessment_id
-                FROM billing_core.tax_assessment
-                WHERE tax_assessment_id = %s
-                """,
-                (tax_assessment_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_tax_assessment(cursor, UUID(str(row[0])))
-
-    def list_tax_assessments(
-        self, tenant_account_id: UUID | None = None
-    ) -> tuple[StoredTaxAssessment, ...]:
-        """Return assessments, optionally limited to one tenant."""
-        with self._cursor() as cursor:
-            if tenant_account_id is None:
-                cursor.execute(
-                    """
-                    SELECT tax_assessment_id
-                    FROM billing_core.tax_assessment
-                    ORDER BY assessed_at, tax_assessment_id
-                    """
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT tax_assessment_id
-                    FROM billing_core.tax_assessment
-                    WHERE tenant_account_id = %s
-                    ORDER BY assessed_at, tax_assessment_id
-                    """,
-                    (tenant_account_id,),
-                )
-            return tuple(
-                self._fetch_tax_assessment(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_tax_assessment(
-        self, assessment: StoredTaxAssessment
-    ) -> StoredTaxAssessment:
-        """Persist one tax snapshot and classify exact or draft replay."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.tax_assessment
-                    (tax_assessment_id, tenant_account_id, invoice_draft_id,
-                     tax_rate_version_id, tax_assessment_contract_version, tax_code,
-                     tax_rate, currency_code, tax_exclusive_amount, tax_amount,
-                     tax_inclusive_amount, source_payload_hash, assessed_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING tax_assessment_id
-                """,
-                (
-                    assessment.tax_assessment_id,
-                    assessment.tenant_account_id,
-                    assessment.invoice_draft_id,
-                    assessment.tax_rate_version_id,
-                    assessment.tax_assessment_contract_version,
-                    assessment.tax_code,
-                    assessment.tax_rate,
-                    assessment.currency_code,
-                    assessment.tax_exclusive_amount,
-                    assessment.tax_amount,
-                    assessment.tax_inclusive_amount,
-                    assessment.source_payload_hash,
-                    assessment.assessed_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT tax_assessment_id
-                    FROM billing_core.tax_assessment
-                    WHERE tenant_account_id = %s
-                      AND invoice_draft_id = %s
-                      AND tax_rate_version_id = %s
-                      AND source_payload_hash = %s
-                      AND tax_assessment_contract_version = %s
-                    """,
-                    (
-                        assessment.tenant_account_id,
-                        assessment.invoice_draft_id,
-                        assessment.tax_rate_version_id,
-                        assessment.source_payload_hash,
-                        assessment.tax_assessment_contract_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("tax assessment identity already belongs to another row")
-                return self._fetch_tax_assessment(cursor, UUID(str(row[0])))
-            return self._fetch_tax_assessment(cursor, UUID(str(row[0])))
-
-    def resolve_tenant(
-        self, tenant_reference: str
-    ) -> tuple[TenantAccount | None, RejectionReasonCode | None]:
-        """Resolve one tenant without exposing another tenant's catalog."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tenant_account_id, tenant_reference, tenant_account_code
-                FROM billing_core.tenant_account
-                WHERE tenant_reference = %s
-                """,
-                (tenant_reference,),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None, RejectionReasonCode.TENANT_NOT_FOUND
-        return TenantAccount(UUID(str(row[0])), row[1], row[2]), None
-
-    def resolve_billing_account(
-        self, tenant: TenantAccount, billing_account_reference: str
-    ) -> tuple[BillingAccount | None, RejectionReasonCode | None]:
-        """Resolve an active account by composite tenant identity."""
-        if not billing_account_reference.startswith(f"{tenant.tenant_reference}:"):
-            return None, RejectionReasonCode.ATTRIBUTION_TENANT_MISMATCH
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT billing_account_id, tenant_account_id, billing_account_code,
-                       account_status_code
-                FROM billing_core.billing_account
-                WHERE tenant_account_id = %s AND billing_account_code = %s
-                """,
-                (tenant.tenant_account_id, _resource_code(billing_account_reference)),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None, RejectionReasonCode.BILLING_ACCOUNT_NOT_FOUND
-        account = BillingAccount(
-            UUID(str(row[0])), UUID(str(row[1])), billing_account_reference, row[2], row[3]
-        )
-        if account.account_status_code != "active":
-            return None, RejectionReasonCode.BILLING_ACCOUNT_NOT_ACTIVE
-        return account, None
-
-    def get_billing_account(self, billing_account_id: UUID) -> BillingAccount | None:
-        """Return one billing account by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT billing_account_id, tenant_account_id, billing_account_code,
-                       billing_account_reference, account_status_code
-                FROM billing_core.billing_account
-                WHERE billing_account_id = %s
-                """,
-                (billing_account_id,),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None
-        return BillingAccount(
-            UUID(str(row[0])), UUID(str(row[1])), row[3], row[2], row[4]
-        )
-
-    def resolve_billing_principal(
-        self, tenant: TenantAccount, billing_principal_reference: str, occurred_at: datetime
-    ) -> tuple[BillingPrincipal | None, RejectionReasonCode | None]:
-        """Resolve an effective principal using PostgreSQL time predicates."""
-        if not billing_principal_reference.startswith(f"{tenant.tenant_reference}:"):
-            return None, RejectionReasonCode.ATTRIBUTION_TENANT_MISMATCH
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT billing_principal_id, tenant_account_id, principal_kind_code,
-                       principal_reference, valid_from, valid_to
-                FROM billing_core.billing_principal
-                WHERE tenant_account_id = %s
-                  AND principal_reference = %s
-                  AND valid_from <= %s
-                  AND (valid_to IS NULL OR %s < valid_to)
-                ORDER BY valid_from DESC
-                LIMIT 1
-                """,
-                (tenant.tenant_account_id, billing_principal_reference, occurred_at, occurred_at),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT 1
-                    FROM billing_core.billing_principal
-                    WHERE tenant_account_id = %s AND principal_reference = %s
-                    LIMIT 1
-                    """,
-                    (tenant.tenant_account_id, billing_principal_reference),
-                )
-                if cursor.fetchone() is None:
-                    return None, RejectionReasonCode.BILLING_PRINCIPAL_NOT_FOUND
-                return None, RejectionReasonCode.PRINCIPAL_NOT_EFFECTIVE
-        principal = self._principal_from_row(row)
-        return principal, None
-
-    def resolve_credential(
-        self,
-        tenant: TenantAccount,
-        credential_reference: str,
-        principal: BillingPrincipal,
-        account: BillingAccount,
-        occurred_at: datetime,
-    ) -> tuple[CredentialRecord | None, RejectionReasonCode | None]:
-        """Resolve a credential only when its effective assignment matches both owners."""
-        if not credential_reference.startswith(f"{tenant.tenant_reference}:"):
-            return None, RejectionReasonCode.ATTRIBUTION_TENANT_MISMATCH
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT credential_record_id, tenant_account_id, credential_reference,
-                       credential_kind_code, credential_fingerprint
-                FROM billing_core.credential_record
-                WHERE tenant_account_id = %s AND credential_reference = %s
-                """,
-                (tenant.tenant_account_id, credential_reference),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return None, RejectionReasonCode.CREDENTIAL_NOT_FOUND
-            credential = self._credential_from_row(row)
-            cursor.execute(
-                """
-                SELECT 1
-                FROM billing_core.credential_assignment
-                WHERE tenant_account_id = %s
-                  AND credential_record_id = %s
-                  AND billing_principal_id = %s
-                  AND billing_account_id = %s
-                  AND valid_from <= %s
-                  AND (valid_to IS NULL OR %s < valid_to)
-                LIMIT 1
-                """,
-                (
-                    tenant.tenant_account_id,
-                    credential.credential_record_id,
-                    principal.billing_principal_id,
-                    account.billing_account_id,
-                    occurred_at,
-                    occurred_at,
-                ),
-            )
-            if cursor.fetchone() is None:
-                return None, RejectionReasonCode.CREDENTIAL_NOT_ASSIGNED
-        return credential, None
-
-    def resolve_meter(
-        self, meter_code: str, unit_code: str, quality_code: str, occurred_at: datetime
-    ) -> tuple[MeterDefinition | None, RejectionReasonCode | None]:
-        """Resolve the highest effective meter version and its quality rule."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT meter_definition_id, meter_code, meter_version, unit_code,
-                       aggregation_code, valid_from, valid_to
-                FROM billing_core.meter_definition
-                WHERE meter_code = %s
-                  AND valid_from <= %s
-                  AND (valid_to IS NULL OR %s < valid_to)
-                ORDER BY meter_version DESC
-                LIMIT 1
-                """,
-                (meter_code, occurred_at, occurred_at),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return None, RejectionReasonCode.METER_NOT_FOUND
-            meter = self._meter_from_row(row)
-            if meter.unit_code != unit_code:
-                return None, RejectionReasonCode.METER_UNIT_MISMATCH
-            cursor.execute(
-                """
-                SELECT 1
-                FROM billing_core.meter_quality_rule
-                WHERE meter_definition_id = %s AND quality_code = %s
-                """,
-                (meter.meter_definition_id, quality_code),
-            )
-            if cursor.fetchone() is None:
-                return None, RejectionReasonCode.METER_QUALITY_NOT_ALLOWED
-        return meter, None
-
-    def find_by_source_event_key(
-        self, tenant_account_id: UUID, source_event_key: str
-    ) -> StoredUsageEvent | None:
-        """Find one immutable event by tenant-scoped source key."""
-        return self._find_event(
-            """
-            SELECT usage_event_id
-            FROM billing_core.usage_event
-            WHERE tenant_account_id = %s AND source_event_key = %s
-            LIMIT 1
-            """,
-            (tenant_account_id, source_event_key),
-        )
-
-    def find_by_payload_hash(
-        self, tenant_account_id: UUID, event_payload_hash: str, event_contract_version: int
-    ) -> StoredUsageEvent | None:
-        """Find one immutable event by tenant, hash, and contract version."""
-        return self._find_event(
-            """
-            SELECT usage_event_id
-            FROM billing_core.usage_event
-            WHERE tenant_account_id = %s
-              AND event_payload_hash = %s
-              AND event_contract_version = %s
-            LIMIT 1
-            """,
-            (tenant_account_id, event_payload_hash, event_contract_version),
-        )
-
-    def find_by_producer_event_id(
-        self, tenant_account_id: UUID, producer_event_id: UUID
-    ) -> StoredUsageEvent | None:
-        """Find one immutable event by tenant-scoped producer event ID."""
-        return self._find_event(
-            """
-            SELECT usage_event_id
-            FROM billing_core.usage_event
-            WHERE tenant_account_id = %s AND producer_event_id = %s
-            LIMIT 1
-            """,
-            (tenant_account_id, producer_event_id),
-        )
-
-    def insert_usage_event(self, event: StoredUsageEvent) -> StoredUsageEvent:
-        """Insert an event and all measurements atomically under database uniqueness."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.usage_event
-                    (usage_event_id, producer_event_id, tenant_account_id,
-                     billing_account_id, billing_principal_id, credential_record_id,
-                     source_event_key, event_contract_version, event_payload_hash,
-                     product_code, operation_code, occurred_at, recorded_at,
-                     cost_center_reference, project_reference)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING usage_event_id
-                """,
-                (
-                    event.usage_event_id,
-                    event.producer_event_id,
-                    event.tenant_account_id,
-                    event.billing_account_id,
-                    event.billing_principal_id,
-                    event.credential_record_id,
-                    event.source_event_key,
-                    event.event_contract_version,
-                    event.event_payload_hash,
-                    event.product_code,
-                    event.operation_code,
-                    event.occurred_at,
-                    event.recorded_at,
-                    event.cost_center_reference,
-                    event.project_reference,
-                ),
-            )
-            inserted = cursor.fetchone()
-            if inserted is None:
-                existing = self._find_event_with_cursor(cursor, event.tenant_account_id, event)
-                if existing is None:
-                    raise ValueError("usage event conflict has no classified existing row")
-                if existing.source_event_key == event.source_event_key:
-                    if (
-                        existing.event_payload_hash == event.event_payload_hash
-                        and existing.event_contract_version == event.event_contract_version
-                    ):
-                        raise UsageEventConflict(existing, duplicate_replay=True)
-                    raise UsageEventConflict(
-                        existing,
-                        duplicate_replay=False,
-                        rejection_reason_code=RejectionReasonCode.SOURCE_EVENT_CONFLICT,
-                    )
-                if (
-                    existing.event_payload_hash == event.event_payload_hash
-                    and existing.event_contract_version == event.event_contract_version
-                ):
-                    raise UsageEventConflict(
-                        existing,
-                        duplicate_replay=False,
-                        rejection_reason_code=RejectionReasonCode.PAYLOAD_HASH_CONFLICT,
-                    )
-                if existing.producer_event_id == event.producer_event_id:
-                    raise UsageEventConflict(
-                        existing,
-                        duplicate_replay=False,
-                        rejection_reason_code=RejectionReasonCode.PRODUCER_EVENT_CONFLICT,
-                    )
-                raise ValueError(  # pragma: no cover - one of the three identity keys matched
-                    "usage event conflict is not tenant-classifiable"
-                )
-            for measurement in event.measurements:
-                cursor.execute(
-                    """
-                    INSERT INTO billing_core.usage_measurement
-                        (usage_measurement_id, usage_event_id, meter_definition_id,
-                         measured_quantity, quality_code)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (
-                        measurement.usage_measurement_id,
-                        event.usage_event_id,
-                        measurement.meter_definition_id,
-                        measurement.measured_quantity,
-                        measurement.quality_code,
-                    ),
-                )
-        return event
-
-    def append_ingestion_receipt(self, receipt: StoredIngestionReceipt) -> StoredIngestionReceipt:
-        """Append one audit receipt in the current ingest transaction."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.usage_ingestion_receipt
-                    (usage_ingestion_receipt_id, tenant_account_id, usage_event_id,
-                     source_event_key, event_contract_version, source_payload_hash,
-                     ingestion_outcome_code, rejection_reason_code, recorded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    receipt.usage_ingestion_receipt_id,
-                    receipt.tenant_account_id,
-                    receipt.usage_event_id,
-                    receipt.source_event_key,
-                    receipt.event_contract_version,
-                    receipt.source_payload_hash,
-                    receipt.ingestion_outcome_code,
-                    receipt.rejection_reason_code,
-                    receipt.recorded_at,
-                ),
-            )
-        return receipt
-
-    def list_ingestion_receipts(
-        self, tenant_account_id: UUID | None = None
-    ) -> tuple[StoredIngestionReceipt, ...]:
-        """Return append-only receipts, optionally filtered by tenant."""
-        with self._cursor() as cursor:
-            if tenant_account_id is None:
-                cursor.execute(
-                    """
-                    SELECT usage_ingestion_receipt_id, tenant_account_id, usage_event_id,
-                           source_event_key, event_contract_version, source_payload_hash,
-                           ingestion_outcome_code, rejection_reason_code, recorded_at
-                    FROM billing_core.usage_ingestion_receipt
-                    ORDER BY recorded_at, usage_ingestion_receipt_id
-                    """
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT usage_ingestion_receipt_id, tenant_account_id, usage_event_id,
-                           source_event_key, event_contract_version, source_payload_hash,
-                           ingestion_outcome_code, rejection_reason_code, recorded_at
-                    FROM billing_core.usage_ingestion_receipt
-                    WHERE tenant_account_id = %s
-                    ORDER BY recorded_at, usage_ingestion_receipt_id
-                    """,
-                    (tenant_account_id,),
-                )
-            return tuple(self._receipt_from_row(row) for row in cursor.fetchall())
-
-    def get_usage_event(self, usage_event_id: UUID) -> StoredUsageEvent | None:
-        """Return one stored usage event by opaque identifier."""
-        return self._find_event(
-            """
-            SELECT usage_event_id
-            FROM billing_core.usage_event
-            WHERE usage_event_id = %s
-            LIMIT 1
-            """,
-            (usage_event_id,),
-        )
-
-    def list_usage_events(
-        self, tenant_account_id: UUID | None = None
-    ) -> tuple[StoredUsageEvent, ...]:
-        """Return immutable events, optionally limited to one tenant."""
-        with self._cursor() as cursor:
-            if tenant_account_id is None:
-                cursor.execute(
-                    """
-                    SELECT usage_event_id
-                    FROM billing_core.usage_event
-                    ORDER BY recorded_at, usage_event_id
-                    """
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT usage_event_id
-                    FROM billing_core.usage_event
-                    WHERE tenant_account_id = %s
-                    ORDER BY recorded_at, usage_event_id
-                    """,
-                    (tenant_account_id,),
-                )
-            return tuple(
-                self._fetch_usage_event(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def list_usage_events_in_window(
-        self, tenant_account_id: UUID, window_started_at: datetime, window_ended_at: datetime
-    ) -> tuple[StoredUsageEvent, ...]:
-        """Return tenant events in the half-open occurred-at window."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT usage_event_id
-                FROM billing_core.usage_event
-                WHERE tenant_account_id = %s
-                  AND occurred_at >= %s
-                  AND occurred_at < %s
-                ORDER BY occurred_at, source_event_key
-                """,
-                (tenant_account_id, window_started_at, window_ended_at),
-            )
-            return tuple(
-                self._fetch_usage_event(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def billing_account_reference_for(self, billing_account_id: UUID) -> str:
-        """Return the tenant-scoped URN for one billing-account identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT account.billing_account_reference
-                FROM billing_core.billing_account AS account
-                JOIN billing_core.tenant_account AS tenant
-                  ON tenant.tenant_account_id = account.tenant_account_id
-                WHERE account.billing_account_id = %s
-                """,
-                (billing_account_id,),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            raise KeyError(billing_account_id)
-        return row[0]
-
-    def find_rating_run(
-        self,
-        tenant_account_id: UUID,
-        window_started_at: datetime,
-        window_ended_at: datetime,
-        rate_card_id: UUID,
-        usage_snapshot_hash: str,
-        rate_card_version: int | None = None,
-    ) -> StoredRatingRun | None:
-        """Return one immutable rating result by its replay identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT rating_run_id
-                FROM billing_core.rating_run
-                WHERE tenant_account_id = %s
-                  AND window_started_at = %s
-                  AND window_ended_at = %s
-                  AND rate_card_id = %s
-                  AND usage_snapshot_hash = %s
-                  AND (%s::integer IS NULL OR rate_card_version = %s::integer)
-                """,
-                (
-                    tenant_account_id,
-                    window_started_at,
-                    window_ended_at,
-                    rate_card_id,
-                    usage_snapshot_hash,
-                    rate_card_version,
-                    rate_card_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_rating_run(cursor, UUID(str(row[0])))
-
-    def insert_rating_run(
-        self,
-        rating_run: StoredRatingRun,
-        rating_lines: tuple[StoredRatingLine, ...],
-    ) -> StoredRatingRun:
-        """Persist one rating result and all normalized lines atomically."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.rating_run
-                    (rating_run_id, tenant_account_id, rate_card_id,
-                     rate_card_version, window_started_at, window_ended_at,
-                     usage_snapshot_hash, currency_code, rated_total_amount,
-                     recorded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING rating_run_id
-                """,
-                (
-                    rating_run.rating_run_id,
-                    rating_run.tenant_account_id,
-                    rating_run.rate_card_id,
-                    rating_run.rate_card_version,
-                    rating_run.window_started_at,
-                    rating_run.window_ended_at,
-                    rating_run.usage_snapshot_hash,
-                    rating_run.currency_code,
-                    rating_run.rated_total_amount,
-                    rating_run.recorded_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT rating_run_id
-                    FROM billing_core.rating_run
-                    WHERE tenant_account_id = %s
-                      AND window_started_at = %s
-                      AND window_ended_at = %s
-                      AND rate_card_id = %s
-                      AND usage_snapshot_hash = %s
-                      AND rate_card_version = %s
-                    """,
-                    (
-                        rating_run.tenant_account_id,
-                        rating_run.window_started_at,
-                        rating_run.window_ended_at,
-                        rating_run.rate_card_id,
-                        rating_run.usage_snapshot_hash,
-                        rating_run.rate_card_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - the primary key conflict is not an identity replay
-                    raise ValueError("rating run identity already belongs to another result")
-                return self._fetch_rating_run(cursor, UUID(str(row[0])))
-            for line in rating_lines:
-                cursor.execute(
-                    """
-                    INSERT INTO billing_core.rating_line
-                        (rating_line_id, rating_run_id, tenant_account_id,
-                         billing_account_id, billing_account_reference,
-                         meter_definition_id, meter_code, unit_code,
-                         rated_quantity, unit_price_amount, line_total_amount,
-                         line_number)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        line.rating_line_id,
-                        line.rating_run_id,
-                        line.tenant_account_id,
-                        line.billing_account_id,
-                        line.billing_account_reference,
-                        line.meter_definition_id,
-                        line.meter_code,
-                        line.unit_code,
-                        line.rated_quantity,
-                        line.unit_price_amount,
-                        line.line_total_amount,
-                        line.line_number,
-                    ),
-                )
-            return self._fetch_rating_run(cursor, rating_run.rating_run_id)
-
-    def get_rating_run(self, rating_run_id: UUID) -> StoredRatingRun | None:
-        """Return one stored rating result by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT rating_run_id
-                FROM billing_core.rating_run
-                WHERE rating_run_id = %s
-                """,
-                (rating_run_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_rating_run(cursor, UUID(str(row[0])))
-
-    def list_rating_runs(
-        self, tenant_account_id: UUID | None = None
-    ) -> tuple[StoredRatingRun, ...]:
-        """Return stored rating results, optionally limited to one tenant."""
-        with self._cursor() as cursor:
-            if tenant_account_id is None:
-                cursor.execute(
-                    """
-                    SELECT rating_run_id
-                    FROM billing_core.rating_run
-                    ORDER BY recorded_at, rating_run_id
-                    """
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT rating_run_id
-                    FROM billing_core.rating_run
-                    WHERE tenant_account_id = %s
-                    ORDER BY recorded_at, rating_run_id
-                    """,
-                    (tenant_account_id,),
-                )
-            return tuple(
-                self._fetch_rating_run(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def find_invoice_draft(
-        self, tenant_account_id: UUID, rating_run_id: UUID
-    ) -> StoredInvoiceDraft | None:
-        """Return one tenant-scoped invoice draft by rating identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT invoice_draft_id
-                FROM billing_core.invoice_draft
-                WHERE tenant_account_id = %s AND rating_run_id = %s
-                """,
-                (tenant_account_id, rating_run_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
-
-    def insert_invoice_draft(
-        self,
-        invoice_draft: StoredInvoiceDraft,
-        invoice_draft_lines: tuple[StoredInvoiceDraftLine, ...],
-    ) -> StoredInvoiceDraft:
-        """Persist one invoice draft and its copied rating lines atomically."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.invoice_draft
-                    (invoice_draft_id, tenant_account_id, rating_run_id,
-                     usage_snapshot_hash, currency_code, invoice_draft_status,
-                     drafted_total_amount, recorded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING invoice_draft_id
-                """,
-                (
-                    invoice_draft.invoice_draft_id,
-                    invoice_draft.tenant_account_id,
-                    invoice_draft.rating_run_id,
-                    invoice_draft.usage_snapshot_hash,
-                    invoice_draft.currency_code,
-                    invoice_draft.invoice_draft_status,
-                    invoice_draft.drafted_total_amount,
-                    invoice_draft.recorded_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT invoice_draft_id
-                    FROM billing_core.invoice_draft
-                    WHERE tenant_account_id = %s AND rating_run_id = %s
-                    """,
-                    (invoice_draft.tenant_account_id, invoice_draft.rating_run_id),
-                )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - the primary key conflict is not a replay
-                    raise ValueError("invoice draft identity already belongs to another draft")
-                return self._fetch_invoice_draft(cursor, UUID(str(row[0])))
-            for line in invoice_draft_lines:
-                cursor.execute(
-                    """
-                    INSERT INTO billing_core.invoice_draft_line
-                        (invoice_draft_line_id, invoice_draft_id, tenant_account_id,
-                         billing_account_id, billing_account_reference,
-                         meter_definition_id, line_number, meter_code, unit_code,
-                         rated_quantity, unit_price_amount, line_total_amount)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        line.invoice_draft_line_id,
-                        line.invoice_draft_id,
-                        line.tenant_account_id,
-                        line.billing_account_id,
-                        line.billing_account_reference,
-                        line.meter_definition_id,
-                        line.line_number,
-                        line.meter_code,
-                        line.unit_code,
-                        line.rated_quantity,
-                        line.unit_price_amount,
-                        line.line_total_amount,
-                    ),
-                )
-            return self._fetch_invoice_draft(cursor, invoice_draft.invoice_draft_id)
-
-    def list_invoice_drafts(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredInvoiceDraft, ...]:
-        """Return invoice drafts limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT invoice_draft_id
-                FROM billing_core.invoice_draft
-                WHERE tenant_account_id = %s
-                ORDER BY recorded_at, invoice_draft_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_invoice_draft(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def get_invoice_draft(self, invoice_draft_id: UUID) -> StoredInvoiceDraft | None:
-        """Return one invoice draft by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT invoice_draft_id
-                FROM billing_core.invoice_draft
-                WHERE invoice_draft_id = %s
-                """,
-                (invoice_draft_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_invoice_draft(cursor, UUID(str(row[0])))
-
-    def find_tax_assessment_for_draft(
-        self, tenant_account_id: UUID, invoice_draft_id: UUID
-    ) -> StoredTaxAssessment | None:
-        """Return the optional tax snapshot for one tenant draft."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT assessment.tax_assessment_id, assessment.tenant_account_id,
-                       assessment.invoice_draft_id, assessment.tax_rate_version_id,
-                       assessment.tax_assessment_contract_version, assessment.tax_code,
-                       assessment.tax_rate, assessment.currency_code,
-                       assessment.tax_exclusive_amount, assessment.tax_amount,
-                       assessment.tax_inclusive_amount, assessment.source_payload_hash,
-                       assessment.assessed_at, version.version_number
-                FROM billing_core.tax_assessment AS assessment
-                JOIN billing_core.tax_rate_version AS version
-                  ON version.tenant_account_id = assessment.tenant_account_id
-                 AND version.tax_rate_version_id = assessment.tax_rate_version_id
-                WHERE assessment.tenant_account_id = %s
-                  AND assessment.invoice_draft_id = %s
-                """,
-                (tenant_account_id, invoice_draft_id),
-            )
-            row = cursor.fetchone()
-        return None if row is None else self._tax_assessment_from_row(row)
-
-    def find_issued_invoice(
-        self, tenant_account_id: UUID, invoice_draft_id: UUID
-    ) -> StoredIssuedInvoice | None:
-        """Return one same-tenant issued snapshot for a draft."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_invoice_id
-                FROM billing_core.issued_invoice
-                WHERE tenant_account_id = %s AND invoice_draft_id = %s
-                """,
-                (tenant_account_id, invoice_draft_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_invoice(cursor, UUID(str(row[0])))
-
-    def get_issued_invoice(self, issued_invoice_id: UUID) -> StoredIssuedInvoice | None:
-        """Return one issued snapshot by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_invoice_id
-                FROM billing_core.issued_invoice
-                WHERE issued_invoice_id = %s
-                """,
-                (issued_invoice_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_invoice(cursor, UUID(str(row[0])))
-
-    def list_issued_invoices_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredIssuedInvoice, ...]:
-        """Return issued snapshots limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_invoice_id
-                FROM billing_core.issued_invoice
-                WHERE tenant_account_id = %s
-                ORDER BY issued_at, issued_invoice_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_issued_invoice(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_issued_invoice(
-        self,
-        issued_invoice: StoredIssuedInvoice,
-        issued_invoice_lines: tuple[StoredIssuedInvoiceLine, ...],
-    ) -> StoredIssuedInvoice:
-        """Persist one invoice snapshot and its lines in one transaction."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.issued_invoice
-                    (issued_invoice_id, tenant_account_id, invoice_draft_id,
-                     issued_invoice_contract_version, rating_run_id,
-                     usage_snapshot_hash, source_payload_hash, currency_code,
-                     tax_exclusive_amount, tax_amount, tax_inclusive_amount,
-                     issued_invoice_status, issued_at, due_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING issued_invoice_id
-                """,
-                (
-                    issued_invoice.issued_invoice_id,
-                    issued_invoice.tenant_account_id,
-                    issued_invoice.invoice_draft_id,
-                    issued_invoice.issued_invoice_contract_version,
-                    issued_invoice.rating_run_id,
-                    issued_invoice.usage_snapshot_hash,
-                    issued_invoice.source_payload_hash,
-                    issued_invoice.currency_code,
-                    issued_invoice.tax_exclusive_amount,
-                    issued_invoice.tax_amount,
-                    issued_invoice.tax_inclusive_amount,
-                    issued_invoice.issued_invoice_status,
-                    issued_invoice.issued_at,
-                    issued_invoice.due_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT issued_invoice_id
-                    FROM billing_core.issued_invoice
-                    WHERE tenant_account_id = %s AND invoice_draft_id = %s
-                    """,
-                    (issued_invoice.tenant_account_id, issued_invoice.invoice_draft_id),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("issued invoice identity already belongs to another snapshot")
-                return self._fetch_issued_invoice(cursor, UUID(str(row[0])))
-            for line in issued_invoice_lines:
-                cursor.execute(
-                    """
-                    INSERT INTO billing_core.issued_invoice_line
-                        (issued_invoice_line_id, issued_invoice_id, tenant_account_id,
-                         line_number, billing_account_reference, meter_code, unit_code,
-                         rated_quantity, unit_price_amount, line_total_amount)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        line.issued_invoice_line_id,
-                        line.issued_invoice_id,
-                        line.tenant_account_id,
-                        line.line_number,
-                        line.billing_account_reference,
-                        line.meter_code,
-                        line.unit_code,
-                        line.rated_quantity,
-                        line.unit_price_amount,
-                        line.line_total_amount,
-                    ),
-                )
-            return self._fetch_issued_invoice(cursor, issued_invoice.issued_invoice_id)
-
-    def get_collection_case(self, collection_case_id: UUID) -> StoredCollectionCase | None:
-        """Return one collection case by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id
-                FROM billing_core.collection_case
-                WHERE collection_case_id = %s
-                """,
-                (collection_case_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_case(cursor, UUID(str(row[0])))
-
-    def find_collection_case(
-        self, tenant_account_id: UUID, invoice_draft_id: UUID
-    ) -> StoredCollectionCase | None:
-        """Return one tenant-scoped collection case identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id
-                FROM billing_core.collection_case
-                WHERE tenant_account_id = %s AND invoice_draft_id = %s
-                """,
-                (tenant_account_id, invoice_draft_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_case(cursor, UUID(str(row[0])))
-
-    def insert_collection_case(
-        self, collection_case: StoredCollectionCase
-    ) -> StoredCollectionCase:
-        """Persist one positive tenant-scoped collection case or replay it."""
-        if collection_case.collection_case_status not in {"open", "dunning"}:
-            raise ValueError("collection cases cannot be paid, written off, or posted")
-        outstanding_amount = parse_exact_decimal(
-            format_exact_decimal(collection_case.outstanding_amount)
-        )
-        if outstanding_amount <= 0:
-            raise ValueError("collection case outstanding must be a positive exact decimal")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.collection_case
-                    (collection_case_id, tenant_account_id, invoice_draft_id,
-                     currency_code, collection_case_status, outstanding_amount, opened_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING collection_case_id
-                """,
-                (
-                    collection_case.collection_case_id,
-                    collection_case.tenant_account_id,
-                    collection_case.invoice_draft_id,
-                    collection_case.currency_code,
-                    collection_case.collection_case_status,
-                    outstanding_amount,
-                    collection_case.opened_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT collection_case_id
-                    FROM billing_core.collection_case
-                    WHERE tenant_account_id = %s AND invoice_draft_id = %s
-                    """,
-                    (collection_case.tenant_account_id, collection_case.invoice_draft_id),
-                )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - a valid FK conflict has an identity row
-                    raise ValueError("collection case identity already belongs to another case")
-            return self._fetch_collection_case(cursor, UUID(str(row[0])))
-
-    def list_collection_cases(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredCollectionCase, ...]:
-        """Return collection cases limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id
-                FROM billing_core.collection_case
-                WHERE tenant_account_id = %s
-                ORDER BY opened_at, collection_case_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_collection_case(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def get_collection_dunning_event(
-        self, collection_dunning_event_id: UUID
-    ) -> StoredCollectionDunningEvent | None:
-        """Return one dunning event by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_dunning_event_id
-                FROM billing_core.collection_dunning_event
-                WHERE collection_dunning_event_id = %s
-                """,
-                (collection_dunning_event_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_dunning_event(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_collection_dunning_events(
-        self, collection_case_id: UUID
-    ) -> tuple[StoredCollectionDunningEvent, ...]:
-        """Return dunning events for one case in event-number order."""
-        return self._list_collection_dunning_events(collection_case_id=collection_case_id)
-
-    def list_collection_dunning_events_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredCollectionDunningEvent, ...]:
-        """Return dunning events limited to one tenant."""
-        return self._list_collection_dunning_events(tenant_account_id=tenant_account_id)
-
-    def find_collection_dunning_event(
-        self, collection_case_id: UUID, dunning_notice_code: str
-    ) -> StoredCollectionDunningEvent | None:
-        """Return one case and notice identity, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_dunning_event_id
-                FROM billing_core.collection_dunning_event
-                WHERE collection_case_id = %s AND dunning_notice_code = %s
-                """,
-                (collection_case_id, dunning_notice_code),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_dunning_event(
-                cursor, UUID(str(row[0]))
-            )
-
-    def insert_collection_dunning_event(
-        self, dunning_event: StoredCollectionDunningEvent
-    ) -> StoredCollectionDunningEvent:
-        """Append one dunning event; an exact notice replay returns its row."""
-        if dunning_event.dunning_notice_code not in {"first_notice", "overdue_notice"}:
-            raise ValueError("collection dunning notices must be commercial reminder codes")
-        if dunning_event.dunning_event_number < 1:
-            raise ValueError("collection dunning event number must be positive")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.collection_dunning_event
-                    (collection_dunning_event_id, collection_case_id,
-                     tenant_account_id, dunning_event_number, dunning_notice_code,
-                     occurred_at)
-                SELECT %s, %s, c.tenant_account_id, %s, %s, %s
-                FROM billing_core.collection_case AS c
-                WHERE c.collection_case_id = %s
-                ON CONFLICT DO NOTHING
-                RETURNING collection_dunning_event_id
-                """,
-                (
-                    dunning_event.collection_dunning_event_id,
-                    dunning_event.collection_case_id,
-                    dunning_event.dunning_event_number,
-                    dunning_event.dunning_notice_code,
-                    dunning_event.occurred_at,
-                    dunning_event.collection_case_id,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT collection_dunning_event_id
-                    FROM billing_core.collection_dunning_event
-                    WHERE collection_case_id = %s AND dunning_notice_code = %s
-                    """,
-                    (dunning_event.collection_case_id, dunning_event.dunning_notice_code),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("collection dunning event identity requires a stored case")
-            return self._fetch_collection_dunning_event(cursor, UUID(str(row[0])))
-
-    def find_collection_dispute(
-        self, tenant_account_id: UUID, collection_case_id: UUID
-    ) -> StoredCollectionDispute | None:
-        """Return the dispute-hold row for one tenant collection case, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_dispute_id
-                FROM billing_core.collection_dispute
-                WHERE tenant_account_id = %s AND collection_case_id = %s
-                """,
-                (tenant_account_id, collection_case_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_dispute(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_collection_dispute(
-        self, collection_dispute_id: UUID
-    ) -> StoredCollectionDispute | None:
-        """Return one collection dispute by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_dispute_id
-                FROM billing_core.collection_dispute
-                WHERE collection_dispute_id = %s
-                """,
-                (collection_dispute_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_dispute(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_collection_disputes_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredCollectionDispute, ...]:
-        """Return collection disputes limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_dispute_id
-                FROM billing_core.collection_dispute
-                WHERE tenant_account_id = %s
-                ORDER BY held_at, collection_dispute_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_collection_dispute(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_collection_dispute(
-        self, collection_dispute: StoredCollectionDispute
-    ) -> StoredCollectionDispute:
-        """Persist one held commercial dispute or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(collection_dispute.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            collection_dispute.source_payload_hash
-        ) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if collection_dispute.collection_dispute_status != "held":
-            raise ValueError("collection_dispute_status must be held")
-        remaining = parse_exact_decimal(
-            format_exact_decimal(collection_dispute.remaining_outstanding_amount)
-        )
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.collection_dispute
-                    (collection_dispute_id, tenant_account_id, collection_case_id,
-                     invoice_draft_id, issued_invoice_id,
-                     collection_dispute_contract_version, source_payload_hash,
-                     currency_code, remaining_outstanding_amount,
-                     collection_dispute_status, held_at, released_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING collection_dispute_id
-                """,
-                (
-                    collection_dispute.collection_dispute_id,
-                    collection_dispute.tenant_account_id,
-                    collection_dispute.collection_case_id,
-                    collection_dispute.invoice_draft_id,
-                    collection_dispute.issued_invoice_id,
-                    collection_dispute.collection_dispute_contract_version,
-                    collection_dispute.source_payload_hash,
-                    collection_dispute.currency_code,
-                    remaining,
-                    collection_dispute.collection_dispute_status,
-                    collection_dispute.held_at,
-                    collection_dispute.released_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT collection_dispute_id
-                    FROM billing_core.collection_dispute
-                    WHERE tenant_account_id = %s AND collection_case_id = %s
-                    """,
-                    (
-                        collection_dispute.tenant_account_id,
-                        collection_dispute.collection_case_id,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError(
-                        "collection dispute identity conflicts with an existing row"
-                    )
-            return self._fetch_collection_dispute(cursor, UUID(str(row[0])))
-
-    def mark_collection_dispute_released(
-        self, collection_dispute_id: UUID, released_at: datetime
-    ) -> StoredCollectionDispute:
-        """Flip one held dispute to ``released`` without changing remaining."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_dispute_id, tenant_account_id, collection_case_id,
-                       invoice_draft_id, issued_invoice_id,
-                       collection_dispute_contract_version, source_payload_hash,
-                       currency_code, remaining_outstanding_amount,
-                       collection_dispute_status, held_at, released_at
-                FROM billing_core.collection_dispute
-                WHERE collection_dispute_id = %s
-                FOR UPDATE
-                """,
-                (collection_dispute_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise ValueError("collection dispute release requires a stored dispute")
-            stored = self._collection_dispute_from_row(row)
-            if stored.collection_dispute_status == "released":
-                return stored
-            if stored.collection_dispute_status != "held":  # pragma: no cover - held/released only
-                raise ValueError("only held collection disputes can release")
-            cursor.execute(
-                """
-                UPDATE billing_core.collection_dispute
-                SET collection_dispute_status = 'released', released_at = %s
-                WHERE collection_dispute_id = %s
-                RETURNING collection_dispute_id
-                """,
-                (released_at, collection_dispute_id),
-            )
-            updated = cursor.fetchone()
-            if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection dispute release requires a stored dispute")
-            return self._fetch_collection_dispute(cursor, UUID(str(updated[0])))
-
-    def mark_collection_case_disputed(
-        self, collection_case_id: UUID
-    ) -> StoredCollectionCase:
-        """Flip an open or dunning case to ``disputed`` without changing outstanding."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
-                       currency_code, collection_case_status, outstanding_amount, opened_at
-                FROM billing_core.collection_case
-                WHERE collection_case_id = %s
-                FOR UPDATE
-                """,
-                (collection_case_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise ValueError("collection dispute requires a stored collection case")
-            stored = self._collection_case_from_row(row)
-            if stored.collection_case_status == "disputed":
-                return stored
-            if stored.collection_case_status not in {"open", "dunning"}:
-                raise ValueError("only open or dunning collection cases can hold as disputed")
-            cursor.execute(
-                """
-                UPDATE billing_core.collection_case
-                SET collection_case_status = 'disputed'
-                WHERE collection_case_id = %s
-                RETURNING collection_case_id
-                """,
-                (collection_case_id,),
-            )
-            updated = cursor.fetchone()
-            if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection dispute requires a stored collection case")
-            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
-
-    def mark_collection_case_released_from_dispute(
-        self, collection_case_id: UUID
-    ) -> StoredCollectionCase:
-        """Restore a disputed case to open or dunning without changing outstanding."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
-                       currency_code, collection_case_status, outstanding_amount, opened_at
-                FROM billing_core.collection_case
-                WHERE collection_case_id = %s
-                FOR UPDATE
-                """,
-                (collection_case_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise ValueError(
-                    "collection dispute release requires a stored collection case"
-                )
-            stored = self._collection_case_from_row(row)
-            if stored.collection_case_status in {"open", "dunning"}:
-                return stored
-            if stored.collection_case_status == "settled":
-                raise ValueError("settled collection cases cannot release from dispute")
-            if stored.collection_case_status == "voided":
-                raise ValueError("voided collection cases cannot release from dispute")
-            if stored.collection_case_status != "disputed":  # pragma: no cover - closed set
-                raise ValueError("only disputed collection cases can release to open")
-            cursor.execute(
-                """
-                SELECT 1
-                FROM billing_core.collection_dunning_event
-                WHERE collection_case_id = %s
-                LIMIT 1
-                """,
-                (collection_case_id,),
-            )
-            restored_status = "dunning" if cursor.fetchone() is not None else "open"
-            cursor.execute(
-                """
-                UPDATE billing_core.collection_case
-                SET collection_case_status = %s
-                WHERE collection_case_id = %s
-                RETURNING collection_case_id
-                """,
-                (restored_status, collection_case_id),
-            )
-            updated = cursor.fetchone()
-            if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError(
-                    "collection dispute release requires a stored collection case"
-                )
-            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
-
-    def apply_collection_settlement(
-        self, collection_case_id: UUID, applied_amount: Any
-    ) -> StoredCollectionCase:
-        """Reduce one case balance and settle it when the exact remainder is zero."""
-        applied = parse_exact_decimal(format_exact_decimal(applied_amount))
-        if applied <= 0:
-            raise ValueError("collection settlement amount must be a positive exact decimal")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
-                       currency_code, collection_case_status, outstanding_amount, opened_at
-                FROM billing_core.collection_case
-                WHERE collection_case_id = %s
-                FOR UPDATE
-                """,
-                (collection_case_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise ValueError("collection settlement requires a stored collection case")
-            stored = self._collection_case_from_row(row)
-            if stored.collection_case_status == "voided":
-                raise ValueError("voided collection cases cannot accept a settlement apply")
-            if stored.collection_case_status == "disputed":
-                raise ValueError("disputed collection cases cannot accept a settlement apply")
-            if applied > stored.outstanding_amount:
-                raise ValueError("collection settlement amount cannot exceed outstanding")
-            remaining = stored.outstanding_amount - applied
-            status = "settled" if remaining == 0 else stored.collection_case_status
-            cursor.execute(
-                """
-                UPDATE billing_core.collection_case
-                SET collection_case_status = %s, outstanding_amount = %s
-                WHERE collection_case_id = %s
-                RETURNING collection_case_id
-                """,
-                (status, remaining, collection_case_id),
-            )
-            row = cursor.fetchone()
-            if row is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection settlement requires a stored collection case")
-            return self._fetch_collection_case(cursor, UUID(str(row[0])))
-
-    def find_collection_write_off(
-        self, tenant_account_id: UUID, collection_case_id: UUID
-    ) -> StoredCollectionWriteOff | None:
-        """Return one tenant-scoped collection write-off identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_write_off_id
-                FROM billing_core.collection_write_off
-                WHERE tenant_account_id = %s AND collection_case_id = %s
-                """,
-                (tenant_account_id, collection_case_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_write_off(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_collection_write_off(
-        self, collection_write_off_id: UUID
-    ) -> StoredCollectionWriteOff | None:
-        """Return one collection write-off by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_write_off_id
-                FROM billing_core.collection_write_off
-                WHERE collection_write_off_id = %s
-                """,
-                (collection_write_off_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_write_off(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_collection_write_offs_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredCollectionWriteOff, ...]:
-        """Return collection write-offs limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_write_off_id
-                FROM billing_core.collection_write_off
-                WHERE tenant_account_id = %s
-                ORDER BY written_off_at, collection_write_off_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_collection_write_off(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_collection_write_off(
-        self, write_off: StoredCollectionWriteOff
-    ) -> StoredCollectionWriteOff:
-        """Persist one exact-zero commercial write-off or replay it."""
-        if write_off.collection_write_off_status != "recorded":
-            raise ValueError("collection_write_off_status must be recorded")
-        write_off_amount = parse_exact_decimal(format_exact_decimal(write_off.write_off_amount))
-        remaining = parse_exact_decimal(
-            format_exact_decimal(write_off.remaining_outstanding_amount)
-        )
-        if write_off_amount <= 0:
-            raise ValueError("collection write-off amount must be a positive exact decimal")
-        if remaining != 0:
-            raise ValueError("collection write-off remaining must be exact zero")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.collection_write_off
-                    (collection_write_off_id, tenant_account_id, collection_case_id,
-                     invoice_draft_id, issued_invoice_id,
-                     collection_write_off_contract_version, source_payload_hash,
-                     currency_code, write_off_amount, remaining_outstanding_amount,
-                     collection_write_off_status, written_off_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING collection_write_off_id
-                """,
-                (
-                    write_off.collection_write_off_id,
-                    write_off.tenant_account_id,
-                    write_off.collection_case_id,
-                    write_off.invoice_draft_id,
-                    write_off.issued_invoice_id,
-                    write_off.collection_write_off_contract_version,
-                    write_off.source_payload_hash,
-                    write_off.currency_code,
-                    write_off_amount,
-                    remaining,
-                    write_off.collection_write_off_status,
-                    write_off.written_off_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT collection_write_off_id
-                    FROM billing_core.collection_write_off
-                    WHERE tenant_account_id = %s AND collection_case_id = %s
-                    """,
-                    (write_off.tenant_account_id, write_off.collection_case_id),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("collection write-off identity conflicts with an existing row")
-            return self._fetch_collection_write_off(cursor, UUID(str(row[0])))
-
-    def apply_collection_write_off(
-        self, collection_case_id: UUID, write_off_amount: Any
-    ) -> StoredCollectionCase:
-        """Zero one open collection case without marking it settled."""
-        amount = parse_exact_decimal(format_exact_decimal(write_off_amount))
-        if amount <= 0:
-            raise ValueError("collection write-off amount must be a positive exact decimal")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
-                       currency_code, collection_case_status, outstanding_amount, opened_at
-                FROM billing_core.collection_case
-                WHERE collection_case_id = %s
-                FOR UPDATE
-                """,
-                (collection_case_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise ValueError("collection write-off requires a stored collection case")
-            stored = self._collection_case_from_row(row)
-            if stored.collection_case_status in {"settled", "voided", "disputed"}:
-                raise ValueError("settled collection cases cannot accept a write-off")
-            if amount != stored.outstanding_amount:
-                raise ValueError("collection write-off amount must equal remaining outstanding")
-            cursor.execute(
-                """
-                UPDATE billing_core.collection_case
-                SET outstanding_amount = 0
-                WHERE collection_case_id = %s
-                RETURNING collection_case_id
-                """,
-                (collection_case_id,),
-            )
-            updated = cursor.fetchone()
-            if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection write-off requires a stored collection case")
-            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
-
-    def find_collection_case_settlement(
-        self, tenant_account_id: UUID, collection_case_id: UUID
-    ) -> StoredCollectionCaseSettlement | None:
-        """Return one tenant-scoped settle-when-zero identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_settlement_id
-                FROM billing_core.collection_case_settlement
-                WHERE tenant_account_id = %s AND collection_case_id = %s
-                """,
-                (tenant_account_id, collection_case_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_case_settlement(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_collection_case_settlement(
-        self, collection_case_settlement_id: UUID
-    ) -> StoredCollectionCaseSettlement | None:
-        """Return one collection-case settlement by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_settlement_id
-                FROM billing_core.collection_case_settlement
-                WHERE collection_case_settlement_id = %s
-                """,
-                (collection_case_settlement_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_collection_case_settlement(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_collection_case_settlements_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredCollectionCaseSettlement, ...]:
-        """Return collection-case settlements limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_settlement_id
-                FROM billing_core.collection_case_settlement
-                WHERE tenant_account_id = %s
-                ORDER BY settled_at, collection_case_settlement_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_collection_case_settlement(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_collection_case_settlement(
-        self, settlement: StoredCollectionCaseSettlement
-    ) -> StoredCollectionCaseSettlement:
-        """Persist one exact-zero settlement or return its identity replay."""
-        if settlement.collection_case_settlement_status != "settled":
-            raise ValueError("collection_case_settlement_status must be settled")
-        remaining = parse_exact_decimal(
-            format_exact_decimal(settlement.remaining_outstanding_amount)
-        )
-        if remaining != 0:
-            raise ValueError("collection case settlement remaining must be exact zero")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.collection_case_settlement
-                    (collection_case_settlement_id, tenant_account_id,
-                     collection_case_id, invoice_draft_id, issued_invoice_id,
-                     collection_case_settlement_contract_version, source_payload_hash,
-                     currency_code, remaining_outstanding_amount,
-                     collection_case_settlement_status, settled_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING collection_case_settlement_id
-                """,
-                (
-                    settlement.collection_case_settlement_id,
-                    settlement.tenant_account_id,
-                    settlement.collection_case_id,
-                    settlement.invoice_draft_id,
-                    settlement.issued_invoice_id,
-                    settlement.collection_case_settlement_contract_version,
-                    settlement.source_payload_hash,
-                    settlement.currency_code,
-                    remaining,
-                    settlement.collection_case_settlement_status,
-                    settlement.settled_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT collection_case_settlement_id
-                    FROM billing_core.collection_case_settlement
-                    WHERE tenant_account_id = %s AND collection_case_id = %s
-                    """,
-                    (settlement.tenant_account_id, settlement.collection_case_id),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("collection settlement identity conflicts with an existing row")
-            return self._fetch_collection_case_settlement(cursor, UUID(str(row[0])))
-
-    def mark_collection_case_settled(
-        self, collection_case_id: UUID
-    ) -> StoredCollectionCase:
-        """Mark one exact-zero open case settled under a row lock."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
-                       currency_code, collection_case_status, outstanding_amount, opened_at
-                FROM billing_core.collection_case
-                WHERE collection_case_id = %s
-                FOR UPDATE
-                """,
-                (collection_case_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise ValueError("collection settlement requires a stored collection case")
-            stored = self._collection_case_from_row(row)
-            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
-            if remaining != 0:
-                raise ValueError("collection case outstanding must be exact zero to settle")
-            if stored.collection_case_status == "settled":
-                return stored
-            if stored.collection_case_status == "voided":
-                raise ValueError("voided collection cases cannot settle")
-            if stored.collection_case_status == "disputed":
-                raise ValueError("disputed collection cases cannot settle")
-            cursor.execute(
-                """
-                UPDATE billing_core.collection_case
-                SET collection_case_status = 'settled'
-                WHERE collection_case_id = %s
-                RETURNING collection_case_id
-                """,
-                (collection_case_id,),
-            )
-            updated = cursor.fetchone()
-            if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection settlement requires a stored collection case")
-            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
-
-    def mark_collection_case_voided(
-        self, collection_case_id: UUID, expected_outstanding: Any
-    ) -> StoredCollectionCase:
-        """Close an unused open or dunning case as ``voided`` at exact zero."""
-        expected = parse_exact_decimal(format_exact_decimal(expected_outstanding))
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
-                       currency_code, collection_case_status, outstanding_amount, opened_at
-                FROM billing_core.collection_case
-                WHERE collection_case_id = %s
-                FOR UPDATE
-                """,
-                (collection_case_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise ValueError("collection void requires a stored collection case")
-            stored = self._collection_case_from_row(row)
-            if stored.collection_case_status == "voided":
-                return stored
-            if stored.collection_case_status not in {"open", "dunning"}:
-                raise ValueError("only open or dunning collection cases can void")
-            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
-            if remaining != expected:
-                raise ValueError("collection void remaining must equal the issued amount")
-            cursor.execute(
-                """
-                UPDATE billing_core.collection_case
-                SET collection_case_status = 'voided', outstanding_amount = 0
-                WHERE collection_case_id = %s
-                RETURNING collection_case_id
-                """,
-                (collection_case_id,),
-            )
-            updated = cursor.fetchone()
-            if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("collection void requires a stored collection case")
-            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
-
-    def get_payment_intent(self, payment_intent_id: UUID) -> StoredPaymentIntent | None:
-        """Return one payment intent by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT payment_intent_id
-                FROM billing_core.payment_intent
-                WHERE payment_intent_id = %s
-                """,
-                (payment_intent_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_payment_intent(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_payment_intent(
-        self,
-        tenant_account_id: UUID,
-        collection_case_id: UUID,
-        source_payload_hash: str,
-        payment_intent_contract_version: int,
-    ) -> StoredPaymentIntent | None:
-        """Return one tenant-scoped payment-intent identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT payment_intent_id
-                FROM billing_core.payment_intent
-                WHERE tenant_account_id = %s
-                  AND collection_case_id = %s
-                  AND source_payload_hash = %s
-                  AND payment_intent_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    collection_case_id,
-                    source_payload_hash,
-                    payment_intent_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_payment_intent(
-                cursor, UUID(str(row[0]))
-            )
-
-    def insert_payment_intent(
-        self, payment_intent: StoredPaymentIntent
-    ) -> StoredPaymentIntent:
-        """Persist one positive provider-neutral intent or replay it."""
-        if payment_intent.payment_intent_status not in {"projected", "cancelled", "rejected"}:
-            raise ValueError("payment intents cannot be captured, settled, or posted")
-        payment_amount = parse_exact_decimal(format_exact_decimal(payment_intent.payment_amount))
-        if payment_amount <= 0:
-            raise ValueError("payment intent amount must be a positive exact decimal")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.payment_intent
-                    (payment_intent_id, tenant_account_id, collection_case_id,
-                     payment_intent_contract_version, currency_code,
-                     payment_intent_status, payment_amount, source_payload_hash,
-                     projected_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING payment_intent_id
-                """,
-                (
-                    payment_intent.payment_intent_id,
-                    payment_intent.tenant_account_id,
-                    payment_intent.collection_case_id,
-                    payment_intent.payment_intent_contract_version,
-                    payment_intent.currency_code,
-                    payment_intent.payment_intent_status,
-                    payment_amount,
-                    payment_intent.source_payload_hash,
-                    payment_intent.projected_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT payment_intent_id
-                    FROM billing_core.payment_intent
-                    WHERE tenant_account_id = %s
-                      AND collection_case_id = %s
-                      AND source_payload_hash = %s
-                      AND payment_intent_contract_version = %s
-                    """,
-                    (
-                        payment_intent.tenant_account_id,
-                        payment_intent.collection_case_id,
-                        payment_intent.source_payload_hash,
-                        payment_intent.payment_intent_contract_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - a valid FK conflict has an identity row
-                    raise ValueError("payment intent identity already belongs to another intent")
-            return self._fetch_payment_intent(cursor, UUID(str(row[0])))
-
-    def list_payment_intents(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredPaymentIntent, ...]:
-        """Return payment intents limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT payment_intent_id
-                FROM billing_core.payment_intent
-                WHERE tenant_account_id = %s
-                ORDER BY projected_at, payment_intent_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_payment_intent(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def cancel_stored_payment_intent(
-        self, payment_intent_id: UUID
-    ) -> StoredPaymentIntent:
-        """Cancel one projected intent idempotently."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE billing_core.payment_intent
-                SET payment_intent_status = 'cancelled'
-                WHERE payment_intent_id = %s
-                  AND payment_intent_status = 'projected'
-                RETURNING payment_intent_id
-                """,
-                (payment_intent_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT payment_intent_id, payment_intent_status
-                    FROM billing_core.payment_intent
-                    WHERE payment_intent_id = %s
-                    """,
-                    (payment_intent_id,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("payment intent cancellation requires a stored payment intent")
-                if row[1] != "cancelled":
-                    raise ValueError("only projected payment intents can be cancelled")
-            return self._fetch_payment_intent(cursor, UUID(str(row[0])))
-
-    def get_payment_receipt(self, payment_receipt_id: UUID) -> StoredPaymentReceipt | None:
-        """Return one payment receipt by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT payment_receipt_id
-                FROM billing_core.payment_receipt
-                WHERE payment_receipt_id = %s
-                """,
-                (payment_receipt_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_payment_receipt(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_payment_receipt(
-        self,
-        tenant_account_id: UUID,
-        payment_intent_id: UUID,
-        source_payload_hash: str,
-        settlement_contract_version: int,
-    ) -> StoredPaymentReceipt | None:
-        """Return one tenant-scoped payment-receipt identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT payment_receipt_id
-                FROM billing_core.payment_receipt
-                WHERE tenant_account_id = %s
-                  AND payment_intent_id = %s
-                  AND source_payload_hash = %s
-                  AND settlement_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    payment_intent_id,
-                    source_payload_hash,
-                    settlement_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_payment_receipt(
-                cursor, UUID(str(row[0]))
-            )
-
-    def insert_payment_receipt(
-        self, payment_receipt: StoredPaymentReceipt
-    ) -> StoredPaymentReceipt:
-        """Persist one applied receipt or return the exact identity replay."""
-        if payment_receipt.payment_receipt_status != "applied":
-            raise ValueError("payment receipts cannot be captured or posted")
-        received_amount = parse_exact_decimal(
-            format_exact_decimal(payment_receipt.received_amount)
-        )
-        if received_amount <= 0:
-            raise ValueError("payment receipt amount must be a positive exact decimal")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.payment_receipt
-                    (payment_receipt_id, tenant_account_id, payment_intent_id,
-                     collection_case_id, settlement_contract_version, currency_code,
-                     payment_receipt_status, received_amount, source_payload_hash,
-                     received_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING payment_receipt_id
-                """,
-                (
-                    payment_receipt.payment_receipt_id,
-                    payment_receipt.tenant_account_id,
-                    payment_receipt.payment_intent_id,
-                    payment_receipt.collection_case_id,
-                    payment_receipt.settlement_contract_version,
-                    payment_receipt.currency_code,
-                    payment_receipt.payment_receipt_status,
-                    received_amount,
-                    payment_receipt.source_payload_hash,
-                    payment_receipt.received_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT payment_receipt_id
-                    FROM billing_core.payment_receipt
-                    WHERE tenant_account_id = %s
-                      AND payment_intent_id = %s
-                      AND source_payload_hash = %s
-                      AND settlement_contract_version = %s
-                    """,
-                    (
-                        payment_receipt.tenant_account_id,
-                        payment_receipt.payment_intent_id,
-                        payment_receipt.source_payload_hash,
-                        payment_receipt.settlement_contract_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("payment receipt identity conflicts with an existing row")
-            return self._fetch_payment_receipt(cursor, UUID(str(row[0])))
-
-    def list_payment_receipts(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredPaymentReceipt, ...]:
-        """Return payment receipts limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT payment_receipt_id
-                FROM billing_core.payment_receipt
-                WHERE tenant_account_id = %s
-                ORDER BY received_at, payment_receipt_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_payment_receipt(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def find_unapplied_cash(
-        self, tenant_account_id: UUID, payment_receipt_id: UUID
-    ) -> StoredUnappliedCash | None:
-        """Return the parked leftover for one tenant payment receipt, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_id
-                FROM billing_core.unapplied_cash
-                WHERE tenant_account_id = %s AND payment_receipt_id = %s
-                """,
-                (tenant_account_id, payment_receipt_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_unapplied_cash(self, unapplied_cash_id: UUID) -> StoredUnappliedCash | None:
-        """Return one unapplied-cash row by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_id
-                FROM billing_core.unapplied_cash
-                WHERE unapplied_cash_id = %s
-                """,
-                (unapplied_cash_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_unapplied_cash_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredUnappliedCash, ...]:
-        """Return unapplied-cash rows limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_id
-                FROM billing_core.unapplied_cash
-                WHERE tenant_account_id = %s
-                ORDER BY parked_at, unapplied_cash_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_unapplied_cash(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_unapplied_cash(self, unapplied_cash: StoredUnappliedCash) -> StoredUnappliedCash:
-        """Persist one parked leftover or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(unapplied_cash.source_payload_hash) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if unapplied_cash.unapplied_cash_status != "parked":
-            raise ValueError("unapplied_cash_status must be parked")
-        leftover = parse_exact_decimal(format_exact_decimal(unapplied_cash.unapplied_amount))
-        if leftover <= 0:
-            raise ValueError("unapplied cash amount must be a positive exact decimal")
-        received_amount = parse_exact_decimal(
-            format_exact_decimal(unapplied_cash.received_amount)
-        )
-        applied_amount = parse_exact_decimal(format_exact_decimal(unapplied_cash.applied_amount))
-        if received_amount <= 0:
-            raise ValueError("unapplied cash received amount must be a positive exact decimal")
-        if applied_amount <= 0:
-            raise ValueError("unapplied cash applied amount must be a positive exact decimal")
-        if leftover > received_amount:
-            raise ValueError("unapplied cash cannot exceed the stored receipt")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.unapplied_cash
-                    (unapplied_cash_id, tenant_account_id, payment_receipt_id,
-                     payment_intent_id, collection_case_id,
-                     unapplied_cash_contract_version, source_payload_hash,
-                     currency_code, unapplied_amount, received_amount,
-                     applied_amount, unapplied_cash_status, parked_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING unapplied_cash_id
-                """,
-                (
-                    unapplied_cash.unapplied_cash_id,
-                    unapplied_cash.tenant_account_id,
-                    unapplied_cash.payment_receipt_id,
-                    unapplied_cash.payment_intent_id,
-                    unapplied_cash.collection_case_id,
-                    unapplied_cash.unapplied_cash_contract_version,
-                    unapplied_cash.source_payload_hash,
-                    unapplied_cash.currency_code,
-                    leftover,
-                    received_amount,
-                    applied_amount,
-                    unapplied_cash.unapplied_cash_status,
-                    unapplied_cash.parked_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT unapplied_cash_id
-                    FROM billing_core.unapplied_cash
-                    WHERE tenant_account_id = %s AND payment_receipt_id = %s
-                    """,
-                    (unapplied_cash.tenant_account_id, unapplied_cash.payment_receipt_id),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError(
-                        "unapplied cash identity conflicts with an existing row"
-                    )
-            return self._fetch_unapplied_cash(cursor, UUID(str(row[0])))
-
-    def find_unapplied_cash_application(
-        self, tenant_account_id: UUID, unapplied_cash_id: UUID
-    ) -> StoredUnappliedCashApplication | None:
-        """Return the leftover apply for one tenant parked leftover, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_application_id
-                FROM billing_core.unapplied_cash_application
-                WHERE tenant_account_id = %s AND unapplied_cash_id = %s
-                """,
-                (tenant_account_id, unapplied_cash_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash_application(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_unapplied_cash_application(
-        self, unapplied_cash_application_id: UUID
-    ) -> StoredUnappliedCashApplication | None:
-        """Return one leftover application by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_application_id
-                FROM billing_core.unapplied_cash_application
-                WHERE unapplied_cash_application_id = %s
-                """,
-                (unapplied_cash_application_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash_application(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_unapplied_cash_applications_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredUnappliedCashApplication, ...]:
-        """Return leftover applications limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_application_id
-                FROM billing_core.unapplied_cash_application
-                WHERE tenant_account_id = %s
-                ORDER BY applied_at, unapplied_cash_application_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_unapplied_cash_application(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_unapplied_cash_application(
-        self, unapplied_cash_application: StoredUnappliedCashApplication
-    ) -> StoredUnappliedCashApplication:
-        """Persist one leftover apply or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash_application.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            unapplied_cash_application.source_payload_hash
-        ) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if unapplied_cash_application.unapplied_cash_application_status != "applied":
-            raise ValueError("unapplied_cash_application_status must be applied")
-        applied_amount = parse_exact_decimal(
-            format_exact_decimal(unapplied_cash_application.applied_amount)
-        )
-        if applied_amount <= 0:
-            raise ValueError(
-                "unapplied cash application amount must be a positive exact decimal"
-            )
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.unapplied_cash_application
-                    (unapplied_cash_application_id, tenant_account_id,
-                     unapplied_cash_id, collection_case_id, payment_receipt_id,
-                     invoice_draft_id, unapplied_cash_application_contract_version,
-                     source_payload_hash, currency_code, applied_amount,
-                     unapplied_cash_application_status, applied_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING unapplied_cash_application_id
-                """,
-                (
-                    unapplied_cash_application.unapplied_cash_application_id,
-                    unapplied_cash_application.tenant_account_id,
-                    unapplied_cash_application.unapplied_cash_id,
-                    unapplied_cash_application.collection_case_id,
-                    unapplied_cash_application.payment_receipt_id,
-                    unapplied_cash_application.invoice_draft_id,
-                    unapplied_cash_application.unapplied_cash_application_contract_version,
-                    unapplied_cash_application.source_payload_hash,
-                    unapplied_cash_application.currency_code,
-                    applied_amount,
-                    unapplied_cash_application.unapplied_cash_application_status,
-                    unapplied_cash_application.applied_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT unapplied_cash_application_id
-                    FROM billing_core.unapplied_cash_application
-                    WHERE tenant_account_id = %s AND unapplied_cash_id = %s
-                    """,
-                    (
-                        unapplied_cash_application.tenant_account_id,
-                        unapplied_cash_application.unapplied_cash_id,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError(
-                        "unapplied cash application identity conflicts with an existing row"
-                    )
-            return self._fetch_unapplied_cash_application(cursor, UUID(str(row[0])))
-
-    def find_unapplied_cash_refund(
-        self, tenant_account_id: UUID, unapplied_cash_id: UUID
-    ) -> StoredUnappliedCashRefund | None:
-        """Return the leftover refund for one tenant parked leftover, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_refund_id
-                FROM billing_core.unapplied_cash_refund
-                WHERE tenant_account_id = %s AND unapplied_cash_id = %s
-                """,
-                (tenant_account_id, unapplied_cash_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash_refund(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_unapplied_cash_refund(
-        self, unapplied_cash_refund_id: UUID
-    ) -> StoredUnappliedCashRefund | None:
-        """Return one leftover refund by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_refund_id
-                FROM billing_core.unapplied_cash_refund
-                WHERE unapplied_cash_refund_id = %s
-                """,
-                (unapplied_cash_refund_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_unapplied_cash_refund(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_unapplied_cash_refunds_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredUnappliedCashRefund, ...]:
-        """Return leftover refunds limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT unapplied_cash_refund_id
-                FROM billing_core.unapplied_cash_refund
-                WHERE tenant_account_id = %s
-                ORDER BY refunded_at, unapplied_cash_refund_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_unapplied_cash_refund(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_unapplied_cash_refund(
-        self, unapplied_cash_refund: StoredUnappliedCashRefund
-    ) -> StoredUnappliedCashRefund:
-        """Persist one leftover refund or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(unapplied_cash_refund.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            unapplied_cash_refund.source_payload_hash
-        ) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if unapplied_cash_refund.unapplied_cash_refund_status != "recorded":
-            raise ValueError("unapplied_cash_refund_status must be recorded")
-        refund_amount = parse_exact_decimal(
-            format_exact_decimal(unapplied_cash_refund.refund_amount)
-        )
-        if refund_amount <= 0:
-            raise ValueError("unapplied cash refund amount must be a positive exact decimal")
-        unapplied_amount = parse_exact_decimal(
-            format_exact_decimal(unapplied_cash_refund.unapplied_amount)
-        )
-        if unapplied_amount <= 0:
-            raise ValueError("unapplied cash amount must be a positive exact decimal")
-        if refund_amount != unapplied_amount:
-            raise ValueError("unapplied cash refund amount must equal the parked leftover")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.unapplied_cash_refund
-                    (unapplied_cash_refund_id, tenant_account_id, unapplied_cash_id,
-                     payment_receipt_id, payment_intent_id, collection_case_id,
-                     unapplied_cash_refund_contract_version, source_payload_hash,
-                     currency_code, refund_amount, unapplied_amount,
-                     unapplied_cash_refund_status, refunded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING unapplied_cash_refund_id
-                """,
-                (
-                    unapplied_cash_refund.unapplied_cash_refund_id,
-                    unapplied_cash_refund.tenant_account_id,
-                    unapplied_cash_refund.unapplied_cash_id,
-                    unapplied_cash_refund.payment_receipt_id,
-                    unapplied_cash_refund.payment_intent_id,
-                    unapplied_cash_refund.collection_case_id,
-                    unapplied_cash_refund.unapplied_cash_refund_contract_version,
-                    unapplied_cash_refund.source_payload_hash,
-                    unapplied_cash_refund.currency_code,
-                    refund_amount,
-                    unapplied_amount,
-                    unapplied_cash_refund.unapplied_cash_refund_status,
-                    unapplied_cash_refund.refunded_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT unapplied_cash_refund_id
-                    FROM billing_core.unapplied_cash_refund
-                    WHERE tenant_account_id = %s AND unapplied_cash_id = %s
-                    """,
-                    (
-                        unapplied_cash_refund.tenant_account_id,
-                        unapplied_cash_refund.unapplied_cash_id,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError(
-                        "unapplied cash refund identity conflicts with an existing row"
-                    )
-            return self._fetch_unapplied_cash_refund(cursor, UUID(str(row[0])))
-
-    def apply_unapplied_cash_to_collection_case(
-        self, collection_case_id: UUID, applied_amount: Any
-    ) -> StoredCollectionCase:
-        """Reduce outstanding by parked leftover without flipping to settled.
-
-        #46 remains the explicit settle-when-zero command. Status stays
-        ``open`` or ``dunning`` even when remaining becomes exact zero.
-        """
-        amount = parse_exact_decimal(format_exact_decimal(applied_amount))
-        if amount <= 0:
-            raise ValueError("unapplied cash apply amount must be a positive exact decimal")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT collection_case_id, tenant_account_id, invoice_draft_id,
-                       currency_code, collection_case_status, outstanding_amount, opened_at
-                FROM billing_core.collection_case
-                WHERE collection_case_id = %s
-                FOR UPDATE
-                """,
-                (collection_case_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise ValueError("unapplied cash apply requires a stored collection case")
-            stored = self._collection_case_from_row(row)
-            if stored.collection_case_status in {"settled", "voided", "disputed"}:
-                raise ValueError("settled collection cases cannot accept unapplied cash")
-            remaining = parse_exact_decimal(format_exact_decimal(stored.outstanding_amount))
-            if amount > remaining:
-                raise ValueError("unapplied cash apply amount cannot exceed outstanding")
-            cursor.execute(
-                """
-                UPDATE billing_core.collection_case
-                SET outstanding_amount = %s
-                WHERE collection_case_id = %s
-                RETURNING collection_case_id
-                """,
-                (remaining - amount, collection_case_id),
-            )
-            updated = cursor.fetchone()
-            if updated is None:  # pragma: no cover - the row is locked above
-                raise ValueError("unapplied cash apply requires a stored collection case")
-            return self._fetch_collection_case(cursor, UUID(str(updated[0])))
-
-    def get_credit_adjustment(
-        self, credit_adjustment_id: UUID
-    ) -> StoredCreditAdjustment | None:
-        """Return one credit adjustment by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT credit_adjustment_id
-                FROM billing_core.credit_adjustment
-                WHERE credit_adjustment_id = %s
-                """,
-                (credit_adjustment_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_credit_adjustment(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_credit_adjustment(
-        self,
-        tenant_account_id: UUID,
-        invoice_draft_id: UUID,
-        source_payload_hash: str,
-        credit_adjustment_contract_version: int,
-    ) -> StoredCreditAdjustment | None:
-        """Return one tenant-scoped credit-adjustment identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT credit_adjustment_id
-                FROM billing_core.credit_adjustment
-                WHERE tenant_account_id = %s
-                  AND invoice_draft_id = %s
-                  AND source_payload_hash = %s
-                  AND credit_adjustment_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    invoice_draft_id,
-                    source_payload_hash,
-                    credit_adjustment_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_credit_adjustment(
-                cursor, UUID(str(row[0]))
-            )
-
-    def insert_credit_adjustment(
-        self, credit: StoredCreditAdjustment
-    ) -> StoredCreditAdjustment:
-        """Persist one exact credit adjustment or return its identity replay."""
-        if credit.credit_reason_code not in {"rating_correction", "goodwill", "billing_error"}:
-            raise ValueError("credit_reason_code is not in the closed set")
-        credit_amount = parse_exact_decimal(format_exact_decimal(credit.credit_amount))
-        tax_exclusive_amount = parse_exact_decimal(
-            format_exact_decimal(credit.tax_exclusive_amount)
-        )
-        tax_amount = parse_exact_decimal(format_exact_decimal(credit.tax_amount))
-        if credit_amount <= 0:
-            raise ValueError("credit amount must be a positive exact decimal")
-        if tax_exclusive_amount + tax_amount != credit_amount:
-            raise ValueError("credit tax split must sum to credit_amount")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.credit_adjustment
-                    (credit_adjustment_id, tenant_account_id, invoice_draft_id,
-                     credit_adjustment_contract_version, credit_reason_code,
-                     currency_code, credit_amount, tax_exclusive_amount, tax_amount,
-                     source_payload_hash, recorded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING credit_adjustment_id
-                """,
-                (
-                    credit.credit_adjustment_id,
-                    credit.tenant_account_id,
-                    credit.invoice_draft_id,
-                    credit.credit_adjustment_contract_version,
-                    credit.credit_reason_code,
-                    credit.currency_code,
-                    credit_amount,
-                    tax_exclusive_amount,
-                    tax_amount,
-                    credit.source_payload_hash,
-                    credit.recorded_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT credit_adjustment_id
-                    FROM billing_core.credit_adjustment
-                    WHERE tenant_account_id = %s
-                      AND invoice_draft_id = %s
-                      AND source_payload_hash = %s
-                      AND credit_adjustment_contract_version = %s
-                    """,
-                    (
-                        credit.tenant_account_id,
-                        credit.invoice_draft_id,
-                        credit.source_payload_hash,
-                        credit.credit_adjustment_contract_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("credit adjustment identity conflicts with an existing row")
-            return self._fetch_credit_adjustment(cursor, UUID(str(row[0])))
-
-    def list_credit_adjustments(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredCreditAdjustment, ...]:
-        """Return credit adjustments limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT credit_adjustment_id
-                FROM billing_core.credit_adjustment
-                WHERE tenant_account_id = %s
-                ORDER BY recorded_at, credit_adjustment_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_credit_adjustment(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def find_issued_credit_note(
-        self, tenant_account_id: UUID, credit_adjustment_id: UUID
-    ) -> StoredIssuedCreditNote | None:
-        """Return the issued credit note for one tenant credit, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_credit_note_id
-                FROM billing_core.issued_credit_note
-                WHERE tenant_account_id = %s AND credit_adjustment_id = %s
-                """,
-                (tenant_account_id, credit_adjustment_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_credit_note(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_issued_credit_note(
-        self, issued_credit_note_id: UUID
-    ) -> StoredIssuedCreditNote | None:
-        """Return one issued credit note by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_credit_note_id
-                FROM billing_core.issued_credit_note
-                WHERE issued_credit_note_id = %s
-                """,
-                (issued_credit_note_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_credit_note(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_issued_credit_notes_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredIssuedCreditNote, ...]:
-        """Return issued credit notes limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_credit_note_id
-                FROM billing_core.issued_credit_note
-                WHERE tenant_account_id = %s
-                ORDER BY issued_at, issued_credit_note_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_issued_credit_note(
-        self, issued_credit_note: StoredIssuedCreditNote
-    ) -> StoredIssuedCreditNote:
-        """Persist one commercial credit-note snapshot or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(issued_credit_note.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(issued_credit_note.source_payload_hash) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if (
-            SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-                issued_credit_note.credit_adjustment_source_payload_hash
-            )
-            is None
-        ):
-            raise ValueError("credit_adjustment_source_payload_hash must be a sha256 digest")
-        if issued_credit_note.issued_credit_note_status != "issued":
-            raise ValueError("issued_credit_note_status must be issued")
-        if issued_credit_note.credit_reason_code not in {
-            "rating_correction",
-            "goodwill",
-            "billing_error",
-        }:
-            raise ValueError("credit_reason_code is not in the closed set")
-        exclusive = parse_exact_decimal(
-            format_exact_decimal(issued_credit_note.tax_exclusive_amount)
-        )
-        tax_amount = parse_exact_decimal(format_exact_decimal(issued_credit_note.tax_amount))
-        inclusive = parse_exact_decimal(
-            format_exact_decimal(issued_credit_note.tax_inclusive_amount)
-        )
-        if exclusive + tax_amount != inclusive:
-            raise ValueError("issued credit note totals must sum")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.issued_credit_note
-                    (issued_credit_note_id, tenant_account_id, credit_adjustment_id,
-                     invoice_draft_id, issued_invoice_id,
-                     issued_credit_note_contract_version,
-                     credit_adjustment_contract_version, credit_reason_code,
-                     credit_adjustment_source_payload_hash, source_payload_hash,
-                     currency_code, tax_exclusive_amount, tax_amount,
-                     tax_inclusive_amount, issued_credit_note_status, issued_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING issued_credit_note_id
-                """,
-                (
-                    issued_credit_note.issued_credit_note_id,
-                    issued_credit_note.tenant_account_id,
-                    issued_credit_note.credit_adjustment_id,
-                    issued_credit_note.invoice_draft_id,
-                    issued_credit_note.issued_invoice_id,
-                    issued_credit_note.issued_credit_note_contract_version,
-                    issued_credit_note.credit_adjustment_contract_version,
-                    issued_credit_note.credit_reason_code,
-                    issued_credit_note.credit_adjustment_source_payload_hash,
-                    issued_credit_note.source_payload_hash,
-                    issued_credit_note.currency_code,
-                    exclusive,
-                    tax_amount,
-                    inclusive,
-                    issued_credit_note.issued_credit_note_status,
-                    issued_credit_note.issued_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT issued_credit_note_id
-                    FROM billing_core.issued_credit_note
-                    WHERE tenant_account_id = %s AND credit_adjustment_id = %s
-                    """,
-                    (
-                        issued_credit_note.tenant_account_id,
-                        issued_credit_note.credit_adjustment_id,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("issued credit note identity conflicts with an existing row")
-            return self._fetch_issued_credit_note(cursor, UUID(str(row[0])))
-
-    def find_issued_invoice_void(
-        self, tenant_account_id: UUID, issued_invoice_id: UUID
-    ) -> StoredIssuedInvoiceVoid | None:
-        """Return the void row for one tenant issued invoice, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_invoice_void_id
-                FROM billing_core.issued_invoice_void
-                WHERE tenant_account_id = %s AND issued_invoice_id = %s
-                """,
-                (tenant_account_id, issued_invoice_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_invoice_void(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_issued_invoice_void(
-        self, issued_invoice_void_id: UUID
-    ) -> StoredIssuedInvoiceVoid | None:
-        """Return one issued-invoice void by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_invoice_void_id
-                FROM billing_core.issued_invoice_void
-                WHERE issued_invoice_void_id = %s
-                """,
-                (issued_invoice_void_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_invoice_void(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_issued_invoice_voids_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredIssuedInvoiceVoid, ...]:
-        """Return issued-invoice voids limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_invoice_void_id
-                FROM billing_core.issued_invoice_void
-                WHERE tenant_account_id = %s
-                ORDER BY voided_at, issued_invoice_void_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_issued_invoice_void(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_issued_invoice_void(
-        self, issued_invoice_void: StoredIssuedInvoiceVoid
-    ) -> StoredIssuedInvoiceVoid:
-        """Persist one unused issued-invoice void or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(issued_invoice_void.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            issued_invoice_void.source_payload_hash
-        ) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if issued_invoice_void.issued_invoice_void_status != "recorded":
-            raise ValueError("issued_invoice_void_status must be recorded")
-        remaining = parse_exact_decimal(
-            format_exact_decimal(issued_invoice_void.remaining_outstanding_amount)
-        )
-        if remaining != 0:
-            raise ValueError("issued-invoice void remaining must be exact zero")
-        voided_amount = parse_exact_decimal(
-            format_exact_decimal(issued_invoice_void.voided_amount)
-        )
-        if voided_amount <= 0:
-            raise ValueError("issued-invoice void amount must be a positive exact decimal")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.issued_invoice_void
-                    (issued_invoice_void_id, tenant_account_id, issued_invoice_id,
-                     invoice_draft_id, collection_case_id,
-                     issued_invoice_void_contract_version, source_payload_hash,
-                     currency_code, voided_amount, remaining_outstanding_amount,
-                     issued_invoice_void_status, voided_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING issued_invoice_void_id
-                """,
-                (
-                    issued_invoice_void.issued_invoice_void_id,
-                    issued_invoice_void.tenant_account_id,
-                    issued_invoice_void.issued_invoice_id,
-                    issued_invoice_void.invoice_draft_id,
-                    issued_invoice_void.collection_case_id,
-                    issued_invoice_void.issued_invoice_void_contract_version,
-                    issued_invoice_void.source_payload_hash,
-                    issued_invoice_void.currency_code,
-                    voided_amount,
-                    remaining,
-                    issued_invoice_void.issued_invoice_void_status,
-                    issued_invoice_void.voided_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT issued_invoice_void_id
-                    FROM billing_core.issued_invoice_void
-                    WHERE tenant_account_id = %s AND issued_invoice_id = %s
-                    """,
-                    (
-                        issued_invoice_void.tenant_account_id,
-                        issued_invoice_void.issued_invoice_id,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError(
-                        "issued-invoice void identity conflicts with an existing row"
-                    )
-            return self._fetch_issued_invoice_void(cursor, UUID(str(row[0])))
-
-    def find_issued_credit_note_void(
-        self, tenant_account_id: UUID, issued_credit_note_id: UUID
-    ) -> StoredIssuedCreditNoteVoid | None:
-        """Return the void row for one tenant issued credit note, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_credit_note_void_id
-                FROM billing_core.issued_credit_note_void
-                WHERE tenant_account_id = %s AND issued_credit_note_id = %s
-                """,
-                (tenant_account_id, issued_credit_note_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_credit_note_void(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_issued_credit_note_void(
-        self, issued_credit_note_void_id: UUID
-    ) -> StoredIssuedCreditNoteVoid | None:
-        """Return one issued-credit-note void by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_credit_note_void_id
-                FROM billing_core.issued_credit_note_void
-                WHERE issued_credit_note_void_id = %s
-                """,
-                (issued_credit_note_void_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_issued_credit_note_void(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_issued_credit_note_voids_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredIssuedCreditNoteVoid, ...]:
-        """Return issued-credit-note voids limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT issued_credit_note_void_id
-                FROM billing_core.issued_credit_note_void
-                WHERE tenant_account_id = %s
-                ORDER BY voided_at, issued_credit_note_void_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_issued_credit_note_void(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_issued_credit_note_void(
-        self, issued_credit_note_void: StoredIssuedCreditNoteVoid
-    ) -> StoredIssuedCreditNoteVoid:
-        """Persist one unused issued-credit-note void or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(issued_credit_note_void.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            issued_credit_note_void.source_payload_hash
-        ) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if issued_credit_note_void.issued_credit_note_void_status != "recorded":
-            raise ValueError("issued_credit_note_void_status must be recorded")
-        voided_amount = parse_exact_decimal(
-            format_exact_decimal(issued_credit_note_void.voided_amount)
-        )
-        if voided_amount <= 0:
-            raise ValueError(
-                "issued-credit-note void amount must be a positive exact decimal"
-            )
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.issued_credit_note_void
-                    (issued_credit_note_void_id, tenant_account_id,
-                     issued_credit_note_id, credit_adjustment_id, invoice_draft_id,
-                     issued_invoice_id, issued_credit_note_void_contract_version,
-                     source_payload_hash, currency_code, voided_amount,
-                     issued_credit_note_void_status, voided_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING issued_credit_note_void_id
-                """,
-                (
-                    issued_credit_note_void.issued_credit_note_void_id,
-                    issued_credit_note_void.tenant_account_id,
-                    issued_credit_note_void.issued_credit_note_id,
-                    issued_credit_note_void.credit_adjustment_id,
-                    issued_credit_note_void.invoice_draft_id,
-                    issued_credit_note_void.issued_invoice_id,
-                    issued_credit_note_void.issued_credit_note_void_contract_version,
-                    issued_credit_note_void.source_payload_hash,
-                    issued_credit_note_void.currency_code,
-                    voided_amount,
-                    issued_credit_note_void.issued_credit_note_void_status,
-                    issued_credit_note_void.voided_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT issued_credit_note_void_id
-                    FROM billing_core.issued_credit_note_void
-                    WHERE tenant_account_id = %s AND issued_credit_note_id = %s
-                    """,
-                    (
-                        issued_credit_note_void.tenant_account_id,
-                        issued_credit_note_void.issued_credit_note_id,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError(
-                        "issued-credit-note void identity conflicts with an existing row"
-                    )
-            return self._fetch_issued_credit_note_void(cursor, UUID(str(row[0])))
-
-    def find_credit_note_application(
-        self, tenant_account_id: UUID, issued_credit_note_id: UUID
-    ) -> StoredCreditNoteApplication | None:
-        """Return the application for one tenant issued credit note, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT credit_note_application_id
-                FROM billing_core.credit_note_application
-                WHERE tenant_account_id = %s AND issued_credit_note_id = %s
-                """,
-                (tenant_account_id, issued_credit_note_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_credit_note_application(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_credit_note_application(
-        self, credit_note_application_id: UUID
-    ) -> StoredCreditNoteApplication | None:
-        """Return one credit-note application by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT credit_note_application_id
-                FROM billing_core.credit_note_application
-                WHERE credit_note_application_id = %s
-                """,
-                (credit_note_application_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_credit_note_application(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_credit_note_applications_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredCreditNoteApplication, ...]:
-        """Return credit-note applications limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT credit_note_application_id
-                FROM billing_core.credit_note_application
-                WHERE tenant_account_id = %s
-                ORDER BY applied_at, credit_note_application_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_credit_note_application(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_credit_note_application(
-        self, credit_note_application: StoredCreditNoteApplication
-    ) -> StoredCreditNoteApplication:
-        """Persist one applied credit-note application or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(credit_note_application.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            credit_note_application.source_payload_hash
-        ) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(
-            credit_note_application.issued_credit_note_source_payload_hash
-        ) is None:
-            raise ValueError(
-                "issued_credit_note_source_payload_hash must be a sha256 digest"
-            )
-        if credit_note_application.credit_note_application_status != "applied":
-            raise ValueError("credit_note_application_status must be applied")
-        applied_amount = parse_exact_decimal(
-            format_exact_decimal(credit_note_application.applied_amount)
-        )
-        if applied_amount <= 0:
-            raise ValueError(
-                "credit note application amount must be a positive exact decimal"
-            )
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.credit_note_application
-                    (credit_note_application_id, tenant_account_id,
-                     issued_credit_note_id, collection_case_id, invoice_draft_id,
-                     issued_invoice_id, credit_note_application_contract_version,
-                     issued_credit_note_contract_version, source_payload_hash,
-                     issued_credit_note_source_payload_hash, currency_code,
-                     applied_amount, credit_note_application_status, applied_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING credit_note_application_id
-                """,
-                (
-                    credit_note_application.credit_note_application_id,
-                    credit_note_application.tenant_account_id,
-                    credit_note_application.issued_credit_note_id,
-                    credit_note_application.collection_case_id,
-                    credit_note_application.invoice_draft_id,
-                    credit_note_application.issued_invoice_id,
-                    credit_note_application.credit_note_application_contract_version,
-                    credit_note_application.issued_credit_note_contract_version,
-                    credit_note_application.source_payload_hash,
-                    credit_note_application.issued_credit_note_source_payload_hash,
-                    credit_note_application.currency_code,
-                    applied_amount,
-                    credit_note_application.credit_note_application_status,
-                    credit_note_application.applied_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT credit_note_application_id
-                    FROM billing_core.credit_note_application
-                    WHERE tenant_account_id = %s AND issued_credit_note_id = %s
-                    """,
-                    (
-                        credit_note_application.tenant_account_id,
-                        credit_note_application.issued_credit_note_id,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError(
-                        "credit-note application identity conflicts with an existing row"
-                    )
-            return self._fetch_credit_note_application(cursor, UUID(str(row[0])))
-
-    def find_spend_budget(
-        self,
-        tenant_account_id: UUID,
-        billing_account_id: UUID,
-        window_started_at: datetime,
-        window_ended_at: datetime,
-        currency_code: str,
-        source_payload_hash: str,
-        spend_budget_contract_version: int,
-    ) -> StoredSpendBudget | None:
-        """Return the spend budget for one tenant-scoped identity, if any."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT spend_budget_id
-                FROM billing_core.spend_budget
-                WHERE tenant_account_id = %s
-                  AND billing_account_id = %s
-                  AND window_started_at = %s
-                  AND window_ended_at = %s
-                  AND currency_code = %s
-                  AND source_payload_hash = %s
-                  AND spend_budget_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    billing_account_id,
-                    window_started_at,
-                    window_ended_at,
-                    currency_code,
-                    source_payload_hash,
-                    spend_budget_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_spend_budget(
-                cursor, UUID(str(row[0]))
-            )
-
-    def get_spend_budget(self, spend_budget_id: UUID) -> StoredSpendBudget | None:
-        """Return one spend budget by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT spend_budget_id
-                FROM billing_core.spend_budget
-                WHERE spend_budget_id = %s
-                """,
-                (spend_budget_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_spend_budget(
-                cursor, UUID(str(row[0]))
-            )
-
-    def insert_spend_budget(self, budget: StoredSpendBudget) -> StoredSpendBudget:
-        """Persist one published spend budget or return its identity replay."""
-        if CURRENCY_CODE_PATTERN.fullmatch(budget.currency_code) is None:
-            raise ValueError("currency_code must be a three-letter ISO code")
-        if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(budget.source_payload_hash) is None:
-            raise ValueError("source_payload_hash must be a sha256 digest")
-        if budget.spend_budget_status != "published":
-            raise ValueError("spend_budget_status must be published")
-        budget_amount = parse_exact_decimal(format_exact_decimal(budget.budget_amount))
-        if budget_amount <= 0:
-            raise ValueError("budget amount must be a positive exact decimal")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.spend_budget
-                    (spend_budget_id, tenant_account_id, billing_account_id,
-                     spend_budget_contract_version, currency_code, budget_amount,
-                     window_started_at, window_ended_at, source_payload_hash,
-                     published_at, spend_budget_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING spend_budget_id
-                """,
-                (
-                    budget.spend_budget_id,
-                    budget.tenant_account_id,
-                    budget.billing_account_id,
-                    budget.spend_budget_contract_version,
-                    budget.currency_code,
-                    budget_amount,
-                    budget.window_started_at,
-                    budget.window_ended_at,
-                    budget.source_payload_hash,
-                    budget.published_at,
-                    budget.spend_budget_status,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT spend_budget_id
-                    FROM billing_core.spend_budget
-                    WHERE tenant_account_id = %s
-                      AND billing_account_id = %s
-                      AND window_started_at = %s
-                      AND window_ended_at = %s
-                      AND currency_code = %s
-                      AND source_payload_hash = %s
-                      AND spend_budget_contract_version = %s
-                    """,
-                    (
-                        budget.tenant_account_id,
-                        budget.billing_account_id,
-                        budget.window_started_at,
-                        budget.window_ended_at,
-                        budget.currency_code,
-                        budget.source_payload_hash,
-                        budget.spend_budget_contract_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("spend budget identity conflicts with an existing row")
-            return self._fetch_spend_budget(cursor, UUID(str(row[0])))
-
-    def list_spend_budgets(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredSpendBudget, ...]:
-        """Return spend budgets limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT spend_budget_id
-                FROM billing_core.spend_budget
-                WHERE tenant_account_id = %s
-                ORDER BY published_at, spend_budget_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_spend_budget(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def find_journal_proposal(
-        self,
-        tenant_account_id: UUID,
-        invoice_draft_id: UUID,
-        source_payload_hash: str,
-        proposal_contract_version: int,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped draft-only proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND invoice_draft_id = %s
-                  AND source_payload_hash = %s
-                  AND proposal_contract_version = %s
-                  AND payment_receipt_id IS NULL
-                  AND credit_adjustment_id IS NULL
-                  AND collection_write_off_id IS NULL
-                  AND unapplied_cash_refund_id IS NULL
-                  AND unapplied_cash_id IS NULL
-                  AND unapplied_cash_application_id IS NULL
-                  AND issued_invoice_void_id IS NULL
-                  AND issued_credit_note_void_id IS NULL
-                """,
-                (
-                    tenant_account_id,
-                    invoice_draft_id,
-                    source_payload_hash,
-                    proposal_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_receipt(
-        self,
-        tenant_account_id: UUID,
-        payment_receipt_id: UUID,
-        source_payload_hash: str,
-        proposal_contract_version: int,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped cash proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND payment_receipt_id = %s
-                  AND source_payload_hash = %s
-                  AND proposal_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    payment_receipt_id,
-                    source_payload_hash,
-                    proposal_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_credit(
-        self,
-        tenant_account_id: UUID,
-        credit_adjustment_id: UUID,
-        source_payload_hash: str,
-        proposal_contract_version: int,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped credit proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND credit_adjustment_id = %s
-                  AND source_payload_hash = %s
-                  AND proposal_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    credit_adjustment_id,
-                    source_payload_hash,
-                    proposal_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_credit_adjustment(
-        self,
-        tenant_account_id: UUID,
-        credit_adjustment_id: UUID,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped credit proposal by credit identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND credit_adjustment_id = %s
-                """,
-                (tenant_account_id, credit_adjustment_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_write_off(
-        self,
-        tenant_account_id: UUID,
-        collection_write_off_id: UUID,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped write-off proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND collection_write_off_id = %s
-                """,
-                (tenant_account_id, collection_write_off_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_refund(
-        self,
-        tenant_account_id: UUID,
-        unapplied_cash_refund_id: UUID,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped leftover-refund proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND unapplied_cash_refund_id = %s
-                """,
-                (tenant_account_id, unapplied_cash_refund_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_unapplied_cash(
-        self,
-        tenant_account_id: UUID,
-        unapplied_cash_id: UUID,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped leftover proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND unapplied_cash_id = %s
-                """,
-                (tenant_account_id, unapplied_cash_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_unapplied_cash_application(
-        self,
-        tenant_account_id: UUID,
-        unapplied_cash_application_id: UUID,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped leftover-apply proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND unapplied_cash_application_id = %s
-                """,
-                (tenant_account_id, unapplied_cash_application_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_issued_invoice_void(
-        self,
-        tenant_account_id: UUID,
-        issued_invoice_void_id: UUID,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped unused invoice-void proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND issued_invoice_void_id = %s
-                """,
-                (tenant_account_id, issued_invoice_void_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_issued_credit_note_void(
-        self,
-        tenant_account_id: UUID,
-        issued_credit_note_void_id: UUID,
-    ) -> StoredJournalProposal | None:
-        """Return one tenant-scoped unused credit-note-void proposal identity."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND issued_credit_note_void_id = %s
-                """,
-                (tenant_account_id, issued_credit_note_void_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def find_journal_proposal_for_invoice_draft(
-        self,
-        tenant_account_id: UUID,
-        invoice_draft_id: UUID,
-    ) -> StoredJournalProposal | None:
-        """Return the draft-only invoice journal for one tenant-scoped draft.
-
-        Specialized cash, credit, write-off, leftover, apply, refund,
-        invoice-void, and credit-note-void proposals share
-        ``invoice_draft_id`` but are not this identity. Binding uses Billing
-        ``proposal_id`` only.
-        """
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                  AND invoice_draft_id = %s
-                  AND payment_receipt_id IS NULL
-                  AND credit_adjustment_id IS NULL
-                  AND collection_write_off_id IS NULL
-                  AND unapplied_cash_refund_id IS NULL
-                  AND unapplied_cash_id IS NULL
-                  AND unapplied_cash_application_id IS NULL
-                  AND issued_invoice_void_id IS NULL
-                  AND issued_credit_note_void_id IS NULL
-                """,
-                (tenant_account_id, invoice_draft_id),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def insert_journal_proposal(
-        self,
-        journal_proposal: StoredJournalProposal,
-        proposal_lines: tuple[StoredJournalProposalLine, ...],
-    ) -> StoredJournalProposal:
-        """Persist one balanced invoice-draft, cash, credit, write-off, leftover, apply, refund, unused invoice-void, or unused credit-note-void proposal or its replay."""
-        if journal_proposal.proposal_status not in {
-            "draft",
-            "validated",
-            "exported",
-            "rejected",
-        }:
-            raise ValueError("journal proposals cannot be posted")
-        if not proposal_lines or len({line.line_number for line in proposal_lines}) != len(
-            proposal_lines
-        ):
-            raise ValueError("journal proposal line numbers must be unique")
-        parsed_lines = tuple(
-            (
-                line,
-                parse_exact_decimal(format_exact_decimal(line.debit_amount)),
-                parse_exact_decimal(format_exact_decimal(line.credit_amount)),
-            )
-            for line in proposal_lines
-        )
-        for line, debit_amount, credit_amount in parsed_lines:
-            if line.journal_proposal_id != journal_proposal.journal_proposal_id:
-                raise ValueError("journal proposal line has the wrong proposal identity")
-            if line.tenant_account_id != journal_proposal.tenant_account_id:
-                raise ValueError("journal proposal line has the wrong tenant identity")
-            if (debit_amount > 0) == (credit_amount > 0):
-                raise ValueError("journal proposal lines must be debit XOR credit")
-            require_postable_journal_line_amounts(debit_amount, credit_amount)
-        if sum((item[1] for item in parsed_lines), parse_exact_decimal("0")) != sum(
-            (item[2] for item in parsed_lines), parse_exact_decimal("0")
-        ):
-            raise ValueError("journal proposal lines must balance")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.journal_proposal
-                    (journal_proposal_id, tenant_account_id, invoice_draft_id,
-                     proposal_contract_version, idempotency_key, legal_entity_reference,
-                     intended_book_role_code, transaction_currency, transaction_date,
-                     accounting_date, source_payload_hash, proposed_at, proposal_status,
-                     source_event_reference, payment_receipt_id, credit_adjustment_id,
-                     collection_write_off_id, unapplied_cash_refund_id, unapplied_cash_id,
-                     unapplied_cash_application_id, issued_invoice_void_id,
-                     issued_credit_note_void_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING journal_proposal_id
-                """,
-                (
-                    journal_proposal.journal_proposal_id,
-                    journal_proposal.tenant_account_id,
-                    journal_proposal.invoice_draft_id,
-                    journal_proposal.proposal_contract_version,
-                    journal_proposal.idempotency_key,
-                    journal_proposal.legal_entity_reference,
-                    journal_proposal.intended_book_role_code,
-                    journal_proposal.transaction_currency,
-                    journal_proposal.transaction_date,
-                    journal_proposal.accounting_date,
-                    journal_proposal.source_payload_hash,
-                    journal_proposal.proposed_at,
-                    journal_proposal.proposal_status,
-                    journal_proposal.source_event_reference,
-                    journal_proposal.payment_receipt_id,
-                    journal_proposal.credit_adjustment_id,
-                    journal_proposal.collection_write_off_id,
-                    journal_proposal.unapplied_cash_refund_id,
-                    journal_proposal.unapplied_cash_id,
-                    journal_proposal.unapplied_cash_application_id,
-                    journal_proposal.issued_invoice_void_id,
-                    journal_proposal.issued_credit_note_void_id,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                if journal_proposal.payment_receipt_id is not None:
-                    identity_value = journal_proposal.payment_receipt_id
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND payment_receipt_id = %s
-                          AND source_payload_hash = %s
-                          AND proposal_contract_version = %s
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            identity_value,
-                            journal_proposal.source_payload_hash,
-                            journal_proposal.proposal_contract_version,
-                        ),
-                    )
-                elif journal_proposal.credit_adjustment_id is not None:
-                    identity_value = journal_proposal.credit_adjustment_id
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND credit_adjustment_id = %s
-                          AND source_payload_hash = %s
-                          AND proposal_contract_version = %s
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            identity_value,
-                            journal_proposal.source_payload_hash,
-                            journal_proposal.proposal_contract_version,
-                        ),
-                    )
-                elif journal_proposal.collection_write_off_id is not None:
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND collection_write_off_id = %s
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            journal_proposal.collection_write_off_id,
-                        ),
-                    )
-                elif journal_proposal.unapplied_cash_refund_id is not None:
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND unapplied_cash_refund_id = %s
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            journal_proposal.unapplied_cash_refund_id,
-                        ),
-                    )
-                elif journal_proposal.unapplied_cash_id is not None:
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND unapplied_cash_id = %s
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            journal_proposal.unapplied_cash_id,
-                        ),
-                    )
-                elif journal_proposal.unapplied_cash_application_id is not None:
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND unapplied_cash_application_id = %s
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            journal_proposal.unapplied_cash_application_id,
-                        ),
-                    )
-                elif journal_proposal.issued_invoice_void_id is not None:
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND issued_invoice_void_id = %s
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            journal_proposal.issued_invoice_void_id,
-                        ),
-                    )
-                elif journal_proposal.issued_credit_note_void_id is not None:
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND issued_credit_note_void_id = %s
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            journal_proposal.issued_credit_note_void_id,
-                        ),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        SELECT journal_proposal_id
-                        FROM billing_core.journal_proposal
-                        WHERE tenant_account_id = %s
-                          AND invoice_draft_id = %s
-                          AND source_payload_hash = %s
-                          AND proposal_contract_version = %s
-                          AND payment_receipt_id IS NULL
-                          AND credit_adjustment_id IS NULL
-                          AND collection_write_off_id IS NULL
-                          AND unapplied_cash_refund_id IS NULL
-                          AND unapplied_cash_id IS NULL
-                          AND unapplied_cash_application_id IS NULL
-                          AND issued_invoice_void_id IS NULL
-                          AND issued_credit_note_void_id IS NULL
-                        """,
-                        (
-                            journal_proposal.tenant_account_id,
-                            journal_proposal.invoice_draft_id,
-                            journal_proposal.source_payload_hash,
-                            journal_proposal.proposal_contract_version,
-                        ),
-                    )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("journal proposal identity conflicts with an existing row")
-                return self._fetch_journal_proposal(cursor, UUID(str(row[0])))
-            for line, debit_amount, credit_amount in parsed_lines:
-                cursor.execute(
-                    """
-                    INSERT INTO billing_core.journal_proposal_line
-                        (journal_proposal_line_id, journal_proposal_id,
-                         tenant_account_id, line_number, account_role_code,
-                         debit_amount, credit_amount)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        line.journal_proposal_line_id,
-                        line.journal_proposal_id,
-                        line.tenant_account_id,
-                        line.line_number,
-                        line.account_role_code,
-                        debit_amount,
-                        credit_amount,
-                    ),
-                )
-            return self._fetch_journal_proposal(
-                cursor, UUID(str(journal_proposal.journal_proposal_id))
-            )
-
-    def get_journal_proposal(
-        self, journal_proposal_id: UUID
-    ) -> StoredJournalProposal | None:
-        """Return one journal proposal by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE journal_proposal_id = %s
-                """,
-                (journal_proposal_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_journal_proposal(
-                cursor, UUID(str(row[0]))
-            )
-
-    def list_journal_proposals(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredJournalProposal, ...]:
-        """Return journal proposals limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT journal_proposal_id
-                FROM billing_core.journal_proposal
-                WHERE tenant_account_id = %s
-                ORDER BY proposed_at, journal_proposal_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_journal_proposal(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def insert_tenant_api_credential(
-        self, credential: StoredTenantApiCredential
-    ) -> StoredTenantApiCredential:
-        """Persist one API credential.  Secrets are never replayed or stored."""
-        if credential.credential_status not in {"active", "revoked"}:
-            raise ValueError("credential_status must be active or revoked")
-        if not credential.credential_secret_hash.startswith("hmac-sha256:"):
-            raise ValueError("credential_secret_hash must be a keyed HMAC")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT 1
-                FROM billing_core.tenant_api_credential
-                WHERE credential_secret_hash = %s
-                """,
-                (credential.credential_secret_hash,),
-            )
-            if cursor.fetchone() is not None:
-                raise ValueError("credential_secret_hash already stored")
-            cursor.execute(
-                """
-                INSERT INTO billing_core.tenant_api_credential
-                    (tenant_api_credential_id, tenant_account_id,
-                     tenant_api_credential_contract_version, credential_label,
-                     credential_prefix, credential_secret_hash, credential_status,
-                     issued_at, revoked_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (tenant_api_credential_id) DO NOTHING
-                RETURNING tenant_api_credential_id
-                """,
-                (
-                    credential.tenant_api_credential_id,
-                    credential.tenant_account_id,
-                    credential.tenant_api_credential_contract_version,
-                    credential.credential_label,
-                    credential.credential_prefix,
-                    credential.credential_secret_hash,
-                    credential.credential_status,
-                    credential.issued_at,
-                    credential.revoked_at,
-                ),
-            )
-            if cursor.fetchone() is None:
-                raise ValueError("tenant_api_credential_id already stored")
-        return credential
-
-    def get_tenant_api_credential(
-        self, tenant_api_credential_id: UUID
-    ) -> StoredTenantApiCredential | None:
-        """Return one API credential by internal identifier, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tenant_api_credential_id, tenant_account_id,
-                       tenant_api_credential_contract_version, credential_label,
-                       credential_prefix, credential_secret_hash, credential_status,
-                       issued_at, revoked_at
-                FROM billing_core.tenant_api_credential
-                WHERE tenant_api_credential_id = %s
-                """,
-                (tenant_api_credential_id,),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None
-        return self._tenant_api_credential_from_row(row)
-
-    def find_tenant_api_credential_by_hash(
-        self, credential_secret_hash: str
-    ) -> StoredTenantApiCredential | None:
-        """Return the credential for one keyed hash, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tenant_api_credential_id, tenant_account_id,
-                       tenant_api_credential_contract_version, credential_label,
-                       credential_prefix, credential_secret_hash, credential_status,
-                       issued_at, revoked_at
-                FROM billing_core.tenant_api_credential
-                WHERE credential_secret_hash = %s
-                """,
-                (credential_secret_hash,),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None
-        return self._tenant_api_credential_from_row(row)
-
-    def list_tenant_api_credentials(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredTenantApiCredential, ...]:
-        """Return API credentials limited to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT tenant_api_credential_id, tenant_account_id,
-                       tenant_api_credential_contract_version, credential_label,
-                       credential_prefix, credential_secret_hash, credential_status,
-                       issued_at, revoked_at
-                FROM billing_core.tenant_api_credential
-                WHERE tenant_account_id = %s
-                ORDER BY issued_at, tenant_api_credential_id
-                """,
-                (tenant_account_id,),
-            )
-            rows = cursor.fetchall()
-        return tuple(self._tenant_api_credential_from_row(row) for row in rows)
-
-    def list_active_tenant_api_credentials(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredTenantApiCredential, ...]:
-        """Return active API credentials limited to one tenant."""
-        return tuple(
-            credential
-            for credential in self.list_tenant_api_credentials(tenant_account_id)
-            if credential.credential_status == "active"
-        )
-
-    def revoke_tenant_api_credential(
-        self, tenant_api_credential_id: UUID, revoked_at: datetime
-    ) -> StoredTenantApiCredential:
-        """Mark one stored credential revoked.  A second revoke is idempotent."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE billing_core.tenant_api_credential
-                SET credential_status = 'revoked', revoked_at = %s
-                WHERE tenant_api_credential_id = %s
-                  AND credential_status = 'active'
-                RETURNING tenant_api_credential_id
-                """,
-                (revoked_at, tenant_api_credential_id),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT 1
-                    FROM billing_core.tenant_api_credential
-                    WHERE tenant_api_credential_id = %s
-                    """,
-                    (tenant_api_credential_id,),
-                )
-                if cursor.fetchone() is None:
-                    raise ValueError(
-                        "api credential revocation requires a stored credential"
-                    )
-            cursor.execute(
-                """
-                SELECT tenant_api_credential_id, tenant_account_id,
-                       tenant_api_credential_contract_version, credential_label,
-                       credential_prefix, credential_secret_hash, credential_status,
-                       issued_at, revoked_at
-                FROM billing_core.tenant_api_credential
-                WHERE tenant_api_credential_id = %s
-                """,
-                (tenant_api_credential_id,),
-            )
-            stored_row = cursor.fetchone()
-        assert stored_row is not None
-        return self._tenant_api_credential_from_row(stored_row)
-
-    @staticmethod
-    def _tenant_api_credential_from_row(
-        row: tuple[Any, ...]
-    ) -> StoredTenantApiCredential:
-        """Decode one normalized API credential row."""
-        return StoredTenantApiCredential(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            int(row[2]),
-            str(row[3]),
-            str(row[4]),
-            str(row[5]),
-            str(row[6]),
-            row[7],
-            row[8],
-        )
-
-    def insert_webhook_subscription(
-        self, subscription: StoredWebhookSubscription
-    ) -> StoredWebhookSubscription:
-        """Persist one subscription; a unique identity returns its replay."""
-        if subscription.subscription_status not in {"active", "revoked"}:
-            raise ValueError("subscription_status must be active or revoked")
-        if not subscription.webhook_secret_hash.startswith("hmac-sha256:"):
-            raise ValueError("webhook_secret_hash must be a keyed HMAC")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.webhook_subscription
-                    (webhook_subscription_id, tenant_account_id,
-                     webhook_subscription_contract_version, callback_url,
-                     event_type_set, webhook_secret_prefix, webhook_secret_hash,
-                     subscription_status, issued_at, revoked_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING webhook_subscription_id
-                """,
-                (
-                    subscription.webhook_subscription_id,
-                    subscription.tenant_account_id,
-                    subscription.webhook_subscription_contract_version,
-                    subscription.callback_url,
-                    subscription.event_type_set,
-                    subscription.webhook_secret_prefix,
-                    subscription.webhook_secret_hash,
-                    subscription.subscription_status,
-                    subscription.issued_at,
-                    subscription.revoked_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT webhook_subscription_id
-                    FROM billing_core.webhook_subscription
-                    WHERE tenant_account_id = %s
-                      AND callback_url = %s
-                      AND event_type_set = %s
-                      AND webhook_subscription_contract_version = %s
-                    """,
-                    (
-                        subscription.tenant_account_id,
-                        subscription.callback_url,
-                        subscription.event_type_set,
-                        subscription.webhook_subscription_contract_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("webhook subscription identity already belongs to another row")
-            return self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
-
-    def store_webhook_subscription_secret(
-        self, webhook_subscription_id: UUID, webhook_secret: str
-    ) -> None:
-        """Keep the one-time secret in the worker process; SQL stores only its hash."""
-        if not webhook_secret:
-            raise ValueError("webhook secret must be a non-empty string")
-        self.webhook_subscription_secrets[webhook_subscription_id] = webhook_secret
-
-    def get_webhook_subscription_secret(self, webhook_subscription_id: UUID) -> str | None:
-        """Return the process-local secret for one subscription, if present."""
-        return self.webhook_subscription_secrets.get(webhook_subscription_id)
-
-    def get_webhook_subscription(
-        self, webhook_subscription_id: UUID
-    ) -> StoredWebhookSubscription | None:
-        """Return one subscription by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT webhook_subscription_id
-                FROM billing_core.webhook_subscription
-                WHERE webhook_subscription_id = %s
-                """,
-                (webhook_subscription_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
-
-    def find_webhook_subscription(
-        self,
-        tenant_account_id: UUID,
-        callback_url: str,
-        event_type_set: str,
-        webhook_subscription_contract_version: int,
-    ) -> StoredWebhookSubscription | None:
-        """Return one tenant-scoped subscription identity, if present."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT webhook_subscription_id
-                FROM billing_core.webhook_subscription
-                WHERE tenant_account_id = %s
-                  AND callback_url = %s
-                  AND event_type_set = %s
-                  AND webhook_subscription_contract_version = %s
-                """,
-                (
-                    tenant_account_id,
-                    callback_url,
-                    event_type_set,
-                    webhook_subscription_contract_version,
-                ),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
-
-    def list_webhook_subscriptions(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredWebhookSubscription, ...]:
-        """Return subscription metadata limited to one tenant."""
-        return self._list_webhook_subscriptions(tenant_account_id)
-
-    def list_active_webhook_subscriptions(
-        self, tenant_account_id: UUID, event_type_code: str
-    ) -> tuple[StoredWebhookSubscription, ...]:
-        """Return active same-tenant subscriptions containing one event code."""
-        return self._list_webhook_subscriptions(
-            tenant_account_id, event_type_code=event_type_code
-        )
-
-    def revoke_webhook_subscription(
-        self, webhook_subscription_id: UUID, revoked_at: datetime
-    ) -> StoredWebhookSubscription:
-        """Revoke one subscription idempotently."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE billing_core.webhook_subscription
-                SET subscription_status = 'revoked', revoked_at = %s
-                WHERE webhook_subscription_id = %s
-                  AND subscription_status = 'active'
-                RETURNING webhook_subscription_id
-                """,
-                (revoked_at, webhook_subscription_id),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT webhook_subscription_id
-                    FROM billing_core.webhook_subscription
-                    WHERE webhook_subscription_id = %s
-                    """,
-                    (webhook_subscription_id,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError(
-                        "webhook subscription revocation requires a stored subscription"
-                    )
-            return self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
-
-    def find_webhook_outbox_event(
-        self,
-        tenant_account_id: UUID,
-        event_type_code: str,
-        source_id: UUID,
-        payload_hash: str,
-    ) -> StoredWebhookOutboxEvent | None:
-        """Return one tenant-scoped outbox identity, if it exists."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT outbox_event_id
-                FROM billing_core.webhook_outbox_event
-                WHERE tenant_account_id = %s
-                  AND event_type_code = %s
-                  AND source_id = %s
-                  AND payload_hash = %s
-                """,
-                (tenant_account_id, event_type_code, source_id, payload_hash),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
-
-    def get_webhook_outbox_event(
-        self, outbox_event_id: UUID
-    ) -> StoredWebhookOutboxEvent | None:
-        """Return one outbox row by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT outbox_event_id
-                FROM billing_core.webhook_outbox_event
-                WHERE outbox_event_id = %s
-                """,
-                (outbox_event_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
-
-    def insert_webhook_outbox_event(
-        self, outbox_event: StoredWebhookOutboxEvent
-    ) -> StoredWebhookOutboxEvent:
-        """Persist one outbox event, returning the identity replay."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.webhook_outbox_event
-                    (outbox_event_id, tenant_account_id, event_type_code,
-                     payload_hash, source_id, occurred_at, delivery_status,
-                     payload_json, enqueued_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING outbox_event_id
-                """,
-                (
-                    outbox_event.outbox_event_id,
-                    outbox_event.tenant_account_id,
-                    outbox_event.event_type_code,
-                    outbox_event.payload_hash,
-                    outbox_event.source_id,
-                    outbox_event.occurred_at,
-                    outbox_event.delivery_status,
-                    outbox_event.payload_json,
-                    outbox_event.enqueued_at,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT outbox_event_id
-                    FROM billing_core.webhook_outbox_event
-                    WHERE tenant_account_id = %s
-                      AND event_type_code = %s
-                      AND source_id = %s
-                      AND payload_hash = %s
-                    """,
-                    (
-                        outbox_event.tenant_account_id,
-                        outbox_event.event_type_code,
-                        outbox_event.source_id,
-                        outbox_event.payload_hash,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("outbox event identity already belongs to another row")
-            return self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
-
-    def list_pending_webhook_outbox_events(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredWebhookOutboxEvent, ...]:
-        """Return pending outbox events limited to one tenant."""
-        return self._list_webhook_outbox_events(tenant_account_id, pending_only=True)
-
-    def list_webhook_outbox_events_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredWebhookOutboxEvent, ...]:
-        """Return all outbox events limited to one tenant."""
-        return self._list_webhook_outbox_events(tenant_account_id, pending_only=False)
-
-    def mark_webhook_outbox_event_delivered(
-        self, outbox_event_id: UUID
-    ) -> StoredWebhookOutboxEvent:
-        """Mark one outbox event delivered idempotently."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE billing_core.webhook_outbox_event
-                SET delivery_status = 'delivered'
-                WHERE outbox_event_id = %s
-                  AND delivery_status = 'pending'
-                RETURNING outbox_event_id
-                """,
-                (outbox_event_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT outbox_event_id
-                    FROM billing_core.webhook_outbox_event
-                    WHERE outbox_event_id = %s
-                    """,
-                    (outbox_event_id,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("outbox delivery requires a stored event")
-            return self._fetch_webhook_outbox_event(cursor, UUID(str(row[0])))
-
-    def insert_webhook_delivery_attempt(
-        self, attempt: StoredWebhookDeliveryAttempt
-    ) -> StoredWebhookDeliveryAttempt:
-        """Append one delivery attempt; an exact replay returns the stored row."""
-        if attempt.attempt_number < 1:
-            raise ValueError("attempt_number must be at least 1")
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO billing_core.webhook_delivery_attempt
-                    (delivery_attempt_id, outbox_event_id, webhook_subscription_id,
-                     tenant_account_id, attempt_number, http_status, delivered_at,
-                     failure_reason_code, attempted_at)
-                SELECT %s, %s, %s, o.tenant_account_id, %s, %s, %s, %s, %s
-                FROM billing_core.webhook_outbox_event AS o
-                WHERE o.outbox_event_id = %s
-                ON CONFLICT DO NOTHING
-                RETURNING delivery_attempt_id
-                """,
-                (
-                    attempt.delivery_attempt_id,
-                    attempt.outbox_event_id,
-                    attempt.webhook_subscription_id,
-                    attempt.attempt_number,
-                    attempt.http_status,
-                    attempt.delivered_at,
-                    attempt.failure_reason_code,
-                    attempt.attempted_at,
-                    attempt.outbox_event_id,
-                ),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor.execute(
-                    """
-                    SELECT delivery_attempt_id
-                    FROM billing_core.webhook_delivery_attempt
-                    WHERE outbox_event_id = %s
-                      AND webhook_subscription_id = %s
-                      AND attempt_number = %s
-                    """,
-                    (
-                        attempt.outbox_event_id,
-                        attempt.webhook_subscription_id,
-                        attempt.attempt_number,
-                    ),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("delivery attempt identity already belongs to another row")
-            return self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
-
-    def list_webhook_delivery_attempts(
-        self, outbox_event_id: UUID, webhook_subscription_id: UUID | None = None
-    ) -> tuple[StoredWebhookDeliveryAttempt, ...]:
-        """Return attempts for one outbox event, optionally one subscription."""
-        with self._cursor() as cursor:
-            if webhook_subscription_id is None:
-                cursor.execute(
-                    """
-                    SELECT delivery_attempt_id
-                    FROM billing_core.webhook_delivery_attempt
-                    WHERE outbox_event_id = %s
-                    ORDER BY attempt_number, delivery_attempt_id
-                    """,
-                    (outbox_event_id,),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT delivery_attempt_id
-                    FROM billing_core.webhook_delivery_attempt
-                    WHERE outbox_event_id = %s
-                      AND webhook_subscription_id = %s
-                    ORDER BY attempt_number, delivery_attempt_id
-                    """,
-                    (outbox_event_id, webhook_subscription_id),
-                )
-            return tuple(
-                self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def get_webhook_delivery_attempt(
-        self, delivery_attempt_id: UUID
-    ) -> StoredWebhookDeliveryAttempt | None:
-        """Return one delivery attempt by opaque identifier."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT delivery_attempt_id
-                FROM billing_core.webhook_delivery_attempt
-                WHERE delivery_attempt_id = %s
-                """,
-                (delivery_attempt_id,),
-            )
-            row = cursor.fetchone()
-            return None if row is None else self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
-
-    def list_webhook_delivery_attempts_for_tenant(
-        self, tenant_account_id: UUID
-    ) -> tuple[StoredWebhookDeliveryAttempt, ...]:
-        """Return attempts whose outbox belongs to one tenant."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT a.delivery_attempt_id
-                FROM billing_core.webhook_delivery_attempt AS a
-                JOIN billing_core.webhook_outbox_event AS o
-                  ON o.tenant_account_id = a.tenant_account_id
-                 AND o.outbox_event_id = a.outbox_event_id
-                WHERE a.tenant_account_id = %s
-                ORDER BY a.attempted_at, a.delivery_attempt_id
-                """,
-                (tenant_account_id,),
-            )
-            return tuple(
-                self._fetch_webhook_delivery_attempt(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    def stored_usage_set(self, tenant_account_id: UUID) -> frozenset[tuple[object, ...]]:
-        """Return the same deterministic identity projection as the reference ledger."""
-        identities = []
-        for event in self.list_usage_events(tenant_account_id):
-            identities.append(
-                (
-                    event.usage_event_id,
-                    event.source_event_key,
-                    event.event_contract_version,
-                    event.event_payload_hash,
-                    event.occurred_at,
-                    tuple(
-                        (
-                            measurement.meter_code,
-                            measurement.measured_quantity,
-                            measurement.unit_code,
-                            measurement.quality_code,
-                        )
-                        for measurement in event.measurements
-                    ),
-                )
-            )
-        return frozenset(identities)
-
-    def require_tenant(self, tenant_reference: str) -> TenantAccount:
-        """Return a tenant or raise the reference-ledger-compatible KeyError."""
-        tenant = self.resolve_tenant(tenant_reference)[0]
-        if tenant is None:
-            raise KeyError(tenant_reference)
-        return tenant
-
-    def _require_tenant(self, tenant_reference: str) -> TenantAccount:
-        """Resolve a registration tenant or raise a stable catalog error."""
-        return self.require_tenant(tenant_reference)
-
-    def _require_account(self, tenant: TenantAccount, reference: str) -> BillingAccount:
-        """Resolve an account for catalog registration."""
-        _require_tenant_scoped_reference(tenant.tenant_reference, reference)
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT billing_account_id, tenant_account_id, billing_account_code,
-                       billing_account_reference, account_status_code
-                FROM billing_core.billing_account
-                WHERE tenant_account_id = %s AND billing_account_code = %s
-                """,
-                (tenant.tenant_account_id, _resource_code(reference)),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            raise KeyError(reference)
-        return BillingAccount(
-            UUID(str(row[0])), UUID(str(row[1])), row[3], row[2], row[4]
-        )
-
-    def _require_principal(self, tenant: TenantAccount, reference: str) -> BillingPrincipal:
-        """Resolve a principal for catalog registration without an event time."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT billing_principal_id, tenant_account_id, principal_kind_code,
-                       principal_reference, valid_from, valid_to
-                FROM billing_core.billing_principal
-                WHERE tenant_account_id = %s AND principal_reference = %s
-                ORDER BY valid_from DESC
-                LIMIT 1
-                """,
-                (tenant.tenant_account_id, reference),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            raise KeyError(reference)
-        return self._principal_from_row(row)
-
-    def _require_credential(self, tenant: TenantAccount, reference: str) -> CredentialRecord:
-        """Resolve a credential for catalog registration."""
-        with self._cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT credential_record_id, tenant_account_id, credential_reference,
-                       credential_kind_code, credential_fingerprint
-                FROM billing_core.credential_record
-                WHERE tenant_account_id = %s AND credential_reference = %s
-                """,
-                (tenant.tenant_account_id, reference),
-            )
-            row = cursor.fetchone()
-        if row is None:
-            raise KeyError(reference)
-        return self._credential_from_row(row)
-
-    def _find_event(self, query: str, parameters: tuple[Any, ...]) -> StoredUsageEvent | None:
-        """Run one fixed identity query and hydrate its measurements."""
-        with self._cursor() as cursor:
-            cursor.execute(query, parameters)
-            row = cursor.fetchone()
-            if row is None:
-                return None
-            return self._fetch_usage_event(cursor, UUID(str(row[0])))
-
-    def _find_event_with_cursor(
-        self, cursor: Any, tenant_account_id: UUID, event: StoredUsageEvent
-    ) -> StoredUsageEvent | None:
-        """Classify a unique conflict by querying each tenant-scoped event identity."""
-        for predicate, parameters in (
-            (
-                """
-                SELECT usage_event_id
-                FROM billing_core.usage_event
-                WHERE tenant_account_id = %s AND source_event_key = %s
-                LIMIT 1
-                """,
-                (tenant_account_id, event.source_event_key),
-            ),
-            (
-                """
-                SELECT usage_event_id
-                FROM billing_core.usage_event
-                WHERE tenant_account_id = %s
-                  AND event_payload_hash = %s
-                  AND event_contract_version = %s
-                LIMIT 1
-                """,
-                (tenant_account_id, event.event_payload_hash, event.event_contract_version),
-            ),
-            (
-                """
-                SELECT usage_event_id
-                FROM billing_core.usage_event
-                WHERE tenant_account_id = %s AND producer_event_id = %s
-                LIMIT 1
-                """,
-                (tenant_account_id, event.producer_event_id),
-            ),
-        ):
-            cursor.execute(predicate, parameters)
-            row = cursor.fetchone()
-            if row is not None:
-                return self._fetch_usage_event(cursor, UUID(str(row[0])))
-        return None
-
-    def _fetch_usage_event(self, cursor: Any, usage_event_id: UUID) -> StoredUsageEvent:
-        """Hydrate one event and its normalized measurement rows on one cursor."""
-        cursor.execute(
-            """
-            SELECT usage_event_id, producer_event_id, tenant_account_id, billing_account_id,
-                   billing_principal_id, credential_record_id, source_event_key,
-                   event_contract_version, event_payload_hash, product_code, operation_code,
-                   occurred_at, recorded_at, cost_center_reference, project_reference
-            FROM billing_core.usage_event
-            WHERE usage_event_id = %s
-            """,
-            (usage_event_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - the caller selected an existing row
-            raise KeyError(usage_event_id)
-        cursor.execute(
-            """
-            SELECT usage_measurement_id, usage_event_id, meter_definition_id,
-                   meter_code, unit_code, measured_quantity, quality_code
-            FROM billing_core.usage_measurement
-            JOIN billing_core.meter_definition USING (meter_definition_id)
-            WHERE usage_event_id = %s
-            ORDER BY usage_measurement_id
-            """,
-            (usage_event_id,),
-        )
-        measurements = tuple(self._measurement_from_row(measurement) for measurement in cursor.fetchall())
-        return StoredUsageEvent(
-            usage_event_id=UUID(str(row[0])),
-            producer_event_id=UUID(str(row[1])),
-            tenant_account_id=UUID(str(row[2])),
-            billing_account_id=UUID(str(row[3])),
-            billing_principal_id=UUID(str(row[4])),
-            credential_record_id=None if row[5] is None else UUID(str(row[5])),
-            source_event_key=row[6],
-            event_contract_version=row[7],
-            event_payload_hash=row[8],
-            product_code=row[9],
-            operation_code=row[10],
-            occurred_at=row[11],
-            recorded_at=row[12],
-            cost_center_reference=row[13],
-            project_reference=row[14],
-            measurements=measurements,
-        )
-
-    @staticmethod
-    def _rate_card_from_row(row: tuple[Any, ...]) -> StoredRateCard:
-        """Decode one price-book header row."""
-        return StoredRateCard(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            row[2],
-            row[3],
-            row[4],
-        )
-
-    @staticmethod
-    def _rate_card_line_from_row(row: tuple[Any, ...]) -> StoredRateCardLine:
-        """Decode one normalized price-book line row."""
-        return StoredRateCardLine(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-        )
-
-    @staticmethod
-    def _tax_rate_schedule_from_row(row: tuple[Any, ...]) -> StoredTaxRateSchedule:
-        """Decode one tax-rate schedule row."""
-        return StoredTaxRateSchedule(
-            UUID(str(row[0])), UUID(str(row[1])), row[2], row[3]
-        )
-
-    @staticmethod
-    def _tax_rate_version_from_row(row: tuple[Any, ...]) -> StoredTaxRateVersion:
-        """Decode one published tax-rate version row."""
-        return StoredTaxRateVersion(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-        )
-
-    def _fetch_tax_assessment(
-        self, cursor: Any, tax_assessment_id: UUID
-    ) -> StoredTaxAssessment:
-        """Hydrate one tax assessment with its published version number."""
-        cursor.execute(
-            """
-            SELECT assessment.tax_assessment_id, assessment.tenant_account_id,
-                   assessment.invoice_draft_id, assessment.tax_rate_version_id,
-                   assessment.tax_assessment_contract_version, assessment.tax_code,
-                   assessment.tax_rate, assessment.currency_code,
-                   assessment.tax_exclusive_amount, assessment.tax_amount,
-                   assessment.tax_inclusive_amount, assessment.source_payload_hash,
-                   assessment.assessed_at, version.version_number
-            FROM billing_core.tax_assessment AS assessment
-            JOIN billing_core.tax_rate_version AS version
-              ON version.tenant_account_id = assessment.tenant_account_id
-             AND version.tax_rate_version_id = assessment.tax_rate_version_id
-            WHERE assessment.tax_assessment_id = %s
-            """,
-            (tax_assessment_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(tax_assessment_id)
-        return self._tax_assessment_from_row(row)
-
-    def _rate_card_version_from_cursor(
-        self, cursor: Any, row: tuple[Any, ...]
-    ) -> StoredRateCardVersion:
-        """Decode a published version and its lines on one transaction cursor."""
-        cursor.execute(
-            """
-            SELECT rate_card_line_id, tenant_account_id, rate_card_version_id,
-                   metric_code, unit_amount, currency_code
-            FROM billing_core.rate_card_line
-            WHERE tenant_account_id = %s AND rate_card_version_id = %s
-            ORDER BY metric_code, rate_card_line_id
-            """,
-            (row[1], row[0]),
-        )
-        return StoredRateCardVersion(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            tuple(self._rate_card_line_from_row(line) for line in cursor.fetchall()),
-        )
-
-    def _fetch_rating_run(self, cursor: Any, rating_run_id: UUID) -> StoredRatingRun:
-        """Hydrate one rating run and its immutable lines."""
-        cursor.execute(
-            """
-            SELECT run.rating_run_id, run.tenant_account_id, run.rate_card_id,
-                   run.rate_card_version, run.window_started_at, run.window_ended_at,
-                   run.usage_snapshot_hash, run.currency_code, run.rated_total_amount,
-                   run.recorded_at, card.rate_card_name, card.rate_card_code
-            FROM billing_core.rating_run AS run
-            JOIN billing_core.rate_card AS card
-              ON card.tenant_account_id = run.tenant_account_id
-             AND card.rate_card_id = run.rate_card_id
-            WHERE run.rating_run_id = %s
-            """,
-            (rating_run_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - callers select an existing run
-            raise KeyError(rating_run_id)
-        cursor.execute(
-            """
-            SELECT rating_line_id, rating_run_id, tenant_account_id,
-                   billing_account_id, billing_account_reference,
-                   meter_definition_id, meter_code, unit_code,
-                   rated_quantity, unit_price_amount, line_total_amount,
-                   line_number
-            FROM billing_core.rating_line
-            WHERE tenant_account_id = %s AND rating_run_id = %s
-            ORDER BY line_number
-            """,
-            (row[1], row[0]),
-        )
-        lines = tuple(
-            StoredRatingLine(
-                UUID(str(line[0])),
-                UUID(str(line[1])),
-                UUID(str(line[2])),
-                UUID(str(line[3])),
-                line[4],
-                UUID(str(line[5])),
-                line[6],
-                line[7],
-                line[8],
-                line[9],
-                line[10],
-                line[11],
-            )
-            for line in cursor.fetchall()
-        )
-        return StoredRatingRun(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[10] or row[11],
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-            lines,
-        )
-
-    def _fetch_invoice_draft(self, cursor: Any, invoice_draft_id: UUID) -> StoredInvoiceDraft:
-        """Hydrate one invoice draft and its immutable copied lines."""
-        cursor.execute(
-            """
-            SELECT invoice_draft_id, tenant_account_id, rating_run_id,
-                   usage_snapshot_hash, currency_code, invoice_draft_status,
-                   drafted_total_amount, recorded_at
-            FROM billing_core.invoice_draft
-            WHERE invoice_draft_id = %s
-            """,
-            (invoice_draft_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - callers select an existing draft
-            raise KeyError(invoice_draft_id)
-        cursor.execute(
-            """
-            SELECT invoice_draft_line_id, invoice_draft_id, tenant_account_id,
-                   billing_account_id, billing_account_reference,
-                   meter_definition_id, meter_code, unit_code, rated_quantity,
-                   unit_price_amount, line_total_amount, line_number
-            FROM billing_core.invoice_draft_line
-            WHERE tenant_account_id = %s AND invoice_draft_id = %s
-            ORDER BY line_number
-            """,
-            (row[1], row[0]),
-        )
-        lines = tuple(
-            StoredInvoiceDraftLine(
-                UUID(str(line[0])),
-                UUID(str(line[1])),
-                UUID(str(line[2])),
-                UUID(str(line[3])),
-                line[4],
-                UUID(str(line[5])),
-                line[6],
-                line[7],
-                line[8],
-                line[9],
-                line[10],
-                line[11],
-            )
-            for line in cursor.fetchall()
-        )
-        return StoredInvoiceDraft(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            lines,
-        )
-
-    @staticmethod
-    def _tax_assessment_from_row(row: tuple[Any, ...]) -> StoredTaxAssessment:
-        """Decode one persisted tax assessment snapshot."""
-        return StoredTaxAssessment(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-            row[10],
-            row[11],
-            row[12],
-            row[13],
-        )
-
-    def _fetch_issued_invoice(
-        self, cursor: Any, issued_invoice_id: UUID
-    ) -> StoredIssuedInvoice:
-        """Hydrate one issued snapshot and its immutable lines."""
-        cursor.execute(
-            """
-            SELECT issued_invoice_id, tenant_account_id, invoice_draft_id,
-                   issued_invoice_contract_version, rating_run_id,
-                   usage_snapshot_hash, source_payload_hash, currency_code,
-                   tax_exclusive_amount, tax_amount, tax_inclusive_amount,
-                   issued_invoice_status, issued_at, due_at
-            FROM billing_core.issued_invoice
-            WHERE issued_invoice_id = %s
-            """,
-            (issued_invoice_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(issued_invoice_id)
-        cursor.execute(
-            """
-            SELECT issued_invoice_line_id, issued_invoice_id, tenant_account_id,
-                   line_number, billing_account_reference, meter_code, unit_code,
-                   rated_quantity, unit_price_amount, line_total_amount
-            FROM billing_core.issued_invoice_line
-            WHERE tenant_account_id = %s AND issued_invoice_id = %s
-            ORDER BY line_number
-            """,
-            (row[1], row[0]),
-        )
-        lines = tuple(
-            StoredIssuedInvoiceLine(
-                UUID(str(line[0])),
-                UUID(str(line[1])),
-                UUID(str(line[2])),
-                line[3],
-                line[4],
-                line[5],
-                line[6],
-                line[7],
-                line[8],
-                line[9],
-            )
-            for line in cursor.fetchall()
-        )
-        return StoredIssuedInvoice(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            UUID(str(row[4])),
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-            row[10],
-            row[11],
-            row[12],
-            row[13],
-            lines,
-        )
-
-    @staticmethod
-    def _collection_case_from_row(row: tuple[Any, ...]) -> StoredCollectionCase:
-        """Decode one normalized collection-case row."""
-        return StoredCollectionCase(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            parse_exact_decimal(format_exact_decimal(row[5])),
-            row[6],
-        )
-
-    def _fetch_collection_case(
-        self, cursor: Any, collection_case_id: UUID
-    ) -> StoredCollectionCase:
-        """Hydrate one collection case."""
-        cursor.execute(
-            """
-            SELECT collection_case_id, tenant_account_id, invoice_draft_id,
-                   currency_code, collection_case_status, outstanding_amount, opened_at
-            FROM billing_core.collection_case
-            WHERE collection_case_id = %s
-            """,
-            (collection_case_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(collection_case_id)
-        return self._collection_case_from_row(row)
-
-    @staticmethod
-    def _collection_dunning_event_from_row(
-        row: tuple[Any, ...]
-    ) -> StoredCollectionDunningEvent:
-        """Decode one normalized dunning-event row."""
-        return StoredCollectionDunningEvent(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-        )
-
-    def _fetch_collection_dunning_event(
-        self, cursor: Any, collection_dunning_event_id: UUID
-    ) -> StoredCollectionDunningEvent:
-        """Hydrate one dunning event."""
-        cursor.execute(
-            """
-            SELECT collection_dunning_event_id, collection_case_id,
-                   tenant_account_id, dunning_event_number, dunning_notice_code,
-                   occurred_at
-            FROM billing_core.collection_dunning_event
-            WHERE collection_dunning_event_id = %s
-            """,
-            (collection_dunning_event_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(collection_dunning_event_id)
-        return self._collection_dunning_event_from_row(row)
-
-    def _list_collection_dunning_events(
-        self,
-        *,
-        collection_case_id: UUID | None = None,
-        tenant_account_id: UUID | None = None,
-    ) -> tuple[StoredCollectionDunningEvent, ...]:
-        """List dunning events by case or tenant with an explicit predicate."""
-        with self._cursor() as cursor:
-            if collection_case_id is not None:
-                cursor.execute(
-                    """
-                    SELECT collection_dunning_event_id
-                    FROM billing_core.collection_dunning_event
-                    WHERE collection_case_id = %s
-                    ORDER BY dunning_event_number, collection_dunning_event_id
-                    """,
-                    (collection_case_id,),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT collection_dunning_event_id
-                    FROM billing_core.collection_dunning_event
-                    WHERE tenant_account_id = %s
-                    ORDER BY occurred_at, collection_dunning_event_id
-                    """,
-                    (tenant_account_id,),
-                )
-            return tuple(
-                self._fetch_collection_dunning_event(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    @staticmethod
-    def _payment_intent_from_row(row: tuple[Any, ...]) -> StoredPaymentIntent:
-        """Decode one normalized payment-intent row."""
-        return StoredPaymentIntent(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-            parse_exact_decimal(format_exact_decimal(row[6])),
-            row[7],
-            row[8],
-        )
-
-    def _fetch_payment_intent(
-        self, cursor: Any, payment_intent_id: UUID
-    ) -> StoredPaymentIntent:
-        """Hydrate one payment intent."""
-        cursor.execute(
-            """
-            SELECT payment_intent_id, tenant_account_id, collection_case_id,
-                   payment_intent_contract_version, currency_code,
-                   payment_intent_status, payment_amount, source_payload_hash,
-                   projected_at
-            FROM billing_core.payment_intent
-            WHERE payment_intent_id = %s
-            """,
-            (payment_intent_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(payment_intent_id)
-        return self._payment_intent_from_row(row)
-
-    @staticmethod
-    def _payment_receipt_from_row(row: tuple[Any, ...]) -> StoredPaymentReceipt:
-        """Decode one normalized payment-receipt row."""
-        return StoredPaymentReceipt(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            row[4],
-            row[5],
-            row[6],
-            parse_exact_decimal(format_exact_decimal(row[7])),
-            row[8],
-            row[9],
-        )
-
-    def _fetch_payment_receipt(
-        self, cursor: Any, payment_receipt_id: UUID
-    ) -> StoredPaymentReceipt:
-        """Hydrate one payment receipt."""
-        cursor.execute(
-            """
-            SELECT payment_receipt_id, tenant_account_id, payment_intent_id,
-                   collection_case_id, settlement_contract_version, currency_code,
-                   payment_receipt_status, received_amount, source_payload_hash,
-                   received_at
-            FROM billing_core.payment_receipt
-            WHERE payment_receipt_id = %s
-            """,
-            (payment_receipt_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(payment_receipt_id)
-        return self._payment_receipt_from_row(row)
-
-    @staticmethod
-    def _unapplied_cash_from_row(row: tuple[Any, ...]) -> StoredUnappliedCash:
-        """Decode one normalized parked leftover row."""
-        return StoredUnappliedCash(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            UUID(str(row[4])),
-            row[5],
-            row[6],
-            row[7],
-            parse_exact_decimal(format_exact_decimal(row[8])),
-            parse_exact_decimal(format_exact_decimal(row[9])),
-            parse_exact_decimal(format_exact_decimal(row[10])),
-            row[11],
-            row[12],
-        )
-
-    def _fetch_unapplied_cash(
-        self, cursor: Any, unapplied_cash_id: UUID
-    ) -> StoredUnappliedCash:
-        """Hydrate one parked leftover."""
-        cursor.execute(
-            """
-            SELECT unapplied_cash_id, tenant_account_id, payment_receipt_id,
-                   payment_intent_id, collection_case_id,
-                   unapplied_cash_contract_version, source_payload_hash,
-                   currency_code, unapplied_amount, received_amount,
-                   applied_amount, unapplied_cash_status, parked_at
-            FROM billing_core.unapplied_cash
-            WHERE unapplied_cash_id = %s
-            """,
-            (unapplied_cash_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(unapplied_cash_id)
-        return self._unapplied_cash_from_row(row)
-
-    @staticmethod
-    def _unapplied_cash_application_from_row(
-        row: tuple[Any, ...],
-    ) -> StoredUnappliedCashApplication:
-        """Decode one normalized leftover-apply row."""
-        return StoredUnappliedCashApplication(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            UUID(str(row[4])),
-            UUID(str(row[5])),
-            row[6],
-            row[7],
-            row[8],
-            parse_exact_decimal(format_exact_decimal(row[9])),
-            row[10],
-            row[11],
-        )
-
-    def _fetch_unapplied_cash_application(
-        self, cursor: Any, unapplied_cash_application_id: UUID
-    ) -> StoredUnappliedCashApplication:
-        """Hydrate one leftover apply."""
-        cursor.execute(
-            """
-            SELECT unapplied_cash_application_id, tenant_account_id,
-                   unapplied_cash_id, collection_case_id, payment_receipt_id,
-                   invoice_draft_id, unapplied_cash_application_contract_version,
-                   source_payload_hash, currency_code, applied_amount,
-                   unapplied_cash_application_status, applied_at
-            FROM billing_core.unapplied_cash_application
-            WHERE unapplied_cash_application_id = %s
-            """,
-            (unapplied_cash_application_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(unapplied_cash_application_id)
-        return self._unapplied_cash_application_from_row(row)
-
-    @staticmethod
-    def _unapplied_cash_refund_from_row(
-        row: tuple[Any, ...],
-    ) -> StoredUnappliedCashRefund:
-        """Decode one normalized leftover-refund row."""
-        return StoredUnappliedCashRefund(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            UUID(str(row[4])),
-            UUID(str(row[5])),
-            row[6],
-            row[7],
-            row[8],
-            parse_exact_decimal(format_exact_decimal(row[9])),
-            parse_exact_decimal(format_exact_decimal(row[10])),
-            row[11],
-            row[12],
-        )
-
-    def _fetch_unapplied_cash_refund(
-        self, cursor: Any, unapplied_cash_refund_id: UUID
-    ) -> StoredUnappliedCashRefund:
-        """Hydrate one leftover refund."""
-        cursor.execute(
-            """
-            SELECT unapplied_cash_refund_id, tenant_account_id, unapplied_cash_id,
-                   payment_receipt_id, payment_intent_id, collection_case_id,
-                   unapplied_cash_refund_contract_version, source_payload_hash,
-                   currency_code, refund_amount, unapplied_amount,
-                   unapplied_cash_refund_status, refunded_at
-            FROM billing_core.unapplied_cash_refund
-            WHERE unapplied_cash_refund_id = %s
-            """,
-            (unapplied_cash_refund_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(unapplied_cash_refund_id)
-        return self._unapplied_cash_refund_from_row(row)
-
-    @staticmethod
-    def _credit_adjustment_from_row(row: tuple[Any, ...]) -> StoredCreditAdjustment:
-        """Decode one normalized credit-adjustment row."""
-        return StoredCreditAdjustment(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-            parse_exact_decimal(format_exact_decimal(row[6])),
-            parse_exact_decimal(format_exact_decimal(row[7])),
-            parse_exact_decimal(format_exact_decimal(row[8])),
-            row[9],
-            row[10],
-        )
-
-    def _fetch_credit_adjustment(
-        self, cursor: Any, credit_adjustment_id: UUID
-    ) -> StoredCreditAdjustment:
-        """Hydrate one credit adjustment."""
-        cursor.execute(
-            """
-            SELECT credit_adjustment_id, tenant_account_id, invoice_draft_id,
-                   credit_adjustment_contract_version, credit_reason_code,
-                   currency_code, credit_amount, tax_exclusive_amount, tax_amount,
-                   source_payload_hash, recorded_at
-            FROM billing_core.credit_adjustment
-            WHERE credit_adjustment_id = %s
-            """,
-            (credit_adjustment_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(credit_adjustment_id)
-        return self._credit_adjustment_from_row(row)
-
-    @staticmethod
-    def _issued_credit_note_from_row(row: tuple[Any, ...]) -> StoredIssuedCreditNote:
-        """Decode one normalized issued-credit-note row."""
-        return StoredIssuedCreditNote(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            None if row[4] is None else UUID(str(row[4])),
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-            row[10],
-            parse_exact_decimal(format_exact_decimal(row[11])),
-            parse_exact_decimal(format_exact_decimal(row[12])),
-            parse_exact_decimal(format_exact_decimal(row[13])),
-            row[14],
-            row[15],
-        )
-
-    def _fetch_issued_credit_note(
-        self, cursor: Any, issued_credit_note_id: UUID
-    ) -> StoredIssuedCreditNote:
-        """Hydrate one issued credit-note snapshot."""
-        cursor.execute(
-            """
-            SELECT issued_credit_note_id, tenant_account_id, credit_adjustment_id,
-                   invoice_draft_id, issued_invoice_id,
-                   issued_credit_note_contract_version,
-                   credit_adjustment_contract_version, credit_reason_code,
-                   credit_adjustment_source_payload_hash, source_payload_hash,
-                   currency_code, tax_exclusive_amount, tax_amount,
-                   tax_inclusive_amount, issued_credit_note_status, issued_at
-            FROM billing_core.issued_credit_note
-            WHERE issued_credit_note_id = %s
-            """,
-            (issued_credit_note_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(issued_credit_note_id)
-        return self._issued_credit_note_from_row(row)
-
-    @staticmethod
-    def _issued_invoice_void_from_row(row: tuple[Any, ...]) -> StoredIssuedInvoiceVoid:
-        """Decode one normalized unused issued-invoice void row."""
-        return StoredIssuedInvoiceVoid(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            None if row[4] is None else UUID(str(row[4])),
-            row[5],
-            row[6],
-            row[7],
-            parse_exact_decimal(format_exact_decimal(row[8])),
-            parse_exact_decimal(format_exact_decimal(row[9])),
-            row[10],
-            row[11],
-        )
-
-    def _fetch_issued_invoice_void(
-        self, cursor: Any, issued_invoice_void_id: UUID
-    ) -> StoredIssuedInvoiceVoid:
-        """Hydrate one unused issued-invoice void."""
-        cursor.execute(
-            """
-            SELECT issued_invoice_void_id, tenant_account_id, issued_invoice_id,
-                   invoice_draft_id, collection_case_id,
-                   issued_invoice_void_contract_version, source_payload_hash,
-                   currency_code, voided_amount, remaining_outstanding_amount,
-                   issued_invoice_void_status, voided_at
-            FROM billing_core.issued_invoice_void
-            WHERE issued_invoice_void_id = %s
-            """,
-            (issued_invoice_void_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(issued_invoice_void_id)
-        return self._issued_invoice_void_from_row(row)
-
-    @staticmethod
-    def _issued_credit_note_void_from_row(
-        row: tuple[Any, ...],
-    ) -> StoredIssuedCreditNoteVoid:
-        """Decode one normalized unused issued-credit-note void row."""
-        return StoredIssuedCreditNoteVoid(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            UUID(str(row[4])),
-            None if row[5] is None else UUID(str(row[5])),
-            row[6],
-            row[7],
-            row[8],
-            parse_exact_decimal(format_exact_decimal(row[9])),
-            row[10],
-            row[11],
-        )
-
-    def _fetch_issued_credit_note_void(
-        self, cursor: Any, issued_credit_note_void_id: UUID
-    ) -> StoredIssuedCreditNoteVoid:
-        """Hydrate one unused issued-credit-note void."""
-        cursor.execute(
-            """
-            SELECT issued_credit_note_void_id, tenant_account_id,
-                   issued_credit_note_id, credit_adjustment_id, invoice_draft_id,
-                   issued_invoice_id, issued_credit_note_void_contract_version,
-                   source_payload_hash, currency_code, voided_amount,
-                   issued_credit_note_void_status, voided_at
-            FROM billing_core.issued_credit_note_void
-            WHERE issued_credit_note_void_id = %s
-            """,
-            (issued_credit_note_void_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(issued_credit_note_void_id)
-        return self._issued_credit_note_void_from_row(row)
-
-    @staticmethod
-    def _credit_note_application_from_row(
-        row: tuple[Any, ...],
-    ) -> StoredCreditNoteApplication:
-        """Decode one normalized credit-note application row."""
-        return StoredCreditNoteApplication(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            UUID(str(row[4])),
-            None if row[5] is None else UUID(str(row[5])),
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-            row[10],
-            parse_exact_decimal(format_exact_decimal(row[11])),
-            row[12],
-            row[13],
-        )
-
-    def _fetch_credit_note_application(
-        self, cursor: Any, credit_note_application_id: UUID
-    ) -> StoredCreditNoteApplication:
-        """Hydrate one credit-note application."""
-        cursor.execute(
-            """
-            SELECT credit_note_application_id, tenant_account_id,
-                   issued_credit_note_id, collection_case_id, invoice_draft_id,
-                   issued_invoice_id, credit_note_application_contract_version,
-                   issued_credit_note_contract_version, source_payload_hash,
-                   issued_credit_note_source_payload_hash, currency_code,
-                   applied_amount, credit_note_application_status, applied_at
-            FROM billing_core.credit_note_application
-            WHERE credit_note_application_id = %s
-            """,
-            (credit_note_application_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(credit_note_application_id)
-        return self._credit_note_application_from_row(row)
-
-    @staticmethod
-    def _spend_budget_from_row(row: tuple[Any, ...]) -> StoredSpendBudget:
-        """Decode one normalized published spend-budget row."""
-        return StoredSpendBudget(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            parse_exact_decimal(format_exact_decimal(row[5])),
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-            row[10],
-        )
-
-    def _fetch_spend_budget(
-        self, cursor: Any, spend_budget_id: UUID
-    ) -> StoredSpendBudget:
-        """Hydrate one published spend budget."""
-        cursor.execute(
-            """
-            SELECT spend_budget_id, tenant_account_id, billing_account_id,
-                   spend_budget_contract_version, currency_code, budget_amount,
-                   window_started_at, window_ended_at, source_payload_hash,
-                   published_at, spend_budget_status
-            FROM billing_core.spend_budget
-            WHERE spend_budget_id = %s
-            """,
-            (spend_budget_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(spend_budget_id)
-        return self._spend_budget_from_row(row)
-
-    @staticmethod
-    def _collection_write_off_from_row(row: tuple[Any, ...]) -> StoredCollectionWriteOff:
-        """Decode one normalized collection write-off row."""
-        return StoredCollectionWriteOff(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            None if row[4] is None else UUID(str(row[4])),
-            row[5],
-            row[6],
-            row[7],
-            parse_exact_decimal(format_exact_decimal(row[8])),
-            parse_exact_decimal(format_exact_decimal(row[9])),
-            row[10],
-            row[11],
-        )
-
-    def _fetch_collection_write_off(
-        self, cursor: Any, collection_write_off_id: UUID
-    ) -> StoredCollectionWriteOff:
-        """Hydrate one collection write-off."""
-        cursor.execute(
-            """
-            SELECT collection_write_off_id, tenant_account_id, collection_case_id,
-                   invoice_draft_id, issued_invoice_id,
-                   collection_write_off_contract_version, source_payload_hash,
-                   currency_code, write_off_amount, remaining_outstanding_amount,
-                   collection_write_off_status, written_off_at
-            FROM billing_core.collection_write_off
-            WHERE collection_write_off_id = %s
-            """,
-            (collection_write_off_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(collection_write_off_id)
-        return self._collection_write_off_from_row(row)
-
-    @staticmethod
-    def _collection_case_settlement_from_row(
-        row: tuple[Any, ...]
-    ) -> StoredCollectionCaseSettlement:
-        """Decode one normalized collection settlement row."""
-        return StoredCollectionCaseSettlement(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            None if row[4] is None else UUID(str(row[4])),
-            row[5],
-            row[6],
-            row[7],
-            parse_exact_decimal(format_exact_decimal(row[8])),
-            row[9],
-            row[10],
-        )
-
-    def _fetch_collection_case_settlement(
-        self, cursor: Any, collection_case_settlement_id: UUID
-    ) -> StoredCollectionCaseSettlement:
-        """Hydrate one collection-case settlement."""
-        cursor.execute(
-            """
-            SELECT collection_case_settlement_id, tenant_account_id,
-                   collection_case_id, invoice_draft_id, issued_invoice_id,
-                   collection_case_settlement_contract_version, source_payload_hash,
-                   currency_code, remaining_outstanding_amount,
-                   collection_case_settlement_status, settled_at
-            FROM billing_core.collection_case_settlement
-            WHERE collection_case_settlement_id = %s
-            """,
-            (collection_case_settlement_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(collection_case_settlement_id)
-        return self._collection_case_settlement_from_row(row)
-
-    @staticmethod
-    def _collection_dispute_from_row(row: tuple[Any, ...]) -> StoredCollectionDispute:
-        """Decode one normalized collection-dispute row."""
-        return StoredCollectionDispute(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            None if row[4] is None else UUID(str(row[4])),
-            row[5],
-            row[6],
-            row[7],
-            parse_exact_decimal(format_exact_decimal(row[8])),
-            row[9],
-            row[10],
-            row[11],
-        )
-
-    def _fetch_collection_dispute(
-        self, cursor: Any, collection_dispute_id: UUID
-    ) -> StoredCollectionDispute:
-        """Hydrate one collection dispute."""
-        cursor.execute(
-            """
-            SELECT collection_dispute_id, tenant_account_id, collection_case_id,
-                   invoice_draft_id, issued_invoice_id,
-                   collection_dispute_contract_version, source_payload_hash,
-                   currency_code, remaining_outstanding_amount,
-                   collection_dispute_status, held_at, released_at
-            FROM billing_core.collection_dispute
-            WHERE collection_dispute_id = %s
-            """,
-            (collection_dispute_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(collection_dispute_id)
-        return self._collection_dispute_from_row(row)
-
-    @staticmethod
-    def _journal_proposal_from_row(
-        row: tuple[Any, ...], lines: tuple[StoredJournalProposalLine, ...]
-    ) -> StoredJournalProposal:
-        """Decode one normalized journal-proposal row and its lines."""
-        return StoredJournalProposal(
-            journal_proposal_id=UUID(str(row[0])),
-            tenant_account_id=UUID(str(row[1])),
-            invoice_draft_id=UUID(str(row[2])),
-            proposal_contract_version=row[3],
-            idempotency_key=row[4],
-            legal_entity_reference=row[5],
-            intended_book_role_code=row[6],
-            transaction_currency=row[7],
-            transaction_date=row[8].isoformat() if hasattr(row[8], "isoformat") else row[8],
-            accounting_date=row[9].isoformat() if hasattr(row[9], "isoformat") else row[9],
-            source_payload_hash=row[10],
-            proposed_at=row[11],
-            proposal_status=row[12],
-            source_event_reference=row[13],
-            proposal_lines=lines,
-            payment_receipt_id=None if row[14] is None else UUID(str(row[14])),
-            credit_adjustment_id=None if row[15] is None else UUID(str(row[15])),
-            collection_write_off_id=None if row[16] is None else UUID(str(row[16])),
-            unapplied_cash_refund_id=None if row[17] is None else UUID(str(row[17])),
-            unapplied_cash_id=None if row[18] is None else UUID(str(row[18])),
-            unapplied_cash_application_id=None if row[19] is None else UUID(str(row[19])),
-            issued_invoice_void_id=None if row[20] is None else UUID(str(row[20])),
-            issued_credit_note_void_id=None if row[21] is None else UUID(str(row[21])),
-        )
-
-    def _fetch_journal_proposal(
-        self, cursor: Any, journal_proposal_id: UUID
-    ) -> StoredJournalProposal:
-        """Hydrate one journal proposal and its immutable lines."""
-        cursor.execute(
-            """
-            SELECT journal_proposal_id, tenant_account_id, invoice_draft_id,
-                   proposal_contract_version, idempotency_key, legal_entity_reference,
-                   intended_book_role_code, transaction_currency, transaction_date,
-                   accounting_date, source_payload_hash, proposed_at, proposal_status,
-                   source_event_reference, payment_receipt_id, credit_adjustment_id,
-                   collection_write_off_id, unapplied_cash_refund_id, unapplied_cash_id,
-                   unapplied_cash_application_id, issued_invoice_void_id,
-                   issued_credit_note_void_id
-            FROM billing_core.journal_proposal
-            WHERE journal_proposal_id = %s
-            """,
-            (journal_proposal_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(journal_proposal_id)
-        cursor.execute(
-            """
-            SELECT journal_proposal_line_id, journal_proposal_id,
-                   tenant_account_id, line_number, account_role_code,
-                   debit_amount, credit_amount
-            FROM billing_core.journal_proposal_line
-            WHERE journal_proposal_id = %s
-            ORDER BY line_number, journal_proposal_line_id
-            """,
-            (journal_proposal_id,),
-        )
-        lines = tuple(
-            StoredJournalProposalLine(
-                UUID(str(line[0])),
-                UUID(str(line[1])),
-                UUID(str(line[2])),
-                line[3],
-                line[4],
-                parse_exact_decimal(format_exact_decimal(line[5])),
-                parse_exact_decimal(format_exact_decimal(line[6])),
-            )
-            for line in cursor.fetchall()
-        )
-        return self._journal_proposal_from_row(row, lines)
-
-    @staticmethod
-    def _webhook_subscription_from_row(row: tuple[Any, ...]) -> StoredWebhookSubscription:
-        """Decode one normalized webhook subscription row."""
-        return StoredWebhookSubscription(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            row[2],
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-        )
-
-    def _fetch_webhook_subscription(
-        self, cursor: Any, webhook_subscription_id: UUID
-    ) -> StoredWebhookSubscription:
-        """Hydrate one subscription."""
-        cursor.execute(
-            """
-            SELECT webhook_subscription_id, tenant_account_id,
-                   webhook_subscription_contract_version, callback_url,
-                   event_type_set, webhook_secret_prefix, webhook_secret_hash,
-                   subscription_status, issued_at, revoked_at
-            FROM billing_core.webhook_subscription
-            WHERE webhook_subscription_id = %s
-            """,
-            (webhook_subscription_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(webhook_subscription_id)
-        return self._webhook_subscription_from_row(row)
-
-    def _list_webhook_subscriptions(
-        self,
-        tenant_account_id: UUID,
-        *,
-        event_type_code: str | None = None,
-    ) -> tuple[StoredWebhookSubscription, ...]:
-        """List subscriptions with explicit tenant and optional event predicates."""
-        with self._cursor() as cursor:
-            if event_type_code is not None:
-                cursor.execute(
-                    """
-                    SELECT webhook_subscription_id
-                    FROM billing_core.webhook_subscription
-                    WHERE tenant_account_id = %s
-                      AND subscription_status = 'active'
-                      AND position(',' || %s || ',' in ',' || event_type_set || ',') > 0
-                    ORDER BY issued_at, webhook_subscription_id
-                    """,
-                    (tenant_account_id, event_type_code),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT webhook_subscription_id
-                    FROM billing_core.webhook_subscription
-                    WHERE tenant_account_id = %s
-                    ORDER BY issued_at, webhook_subscription_id
-                    """,
-                    (tenant_account_id,),
-                )
-            return tuple(
-                self._fetch_webhook_subscription(cursor, UUID(str(row[0])))
-                for row in cursor.fetchall()
-            )
-
-    @staticmethod
-    def _webhook_outbox_from_row(row: tuple[Any, ...]) -> StoredWebhookOutboxEvent:
-        """Decode one normalized webhook outbox row."""
-        return StoredWebhookOutboxEvent(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            row[2],
-            row[3],
-            UUID(str(row[4])),
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-        )
-
-    @staticmethod
-    def _webhook_delivery_attempt_from_row(
-        row: tuple[Any, ...]
-    ) -> StoredWebhookDeliveryAttempt:
-        """Decode one normalized webhook delivery attempt row."""
-        return StoredWebhookDeliveryAttempt(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-        )
-
-    def _fetch_webhook_delivery_attempt(
-        self, cursor: Any, delivery_attempt_id: UUID
-    ) -> StoredWebhookDeliveryAttempt:
-        """Hydrate one delivery attempt."""
-        cursor.execute(
-            """
-            SELECT delivery_attempt_id, outbox_event_id, webhook_subscription_id,
-                   attempt_number, http_status, delivered_at,
-                   failure_reason_code, attempted_at
-            FROM billing_core.webhook_delivery_attempt
-            WHERE delivery_attempt_id = %s
-            """,
-            (delivery_attempt_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(delivery_attempt_id)
-        return self._webhook_delivery_attempt_from_row(row)
-
-    def _fetch_webhook_outbox_event(
-        self, cursor: Any, outbox_event_id: UUID
-    ) -> StoredWebhookOutboxEvent:
-        """Hydrate one outbox event."""
-        cursor.execute(
-            """
-            SELECT outbox_event_id, tenant_account_id, event_type_code,
-                   payload_hash, source_id, occurred_at, delivery_status,
-                   payload_json, enqueued_at
-            FROM billing_core.webhook_outbox_event
-            WHERE outbox_event_id = %s
-            """,
-            (outbox_event_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:  # pragma: no cover - caller selected an existing row
-            raise KeyError(outbox_event_id)
-        return self._webhook_outbox_from_row(row)
-
-    def _list_webhook_outbox_events(
-        self, tenant_account_id: UUID, *, pending_only: bool
-    ) -> tuple[StoredWebhookOutboxEvent, ...]:
-        """List outbox events with one explicit tenant predicate."""
-        with self._cursor() as cursor:
-            if pending_only:
-                cursor.execute(
-                    """
-                    SELECT outbox_event_id, tenant_account_id, event_type_code,
-                           payload_hash, source_id, occurred_at, delivery_status,
-                           payload_json, enqueued_at
-                    FROM billing_core.webhook_outbox_event
-                    WHERE tenant_account_id = %s AND delivery_status = 'pending'
-                    ORDER BY enqueued_at, outbox_event_id
-                    """,
-                    (tenant_account_id,),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT outbox_event_id, tenant_account_id, event_type_code,
-                           payload_hash, source_id, occurred_at, delivery_status,
-                           payload_json, enqueued_at
-                    FROM billing_core.webhook_outbox_event
-                    WHERE tenant_account_id = %s
-                    ORDER BY enqueued_at, outbox_event_id
-                    """,
-                    (tenant_account_id,),
-                )
-            return tuple(self._webhook_outbox_from_row(row) for row in cursor.fetchall())
-
-    @staticmethod
-    def _principal_from_row(row: tuple[Any, ...]) -> BillingPrincipal:
-        """Decode a principal query row."""
-        return BillingPrincipal(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            row[3],
-            row[2],
-            row[3],
-            row[4],
-            row[5],
-        )
-
-    @staticmethod
-    def _credential_from_row(row: tuple[Any, ...]) -> CredentialRecord:
-        """Decode a credential query row without exposing any secret."""
-        return CredentialRecord(UUID(str(row[0])), UUID(str(row[1])), row[2], row[3], row[4])
-
-    @staticmethod
-    def _assignment_from_row(row: tuple[Any, ...]) -> CredentialAssignment:
-        """Decode an assignment query row."""
-        return CredentialAssignment(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            UUID(str(row[3])),
-            UUID(str(row[4])),
-            row[5],
-            row[6],
-        )
-
-    @staticmethod
-    def _meter_from_row(row: tuple[Any, ...]) -> MeterDefinition:
-        """Decode a meter query row."""
-        return MeterDefinition(
-            UUID(str(row[0])), row[1], row[2], row[3], row[4], row[5], row[6]
-        )
-
-    @staticmethod
-    def _measurement_from_row(row: tuple[Any, ...]) -> StoredUsageMeasurement:
-        """Decode a normalized measurement join row."""
-        return StoredUsageMeasurement(
-            UUID(str(row[0])),
-            UUID(str(row[1])),
-            UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-        )
-
-    @staticmethod
-    def _receipt_from_row(row: tuple[Any, ...]) -> StoredIngestionReceipt:
-        """Decode an append-only receipt row."""
-        return StoredIngestionReceipt(
-            UUID(str(row[0])),
-            None if row[1] is None else UUID(str(row[1])),
-            None if row[2] is None else UUID(str(row[2])),
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-        )
-
-
-UsageLedger = MemoryUsageLedger | PostgresUsageLedger
-"""Ledger implementations accepted by the HTTP adapter and service wiring.
-
-``MemoryUsageLedger`` stays the deterministic reference and test adapter;
-:class:`PostgresUsageLedger` is the durable production system of record.
-"""
+YЄзЉx-®йЬjЧќўлiєЪ+Љ§j[h‘йЬўйнЧM=г¤иµ©hєЪn¶X§zНH€€”ЬЭЬ™TФS™\ЬЪ]ЬћH›Ь€H\X›H\ШYЩK]ЛZ[ќ›ЪXЩH™\ќXШ[ЫXЩK‚‚•H™\ЬЪ]ЬћHЭЫњИШ][ЩИ›ЭЬЛ[[]]X›H\ШYЩHXЭЛ][™Иќ[њЛ[ќ›ЪXЩB™YќЛ\ЬЭYY[ќ›ЪXЩ\Л[ќ\ЩY\ЬЭYYZ[ќ›ЪXЩH›ЪYЛ\ЬЭYYЬ™Y]›Э\Лќ[ќ\ЩY\ЬЭYYXЬ™Y][›ЭH›ЪYЛЬ™Y][›ЭH\XШ][ЫњЛ\љЩYYќЭ™\‚[\YYШШ\ЪYќЭ™\‹X\H[\YYШШ\ЪШ\XШ][ЫYќЭ™\‚њ™Yќ[™[\YYШШ\ЪЬ™Yќ[™ЫЫXЭ[Ы€Ш\Щ\ЛЫЫXЭ[Ы‹Y\Ь]BљЫЛ^[Y[ќ[™Ь™Y]XЭЛ›Э\›[›ЬЬШ[ЛX›\ЪYЬ[™ќYЩ]Л[™H]ЫZXВќЩXљЫЪИЭ]›Ю\ЩYћHHљ\њЭЫЫ[Y\ЪX[]€]™\ћHX›XИЬ\][Ы€\Щ\ВќHЭ\YYЬЭЬ™TФSЫЫ›™XЭ[ЫЋИH[\[Y[ќ][Ы€™]™\€[ИXЪИИ[‚љ[‹[Y[[ЬћHЫЬK€›ЭљY\€Ш\\™H[™™[XZ[љ[™И^Щ\[Ы€™\ЬЪ]ЬљY\И™[XZ[‚њЭXњЩ\]Y[ќЫXЩ\ИЩ€H\њЪ\Э[ЩHЬќ‚€€€‚‚™њ›ЫHЧЩќ]\™WЧИ[\Ьќ[››Э][ЫњВ‚™њ›ЫHЫЫќ^X€[\ЬќЫЫќ^X[YЩ\‚™њ›ЫH]][YH[\Ьќ]][YB™њ›ЫH™XY[™И[\Ьќ“ШЪВ™њ›ЫH\[™И[\Ьќ[ћK]\]Ь‚™њ›ЫH]ZY[\ЬќURQ‚™њ›ЫHY]\љ[™ЧШљ[[™Л™\њ›ЬњИ[\Ьќ
+€™Z™XЭ[Ы”™X\ЫЫђЫЩK€\ШYЩQ]™[ќЫЫ™›XЭЉB™њ›ЫHY]\љ[™ЧШљ[[™ЛњЬЭЬ™\ЧШЫY[ќ[\ЬќЫЫ›™XЭ\ИЫЫ›™XЭЬЬЭЬ™\В™њ›ЫHY]\љ[™ЧШљ[[™Л™^XЭЩXЪ[X[[\Ьќ
+€›Ь›X]Щ^XЭЩXЪ[X[€\њЩWЩ^XЭЩXЪ[X[€™\]Z\™WЬЬЭX›WЪ›Э\›[Ы[™WШ[[Э[ќЛЉB™њ›ЫHY]\љ[™ЧШљ[[™Лќ\ШYЩWЫYЩ\€[\Ьќ
+€ХT”‘SђЦWРУСWФUT“‹€УХTђСWФVSРQТTТФUT“‹€љ[[™РXШЫЭ[ќ€љ[[™Фљ[Ъ\[€Ь™Y[ќX[\ЬЪYЫ›Y[ќ€Ь™Y[ќX[™XЫЬ™€Y[[ЬћU\ШYЩSYЩ\‹€Y]\‘Yљ[љ][Ы‹€Y]\”]X[]Tќ[K€ЭЬ™YЫЫXЭ[ЫђШ\ЩK€ЭЬ™YЫЫXЭ[Ы‘\Ь]K€ЭЬ™YЫЫXЭ[Ы‘[›љ[™С]™[ќ€ЭЬ™YЬ™Y]Yќ\ЭY[ќ€ЭЬ™YЫЫXЭ[ЫђШ\ЩTЩ][Y[ќ€ЭЬ™YЫЫXЭ[Ы•Ьљ]SЩ™‹€ЭЬ™Y[ќ›ЪXЩQYќ€ЭЬ™Y[ќ›ЪXЩQYќ[™K€ЭЬ™Y[™Щ\Э[Ы”™XЩZ\€ЭЬ™YЬ™Y]›ЭP\XШ][Ы‹€ЭЬ™Y\ЬЭYYЬ™Y]›ЭK€ЭЬ™Y\ЬЭYYЬ™Y]›ЭU›ЪY€ЭЬ™Y\ЬЭYY[ќ›ЪXЩK€ЭЬ™Y\ЬЭYY[ќ›ЪXЩS[™K€ЭЬ™Y\ЬЭYY[ќ›ЪXЩU›ЪY€ЭЬ™Y[\YYШ\Ъ€ЭЬ™Y[\YYШ\Ъ\XШ][Ы‹€ЭЬ™Y[\YYШ\Ъ™Yќ[™€ЭЬ™Y›Э\›[›ЬЬШ[€ЭЬ™Y›Э\›[›ЬЬШ[[™K€ЭЬ™Y]PШ\™€ЭЬ™Y]PШ\™[™K€ЭЬ™Y]PШ\™™\њЪ[Ы‹€ЭЬ™Y][™У[™K€ЭЬ™Y][™Фќ[‹€ЭЬ™Y^]TШЪY[K€ЭЬ™Y^]U™\њЪ[Ы‹€ЭЬ™Y[[ќ\PЬ™Y[ќX[€ЭЬ™Y^\ЬЩ\ЬЫY[ќ€ЭЬ™Y^[Y[ќ[ќ[ќ€ЭЬ™Y^[Y[ќ™XЩZ\€ЭЬ™YЬ[™ќYЩ]€ЭЬ™Y\ШYЩQ]™[ќ€ЭЬ™Y\ШYЩSYX\Э\™[Y[ќ€ЭЬ™YЩXљЫЪС[]™\ћP][\€ЭЬ™YЩXљЫЪУЭ]›Ю]™[ќ€ЭЬ™YЩXљЫЪФЭXњШЬљ\[Ы‹€[[ќXШЫЭ[ќ€Ь™\]Z\™WЭ[[ќЬШЫЬYЬ™Y™\™[ЩK€Ь™\ЫЭ\ЩWШЫЩK€ЬЪ[™ЫWЭ\›—ЬЩYЫY[ќ€Щ[™\]WЬ™XЫЬ™ЪYЉB‚‚“RQФђUSУ—ТTХФ–WХP“HHњX›XЛ›Y]\љ[™ЧШљ[[™ЧЬШЪ[XWЫZYЬ][Ы€‚€€€“ZYЬ][Ы‹Z\ЭЬћHX›HZ\њ›Ь™Yњ›ЫHШЬљ\ЛЫZYЬ]WЬЬЭЬ™\ЛњX€€€‚‚‚Ы\ЬИЬЭЬ™\Х\ШYЩSYЩ\Ћ‚€€€”\њЪ\Э\ШYЩH]љXќ][Ы€[™[[]]X›HXЭИ[€ЬЭЬ™TФS‚‚€ЫЫ›™XЭ[Ы\ИHЫЫ[Y\ЪX[HЫЫ\]X›HЬЭЬ™TФSЩ\ЬЪ[Ы€њ›ЫB€Y]\љ[™ЧШљ[[™ЛњЬЭЬ™\ЧШЫY[ќ€]\И[љ™XЭYЫИШ[\њИШ[‚€ЫЫќ›ЫЫЫ[™И[™Y™XЮXЫNИ›Y]ЫЫ›™XЭ\ИHЫX[ЫЫќ™[љY[ЩB€[ќћHЪ[ќ›Ь€HЭ[™[Ы™H›ШЩ\ЬЛ€HЫЫ›™XЭ[Ы€\И›ЭЫЬЩYћB€›Y]ЫЬЩX[›\ЬИ\И™\ЬЪ]ЬћHЬ™X]Y]‚€€€‚‚€Y€ЧЪ[љ]ЧКЩ[‹ЫЫ›™XЭ[ЫЋ€[ћK
+‹ЭЫњЧШЫЫ›™XЭ[ЫЋ€›ЫЫH[ЩJHO€›Ы™N‚€Щ[‹ЫЫ›™XЭ[Ы€HЫЫ›™XЭ[Ы‚€Щ[‹—ЫЭЫњЧШЫЫ›™XЭ[Ы€HЭЫњЧШЫЫ›™XЭ[Ы‚€Щ[‹—Э[њШXЭ[Ы—ШXЭ]™HH[ЩB€Щ[‹ќЩXљЫЪЧЬЭXњШЬљ\[Ы—ЬЩXЬ™]О€XЭХURQЭ—HHЯB€ИЫ™HЬЭЬ™TФSЫЫ›™XЭ[Ы€Щ\љX[^™\И]И[њШXЭ[ЫњОИH™XYYЩX‚€ИY\€]\Эќ[›™[]™\ћHЩ\ЬЪ[Ы€ЭXЪ›ЭYЪ\И™Y[ќ[ќШЪИЫВ€ИЫЫЭ\њ™[ќ™\]Y\ЭИ™]™\€[ќ\›X]™H[њШXЭ[Ы€™\Э[™Л‚€Щ[‹—ШЫЫ›™XЭ[Ы—ЫШЪИH“ШЪК
+B‚€Ы\ЬЫY]Щ€Y€ЫЫ›™XЭ
+ЫЛЫЋ€ЭЉHO€”ЬЭЬ™\Х\ШYЩSYЩ\€Ћ‚€€€“Ь[€HЫЫ[Y\ЪX[HЫЫ\]X›HЬЭЬ™TФSЩ\ЬЪ[Ы€›Ь€\ИZYЬ][Ы€Щ]€€€‚€™]\›€ЫКЫЫ›™XЭЬЬЭЬ™\КЫЉKЭЫњЧШЫЫ›™XЭ[ЫЏUќYJB‚€ЫЫќ^X[YЩ\‚€Y€ШЭ\њЫЬЉЩ[ЉHO€]\]Ь–Р[ћWN‚€€€–ZY[HЭ\њЫЬ€[€HШ[\€[њШXЭ[Ы€Ь€HЫ™K[Ь\][Ы€[њШXЭ[Ы‹€€€‚€Y€Щ[‹—Э[њШXЭ[Ы—ШXЭ]™N‚€Ъ]Щ[‹ЫЫ›™XЭ[Ы‹Э\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€ZY[Э\њЫЬ‚€™]\›‚€Щ[‹—ШЫЫ›™XЭ[Ы—ЫШЪЛXЬ]Z\™J
+B€ћN‚€Ъ]Щ[‹ЫЫ›™XЭ[Ы‹ќ[њШXЭ[ЫЉ
+N‚€Ъ]Щ[‹ЫЫ›™XЭ[Ы‹Э\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€ZY[Э\њЫЬ‚€љ[[N‚€Щ[‹—ШЫЫ›™XЭ[Ы—ЫШЪЛњ™[X\ЩJ
+B‚€ЫЫќ^X[YЩ\‚€Y€[™Щ\Э[Ы—Э[њШXЭ[ЫЉЩ[ЉHO€]\]Ь–У›Ы™WN‚€€€ђЫЫ[Z]Ы™H[™Щ\ЭXЪ\Ъ[Ы€[™]И]Y]™XЩZ\]ЫZXШ[K€€€‚€Щ[‹—ШЫЫ›™XЭ[Ы—ЫШЪЛXЬ]Z\™J
+B€ћN‚€Y€Щ[‹—Э[њШXЭ[Ы—ШXЭ]™N‚€ZY[€™]\›‚€Щ[‹—Э[њШXЭ[Ы—ШXЭ]™HHќYB€ћN‚€Ъ]Щ[‹ЫЫ›™XЭ[Ы‹ќ[њШXЭ[ЫЉ
+N‚€ZY[€љ[[N‚€Щ[‹—Э[њШXЭ[Ы—ШXЭ]™HH[ЩB€љ[[N‚€Щ[‹—ШЫЫ›™XЭ[Ы—ЫШЪЛњ™[X\ЩJ
+B‚€ЫЫќ^X[YЩ\‚€Y€[њШXЭ[ЫЉЩ[ЉHO€]\]Ь–У›Ы™WN‚€€€ђЫЫ[Z]Ы™H][K\™XЫЬ™ЫЫ[Y\ЪX[ЫЫ[X[™]ЫZXШ[K€€€‚€Щ[‹—ШЫЫ›™XЭ[Ы—ЫШЪЛXЬ]Z\™J
+B€ћN‚€Y€Щ[‹—Э[њШXЭ[Ы—ШXЭ]™N‚€ZY[€™]\›‚€Щ[‹—Э[њШXЭ[Ы—ШXЭ]™HHќYB€ћN‚€Ъ]Щ[‹ЫЫ›™XЭ[Ы‹ќ[њШXЭ[ЫЉ
+N‚€ZY[€љ[[N‚€Щ[‹—Э[њШXЭ[Ы—ШXЭ]™HH[ЩB€љ[[N‚€Щ[‹—ШЫЫ›™XЭ[Ы—ЫШЪЛњ™[X\ЩJ
+B‚€Y€ЫЬЩJЩ[ЉHO€›Ы™N‚€€€ђЫЬЩHHЫЫ›™XЭ[Ы€Ъ[€\И™\ЬЪ]ЬћHЭЫњИ]€€€‚€Y€Щ[‹—ЫЭЫњЧШЫЫ›™XЭ[ЫЋ‚€Щ[‹ЫЫ›™XЭ[Ы‹ЫЬЩJ
+B‚€Y€ZYЬ][Ы—Ъ\ЭЬћWЬ›ЭЧШЫЭ[ќ
+Щ[ЉHO€[ќ‚€€€”™]\›€Ы™HЪX\]™[™\ЬЛ\›Ш™H›ЭИЫЭ[ќњ›ЫHHZYЬ][Ы€\ЭЬћK‚‚€H›Ш™Hќ[њИ›ЭYЪHШ[YHЫЫ›™XЭ[Ы€[™[њШXЭ[Ы€ЫЫќ™[ќ[ЫњВ€\И]™\ћHЭ\€™\ЬЪ]ЬћHЬ\][Ы‹ЫИЬ™XY^™]™\€Ь[њИ[‚€YZШИЬЭЬ™TФSЫЫ›™XЭ[Ы€™\ЪYHHYЩ\‰ЬИЭЫ€Щ\ЬЪ[Ы‹‚€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€”СSPХУХS•
+
+ЉH”“УHX›XЛ›Y]\љ[™ЧШљ[[™ЧЬШЪ[XWЫZYЬ][Ы€‚€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€HУХS•
+
+ЉH[Ш^\И™]\›њИЫ™H›ЭВ€Z\ЩHќ[ќ[YQ\њ›ЬЉ›ZYЬ][Ы€\ЭЬћHЫЭ[ќY›Э™]\›€H›ЭИЉB€™]\›€[ќ
+›ЭЦМJB‚€Y€™YЪ\Э\—Э[[ќ
+Щ[‹[[ќЬ™Y™\™[ЩN€ЭЉHO€[[ќXШЫЭ[ќ‚€€€’[њЩ\ќЬ€™]\›€Ы™H[[ќ]]Ьљ]H›ЭЛ€€€‚€[[ќШЫЩHHЬЪ[™ЫWЭ\›—ЬЩYЫY[ќ
+[[ќЬ™Y™\™[ЩJB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kќ[[ќШXШЫЭ[ќ€
+[[ќШXШЫЭ[ќЪY[[ќШXШЫЭ[ќШЫЩK[[ќЬ™Y™\™[ЩJB€ђSQTИ
+	\Л	\Л	\КB€У€УУ‘“PХ
+[[ќШXШЫЭ[ќШЫЩJHИ“ХS‘В€‘UT“’S‘И[[ќШXШЫЭ[ќЪY[[ќЬ™Y™\™[ЩK[[ќШXШЫЭ[ќШЫЩB€€€‹€
+Щ[™\]WЬ™XЫЬ™ЪY
+
+K[[ќШЫЩK[[ќЬ™Y™\™[ЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[[ќШXШЫЭ[ќЪY[[ќЬ™Y™\™[ЩK[[ќШXШЫЭ[ќШЫЩB€”“УHљ[[™ЧШЫЬ™Kќ[[ќШXШЫЭ[ќ€ТT‘H[[ќШXШЫЭ[ќШЫЩHH	\В€€€‹€
+[[ќШЫЩK
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€HHЫЫ[Z]Y[љ\]YH›ЭИШ[››Э\Ш\X\€\™B€Z\ЩHќ[ќ[YQ\њ›ЬЉќ[[ќ[њЩ\ќY›Э™]\›€H›ЭИЉB€Y€›ЭЦМWHOH[[ќЬ™Y™\™[ЩN€ИYЫXN€›ИЫЭ™\€HЫЩH\љ]™\Ињ›ЫH\ИT“‚€Z\ЩH[YQ\њ›ЬЉќ[[ќ™Y™\™[ЩHШ[››Э[Э™HXЬ›ЬЬИY[ќ]Y\ИЉB€™]\›€[[ќXШЫЭ[ќ
+URQ
+ЭЉ›ЭЦМJJK›ЭЦМWK›ЭЦМ—JB‚€Y€™YЪ\Э\—Шљ[[™ЧШXШЫЭ[ќ
+€Щ[‹€[[ќЬ™Y™\™[ЩN€Э‹€љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩN€Э‹€XШЫЭ[ќЬЭ]\ЧШЫЩN€Э€HXЭ]™H‹€
+HO€љ[[™РXШЫЭ[ќ‚€€€’[њЩ\ќЬ€™]\›€Ы™H[[ќ\ШЫЬYљ[[™ИXШЫЭ[ќ€€€‚€[[ќHЩ[‹—Ь™\]Z\™WЭ[[ќ
+[[ќЬ™Y™\™[ЩJB€Ь™\]Z\™WЭ[[ќЬШЫЬYЬ™Y™\™[ЩJ[[ќЬ™Y™\™[ЩKљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩJB€XШЫЭ[ќШЫЩHHЬ™\ЫЭ\ЩWШЫЩJљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩJB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kљ[[™ЧШXШЫЭ[ќ€
+љ[[™ЧШXШЫЭ[ќЪY[[ќШXШЫЭ[ќЪYљ[[™ЧШXШЫЭ[ќШЫЩK€љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩKXШЫЭ[ќЬЭ]\ЧШЫЩJB€ђSQTИ
+	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХ
+[[ќШXШЫЭ[ќЪYљ[[™ЧШXШЫЭ[ќШЫЩJHИ“ХS‘В€‘UT“’S‘Иљ[[™ЧШXШЫЭ[ќЪY[[ќШXШЫЭ[ќЪYљ[[™ЧШXШЫЭ[ќШЫЩK€љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩKXШЫЭ[ќЬЭ]\ЧШЫЩB€€€‹€
+€Щ[™\]WЬ™XЫЬ™ЪY
+
+K€[[ќќ[[ќШXШЫЭ[ќЪY€XШЫЭ[ќШЫЩK€љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩK€XШЫЭ[ќЬЭ]\ЧШЫЩK€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХљ[[™ЧШXШЫЭ[ќЪY[[ќШXШЫЭ[ќЪYљ[[™ЧШXШЫЭ[ќШЫЩK€љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩKXШЫЭ[ќЬЭ]\ЧШЫЩB€”“УHљ[[™ЧШЫЬ™Kљ[[™ЧШXШЫЭ[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘љ[[™ЧШXШЫЭ[ќШЫЩHH	\В€€€‹€
+[[ќќ[[ќШXШЫЭ[ќЪYXШЫЭ[ќШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€H]X\ЩH›ЭИ\И›ЭXЭYћHH[љ\]YHЩ^B€Z\ЩHќ[ќ[YQ\њ›ЬЉљ[[™ИXШЫЭ[ќ[њЩ\ќY›Э™]\›€H›ЭИЉB€™]\›€љ[[™РXШЫЭ[ќ
+€URQ
+ЭЉ›ЭЦМJJK€URQ
+ЭЉ›ЭЦМWJJK€›ЭЦМЧK€›ЭЦМ—K€›ЭЦНK€
+B‚€Y€™YЪ\Э\—Шљ[[™ЧЬљ[Ъ\[
+€Щ[‹€[[ќЬ™Y™\™[ЩN€Э‹€љ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩN€Э‹€љ[Ъ\[ЪЪ[™ШЫЩN€Э‹€[YЩњ›ЫN€]][YK€[YЭО€]][YH›Ы™HH›Ы™K€
+HO€љ[[™Фљ[Ъ\[‚€€€’[њЩ\ќЬ€™]\›€Ы™HY™™XЭ]™KY]Yљ[[™Иљ[Ъ\[€€€‚€[[ќHЩ[‹—Ь™\]Z\™WЭ[[ќ
+[[ќЬ™Y™\™[ЩJB€Ь™\]Z\™WЭ[[ќЬШЫЬYЬ™Y™\™[ЩJ[[ќЬ™Y™\™[ЩKљ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩJB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kљ[[™ЧЬљ[Ъ\[€
+љ[[™ЧЬљ[Ъ\[ЪY[[ќШXШЫЭ[ќЪYљ[Ъ\[ЪЪ[™ШЫЩK€љ[Ъ\[Ь™Y™\™[ЩK[YЩњ›ЫK[YЭКB€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХ
+[[ќШXШЫЭ[ќЪYљ[Ъ\[Ь™Y™\™[ЩK[YЩњ›ЫJHИ“ХS‘В€‘UT“’S‘Иљ[[™ЧЬљ[Ъ\[ЪY[[ќШXШЫЭ[ќЪYљ[Ъ\[ЪЪ[™ШЫЩK€љ[Ъ\[Ь™Y™\™[ЩK[YЩњ›ЫK[YЭВ€€€‹€
+€Щ[™\]WЬ™XЫЬ™ЪY
+
+K€[[ќќ[[ќШXШЫЭ[ќЪY€љ[Ъ\[ЪЪ[™ШЫЩK€љ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩK€[YЩњ›ЫK€[YЭЛ€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХљ[[™ЧЬљ[Ъ\[ЪY[[ќШXШЫЭ[ќЪYљ[Ъ\[ЪЪ[™ШЫЩK€љ[Ъ\[Ь™Y™\™[ЩK[YЩњ›ЫK[YЭВ€”“УHљ[[™ЧШЫЬ™Kљ[[™ЧЬљ[Ъ\[€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘љ[Ъ\[Ь™Y™\™[ЩHH	\В€S‘[YЩњ›ЫHH	\В€€€‹€
+[[ќќ[[ќШXШЫЭ[ќЪYљ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩK[YЩњ›ЫJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€H]X\ЩH›ЭИ\И›ЭXЭYћHH[љ\]YHЩ^B€Z\ЩHќ[ќ[YQ\њ›ЬЉљ[[™Иљ[Ъ\[[њЩ\ќY›Э™]\›€H›ЭИЉB€™]\›€Щ[‹—Ьљ[Ъ\[Щњ›ЫWЬ›ЭК›ЭКB‚€Y€™YЪ\Э\—ШЬ™Y[ќX[Ь™XЫЬ™
+€Щ[‹€[[ќЬ™Y™\™[ЩN€Э‹€Ь™Y[ќX[Ь™Y™\™[ЩN€Э‹€Ь™Y[ќX[ЪЪ[™ШЫЩN€Э‹€Ь™Y[ќX[Щљ[™Щ\њљ[ќ€Э‹€
+HO€Ь™Y[ќX[™XЫЬ™‚€€€’[њЩ\ќЬ€™]\›€Ы™HЬ\]YK›Ы‹\ЩXЬ™]Ь™Y[ќX[™XЫЬ™€€€‚€[[ќHЩ[‹—Ь™\]Z\™WЭ[[ќ
+[[ќЬ™Y™\™[ЩJB€Ь™\]Z\™WЭ[[ќЬШЫЬYЬ™Y™\™[ЩJ[[ќЬ™Y™\™[ЩKЬ™Y[ќX[Ь™Y™\™[ЩJB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™KЬ™Y[ќX[Ь™XЫЬ™€
+Ь™Y[ќX[Ь™XЫЬ™ЪY[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™Y™\™[ЩK€Ь™Y[ќX[ЪЪ[™ШЫЩKЬ™Y[ќX[Щљ[™Щ\њљ[ќ\ЬЭY\—Ь™Y™\™[ЩK\ЬЭYYШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\ЛЫШЪЧЭ[Y\Э[\
+
+JB€У€УУ‘“PХ
+[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™Y™\™[ЩJHИ“ХS‘В€‘UT“’S‘ИЬ™Y[ќX[Ь™XЫЬ™ЪY[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™Y™\™[ЩK€Ь™Y[ќX[ЪЪ[™ШЫЩKЬ™Y[ќX[Щљ[™Щ\њљ[ќ€€€‹€
+€Щ[™\]WЬ™XЫЬ™ЪY
+
+K€[[ќќ[[ќШXШЫЭ[ќЪY€Ь™Y[ќX[Ь™Y™\™[ЩK€Ь™Y[ќX[ЪЪ[™ШЫЩK€Ь™Y[ќX[Щљ[™Щ\њљ[ќ€[[ќЬ™Y™\™[ЩK€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЬ™Y[ќX[Ь™XЫЬ™ЪY[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™Y™\™[ЩK€Ь™Y[ќX[ЪЪ[™ШЫЩKЬ™Y[ќX[Щљ[™Щ\њљ[ќ€”“УHљ[[™ЧШЫЬ™KЬ™Y[ќX[Ь™XЫЬ™€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘Ь™Y[ќX[Ь™Y™\™[ЩHH	\В€€€‹€
+[[ќќ[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™Y™\™[ЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€H]X\ЩH›ЭИ\И›ЭXЭYћHH[љ\]YHЩ^B€Z\ЩHќ[ќ[YQ\њ›ЬЉЬ™Y[ќX[[њЩ\ќY›Э™]\›€H›ЭИЉB€™]\›€Щ[‹—ШЬ™Y[ќX[Щњ›ЫWЬ›ЭК›ЭКB‚€Y€™YЪ\Э\—ШЬ™Y[ќX[Ш\ЬЪYЫ›Y[ќ
+€Щ[‹€[[ќЬ™Y™\™[ЩN€Э‹€Ь™Y[ќX[Ь™Y™\™[ЩN€Э‹€љ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩN€Э‹€љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩN€Э‹€[YЩњ›ЫN€]][YK€[YЭО€]][YH›Ы™HH›Ы™K€
+HO€Ь™Y[ќX[\ЬЪYЫ›Y[ќ‚€€€’[њЩ\ќЫ™H[[ќ\ШY™H[‹[Ь[€Ь™Y[ќX[\ЬЪYЫ›Y[ќ€€€‚€[[ќHЩ[‹—Ь™\]Z\™WЭ[[ќ
+[[ќЬ™Y™\™[ЩJB€Ь™Y[ќX[HЩ[‹—Ь™\]Z\™WШЬ™Y[ќX[
+[[ќЬ™Y[ќX[Ь™Y™\™[ЩJB€љ[Ъ\[HЩ[‹—Ь™\]Z\™WЬљ[Ъ\[
+[[ќљ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩJB€XШЫЭ[ќHЩ[‹—Ь™\]Z\™WШXШЫЭ[ќ
+[[ќљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩJB€Y€[YЭИ\И›Э›Ы™H[™[YЭИH[YЩњ›ЫN‚€Z\ЩH[YQ\њ›ЬЉЬ™Y[ќX[\ЬЪYЫ›Y[ќ[ќ\ќ[]\Э™HЬЪ]]™HЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™KЬ™Y[ќX[Ш\ЬЪYЫ›Y[ќ€
+Ь™Y[ќX[Ш\ЬЪYЫ›Y[ќЪY[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™XЫЬ™ЪY€љ[[™ЧЬљ[Ъ\[ЪYљ[[™ЧШXШЫЭ[ќЪY[YЩњ›ЫK[YЭКB€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘ИЬ™Y[ќX[Ш\ЬЪYЫ›Y[ќЪY[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™XЫЬ™ЪY€љ[[™ЧЬљ[Ъ\[ЪYљ[[™ЧШXШЫЭ[ќЪY[YЩњ›ЫK[YЭВ€€€‹€
+€Щ[™\]WЬ™XЫЬ™ЪY
+
+K€[[ќќ[[ќШXШЫЭ[ќЪY€Ь™Y[ќX[Ь™Y[ќX[Ь™XЫЬ™ЪY€љ[Ъ\[љ[[™ЧЬљ[Ъ\[ЪY€XШЫЭ[ќљ[[™ЧШXШЫЭ[ќЪY€[YЩњ›ЫK€[YЭЛ€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЬ™Y[ќX[Ш\ЬЪYЫ›Y[ќЪY[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™XЫЬ™ЪY€љ[[™ЧЬљ[Ъ\[ЪYљ[[™ЧШXШЫЭ[ќЪY[YЩњ›ЫK[YЭВ€”“УHљ[[™ЧШЫЬ™KЬ™Y[ќX[Ш\ЬЪYЫ›Y[ќ€ТT‘HЬ™Y[ќX[Ь™XЫЬ™ЪYH	\ИS‘[YЩњ›ЫHH	\В€€€‹€
+Ь™Y[ќX[Ь™Y[ќX[Ь™XЫЬ™ЪY[YЩњ›ЫJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€H^Ы\Ъ[Ы€ЫЫњЭZ[ќ›ЭXЭИH›ЭВ€Z\ЩH[YQ\њ›ЬЉЬ™Y[ќX[\ЬЪYЫ›Y[ќ[ќ\ќ[ИШ[››ЭЭ™\›\ЉB€™]\›€Щ[‹—Ш\ЬЪYЫ›Y[ќЩњ›ЫWЬ›ЭК›ЭКB‚€Y€™YЪ\Э\—ЫY]\—ЩYљ[љ][ЫЉ€Щ[‹€Y]\—ШЫЩN€Э‹€Y]\—Э™\њЪ[ЫЋ€[ќ€[љ]ШЫЩN€Э‹€YЩЬ™YШ][Ы—ШЫЩN€Э‹€[YЩњ›ЫN€]][YK€[YЭО€]][YH›Ы™HH›Ы™K€
+HO€Y]\‘Yљ[љ][ЫЋ‚€€€’[њЩ\ќЬ€™]\›€Ы™H™\њЪ[Ы™YY]\€Yљ[љ][Ы‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™K›Y]\—ЩYљ[љ][Ы‚€
+Y]\—ЩYљ[љ][Ы—ЪYY]\—ШЫЩKY]\—Э™\њЪ[Ы‹[љ]ШЫЩK€YЩЬ™YШ][Ы—ШЫЩK[YЩњ›ЫK[YЭКB€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХ
+Y]\—ШЫЩKY]\—Э™\њЪ[ЫЉHИ“ХS‘В€‘UT“’S‘ИY]\—ЩYљ[љ][Ы—ЪYY]\—ШЫЩKY]\—Э™\њЪ[Ы‹[љ]ШЫЩK€YЩЬ™YШ][Ы—ШЫЩK[YЩњ›ЫK[YЭВ€€€‹€
+€Щ[™\]WЬ™XЫЬ™ЪY
+
+K€Y]\—ШЫЩK€Y]\—Э™\њЪ[Ы‹€[љ]ШЫЩK€YЩЬ™YШ][Ы—ШЫЩK€[YЩњ›ЫK€[YЭЛ€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХY]\—ЩYљ[љ][Ы—ЪYY]\—ШЫЩKY]\—Э™\њЪ[Ы‹[љ]ШЫЩK€YЩЬ™YШ][Ы—ШЫЩK[YЩњ›ЫK[YЭВ€”“УHљ[[™ЧШЫЬ™K›Y]\—ЩYљ[љ][Ы‚€ТT‘HY]\—ШЫЩHH	\ИS‘Y]\—Э™\њЪ[Ы€H	\В€€€‹€
+Y]\—ШЫЩKY]\—Э™\њЪ[ЫЉK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€H]X\ЩH›ЭИ\И›ЭXЭYћHH[љ\]YHЩ^B€Z\ЩHќ[ќ[YQ\њ›ЬЉ›Y]\€Yљ[љ][Ы€[њЩ\ќY›Э™]\›€H›ЭИЉB€™]\›€Щ[‹—ЫY]\—Щњ›ЫWЬ›ЭК›ЭКB‚€Y€™YЪ\Э\—ЫY]\—Ь]X[]WЬќ[J€Щ[‹€Y]\—ЩYљ[љ][Ы—ЪY€URQ€]X[]WШЫЩN€Э‹€љ[[™ЧЩ\ЬЬЪ][Ы—ШЫЩN€Э‹€
+HO€Y]\”]X[]Tќ[N‚€€€’[њЩ\ќЬ€™]\›€Ы™HY]\€]X[]H\ЬЬЪ][Ы‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€ќ[WЪYHЩ[™\]WЬ™XЫЬ™ЪY
+
+B€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™K›Y]\—Ь]X[]WЬќ[B€
+Y]\—Ь]X[]WЬќ[WЪYY]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩK€љ[[™ЧЩ\ЬЬЪ][Ы—ШЫЩJB€ђSQTИ
+	\Л	\Л	\Л	\КB€У€УУ‘“PХ
+Y]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩJHИ“ХS‘В€‘UT“’S‘ИY]\—Ь]X[]WЬќ[WЪYY]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩK€љ[[™ЧЩ\ЬЬЪ][Ы—ШЫЩB€€€‹€
+ќ[WЪYY]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩKљ[[™ЧЩ\ЬЬЪ][Ы—ШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХY]\—Ь]X[]WЬќ[WЪYY]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩK€љ[[™ЧЩ\ЬЬЪ][Ы—ШЫЩB€”“УHљ[[™ЧШЫЬ™K›Y]\—Ь]X[]WЬќ[B€ТT‘HY]\—ЩYљ[љ][Ы—ЪYH	\ИS‘]X[]WШЫЩHH	\В€€€‹€
+Y]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€H]X\ЩH›ЭИ\И›ЭXЭYћHH[љ\]YHЩ^B€Z\ЩHќ[ќ[YQ\њ›ЬЉ›Y]\€]X[]Hќ[H[њЩ\ќY›Э™]\›€H›ЭИЉB€™]\›€Y]\”]X[]Tќ[JURQ
+ЭЉ›ЭЦМJJKURQ
+ЭЉ›ЭЦМWJJK›ЭЦМ—K›ЭЦМЧJB‚€Y€љ[™Ь]WШШ\™
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ]WШШ\™Ы[YN€Э‚€
+HO€ЭЬ™Y]PШ\™›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬYљXЩKX›ЫЪИXY\€ћH[YK€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™ЪY[[ќШXШЫЭ[ќЪY]WШШ\™Ы[YK€Э\њ™[ЮWШЫЩK[YЩњ›ЫB€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘]WШШ\™Ы[YHH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY]WШШ\™Ы[YJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Ь]WШШ\™Щњ›ЫWЬ›ЭК›ЭКB‚€Y€Щ]Ь]WШШ\™
+Щ[‹]WШШ\™ЪY€URQ
+HO€ЭЬ™Y]PШ\™›Ы™N‚€€€”™]\›€Ы™HљXЩKX›ЫЪИXY\€ћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™ЪY[[ќШXШЫЭ[ќЪY]WШШ\™Ы[YK€Э\њ™[ЮWШЫЩK[YЩњ›ЫB€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™€ТT‘H]WШШ\™ЪYH	\В€€€‹€
+]WШШ\™ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Ь]WШШ\™Щњ›ЫWЬ›ЭК›ЭКB‚€Y€[њЩ\ќЬ]WШШ\™
+Щ[‹]WШШ\™€ЭЬ™Y]PШ\™
+HO€ЭЬ™Y]PШ\™‚€€€”\њЪ\ЭЫ™H[[ќљXЩKX›ЫЪИXY\€Ъ]Э]™\XЪ[™И\ЭЬћK€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kњ]WШШ\™€
+]WШШ\™ЪY]WШШ\™ШЫЩK]WШШ\™Э™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€[YЩњ›ЫK[[ќШXШЫЭ[ќЪY]WШШ\™Ы[YJB€ђSQTИ
+	\Л	\ЛK	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И]WШШ\™ЪY[[ќШXШЫЭ[ќЪY]WШШ\™Ы[YK€Э\њ™[ЮWШЫЩK[YЩњ›ЫB€€€‹€
+€]WШШ\™њ]WШШ\™ЪY€]WШШ\™њ]WШШ\™Ы[YK€]WШШ\™Э\њ™[ЮWШЫЩK€]WШШ\™Ь™X]YШ]€]WШШ\™ќ[[ќШXШЫЭ[ќЪY€]WШШ\™њ]WШШ\™Ы[YK€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™ЪY[[ќШXШЫЭ[ќЪY]WШШ\™Ы[YK€Э\њ™[ЮWШЫЩK[YЩњ›ЫB€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘]WШШ\™Ы[YHH	\В€€€‹€
+]WШШ\™ќ[[ќШXШЫЭ[ќЪY]WШШ\™њ]WШШ\™Ы[YJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€H[љ\]YHY[ќ]H›ЭXЭИHXY\‚€Z\ЩHќ[ќ[YQ\њ›ЬЉњ]KXШ\™[њЩ\ќY›Э™]\›€H›ЭИЉB€ЭЬ™YHЩ[‹—Ь]WШШ\™Щњ›ЫWЬ›ЭК›ЭКB€Y€ЭЬ™YЭ\њ™[ЮWШЫЩHOH]WШШ\™Э\њ™[ЮWШЫЩN‚€Z\ЩH[YQ\њ›ЬЉњ]WШШ\™Э\њ™[ЮHШ[››ЭЪ[™ЩHYќ\€X›\ЪЉB€™]\›€ЭЬ™Y‚€Y€\ЭЬ]WШШ\™КЩ[‹[[ќШXШЫЭ[ќЪY€URQ
+HO€\VФЭЬ™Y]PШ\™‹‹—N‚€€€”™]\›€љXЩKX›ЫЪИXY\њИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™ЪY[[ќШXШЫЭ[ќЪY]WШШ\™Ы[YK€Э\њ™[ЮWШЫЩK[YЩњ›ЫB€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H]WШШ\™Ы[YK]WШШ\™ЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\JЩ[‹—Ь]WШШ\™Щњ›ЫWЬ›ЭК›ЭКH›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+JB‚€Y€љ[™Ь]WШШ\™Э™\њЪ[Ы—ШћWЪY[ќ]J€Щ[‹€[[ќШXШЫЭ[ќЪY€URQ€]WШШ\™ЪY€URQ€ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э‹€]WШШ\™ШЫЫќXЭЭ™\њЪ[ЫЋ€[ќ€
+HO€ЭЬ™Y]PШ\™™\њЪ[Ы€›Ы™N‚€€€”™]\›€Ы™HX›\ЪY™\њЪ[Ы€ћH]И[[]]X›H^[ШYY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™Э™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€™\њЪ[Ы—Ыќ[X™\‹]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘]WШШ\™ЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+[[ќШXШЫЭ[ќЪY]WШШ\™ЪYЫЭ\ЩWЬ^[ШYЪ\Ъ]WШШ\™ШЫЫќXЭЭ™\њЪ[ЫЉK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Ь]WШШ\™Э™\њЪ[Ы—Щњ›ЫWШЭ\њЫЬЉЭ\њЫЬ‹›ЭКB‚€Y€Щ]Ь]WШШ\™Э™\њЪ[ЫЉЩ[‹]WШШ\™Э™\њЪ[Ы—ЪY€URQ
+HO€ЭЬ™Y]PШ\™™\њЪ[Ы€›Ы™N‚€€€”™]\›€Ы™HX›\ЪYљXЩKX›ЫЪИ™\њЪ[Ы€ћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™Э™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€™\њЪ[Ы—Ыќ[X™\‹]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы‚€ТT‘H]WШШ\™Э™\њЪ[Ы—ЪYH	\В€€€‹€
+]WШШ\™Э™\њЪ[Ы—ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Ь]WШШ\™Э™\њЪ[Ы—Щњ›ЫWШЭ\њЫЬЉЭ\њЫЬ‹›ЭКB‚€Y€љ[™Ь]WШШ\™Э™\њЪ[ЫЉ€Щ[‹€[[ќШXШЫЭ[ќЪY€URQ€™\њЪ[Ы—Ыќ[X™\Ћ€[ќ€]WШШ\™Ы[YN€Э€›Ы™HH›Ы™K€
+HO€ЭЬ™Y]PШ\™™\њЪ[Ы€›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬY™\њЪ[Ы€ќ[X™\€Ъ[€]\И[[XљYЭ[Э\Л€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Y€]WШШ\™Ы[YH\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™Э™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€™\њЪ[Ы—Ыќ[X™\‹]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘™\њЪ[Ы—Ыќ[X™\€H	\В€€€‹€
+[[ќШXШЫЭ[ќЪY™\њЪ[Ы—Ыќ[X™\ЉK€
+B€[ЩN‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ™\њЪ[Ы‹њ]WШШ\™Э™\њЪ[Ы—ЪY™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪY€™\њЪ[Ы‹њ]WШШ\™ЪY™\њЪ[Ы‹ќ™\њЪ[Ы—Ыќ[X™\‹€™\њЪ[Ы‹њ]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€™\њЪ[Ы‹њЫЭ\ЩWЬ^[ШYЪ\Ъ™\њЪ[Ы‹њX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы€TИ™\њЪ[Ы‚€“ТS€љ[[™ЧШЫЬ™Kњ]WШШ\™TИШ\™€У€Ш\™ќ[[ќШXШЫЭ[ќЪYH™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪY€S‘Ш\™њ]WШШ\™ЪYH™\њЪ[Ы‹њ]WШШ\™ЪY€ТT‘H™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪYH	\В€S‘Ш\™њ]WШШ\™Ы[YHH	\В€S‘™\њЪ[Ы‹ќ™\њЪ[Ы—Ыќ[X™\€H	\В€€€‹€
+[[ќШXШЫЭ[ќЪY]WШШ\™Ы[YK™\њЪ[Ы—Ыќ[X™\ЉK€
+B€›ЭЬИHЭ\њЫЬ‹™™]Ъ[
+
+B€Y€[Љ›ЭЬКHOHN‚€™]\›€›Ы™B€™]\›€Щ[‹—Ь]WШШ\™Э™\њЪ[Ы—Щњ›ЫWШЭ\њЫЬЉЭ\њЫЬ‹›ЭЬЦМJB‚€Y€™^Ь]WШШ\™Э™\њЪ[Ы—Ыќ[X™\Љ€Щ[‹[[ќШXШЫЭ[ќЪY€URQ]WШШ\™ЪY€URQ€
+HO€[ќ‚€€€”™]\›€H™^\[™[Ы›H™\њЪ[Ы€ќ[X™\€›Ь€Ы™HљXЩH›ЫЪЛ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХУРSTРСJPV
+™\њЪ[Ы—Ыќ[X™\ЉK
+H
+ИB€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘]WШШ\™ЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY]WШШ\™ЪY
+K€
+B€™]\›€[ќ
+Э\њЫЬ‹™™]ЪЫ™J
+VМJB‚€Y€[њЩ\ќЬ]WШШ\™Э™\њЪ[ЫЉ€Щ[‹™\њЪ[ЫЋ€ЭЬ™Y]PШ\™™\њЪ[Ы‚€
+HO€ЭЬ™Y]PШ\™™\њЪ[ЫЋ‚€€€”\њЪ\ЭЫ™H[[]]X›HљXЩKX›ЫЪИ™\њЪ[Ы€[™]И›Ь›X[^™Y[™\Л€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы‚€
+]WШШ\™Э™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€™\њЪ[Ы—Ыќ[X™\‹]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И]WШШ\™Э™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€™\њЪ[Ы—Ыќ[X™\‹]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€€€‹€
+€™\њЪ[Ы‹њ]WШШ\™Э™\њЪ[Ы—ЪY€™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪY€™\њЪ[Ы‹њ]WШШ\™ЪY€™\њЪ[Ы‹ќ™\њЪ[Ы—Ыќ[X™\‹€™\њЪ[Ы‹њ]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹€™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€™\њЪ[Ы‹њЫЭ\ЩWЬ^[ШYЪ\Ъ€™\њЪ[Ы‹њX›\ЪYШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™Э™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€™\њЪ[Ы—Ыќ[X™\‹]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘]WШШ\™ЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪY€™\њЪ[Ы‹њ]WШШ\™ЪY€™\њЪ[Ы‹њЫЭ\ЩWЬ^[ШYЪ\Ъ€™\њЪ[Ы‹њ]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€H[љ\]YHY[ќ]H›ЭXЭИH™\њЪ[Ы‚€Z\ЩHќ[ќ[YQ\њ›ЬЉњ]KXШ\™™\њЪ[Ы€[њЩ\ќY›Э™]\›€H›ЭИЉB€™]\›€Щ[‹—Ь]WШШ\™Э™\њЪ[Ы—Щњ›ЫWШЭ\њЫЬЉЭ\њЫЬ‹›ЭКB€›Ь€[™H[€™\њЪ[Ы‹њ]WШШ\™Ы[™\О‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kњ]WШШ\™Ы[™B€
+]WШШ\™Ы[™WЪY[[ќШXШЫЭ[ќЪY]WШШ\™Э™\њЪ[Ы—ЪY€Y]љXЧШЫЩK[љ]Ш[[Э[ќЭ\њ™[ЮWШЫЩJB€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\КB€€€‹€
+€[™Kњ]WШШ\™Ы[™WЪY€[™Kќ[[ќШXШЫЭ[ќЪY€[™Kњ]WШШ\™Э™\њЪ[Ы—ЪY€[™K›Y]љXЧШЫЩK€[™Kќ[љ]Ш[[Э[ќ€[™KЭ\њ™[ЮWШЫЩK€
+K€
+B€™]\›€Щ[‹—Ь]WШШ\™Э™\њЪ[Ы—Щњ›ЫWШЭ\њЫЬЉЭ\њЫЬ‹›ЭКB‚€Y€\ЭЬ]WШШ\™Э™\њЪ[ЫњК€Щ[‹[[ќШXШЫЭ[ќЪY€URQ]WШШ\™ЪY€URQ›Ы™HH›Ы™B€
+HO€\VФЭЬ™Y]PШ\™™\њЪ[Ы‹‹‹—N‚€€€”™]\›€X›\ЪYљXЩKX›ЫЪИ™\њЪ[ЫњИ›Ь€Ы™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Y€]WШШ\™ЪY\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™Э™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€™\њЪ[Ы—Ыќ[X™\‹]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H]WШШ\™ЪY™\њЪ[Ы—Ыќ[X™\‚€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€[ЩN‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™Э™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€™\њЪ[Ы—Ыќ[X™\‹]WШШ\™ШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Э™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘]WШШ\™ЪYH	\В€Ф‘T€–H™\њЪ[Ы—Ыќ[X™\‚€€€‹€
+[[ќШXШЫЭ[ќЪY]WШШ\™ЪY
+K€
+B€™]\›€\J€Щ[‹—Ь]WШШ\™Э™\њЪ[Ы—Щњ›ЫWШЭ\њЫЬЉЭ\њЫЬ‹›ЭКB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€љ[™Ь]WШШ\™Ы[™J€Щ[‹]WШШ\™Э™\њЪ[Ы—ЪY€URQY]љXЧШЫЩN€Э‚€
+HO€ЭЬ™Y]PШ\™[™H›Ы™N‚€€€”™]\›€Ы™H^XЭ[љ]љXЩHњ›ЫHHX›\ЪY™\њЪ[Ы‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ]WШШ\™Ы[™WЪY[[ќШXШЫЭ[ќЪY]WШШ\™Э™\њЪ[Ы—ЪY€Y]љXЧШЫЩK[љ]Ш[[Э[ќЭ\њ™[ЮWШЫЩB€”“УHљ[[™ЧШЫЬ™Kњ]WШШ\™Ы[™B€ТT‘H]WШШ\™Э™\њЪ[Ы—ЪYH	\ИS‘Y]љXЧШЫЩHH	\В€€€‹€
+]WШШ\™Э™\њЪ[Ы—ЪYY]љXЧШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Ь]WШШ\™Ы[™WЩњ›ЫWЬ›ЭК›ЭКB‚€Y€љ[™ЫY]\—Ь]X[]WЬќ[J€Щ[‹Y]\—ЩYљ[љ][Ы—ЪY€URQ]X[]WШЫЩN€Э‚€
+HO€Y]\”]X[]Tќ[H›Ы™N‚€€€”™]\›€Hљ[[™И\ЬЬЪ][Ы€›Ь€Ы™H›Ь›X[^™YY]\€]X[]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХY]\—Ь]X[]WЬќ[WЪYY]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩK€љ[[™ЧЩ\ЬЬЪ][Ы—ШЫЩB€”“УHљ[[™ЧШЫЬ™K›Y]\—Ь]X[]WЬќ[B€ТT‘HY]\—ЩYљ[љ][Ы—ЪYH	\ИS‘]X[]WШЫЩHH	\В€€€‹€
+Y]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€™]\›€›Ы™B€™]\›€Y]\”]X[]Tќ[JURQ
+ЭЉ›ЭЦМJJKURQ
+ЭЉ›ЭЦМWJJK›ЭЦМ—K›ЭЦМЧJB‚€Y€љ[™Э^Ь]WЬШЪY[J€Щ[‹[[ќШXШЫЭ[ќЪY€URQ^ШЫЩN€Э‚€
+HO€ЭЬ™Y^]TШЪY[H›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬY^\]HШЪY[HћHЫЩK€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЬШЪY[WЪY[[ќШXШЫЭ[ќЪY^ШЫЩKЬ™X]YШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЬШЪY[B€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘^ШЫЩHH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY^ШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Э^Ь]WЬШЪY[WЩњ›ЫWЬ›ЭК›ЭКB‚€Y€Щ]Э^Ь]WЬШЪY[J€Щ[‹^Ь]WЬШЪY[WЪY€URQ€
+HO€ЭЬ™Y^]TШЪY[H›Ы™N‚€€€”™]\›€Ы™H^\]HШЪY[HћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЬШЪY[WЪY[[ќШXШЫЭ[ќЪY^ШЫЩKЬ™X]YШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЬШЪY[B€ТT‘H^Ь]WЬШЪY[WЪYH	\В€€€‹€
+^Ь]WЬШЪY[WЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Э^Ь]WЬШЪY[WЩњ›ЫWЬ›ЭК›ЭКB‚€Y€[њЩ\ќЭ^Ь]WЬШЪY[J€Щ[‹ШЪY[N€ЭЬ™Y^]TШЪY[B€
+HO€ЭЬ™Y^]TШЪY[N‚€€€”\њЪ\ЭЫ™H^\]HШЪY[HЪ]Э]™\XЪ[™И]ИЫЩHY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kќ^Ь]WЬШЪY[B€
+^Ь]WЬШЪY[WЪY[[ќШXШЫЭ[ќЪY^ШЫЩKЬ™X]YШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И^Ь]WЬШЪY[WЪY[[ќШXШЫЭ[ќЪY^ШЫЩKЬ™X]YШ]€€€‹€
+€ШЪY[Kќ^Ь]WЬШЪY[WЪY€ШЪY[Kќ[[ќШXШЫЭ[ќЪY€ШЪY[Kќ^ШЫЩK€ШЪY[KЬ™X]YШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЬШЪY[WЪY[[ќШXШЫЭ[ќЪY^ШЫЩKЬ™X]YШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЬШЪY[B€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘^ШЫЩHH	\В€€€‹€
+ШЪY[Kќ[[ќШXШЫЭ[ќЪYШЪY[Kќ^ШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉќ^\]HШЪY[HY[ќ]H[™XYH™[Ы™ЬИИ[›Э\€›ЭИЉB€™]\›€Щ[‹—Э^Ь]WЬШЪY[WЩњ›ЫWЬ›ЭК›ЭКB‚€Y€\ЭЭ^Ь]WЬШЪY[\К€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™Y^]TШЪY[K‹‹—N‚€€€”™]\›€^\]HШЪY[\И[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЬШЪY[WЪY[[ќШXШЫЭ[ќЪY^ШЫЩKЬ™X]YШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЬШЪY[B€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H^ШЫЩK^Ь]WЬШЪY[WЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\JЩ[‹—Э^Ь]WЬШЪY[WЩњ›ЫWЬ›ЭК›ЭКH›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+JB‚€Y€љ[™Э^Ь]WЭ™\њЪ[Ы—ШћWЪY[ќ]J€Щ[‹€[[ќШXШЫЭ[ќЪY€URQ€^Ь]WЬШЪY[WЪY€URQ€ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э‹€^Ь]WШЫЫќXЭЭ™\њЪ[ЫЋ€[ќ€
+HO€ЭЬ™Y^]U™\њЪ[Ы€›Ы™N‚€€€”™]\›€Ы™HX›\ЪY^\]H™\њЪ[Ы€ћH[[]]X›H^[ШYY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЭ™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY€™\њЪ[Ы—Ыќ[X™\‹^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK^Ь]K€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘^Ь]WЬШЪY[WЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘^Ь]WШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€[[ќШXШЫЭ[ќЪY€^Ь]WЬШЪY[WЪY€ЫЭ\ЩWЬ^[ШYЪ\Ъ€^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Э^Ь]WЭ™\њЪ[Ы—Щњ›ЫWЬ›ЭК›ЭКB‚€Y€Щ]Э^Ь]WЭ™\њЪ[ЫЉ€Щ[‹^Ь]WЭ™\њЪ[Ы—ЪY€URQ€
+HO€ЭЬ™Y^]U™\њЪ[Ы€›Ы™N‚€€€”™]\›€Ы™HX›\ЪY^\]H™\њЪ[Ы€ћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЭ™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY€™\њЪ[Ы—Ыќ[X™\‹^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK^Ь]K€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы‚€ТT‘H^Ь]WЭ™\њЪ[Ы—ЪYH	\В€€€‹€
+^Ь]WЭ™\њЪ[Ы—ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Э^Ь]WЭ™\њЪ[Ы—Щњ›ЫWЬ›ЭК›ЭКB‚€Y€љ[™Э^Ь]WЭ™\њЪ[ЫЉ€Щ[‹€[[ќШXШЫЭ[ќЪY€URQ€™\њЪ[Ы—Ыќ[X™\Ћ€[ќ€^ШЫЩN€Э€›Ы™HH›Ы™K€
+HO€ЭЬ™Y^]U™\њЪ[Ы€›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬY™\њЪ[Ы€ќ[X™\€Ъ[€]\И[[XљYЭ[Э\Л€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Y€^ШЫЩH\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЭ™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY€™\њЪ[Ы—Ыќ[X™\‹^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK^Ь]K€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘™\њЪ[Ы—Ыќ[X™\€H	\В€€€‹€
+[[ќШXШЫЭ[ќЪY™\њЪ[Ы—Ыќ[X™\ЉK€
+B€[ЩN‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ™\њЪ[Ы‹ќ^Ь]WЭ™\њЪ[Ы—ЪY™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪY€™\њЪ[Ы‹ќ^Ь]WЬШЪY[WЪY™\њЪ[Ы‹ќ™\њЪ[Ы—Ыќ[X™\‹€™\њЪ[Ы‹ќ^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹™\њЪ[Ы‹ќ^ШЫЩK€™\њЪ[Ы‹ќ^Ь]K™\њЪ[Ы‹њЫЭ\ЩWЬ^[ШYЪ\Ъ€™\њЪ[Ы‹њX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы€TИ™\њЪ[Ы‚€“ТS€љ[[™ЧШЫЬ™Kќ^Ь]WЬШЪY[HTИШЪY[B€У€ШЪY[Kќ[[ќШXШЫЭ[ќЪYH™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪY€S‘ШЪY[Kќ^Ь]WЬШЪY[WЪYH™\њЪ[Ы‹ќ^Ь]WЬШЪY[WЪY€ТT‘H™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪYH	\В€S‘ШЪY[Kќ^ШЫЩHH	\В€S‘™\њЪ[Ы‹ќ™\њЪ[Ы—Ыќ[X™\€H	\В€€€‹€
+[[ќШXШЫЭ[ќЪY^ШЫЩK™\њЪ[Ы—Ыќ[X™\ЉK€
+B€›ЭЬИHЭ\њЫЬ‹™™]Ъ[
+
+B€Y€[Љ›ЭЬКHOHN‚€™]\›€›Ы™B€™]\›€Щ[‹—Э^Ь]WЭ™\њЪ[Ы—Щњ›ЫWЬ›ЭК›ЭЬЦМJB‚€Y€™^Э^Ь]WЭ™\њЪ[Ы—Ыќ[X™\Љ€Щ[‹[[ќШXШЫЭ[ќЪY€URQ^Ь]WЬШЪY[WЪY€URQ€
+HO€[ќ‚€€€”™]\›€H™^\[™[Ы›H™\њЪ[Ы€ќ[X™\€›Ь€Ы™H^ШЪY[K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХУРSTРСJPV
+™\њЪ[Ы—Ыќ[X™\ЉK
+H
+ИB€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘^Ь]WЬШЪY[WЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY
+K€
+B€™]\›€[ќ
+Э\њЫЬ‹™™]ЪЫ™J
+VМJB‚€Y€[њЩ\ќЭ^Ь]WЭ™\њЪ[ЫЉ€Щ[‹™\њЪ[ЫЋ€ЭЬ™Y^]U™\њЪ[Ы‚€
+HO€ЭЬ™Y^]U™\њЪ[ЫЋ‚€€€”\њЪ\ЭЫ™H[[]]X›H^\]H™\њЪ[Ы€[™Ы\ЬЪYћH™\^K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы‚€
+^Ь]WЭ™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY€™\њЪ[Ы—Ыќ[X™\‹^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK^Ь]K€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И^Ь]WЭ™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY€^Ь]WЬШЪY[WЪY™\њЪ[Ы—Ыќ[X™\‹€^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK^Ь]K€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€€€‹€
+€™\њЪ[Ы‹ќ^Ь]WЭ™\њЪ[Ы—ЪY€™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪY€™\њЪ[Ы‹ќ^Ь]WЬШЪY[WЪY€™\њЪ[Ы‹ќ™\њЪ[Ы—Ыќ[X™\‹€™\њЪ[Ы‹ќ^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹€™\њЪ[Ы‹ќ^ШЫЩK€™\њЪ[Ы‹ќ^Ь]K€™\њЪ[Ы‹њЫЭ\ЩWЬ^[ШYЪ\Ъ€™\њЪ[Ы‹њX›\ЪYШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЭ™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY€™\њЪ[Ы—Ыќ[X™\‹^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK^Ь]K€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘^Ь]WЬШЪY[WЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘^Ь]WШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪY€™\њЪ[Ы‹ќ^Ь]WЬШЪY[WЪY€™\њЪ[Ы‹њЫЭ\ЩWЬ^[ШYЪ\Ъ€™\њЪ[Ы‹ќ^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉќ^\]H™\њЪ[Ы€Y[ќ]H[™XYH™[Ы™ЬИИ[›Э\€›ЭИЉB€™]\›€Щ[‹—Э^Ь]WЭ™\њЪ[Ы—Щњ›ЫWЬ›ЭК›ЭКB‚€Y€\ЭЭ^Ь]WЭ™\њЪ[ЫњК€Щ[‹[[ќШXШЫЭ[ќЪY€URQ^Ь]WЬШЪY[WЪY€URQ›Ы™HH›Ы™B€
+HO€\VФЭЬ™Y^]U™\њЪ[Ы‹‹‹—N‚€€€”™]\›€X›\ЪY^\]H™\њЪ[ЫњИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Y€^Ь]WЬШЪY[WЪY\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЭ™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY€™\њЪ[Ы—Ыќ[X™\‹^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK^Ь]K€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H^Ь]WЬШЪY[WЪY™\њЪ[Ы—Ыќ[X™\‚€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€[ЩN‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ь]WЭ™\њЪ[Ы—ЪY[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY€™\њЪ[Ы—Ыќ[X™\‹^Ь]WШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK^Ь]K€ЫЭ\ЩWЬ^[ШYЪ\ЪX›\ЪYШ]€”“УHљ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘^Ь]WЬШЪY[WЪYH	\В€Ф‘T€–H™\њЪ[Ы—Ыќ[X™\‚€€€‹€
+[[ќШXШЫЭ[ќЪY^Ь]WЬШЪY[WЪY
+K€
+B€™]\›€\JЩ[‹—Э^Ь]WЭ™\њЪ[Ы—Щњ›ЫWЬ›ЭК›ЭКH›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+JB‚€Y€љ[™Э^Ш\ЬЩ\ЬЫY[ќ
+€Щ[‹€[[ќШXШЫЭ[ќЪY€URQ€[ќ›ЪXЩWЩYќЪY€URQ€^Ь]WЭ™\њЪ[Ы—ЪY€URQ€ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э‹€^Ш\ЬЩ\ЬЫY[ќШЫЫќXЭЭ™\њЪ[ЫЋ€[ќ€
+HO€ЭЬ™Y^\ЬЩ\ЬЫY[ќ›Ы™N‚€€€”™]\›€Ы™H\ЬЩ\ЬЫY[ќћH]И[[ќ\ШЫЬY[[]]X›HY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ЬЩ\ЬЫY[ќќ^Ш\ЬЩ\ЬЫY[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ^Ш\ЬЩ\ЬЫY[ќTИ\ЬЩ\ЬЫY[ќ€ТT‘H\ЬЩ\ЬЫY[ќќ[[ќШXШЫЭ[ќЪYH	\В€S‘\ЬЩ\ЬЫY[ќљ[ќ›ЪXЩWЩYќЪYH	\В€S‘\ЬЩ\ЬЫY[ќќ^Ь]WЭ™\њЪ[Ы—ЪYH	\В€S‘\ЬЩ\ЬЫY[ќњЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘\ЬЩ\ЬЫY[ќќ^Ш\ЬЩ\ЬЫY[ќШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€[[ќШXШЫЭ[ќЪY€[ќ›ЪXЩWЩYќЪY€^Ь]WЭ™\њЪ[Ы—ЪY€ЫЭ\ЩWЬ^[ШYЪ\Ъ€^Ш\ЬЩ\ЬЫY[ќШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЭ^Ш\ЬЩ\ЬЫY[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€Щ]Э^Ш\ЬЩ\ЬЫY[ќ
+€Щ[‹^Ш\ЬЩ\ЬЫY[ќЪY€URQ€
+HO€ЭЬ™Y^\ЬЩ\ЬЫY[ќ›Ы™N‚€€€”™]\›€Ы™H^\ЬЩ\ЬЫY[ќћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ш\ЬЩ\ЬЫY[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ^Ш\ЬЩ\ЬЫY[ќ€ТT‘H^Ш\ЬЩ\ЬЫY[ќЪYH	\В€€€‹€
+^Ш\ЬЩ\ЬЫY[ќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЭ^Ш\ЬЩ\ЬЫY[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€\ЭЭ^Ш\ЬЩ\ЬЫY[ќК€Щ[‹[[ќШXШЫЭ[ќЪY€URQ›Ы™HH›Ы™B€
+HO€\VФЭЬ™Y^\ЬЩ\ЬЫY[ќ‹‹—N‚€€€”™]\›€\ЬЩ\ЬЫY[ќЛЬ[Ы[H[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Y€[[ќШXШЫЭ[ќЪY\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ш\ЬЩ\ЬЫY[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ^Ш\ЬЩ\ЬЫY[ќ€Ф‘T€–H\ЬЩ\ЬЩYШ]^Ш\ЬЩ\ЬЫY[ќЪY€€€‚€
+B€[ЩN‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ш\ЬЩ\ЬЫY[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ^Ш\ЬЩ\ЬЫY[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H\ЬЩ\ЬЩYШ]^Ш\ЬЩ\ЬЫY[ќЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЭ^Ш\ЬЩ\ЬЫY[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€[њЩ\ќЭ^Ш\ЬЩ\ЬЫY[ќ
+€Щ[‹\ЬЩ\ЬЫY[ќ€ЭЬ™Y^\ЬЩ\ЬЫY[ќ€
+HO€ЭЬ™Y^\ЬЩ\ЬЫY[ќ‚€€€”\њЪ\ЭЫ™H^Ы\ЪЭ[™Ы\ЬЪYћH^XЭЬ€Yќ™\^K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kќ^Ш\ЬЩ\ЬЫY[ќ€
+^Ш\ЬЩ\ЬЫY[ќЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€^Ь]WЭ™\њЪ[Ы—ЪY^Ш\ЬЩ\ЬЫY[ќШЫЫќXЭЭ™\њЪ[Ы‹^ШЫЩK€^Ь]KЭ\њ™[ЮWШЫЩK^Щ^Ы\Ъ]™WШ[[Э[ќ^Ш[[Э[ќ€^Ъ[Ы\Ъ]™WШ[[Э[ќЫЭ\ЩWЬ^[ШYЪ\Ъ\ЬЩ\ЬЩYШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И^Ш\ЬЩ\ЬЫY[ќЪY€€€‹€
+€\ЬЩ\ЬЫY[ќќ^Ш\ЬЩ\ЬЫY[ќЪY€\ЬЩ\ЬЫY[ќќ[[ќШXШЫЭ[ќЪY€\ЬЩ\ЬЫY[ќљ[ќ›ЪXЩWЩYќЪY€\ЬЩ\ЬЫY[ќќ^Ь]WЭ™\њЪ[Ы—ЪY€\ЬЩ\ЬЫY[ќќ^Ш\ЬЩ\ЬЫY[ќШЫЫќXЭЭ™\њЪ[Ы‹€\ЬЩ\ЬЫY[ќќ^ШЫЩK€\ЬЩ\ЬЫY[ќќ^Ь]K€\ЬЩ\ЬЫY[ќЭ\њ™[ЮWШЫЩK€\ЬЩ\ЬЫY[ќќ^Щ^Ы\Ъ]™WШ[[Э[ќ€\ЬЩ\ЬЫY[ќќ^Ш[[Э[ќ€\ЬЩ\ЬЫY[ќќ^Ъ[Ы\Ъ]™WШ[[Э[ќ€\ЬЩ\ЬЫY[ќњЫЭ\ЩWЬ^[ШYЪ\Ъ€\ЬЩ\ЬЫY[ќ\ЬЩ\ЬЩYШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^Ш\ЬЩ\ЬЫY[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ^Ш\ЬЩ\ЬЫY[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘[ќ›ЪXЩWЩYќЪYH	\В€S‘^Ь]WЭ™\њЪ[Ы—ЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘^Ш\ЬЩ\ЬЫY[ќШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€\ЬЩ\ЬЫY[ќќ[[ќШXШЫЭ[ќЪY€\ЬЩ\ЬЫY[ќљ[ќ›ЪXЩWЩYќЪY€\ЬЩ\ЬЫY[ќќ^Ь]WЭ™\њЪ[Ы—ЪY€\ЬЩ\ЬЫY[ќњЫЭ\ЩWЬ^[ШYЪ\Ъ€\ЬЩ\ЬЫY[ќќ^Ш\ЬЩ\ЬЫY[ќШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉќ^\ЬЩ\ЬЫY[ќY[ќ]H[™XYH™[Ы™ЬИИ[›Э\€›ЭИЉB€™]\›€Щ[‹—Щ™]ЪЭ^Ш\ЬЩ\ЬЫY[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€™]\›€Щ[‹—Щ™]ЪЭ^Ш\ЬЩ\ЬЫY[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€™\ЫЫ™WЭ[[ќ
+€Щ[‹[[ќЬ™Y™\™[ЩN€Э‚€
+HO€\VХ[[ќXШЫЭ[ќ›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩH›Ы™WN‚€€€”™\ЫЫ™HЫ™H[[ќЪ]Э]^ЬЪ[™И[›Э\€[[ќ	ЬИШ][ЩЛ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[[ќШXШЫЭ[ќЪY[[ќЬ™Y™\™[ЩK[[ќШXШЫЭ[ќШЫЩB€”“УHљ[[™ЧШЫЬ™Kќ[[ќШXШЫЭ[ќ€ТT‘H[[ќЬ™Y™\™[ЩHH	\В€€€‹€
+[[ќЬ™Y™\™[ЩK
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩK•SђS•У“ХС“ХS‘€™]\›€[[ќXШЫЭ[ќ
+URQ
+ЭЉ›ЭЦМJJK›ЭЦМWK›ЭЦМ—JK›Ы™B‚€Y€™\ЫЫ™WШљ[[™ЧШXШЫЭ[ќ
+€Щ[‹[[ќ€[[ќXШЫЭ[ќљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩN€Э‚€
+HO€\VРљ[[™РXШЫЭ[ќ›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩH›Ы™WN‚€€€”™\ЫЫ™H[€XЭ]™HXШЫЭ[ќћHЫЫ\ЬЪ]H[[ќY[ќ]K€€€‚€Y€›Эљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩKњЭ\ќЭЪ]
+€ћЭ[[ќќ[[ќЬ™Y™\™[Щ_N€ЉN‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩKђU’P•USУ—ХSђS•УRTУPUТ€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХљ[[™ЧШXШЫЭ[ќЪY[[ќШXШЫЭ[ќЪYљ[[™ЧШXШЫЭ[ќШЫЩK€XШЫЭ[ќЬЭ]\ЧШЫЩB€”“УHљ[[™ЧШЫЬ™Kљ[[™ЧШXШЫЭ[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘љ[[™ЧШXШЫЭ[ќШЫЩHH	\В€€€‹€
+[[ќќ[[ќШXШЫЭ[ќЪYЬ™\ЫЭ\ЩWШЫЩJљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩJJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩKђ’SS‘ЧРPРУХS•У“ХС“ХS‘€XШЫЭ[ќHљ[[™РXШЫЭ[ќ
+€URQ
+ЭЉ›ЭЦМJJKURQ
+ЭЉ›ЭЦМWJJKљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩK›ЭЦМ—K›ЭЦМЧB€
+B€Y€XШЫЭ[ќXШЫЭ[ќЬЭ]\ЧШЫЩHOHXЭ]™HЋ‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩKђ’SS‘ЧРPРУХS•У“ХРPХU‘B€™]\›€XШЫЭ[ќ›Ы™B‚€Y€Щ]Шљ[[™ЧШXШЫЭ[ќ
+Щ[‹љ[[™ЧШXШЫЭ[ќЪY€URQ
+HO€љ[[™РXШЫЭ[ќ›Ы™N‚€€€”™]\›€Ы™Hљ[[™ИXШЫЭ[ќћH[ќ\›[Y[ќYљY\‹Y€™\Щ[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХљ[[™ЧШXШЫЭ[ќЪY[[ќШXШЫЭ[ќЪYљ[[™ЧШXШЫЭ[ќШЫЩK€љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩKXШЫЭ[ќЬЭ]\ЧШЫЩB€”“УHљ[[™ЧШЫЬ™Kљ[[™ЧШXШЫЭ[ќ€ТT‘Hљ[[™ЧШXШЫЭ[ќЪYH	\В€€€‹€
+љ[[™ЧШXШЫЭ[ќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€™]\›€›Ы™B€™]\›€љ[[™РXШЫЭ[ќ
+€URQ
+ЭЉ›ЭЦМJJKURQ
+ЭЉ›ЭЦМWJJK›ЭЦМЧK›ЭЦМ—K›ЭЦНB€
+B‚€Y€™\ЫЫ™WШљ[[™ЧЬљ[Ъ\[
+€Щ[‹[[ќ€[[ќXШЫЭ[ќљ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩN€Э‹ШШЭ\њ™YШ]€]][YB€
+HO€\VРљ[[™Фљ[Ъ\[›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩH›Ы™WN‚€€€”™\ЫЫ™H[€Y™™XЭ]™Hљ[Ъ\[\Ъ[™ИЬЭЬ™TФS[YH™YXШ]\Л€€€‚€Y€›Эљ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩKњЭ\ќЭЪ]
+€ћЭ[[ќќ[[ќЬ™Y™\™[Щ_N€ЉN‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩKђU’P•USУ—ХSђS•УRTУPUТ€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХљ[[™ЧЬљ[Ъ\[ЪY[[ќШXШЫЭ[ќЪYљ[Ъ\[ЪЪ[™ШЫЩK€љ[Ъ\[Ь™Y™\™[ЩK[YЩњ›ЫK[YЭВ€”“УHљ[[™ЧШЫЬ™Kљ[[™ЧЬљ[Ъ\[€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘љ[Ъ\[Ь™Y™\™[ЩHH	\В€S‘[YЩњ›ЫHH	\В€S‘
+[YЭИTИ•SФ€	\И[YЭКB€Ф‘T€–H[YЩњ›ЫHTРВ€SRUB€€€‹€
+[[ќќ[[ќШXШЫЭ[ќЪYљ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩKШШЭ\њ™YШ]ШШЭ\њ™YШ]
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХB€”“УHљ[[™ЧШЫЬ™Kљ[[™ЧЬљ[Ъ\[€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘љ[Ъ\[Ь™Y™\™[ЩHH	\В€SRUB€€€‹€
+[[ќќ[[ќШXШЫЭ[ќЪYљ[[™ЧЬљ[Ъ\[Ь™Y™\™[ЩJK€
+B€Y€Э\њЫЬ‹™™]ЪЫ™J
+H\И›Ы™N‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩKђ’SS‘ЧФ’SђТTSУ“ХС“ХS‘€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩK”’SђТTSУ“ХСQ‘‘PХU‘B€љ[Ъ\[HЩ[‹—Ьљ[Ъ\[Щњ›ЫWЬ›ЭК›ЭКB€™]\›€љ[Ъ\[›Ы™B‚€Y€™\ЫЫ™WШЬ™Y[ќX[
+€Щ[‹€[[ќ€[[ќXШЫЭ[ќ€Ь™Y[ќX[Ь™Y™\™[ЩN€Э‹€љ[Ъ\[€љ[[™Фљ[Ъ\[€XШЫЭ[ќ€љ[[™РXШЫЭ[ќ€ШШЭ\њ™YШ]€]][YK€
+HO€\VРЬ™Y[ќX[™XЫЬ™›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩH›Ы™WN‚€€€”™\ЫЫ™HHЬ™Y[ќX[Ы›HЪ[€]ИY™™XЭ]™H\ЬЪYЫ›Y[ќX]Ъ\И›ЭЭЫ™\њЛ€€€‚€Y€›ЭЬ™Y[ќX[Ь™Y™\™[ЩKњЭ\ќЭЪ]
+€ћЭ[[ќќ[[ќЬ™Y™\™[Щ_N€ЉN‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩKђU’P•USУ—ХSђS•УRTУPUТ€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЬ™Y[ќX[Ь™XЫЬ™ЪY[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™Y™\™[ЩK€Ь™Y[ќX[ЪЪ[™ШЫЩKЬ™Y[ќX[Щљ[™Щ\њљ[ќ€”“УHљ[[™ЧШЫЬ™KЬ™Y[ќX[Ь™XЫЬ™€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘Ь™Y[ќX[Ь™Y™\™[ЩHH	\В€€€‹€
+[[ќќ[[ќШXШЫЭ[ќЪYЬ™Y[ќX[Ь™Y™\™[ЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩKђФ‘QS•PSУ“ХС“ХS‘€Ь™Y[ќX[HЩ[‹—ШЬ™Y[ќX[Щњ›ЫWЬ›ЭК›ЭКB€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХB€”“УHљ[[™ЧШЫЬ™KЬ™Y[ќX[Ш\ЬЪYЫ›Y[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘Ь™Y[ќX[Ь™XЫЬ™ЪYH	\В€S‘љ[[™ЧЬљ[Ъ\[ЪYH	\В€S‘љ[[™ЧШXШЫЭ[ќЪYH	\В€S‘[YЩњ›ЫHH	\В€S‘
+[YЭИTИ•SФ€	\И[YЭКB€SRUB€€€‹€
+€[[ќќ[[ќШXШЫЭ[ќЪY€Ь™Y[ќX[Ь™Y[ќX[Ь™XЫЬ™ЪY€љ[Ъ\[љ[[™ЧЬљ[Ъ\[ЪY€XШЫЭ[ќљ[[™ЧШXШЫЭ[ќЪY€ШШЭ\њ™YШ]€ШШЭ\њ™YШ]€
+K€
+B€Y€Э\њЫЬ‹™™]ЪЫ™J
+H\И›Ы™N‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩKђФ‘QS•PSУ“ХРTФТQУ‘Q€™]\›€Ь™Y[ќX[›Ы™B‚€Y€™\ЫЫ™WЫY]\Љ€Щ[‹Y]\—ШЫЩN€Э‹[љ]ШЫЩN€Э‹]X[]WШЫЩN€Э‹ШШЭ\њ™YШ]€]][YB€
+HO€\VУY]\‘Yљ[љ][Ы€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩH›Ы™WN‚€€€”™\ЫЫ™HHYЪ\ЭY™™XЭ]™HY]\€™\њЪ[Ы€[™]И]X[]Hќ[K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХY]\—ЩYљ[љ][Ы—ЪYY]\—ШЫЩKY]\—Э™\њЪ[Ы‹[љ]ШЫЩK€YЩЬ™YШ][Ы—ШЫЩK[YЩњ›ЫK[YЭВ€”“УHљ[[™ЧШЫЬ™K›Y]\—ЩYљ[љ][Ы‚€ТT‘HY]\—ШЫЩHH	\В€S‘[YЩњ›ЫHH	\В€S‘
+[YЭИTИ•SФ€	\И[YЭКB€Ф‘T€–HY]\—Э™\њЪ[Ы€TРВ€SRUB€€€‹€
+Y]\—ШЫЩKШШЭ\њ™YШ]ШШЭ\њ™YШ]
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩK“QUT—У“ХС“ХS‘€Y]\€HЩ[‹—ЫY]\—Щњ›ЫWЬ›ЭК›ЭКB€Y€Y]\‹ќ[љ]ШЫЩHOH[љ]ШЫЩN‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩK“QUT—ХS’UУRTУPUТ€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХB€”“УHљ[[™ЧШЫЬ™K›Y]\—Ь]X[]WЬќ[B€ТT‘HY]\—ЩYљ[љ][Ы—ЪYH	\ИS‘]X[]WШЫЩHH	\В€€€‹€
+Y]\‹›Y]\—ЩYљ[љ][Ы—ЪY]X[]WШЫЩJK€
+B€Y€Э\њЫЬ‹™™]ЪЫ™J
+H\И›Ы™N‚€™]\›€›Ы™K™Z™XЭ[Ы”™X\ЫЫђЫЩK“QUT—ФUPSUWУ“ХРSХСQ€™]\›€Y]\‹›Ы™B‚€Y€љ[™ШћWЬЫЭ\ЩWЩ]™[ќЪЩ^J€Щ[‹[[ќШXШЫЭ[ќЪY€URQЫЭ\ЩWЩ]™[ќЪЩ^N€Э‚€
+HO€ЭЬ™Y\ШYЩQ]™[ќ›Ы™N‚€€€‘љ[™Ы™H[[]]X›H]™[ќћH[[ќ\ШЫЬYЫЭ\ЩHЩ^K€€€‚€™]\›€Щ[‹—Щљ[™Щ]™[ќ
+€€€‚€СSPХ\ШYЩWЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЩ]™[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘ЫЭ\ЩWЩ]™[ќЪЩ^HH	\В€SRUB€€€‹€
+[[ќШXШЫЭ[ќЪYЫЭ\ЩWЩ]™[ќЪЩ^JK€
+B‚€Y€љ[™ШћWЬ^[ШYЪ\Ъ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ]™[ќЬ^[ШYЪ\Ъ€Э‹]™[ќШЫЫќXЭЭ™\њЪ[ЫЋ€[ќ€
+HO€ЭЬ™Y\ШYЩQ]™[ќ›Ы™N‚€€€‘љ[™Ы™H[[]]X›H]™[ќћH[[ќ\Ъ[™ЫЫќXЭ™\њЪ[Ы‹€€€‚€™]\›€Щ[‹—Щљ[™Щ]™[ќ
+€€€‚€СSPХ\ШYЩWЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЩ]™[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘]™[ќЬ^[ШYЪ\ЪH	\В€S‘]™[ќШЫЫќXЭЭ™\њЪ[Ы€H	\В€SRUB€€€‹€
+[[ќШXШЫЭ[ќЪY]™[ќЬ^[ШYЪ\Ъ]™[ќШЫЫќXЭЭ™\њЪ[ЫЉK€
+B‚€Y€љ[™ШћWЬ›ЩXЩ\—Щ]™[ќЪY
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ›ЩXЩ\—Щ]™[ќЪY€URQ€
+HO€ЭЬ™Y\ШYЩQ]™[ќ›Ы™N‚€€€‘љ[™Ы™H[[]]X›H]™[ќћH[[ќ\ШЫЬY›ЩXЩ\€]™[ќQ€€€‚€™]\›€Щ[‹—Щљ[™Щ]™[ќ
+€€€‚€СSPХ\ШYЩWЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЩ]™[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘›ЩXЩ\—Щ]™[ќЪYH	\В€SRUB€€€‹€
+[[ќШXШЫЭ[ќЪY›ЩXЩ\—Щ]™[ќЪY
+K€
+B‚€Y€[њЩ\ќЭ\ШYЩWЩ]™[ќ
+Щ[‹]™[ќ€ЭЬ™Y\ШYЩQ]™[ќ
+HO€ЭЬ™Y\ШYЩQ]™[ќ‚€€€’[њЩ\ќ[€]™[ќ[™[YX\Э\™[Y[ќИ]ЫZXШ[H[™\€]X\ЩH[љ\]Y[™\ЬЛ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kќ\ШYЩWЩ]™[ќ€
+\ШYЩWЩ]™[ќЪY›ЩXЩ\—Щ]™[ќЪY[[ќШXШЫЭ[ќЪY€љ[[™ЧШXШЫЭ[ќЪYљ[[™ЧЬљ[Ъ\[ЪYЬ™Y[ќX[Ь™XЫЬ™ЪY€ЫЭ\ЩWЩ]™[ќЪЩ^K]™[ќШЫЫќXЭЭ™\њЪ[Ы‹]™[ќЬ^[ШYЪ\Ъ€›ЩXЭШЫЩKЬ\][Ы—ШЫЩKШШЭ\њ™YШ]™XЫЬ™YШ]€ЫЬЭШЩ[ќ\—Ь™Y™\™[ЩK›Ъ™XЭЬ™Y™\™[ЩJB€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И\ШYЩWЩ]™[ќЪY€€€‹€
+€]™[ќќ\ШYЩWЩ]™[ќЪY€]™[ќњ›ЩXЩ\—Щ]™[ќЪY€]™[ќќ[[ќШXШЫЭ[ќЪY€]™[ќљ[[™ЧШXШЫЭ[ќЪY€]™[ќљ[[™ЧЬљ[Ъ\[ЪY€]™[ќЬ™Y[ќX[Ь™XЫЬ™ЪY€]™[ќњЫЭ\ЩWЩ]™[ќЪЩ^K€]™[ќ™]™[ќШЫЫќXЭЭ™\њЪ[Ы‹€]™[ќ™]™[ќЬ^[ШYЪ\Ъ€]™[ќњ›ЩXЭШЫЩK€]™[ќ›Ь\][Ы—ШЫЩK€]™[ќ›ШШЭ\њ™YШ]€]™[ќњ™XЫЬ™YШ]€]™[ќЫЬЭШЩ[ќ\—Ь™Y™\™[ЩK€]™[ќњ›Ъ™XЭЬ™Y™\™[ЩK€
+K€
+B€[њЩ\ќYHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€[њЩ\ќY\И›Ы™N‚€^\Э[™ИHЩ[‹—Щљ[™Щ]™[ќЭЪ]ШЭ\њЫЬЉЭ\њЫЬ‹]™[ќќ[[ќШXШЫЭ[ќЪY]™[ќ
+B€Y€^\Э[™И\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉќ\ШYЩH]™[ќЫЫ™›XЭ\И›ИЫ\ЬЪYљYY^\Э[™И›ЭИЉB€Y€^\Э[™ЛњЫЭ\ЩWЩ]™[ќЪЩ^HOH]™[ќњЫЭ\ЩWЩ]™[ќЪЩ^N‚€Y€
+€^\Э[™Л™]™[ќЬ^[ШYЪ\ЪOH]™[ќ™]™[ќЬ^[ШYЪ\Ъ€[™^\Э[™Л™]™[ќШЫЫќXЭЭ™\њЪ[Ы€OH]™[ќ™]™[ќШЫЫќXЭЭ™\њЪ[Ы‚€
+N‚€Z\ЩH\ШYЩQ]™[ќЫЫ™›XЭ
+^\Э[™Л\XШ]WЬ™\^OUќYJB€Z\ЩH\ШYЩQ]™[ќЫЫ™›XЭ
+€^\Э[™Л€\XШ]WЬ™\^OQ[ЩK€™Z™XЭ[Ы—Ь™X\ЫЫ—ШЫЩOT™Z™XЭ[Ы”™X\ЫЫђЫЩK”УХTђСWСU‘S•РУУ‘“PХ€
+B€Y€
+€^\Э[™Л™]™[ќЬ^[ШYЪ\ЪOH]™[ќ™]™[ќЬ^[ШYЪ\Ъ€[™^\Э[™Л™]™[ќШЫЫќXЭЭ™\њЪ[Ы€OH]™[ќ™]™[ќШЫЫќXЭЭ™\њЪ[Ы‚€
+N‚€Z\ЩH\ШYЩQ]™[ќЫЫ™›XЭ
+€^\Э[™Л€\XШ]WЬ™\^OQ[ЩK€™Z™XЭ[Ы—Ь™X\ЫЫ—ШЫЩOT™Z™XЭ[Ы”™X\ЫЫђЫЩK”VSРQТTТРУУ‘“PХ€
+B€Y€^\Э[™Лњ›ЩXЩ\—Щ]™[ќЪYOH]™[ќњ›ЩXЩ\—Щ]™[ќЪY‚€Z\ЩH\ШYЩQ]™[ќЫЫ™›XЭ
+€^\Э[™Л€\XШ]WЬ™\^OQ[ЩK€™Z™XЭ[Ы—Ь™X\ЫЫ—ШЫЩOT™Z™XЭ[Ы”™X\ЫЫђЫЩK”“СPСT—СU‘S•РУУ‘“PХ€
+B€Z\ЩH[YQ\њ›ЬЉИYЫXN€›ИЫЭ™\€HЫ™HЩ€H™YHY[ќ]HЩ^\ИX]ЪY€ќ\ШYЩH]™[ќЫЫ™›XЭ\И›Э[[ќXЫ\ЬЪYљXX›H‚€
+B€›Ь€YX\Э\™[Y[ќ[€]™[ќ›YX\Э\™[Y[ќО‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kќ\ШYЩWЫYX\Э\™[Y[ќ€
+\ШYЩWЫYX\Э\™[Y[ќЪY\ШYЩWЩ]™[ќЪYY]\—ЩYљ[љ][Ы—ЪY€YX\Э\™YЬ]X[ќ]K]X[]WШЫЩJB€ђSQTИ
+	\Л	\Л	\Л	\Л	\КB€€€‹€
+€YX\Э\™[Y[ќќ\ШYЩWЫYX\Э\™[Y[ќЪY€]™[ќќ\ШYЩWЩ]™[ќЪY€YX\Э\™[Y[ќ›Y]\—ЩYљ[љ][Ы—ЪY€YX\Э\™[Y[ќ›YX\Э\™YЬ]X[ќ]K€YX\Э\™[Y[ќњ]X[]WШЫЩK€
+K€
+B€™]\›€]™[ќ‚€Y€\[™Ъ[™Щ\Э[Ы—Ь™XЩZ\
+Щ[‹™XЩZ\€ЭЬ™Y[™Щ\Э[Ы”™XЩZ\
+HO€ЭЬ™Y[™Щ\Э[Ы”™XЩZ\‚€€€ђ\[™Ы™H]Y]™XЩZ\[€HЭ\њ™[ќ[™Щ\Э[њШXЭ[Ы‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kќ\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\€
+\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\ЪY[[ќШXШЫЭ[ќЪY\ШYЩWЩ]™[ќЪY€ЫЭ\ЩWЩ]™[ќЪЩ^K]™[ќШЫЫќXЭЭ™\њЪ[Ы‹ЫЭ\ЩWЬ^[ШYЪ\Ъ€[™Щ\Э[Ы—ЫЭ]ЫЫYWШЫЩK™Z™XЭ[Ы—Ь™X\ЫЫ—ШЫЩK™XЫЬ™YШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€€€‹€
+€™XЩZ\ќ\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\ЪY€™XЩZ\ќ[[ќШXШЫЭ[ќЪY€™XЩZ\ќ\ШYЩWЩ]™[ќЪY€™XЩZ\њЫЭ\ЩWЩ]™[ќЪЩ^K€™XЩZ\™]™[ќШЫЫќXЭЭ™\њЪ[Ы‹€™XЩZ\њЫЭ\ЩWЬ^[ШYЪ\Ъ€™XЩZ\љ[™Щ\Э[Ы—ЫЭ]ЫЫYWШЫЩK€™XЩZ\њ™Z™XЭ[Ы—Ь™X\ЫЫ—ШЫЩK€™XЩZ\њ™XЫЬ™YШ]€
+K€
+B€™]\›€™XЩZ\‚€Y€\ЭЪ[™Щ\Э[Ы—Ь™XЩZ\К€Щ[‹[[ќШXШЫЭ[ќЪY€URQ›Ы™HH›Ы™B€
+HO€\VФЭЬ™Y[™Щ\Э[Ы”™XЩZ\‹‹—N‚€€€”™]\›€\[™[Ы›H™XЩZ\ЛЬ[Ы[Hљ[\™YћH[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Y€[[ќШXШЫЭ[ќЪY\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\ЪY[[ќШXШЫЭ[ќЪY\ШYЩWЩ]™[ќЪY€ЫЭ\ЩWЩ]™[ќЪЩ^K]™[ќШЫЫќXЭЭ™\њЪ[Ы‹ЫЭ\ЩWЬ^[ШYЪ\Ъ€[™Щ\Э[Ы—ЫЭ]ЫЫYWШЫЩK™Z™XЭ[Ы—Ь™X\ЫЫ—ШЫЩK™XЫЬ™YШ]€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\€Ф‘T€–H™XЫЬ™YШ]\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\ЪY€€€‚€
+B€[ЩN‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\ЪY[[ќШXШЫЭ[ќЪY\ШYЩWЩ]™[ќЪY€ЫЭ\ЩWЩ]™[ќЪЩ^K]™[ќШЫЫќXЭЭ™\њЪ[Ы‹ЫЭ\ЩWЬ^[ШYЪ\Ъ€[™Щ\Э[Ы—ЫЭ]ЫЫYWШЫЩK™Z™XЭ[Ы—Ь™X\ЫЫ—ШЫЩK™XЫЬ™YШ]€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H™XЫЬ™YШ]\ШYЩWЪ[™Щ\Э[Ы—Ь™XЩZ\ЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\JЩ[‹—Ь™XЩZ\Щњ›ЫWЬ›ЭК›ЭКH›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+JB‚€Y€Щ]Э\ШYЩWЩ]™[ќ
+Щ[‹\ШYЩWЩ]™[ќЪY€URQ
+HO€ЭЬ™Y\ШYЩQ]™[ќ›Ы™N‚€€€”™]\›€Ы™HЭЬ™Y\ШYЩH]™[ќћHЬ\]YHY[ќYљY\‹€€€‚€™]\›€Щ[‹—Щљ[™Щ]™[ќ
+€€€‚€СSPХ\ШYЩWЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЩ]™[ќ€ТT‘H\ШYЩWЩ]™[ќЪYH	\В€SRUB€€€‹€
+\ШYЩWЩ]™[ќЪY
+K€
+B‚€Y€\ЭЭ\ШYЩWЩ]™[ќК€Щ[‹[[ќШXШЫЭ[ќЪY€URQ›Ы™HH›Ы™B€
+HO€\VФЭЬ™Y\ШYЩQ]™[ќ‹‹—N‚€€€”™]\›€[[]]X›H]™[ќЛЬ[Ы[H[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Y€[[ќШXШЫЭ[ќЪY\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ШYЩWЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЩ]™[ќ€Ф‘T€–H™XЫЬ™YШ]\ШYЩWЩ]™[ќЪY€€€‚€
+B€[ЩN‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ШYЩWЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЩ]™[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H™XЫЬ™YШ]\ШYЩWЩ]™[ќЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЭ\ШYЩWЩ]™[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€\ЭЭ\ШYЩWЩ]™[ќЧЪ[—ЭЪ[™ЭК€Щ[‹[[ќШXШЫЭ[ќЪY€URQЪ[™ЭЧЬЭ\ќYШ]€]][YKЪ[™ЭЧЩ[™YШ]€]][YB€
+HO€\VФЭЬ™Y\ШYЩQ]™[ќ‹‹—N‚€€€”™]\›€[[ќ]™[ќИ[€H[‹[Ь[€ШШЭ\њ™YX]Ъ[™ЭЛ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ШYЩWЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™Kќ\ШYЩWЩ]™[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘ШШЭ\њ™YШ]ЏH	\В€S‘ШШЭ\њ™YШ]	\В€Ф‘T€–HШШЭ\њ™YШ]ЫЭ\ЩWЩ]™[ќЪЩ^B€€€‹€
+[[ќШXШЫЭ[ќЪYЪ[™ЭЧЬЭ\ќYШ]Ъ[™ЭЧЩ[™YШ]
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЭ\ШYЩWЩ]™[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩWЩ›ЬЉЩ[‹љ[[™ЧШXШЫЭ[ќЪY€URQ
+HO€ЭЋ‚€€€”™]\›€H[[ќ\ШЫЬYT“€›Ь€Ы™Hљ[[™ЛXXШЫЭ[ќY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХXШЫЭ[ќљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩB€”“УHљ[[™ЧШЫЬ™Kљ[[™ЧШXШЫЭ[ќTИXШЫЭ[ќ€“ТS€љ[[™ЧШЫЬ™Kќ[[ќШXШЫЭ[ќTИ[[ќ€У€[[ќќ[[ќШXШЫЭ[ќЪYHXШЫЭ[ќќ[[ќШXШЫЭ[ќЪY€ТT‘HXШЫЭ[ќљ[[™ЧШXШЫЭ[ќЪYH	\В€€€‹€
+љ[[™ЧШXШЫЭ[ќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩHЩ^Q\њ›ЬЉљ[[™ЧШXШЫЭ[ќЪY
+B€™]\›€›ЭЦМB‚€Y€љ[™Ь][™ЧЬќ[Љ€Щ[‹€[[ќШXШЫЭ[ќЪY€URQ€Ъ[™ЭЧЬЭ\ќYШ]€]][YK€Ъ[™ЭЧЩ[™YШ]€]][YK€]WШШ\™ЪY€URQ€\ШYЩWЬЫ\ЪЭЪ\Ъ€Э‹€]WШШ\™Э™\њЪ[ЫЋ€[ќ›Ы™HH›Ы™K€
+HO€ЭЬ™Y][™Фќ[€›Ы™N‚€€€”™]\›€Ы™H[[]]X›H][™И™\Э[ћH]И™\^HY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ][™ЧЬќ[—ЪY€”“УHљ[[™ЧШЫЬ™Kњ][™ЧЬќ[‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘Ъ[™ЭЧЬЭ\ќYШ]H	\В€S‘Ъ[™ЭЧЩ[™YШ]H	\В€S‘]WШШ\™ЪYH	\В€S‘\ШYЩWЬЫ\ЪЭЪ\ЪH	\В€S‘
+	\ОЋљ[ќYЩ\€TИ•SФ€]WШШ\™Э™\њЪ[Ы€H	\ОЋљ[ќYЩ\ЉB€€€‹€
+€[[ќШXШЫЭ[ќЪY€Ъ[™ЭЧЬЭ\ќYШ]€Ъ[™ЭЧЩ[™YШ]€]WШШ\™ЪY€\ШYЩWЬЫ\ЪЭЪ\Ъ€]WШШ\™Э™\њЪ[Ы‹€]WШШ\™Э™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЬ][™ЧЬќ[ЉЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€[њЩ\ќЬ][™ЧЬќ[Љ€Щ[‹€][™ЧЬќ[Ћ€ЭЬ™Y][™Фќ[‹€][™ЧЫ[™\О€\VФЭЬ™Y][™У[™K‹‹—K€
+HO€ЭЬ™Y][™Фќ[Ћ‚€€€”\њЪ\ЭЫ™H][™И™\Э[[™[›Ь›X[^™Y[™\И]ЫZXШ[K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kњ][™ЧЬќ[‚€
+][™ЧЬќ[—ЪY[[ќШXШЫЭ[ќЪY]WШШ\™ЪY€]WШШ\™Э™\њЪ[Ы‹Ъ[™ЭЧЬЭ\ќYШ]Ъ[™ЭЧЩ[™YШ]€\ШYЩWЬЫ\ЪЭЪ\ЪЭ\њ™[ЮWШЫЩK]YЭЭ[Ш[[Э[ќ€™XЫЬ™YШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И][™ЧЬќ[—ЪY€€€‹€
+€][™ЧЬќ[‹њ][™ЧЬќ[—ЪY€][™ЧЬќ[‹ќ[[ќШXШЫЭ[ќЪY€][™ЧЬќ[‹њ]WШШ\™ЪY€][™ЧЬќ[‹њ]WШШ\™Э™\њЪ[Ы‹€][™ЧЬќ[‹ќЪ[™ЭЧЬЭ\ќYШ]€][™ЧЬќ[‹ќЪ[™ЭЧЩ[™YШ]€][™ЧЬќ[‹ќ\ШYЩWЬЫ\ЪЭЪ\Ъ€][™ЧЬќ[‹Э\њ™[ЮWШЫЩK€][™ЧЬќ[‹њ]YЭЭ[Ш[[Э[ќ€][™ЧЬќ[‹њ™XЫЬ™YШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ][™ЧЬќ[—ЪY€”“УHљ[[™ЧШЫЬ™Kњ][™ЧЬќ[‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘Ъ[™ЭЧЬЭ\ќYШ]H	\В€S‘Ъ[™ЭЧЩ[™YШ]H	\В€S‘]WШШ\™ЪYH	\В€S‘\ШYЩWЬЫ\ЪЭЪ\ЪH	\В€S‘]WШШ\™Э™\њЪ[Ы€H	\В€€€‹€
+€][™ЧЬќ[‹ќ[[ќШXШЫЭ[ќЪY€][™ЧЬќ[‹ќЪ[™ЭЧЬЭ\ќYШ]€][™ЧЬќ[‹ќЪ[™ЭЧЩ[™YШ]€][™ЧЬќ[‹њ]WШШ\™ЪY€][™ЧЬќ[‹ќ\ШYЩWЬЫ\ЪЭЪ\Ъ€][™ЧЬќ[‹њ]WШШ\™Э™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€HHљ[X\ћHЩ^HЫЫ™›XЭ\И›Э[€Y[ќ]H™\^B€Z\ЩH[YQ\њ›ЬЉњ][™Иќ[€Y[ќ]H[™XYH™[Ы™ЬИИ[›Э\€™\Э[ЉB€™]\›€Щ[‹—Щ™]ЪЬ][™ЧЬќ[ЉЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€[™H[€][™ЧЫ[™\О‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kњ][™ЧЫ[™B€
+][™ЧЫ[™WЪY][™ЧЬќ[—ЪY[[ќШXШЫЭ[ќЪY€љ[[™ЧШXШЫЭ[ќЪYљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩK€Y]\—ЩYљ[љ][Ы—ЪYY]\—ШЫЩK[љ]ШЫЩK€]YЬ]X[ќ]K[љ]ЬљXЩWШ[[Э[ќ[™WЭЭ[Ш[[Э[ќ€[™WЫќ[X™\ЉB€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€€€‹€
+€[™Kњ][™ЧЫ[™WЪY€[™Kњ][™ЧЬќ[—ЪY€[™Kќ[[ќШXШЫЭ[ќЪY€[™Kљ[[™ЧШXШЫЭ[ќЪY€[™Kљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩK€[™K›Y]\—ЩYљ[љ][Ы—ЪY€[™K›Y]\—ШЫЩK€[™Kќ[љ]ШЫЩK€[™Kњ]YЬ]X[ќ]K€[™Kќ[љ]ЬљXЩWШ[[Э[ќ€[™K›[™WЭЭ[Ш[[Э[ќ€[™K›[™WЫќ[X™\‹€
+K€
+B€™]\›€Щ[‹—Щ™]ЪЬ][™ЧЬќ[ЉЭ\њЫЬ‹][™ЧЬќ[‹њ][™ЧЬќ[—ЪY
+B‚€Y€Щ]Ь][™ЧЬќ[ЉЩ[‹][™ЧЬќ[—ЪY€URQ
+HO€ЭЬ™Y][™Фќ[€›Ы™N‚€€€”™]\›€Ы™HЭЬ™Y][™И™\Э[ћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ][™ЧЬќ[—ЪY€”“УHљ[[™ЧШЫЬ™Kњ][™ЧЬќ[‚€ТT‘H][™ЧЬќ[—ЪYH	\В€€€‹€
+][™ЧЬќ[—ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЬ][™ЧЬќ[ЉЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€\ЭЬ][™ЧЬќ[њК€Щ[‹[[ќШXШЫЭ[ќЪY€URQ›Ы™HH›Ы™B€
+HO€\VФЭЬ™Y][™Фќ[‹‹‹—N‚€€€”™]\›€ЭЬ™Y][™И™\Э[ЛЬ[Ы[H[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Y€[[ќШXШЫЭ[ќЪY\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ][™ЧЬќ[—ЪY€”“УHљ[[™ЧШЫЬ™Kњ][™ЧЬќ[‚€Ф‘T€–H™XЫЬ™YШ]][™ЧЬќ[—ЪY€€€‚€
+B€[ЩN‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ][™ЧЬќ[—ЪY€”“УHљ[[™ЧШЫЬ™Kњ][™ЧЬќ[‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H™XЫЬ™YШ]][™ЧЬќ[—ЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЬ][™ЧЬќ[ЉЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€љ[™Ъ[ќ›ЪXЩWЩYќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ][™ЧЬќ[—ЪY€URQ€
+HO€ЭЬ™Y[ќ›ЪXЩQYќ›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬY[ќ›ЪXЩHYќћH][™ИY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[ќ›ЪXЩWЩYќЪY€”“УHљ[[™ЧШЫЬ™Kљ[ќ›ЪXЩWЩYќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘][™ЧЬќ[—ЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY][™ЧЬќ[—ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЪ[ќ›ЪXЩWЩYќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€[њЩ\ќЪ[ќ›ЪXЩWЩYќ
+€Щ[‹€[ќ›ЪXЩWЩYќ€ЭЬ™Y[ќ›ЪXЩQYќ€[ќ›ЪXЩWЩYќЫ[™\О€\VФЭЬ™Y[ќ›ЪXЩQYќ[™K‹‹—K€
+HO€ЭЬ™Y[ќ›ЪXЩQYќ‚€€€”\њЪ\ЭЫ™H[ќ›ЪXЩHYќ[™]ИЫЬYY][™И[™\И]ЫZXШ[K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kљ[ќ›ЪXЩWЩYќ€
+[ќ›ЪXЩWЩYќЪY[[ќШXШЫЭ[ќЪY][™ЧЬќ[—ЪY€\ШYЩWЬЫ\ЪЭЪ\ЪЭ\њ™[ЮWШЫЩK[ќ›ЪXЩWЩYќЬЭ]\Л€YќYЭЭ[Ш[[Э[ќ™XЫЬ™YШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И[ќ›ЪXЩWЩYќЪY€€€‹€
+€[ќ›ЪXЩWЩYќљ[ќ›ЪXЩWЩYќЪY€[ќ›ЪXЩWЩYќќ[[ќШXШЫЭ[ќЪY€[ќ›ЪXЩWЩYќњ][™ЧЬќ[—ЪY€[ќ›ЪXЩWЩYќќ\ШYЩWЬЫ\ЪЭЪ\Ъ€[ќ›ЪXЩWЩYќЭ\њ™[ЮWШЫЩK€[ќ›ЪXЩWЩYќљ[ќ›ЪXЩWЩYќЬЭ]\Л€[ќ›ЪXЩWЩYќ™YќYЭЭ[Ш[[Э[ќ€[ќ›ЪXЩWЩYќњ™XЫЬ™YШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[ќ›ЪXЩWЩYќЪY€”“УHљ[[™ЧШЫЬ™Kљ[ќ›ЪXЩWЩYќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘][™ЧЬќ[—ЪYH	\В€€€‹€
+[ќ›ЪXЩWЩYќќ[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќњ][™ЧЬќ[—ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€HHљ[X\ћHЩ^HЫЫ™›XЭ\И›ЭH™\^B€Z\ЩH[YQ\њ›ЬЉљ[ќ›ЪXЩHYќY[ќ]H[™XYH™[Ы™ЬИИ[›Э\€YќЉB€™]\›€Щ[‹—Щ™]ЪЪ[ќ›ЪXЩWЩYќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€[™H[€[ќ›ЪXЩWЩYќЫ[™\О‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kљ[ќ›ЪXЩWЩYќЫ[™B€
+[ќ›ЪXЩWЩYќЫ[™WЪY[ќ›ЪXЩWЩYќЪY[[ќШXШЫЭ[ќЪY€љ[[™ЧШXШЫЭ[ќЪYљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩK€Y]\—ЩYљ[љ][Ы—ЪY[™WЫќ[X™\‹Y]\—ШЫЩK[љ]ШЫЩK€]YЬ]X[ќ]K[љ]ЬљXЩWШ[[Э[ќ[™WЭЭ[Ш[[Э[ќ
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€€€‹€
+€[™Kљ[ќ›ЪXЩWЩYќЫ[™WЪY€[™Kљ[ќ›ЪXЩWЩYќЪY€[™Kќ[[ќШXШЫЭ[ќЪY€[™Kљ[[™ЧШXШЫЭ[ќЪY€[™Kљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩK€[™K›Y]\—ЩYљ[љ][Ы—ЪY€[™K›[™WЫќ[X™\‹€[™K›Y]\—ШЫЩK€[™Kќ[љ]ШЫЩK€[™Kњ]YЬ]X[ќ]K€[™Kќ[љ]ЬљXЩWШ[[Э[ќ€[™K›[™WЭЭ[Ш[[Э[ќ€
+K€
+B€™]\›€Щ[‹—Щ™]ЪЪ[ќ›ЪXЩWЩYќ
+Э\њЫЬ‹[ќ›ЪXЩWЩYќљ[ќ›ЪXЩWЩYќЪY
+B‚€Y€\ЭЪ[ќ›ЪXЩWЩYќК€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™Y[ќ›ЪXЩQYќ‹‹—N‚€€€”™]\›€[ќ›ЪXЩHYќИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[ќ›ЪXЩWЩYќЪY€”“УHљ[[™ЧШЫЬ™Kљ[ќ›ЪXЩWЩYќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H™XЫЬ™YШ][ќ›ЪXЩWЩYќЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЪ[ќ›ЪXЩWЩYќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€Щ]Ъ[ќ›ЪXЩWЩYќ
+Щ[‹[ќ›ЪXЩWЩYќЪY€URQ
+HO€ЭЬ™Y[ќ›ЪXЩQYќ›Ы™N‚€€€”™]\›€Ы™H[ќ›ЪXЩHYќћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[ќ›ЪXЩWЩYќЪY€”“УHљ[[™ЧШЫЬ™Kљ[ќ›ЪXЩWЩYќ€ТT‘H[ќ›ЪXЩWЩYќЪYH	\В€€€‹€
+[ќ›ЪXЩWЩYќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЪ[ќ›ЪXЩWЩYќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€љ[™Э^Ш\ЬЩ\ЬЫY[ќЩ›Ь—ЩYќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ[ќ›ЪXЩWЩYќЪY€URQ€
+HO€ЭЬ™Y^\ЬЩ\ЬЫY[ќ›Ы™N‚€€€”™]\›€HЬ[Ы[^Ы\ЪЭ›Ь€Ы™H[[ќYќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ЬЩ\ЬЫY[ќќ^Ш\ЬЩ\ЬЫY[ќЪY\ЬЩ\ЬЫY[ќќ[[ќШXШЫЭ[ќЪY€\ЬЩ\ЬЫY[ќљ[ќ›ЪXЩWЩYќЪY\ЬЩ\ЬЫY[ќќ^Ь]WЭ™\њЪ[Ы—ЪY€\ЬЩ\ЬЫY[ќќ^Ш\ЬЩ\ЬЫY[ќШЫЫќXЭЭ™\њЪ[Ы‹\ЬЩ\ЬЫY[ќќ^ШЫЩK€\ЬЩ\ЬЫY[ќќ^Ь]K\ЬЩ\ЬЫY[ќЭ\њ™[ЮWШЫЩK€\ЬЩ\ЬЫY[ќќ^Щ^Ы\Ъ]™WШ[[Э[ќ\ЬЩ\ЬЫY[ќќ^Ш[[Э[ќ€\ЬЩ\ЬЫY[ќќ^Ъ[Ы\Ъ]™WШ[[Э[ќ\ЬЩ\ЬЫY[ќњЫЭ\ЩWЬ^[ШYЪ\Ъ€\ЬЩ\ЬЫY[ќ\ЬЩ\ЬЩYШ]™\њЪ[Ы‹ќ™\њЪ[Ы—Ыќ[X™\‚€”“УHљ[[™ЧШЫЬ™Kќ^Ш\ЬЩ\ЬЫY[ќTИ\ЬЩ\ЬЫY[ќ€“ТS€љ[[™ЧШЫЬ™Kќ^Ь]WЭ™\њЪ[Ы€TИ™\њЪ[Ы‚€У€™\њЪ[Ы‹ќ[[ќШXШЫЭ[ќЪYH\ЬЩ\ЬЫY[ќќ[[ќШXШЫЭ[ќЪY€S‘™\њЪ[Ы‹ќ^Ь]WЭ™\њЪ[Ы—ЪYH\ЬЩ\ЬЫY[ќќ^Ь]WЭ™\њЪ[Ы—ЪY€ТT‘H\ЬЩ\ЬЫY[ќќ[[ќШXШЫЭ[ќЪYH	\В€S‘\ЬЩ\ЬЫY[ќљ[ќ›ЪXЩWЩYќЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Э^Ш\ЬЩ\ЬЫY[ќЩњ›ЫWЬ›ЭК›ЭКB‚€Y€љ[™Ъ\ЬЭYYЪ[ќ›ЪXЩJ€Щ[‹[[ќШXШЫЭ[ќЪY€URQ[ќ›ЪXЩWЩYќЪY€URQ€
+HO€ЭЬ™Y\ЬЭYY[ќ›ЪXЩH›Ы™N‚€€€”™]\›€Ы™HШ[YK][[ќ\ЬЭYYЫ\ЪЭ›Ь€HYќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ЬЭYYЪ[ќ›ЪXЩWЪY€”“УHљ[[™ЧШЫЬ™Kљ\ЬЭYYЪ[ќ›ЪXЩB€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘[ќ›ЪXЩWЩYќЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЪ\ЬЭYYЪ[ќ›ЪXЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€Щ]Ъ\ЬЭYYЪ[ќ›ЪXЩJЩ[‹\ЬЭYYЪ[ќ›ЪXЩWЪY€URQ
+HO€ЭЬ™Y\ЬЭYY[ќ›ЪXЩH›Ы™N‚€€€”™]\›€Ы™H\ЬЭYYЫ\ЪЭћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ЬЭYYЪ[ќ›ЪXЩWЪY€”“УHљ[[™ЧШЫЬ™Kљ\ЬЭYYЪ[ќ›ЪXЩB€ТT‘H\ЬЭYYЪ[ќ›ЪXЩWЪYH	\В€€€‹€
+\ЬЭYYЪ[ќ›ЪXЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЪ\ЬЭYYЪ[ќ›ЪXЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€\ЭЪ\ЬЭYYЪ[ќ›ЪXЩ\ЧЩ›Ь—Э[[ќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™Y\ЬЭYY[ќ›ЪXЩK‹‹—N‚€€€”™]\›€\ЬЭYYЫ\ЪЭИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ЬЭYYЪ[ќ›ЪXЩWЪY€”“УHљ[[™ЧШЫЬ™Kљ\ЬЭYYЪ[ќ›ЪXЩB€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H\ЬЭYYШ]\ЬЭYYЪ[ќ›ЪXЩWЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЪ\ЬЭYYЪ[ќ›ЪXЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€[њЩ\ќЪ\ЬЭYYЪ[ќ›ЪXЩJ€Щ[‹€\ЬЭYYЪ[ќ›ЪXЩN€ЭЬ™Y\ЬЭYY[ќ›ЪXЩK€\ЬЭYYЪ[ќ›ЪXЩWЫ[™\О€\VФЭЬ™Y\ЬЭYY[ќ›ЪXЩS[™K‹‹—K€
+HO€ЭЬ™Y\ЬЭYY[ќ›ЪXЩN‚€€€”\њЪ\ЭЫ™H[ќ›ЪXЩHЫ\ЪЭ[™]И[™\И[€Ы™H[њШXЭ[Ы‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kљ\ЬЭYYЪ[ќ›ЪXЩB€
+\ЬЭYYЪ[ќ›ЪXЩWЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€\ЬЭYYЪ[ќ›ЪXЩWШЫЫќXЭЭ™\њЪ[Ы‹][™ЧЬќ[—ЪY€\ШYЩWЬЫ\ЪЭЪ\ЪЫЭ\ЩWЬ^[ШYЪ\ЪЭ\њ™[ЮWШЫЩK€^Щ^Ы\Ъ]™WШ[[Э[ќ^Ш[[Э[ќ^Ъ[Ы\Ъ]™WШ[[Э[ќ€\ЬЭYYЪ[ќ›ЪXЩWЬЭ]\Л\ЬЭYYШ]YWШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И\ЬЭYYЪ[ќ›ЪXЩWЪY€€€‹€
+€\ЬЭYYЪ[ќ›ЪXЩKљ\ЬЭYYЪ[ќ›ЪXЩWЪY€\ЬЭYYЪ[ќ›ЪXЩKќ[[ќШXШЫЭ[ќЪY€\ЬЭYYЪ[ќ›ЪXЩKљ[ќ›ЪXЩWЩYќЪY€\ЬЭYYЪ[ќ›ЪXЩKљ\ЬЭYYЪ[ќ›ЪXЩWШЫЫќXЭЭ™\њЪ[Ы‹€\ЬЭYYЪ[ќ›ЪXЩKњ][™ЧЬќ[—ЪY€\ЬЭYYЪ[ќ›ЪXЩKќ\ШYЩWЬЫ\ЪЭЪ\Ъ€\ЬЭYYЪ[ќ›ЪXЩKњЫЭ\ЩWЬ^[ШYЪ\Ъ€\ЬЭYYЪ[ќ›ЪXЩKЭ\њ™[ЮWШЫЩK€\ЬЭYYЪ[ќ›ЪXЩKќ^Щ^Ы\Ъ]™WШ[[Э[ќ€\ЬЭYYЪ[ќ›ЪXЩKќ^Ш[[Э[ќ€\ЬЭYYЪ[ќ›ЪXЩKќ^Ъ[Ы\Ъ]™WШ[[Э[ќ€\ЬЭYYЪ[ќ›ЪXЩKљ\ЬЭYYЪ[ќ›ЪXЩWЬЭ]\Л€\ЬЭYYЪ[ќ›ЪXЩKљ\ЬЭYYШ]€\ЬЭYYЪ[ќ›ЪXЩK™YWШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ\ЬЭYYЪ[ќ›ЪXЩWЪY€”“УHљ[[™ЧШЫЬ™Kљ\ЬЭYYЪ[ќ›ЪXЩB€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘[ќ›ЪXЩWЩYќЪYH	\В€€€‹€
+\ЬЭYYЪ[ќ›ЪXЩKќ[[ќШXШЫЭ[ќЪY\ЬЭYYЪ[ќ›ЪXЩKљ[ќ›ЪXЩWЩYќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉљ\ЬЭYY[ќ›ЪXЩHY[ќ]H[™XYH™[Ы™ЬИИ[›Э\€Ы\ЪЭЉB€™]\›€Щ[‹—Щ™]ЪЪ\ЬЭYYЪ[ќ›ЪXЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€[™H[€\ЬЭYYЪ[ќ›ЪXЩWЫ[™\О‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kљ\ЬЭYYЪ[ќ›ЪXЩWЫ[™B€
+\ЬЭYYЪ[ќ›ЪXЩWЫ[™WЪY\ЬЭYYЪ[ќ›ЪXЩWЪY[[ќШXШЫЭ[ќЪY€[™WЫќ[X™\‹љ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩKY]\—ШЫЩK[љ]ШЫЩK€]YЬ]X[ќ]K[љ]ЬљXЩWШ[[Э[ќ[™WЭЭ[Ш[[Э[ќ
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€€€‹€
+€[™Kљ\ЬЭYYЪ[ќ›ЪXЩWЫ[™WЪY€[™Kљ\ЬЭYYЪ[ќ›ЪXЩWЪY€[™Kќ[[ќШXШЫЭ[ќЪY€[™K›[™WЫќ[X™\‹€[™Kљ[[™ЧШXШЫЭ[ќЬ™Y™\™[ЩK€[™K›Y]\—ШЫЩK€[™Kќ[љ]ШЫЩK€[™Kњ]YЬ]X[ќ]K€[™Kќ[љ]ЬљXЩWШ[[Э[ќ€[™K›[™WЭЭ[Ш[[Э[ќ€
+K€
+B€™]\›€Щ[‹—Щ™]ЪЪ\ЬЭYYЪ[ќ›ЪXЩJЭ\њЫЬ‹\ЬЭYYЪ[ќ›ЪXЩKљ\ЬЭYYЪ[ќ›ЪXЩWЪY
+B‚€Y€Щ]ШЫЫXЭ[Ы—ШШ\ЩJЩ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩH›Ы™N‚€€€”™]\›€Ы™HЫЫXЭ[Ы€Ш\ЩHћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€љ[™ШЫЫXЭ[Ы—ШШ\ЩJ€Щ[‹[[ќШXШЫЭ[ќЪY€URQ[ќ›ЪXЩWЩYќЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩH›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬYЫЫXЭ[Ы€Ш\ЩHY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘[ќ›ЪXЩWЩYќЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€[њЩ\ќШЫЫXЭ[Ы—ШШ\ЩJ€Щ[‹ЫЫXЭ[Ы—ШШ\ЩN€ЭЬ™YЫЫXЭ[ЫђШ\ЩB€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩN‚€€€”\њЪ\ЭЫ™HЬЪ]]™H[[ќ\ШЫЬYЫЫXЭ[Ы€Ш\ЩHЬ€™\^H]€€€‚€Y€ЫЫXЭ[Ы—ШШ\ЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\И›Э[€И›Ь[€‹™[›љ[™ИџN‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ш\Щ\ИШ[››Э™HZYЬљ][€Щ™‹Ь€ЬЭYЉB€Э]Э[™[™ЧШ[[Э[ќH\њЩWЩ^XЭЩXЪ[X[
+€›Ь›X]Щ^XЭЩXЪ[X[
+ЫЫXЭ[Ы—ШШ\ЩK›Э]Э[™[™ЧШ[[Э[ќ
+B€
+B€Y€Э]Э[™[™ЧШ[[Э[ќH‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ш\ЩHЭ]Э[™[™И]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€
+ЫЫXЭ[Ы—ШШ\ЩWЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€Э\њ™[ЮWШЫЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ЛЭ]Э[™[™ЧШ[[Э[ќЬ[™YШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘ИЫЫXЭ[Ы—ШШ\ЩWЪY€€€‹€
+€ЫЫXЭ[Ы—ШШ\ЩKЫЫXЭ[Ы—ШШ\ЩWЪY€ЫЫXЭ[Ы—ШШ\ЩKќ[[ќШXШЫЭ[ќЪY€ЫЫXЭ[Ы—ШШ\ЩKљ[ќ›ЪXЩWЩYќЪY€ЫЫXЭ[Ы—ШШ\ЩKЭ\њ™[ЮWШЫЩK€ЫЫXЭ[Ы—ШШ\ЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\Л€Э]Э[™[™ЧШ[[Э[ќ€ЫЫXЭ[Ы—ШШ\ЩK›Ь[™YШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘[ќ›ЪXЩWЩYќЪYH	\В€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩKќ[[ќШXШЫЭ[ќЪYЫЫXЭ[Ы—ШШ\ЩKљ[ќ›ЪXЩWЩYќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH[Y’ИЫЫ™›XЭ\И[€Y[ќ]H›ЭВ€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ш\ЩHY[ќ]H[™XYH™[Ы™ЬИИ[›Э\€Ш\ЩHЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€\ЭШЫЫXЭ[Ы—ШШ\Щ\К€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™YЫЫXЭ[ЫђШ\ЩK‹‹—N‚€€€”™]\›€ЫЫXЭ[Ы€Ш\Щ\И[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–HЬ[™YШ]ЫЫXЭ[Ы—ШШ\ЩWЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€Щ]ШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ
+€Щ[‹ЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[Ы‘[›љ[™С]™[ќ›Ы™N‚€€€”™]\›€Ы™H[›љ[™И]™[ќћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ€ТT‘HЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪYH	\В€€€‹€
+ЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€\ЭШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќК€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ€
+HO€\VФЭЬ™YЫЫXЭ[Ы‘[›љ[™С]™[ќ‹‹—N‚€€€”™]\›€[›љ[™И]™[ќИ›Ь€Ы™HШ\ЩH[€]™[ќ[ќ[X™\€Ь™\‹€€€‚€™]\›€Щ[‹—Ы\ЭШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќКЫЫXЭ[Ы—ШШ\ЩWЪYXЫЫXЭ[Ы—ШШ\ЩWЪY
+B‚€Y€\ЭШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЧЩ›Ь—Э[[ќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™YЫЫXЭ[Ы‘[›љ[™С]™[ќ‹‹—N‚€€€”™]\›€[›љ[™И]™[ќИ[Z]YИЫ™H[[ќ€€€‚€™]\›€Щ[‹—Ы\ЭШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќК[[ќШXШЫЭ[ќЪY][[ќШXШЫЭ[ќЪY
+B‚€Y€љ[™ШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ
+€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ[›љ[™ЧЫ›ЭXЩWШЫЩN€Э‚€
+HO€ЭЬ™YЫЫXЭ[Ы‘[›љ[™С]™[ќ›Ы™N‚€€€”™]\›€Ы™HШ\ЩH[™›ЭXЩHY[ќ]KY€™\Щ[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\ИS‘[›љ[™ЧЫ›ЭXЩWШЫЩHH	\В€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY[›љ[™ЧЫ›ЭXЩWШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€[њЩ\ќШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ
+€Щ[‹[›љ[™ЧЩ]™[ќ€ЭЬ™YЫЫXЭ[Ы‘[›љ[™С]™[ќ€
+HO€ЭЬ™YЫЫXЭ[Ы‘[›љ[™С]™[ќ‚€€€ђ\[™Ы™H[›љ[™И]™[ќИ[€^XЭ›ЭXЩH™\^H™]\›њИ]И›ЭЛ€€€‚€Y€[›љ[™ЧЩ]™[ќ™[›љ[™ЧЫ›ЭXЩWШЫЩH›Э[€И™љ\њЭЫ›ЭXЩH‹›Э™\™YWЫ›ЭXЩHџN‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€[›љ[™И›ЭXЩ\И]\Э™HЫЫ[Y\ЪX[™[Z[™\€ЫЩ\ИЉB€Y€[›љ[™ЧЩ]™[ќ™[›љ[™ЧЩ]™[ќЫќ[X™\€N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€[›љ[™И]™[ќќ[X™\€]\Э™HЬЪ]]™HЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ€
+ЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY€[[ќШXШЫЭ[ќЪY[›љ[™ЧЩ]™[ќЫќ[X™\‹[›љ[™ЧЫ›ЭXЩWШЫЩK€ШШЭ\њ™YШ]
+B€СSPХ	\Л	\ЛЛќ[[ќШXШЫЭ[ќЪY	\Л	\Л	\В€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩHTИВ€ТT‘HЛЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘ИЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪY€€€‹€
+€[›љ[™ЧЩ]™[ќЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪY€[›љ[™ЧЩ]™[ќЫЫXЭ[Ы—ШШ\ЩWЪY€[›љ[™ЧЩ]™[ќ™[›љ[™ЧЩ]™[ќЫќ[X™\‹€[›љ[™ЧЩ]™[ќ™[›љ[™ЧЫ›ЭXЩWШЫЩK€[›љ[™ЧЩ]™[ќ›ШШЭ\њ™YШ]€[›љ[™ЧЩ]™[ќЫЫXЭ[Ы—ШШ\ЩWЪY€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\ИS‘[›љ[™ЧЫ›ЭXЩWШЫЩHH	\В€€€‹€
+[›љ[™ЧЩ]™[ќЫЫXЭ[Ы—ШШ\ЩWЪY[›љ[™ЧЩ]™[ќ™[›љ[™ЧЫ›ЭXЩWШЫЩJK€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€[›љ[™И]™[ќY[ќ]H™\]Z\™\ИHЭЬ™YШ\ЩHЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€љ[™ШЫЫXЭ[Ы—Щ\Ь]J€Щ[‹[[ќШXШЫЭ[ќЪY€URQЫЫXЭ[Ы—ШШ\ЩWЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[Ы‘\Ь]H›Ы™N‚€€€”™]\›€H\Ь]KZЫ›ЭИ›Ь€Ы™H[[ќЫЫXЭ[Ы€Ш\ЩKY€[ћK€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—Щ\Ь]WЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ\Ь]B€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘ЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—Щ\Ь]J€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€Щ]ШЫЫXЭ[Ы—Щ\Ь]J€Щ[‹ЫЫXЭ[Ы—Щ\Ь]WЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[Ы‘\Ь]H›Ы™N‚€€€”™]\›€Ы™HЫЫXЭ[Ы€\Ь]HћH[ќ\›[Y[ќYљY\‹Y€™\Щ[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—Щ\Ь]WЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ\Ь]B€ТT‘HЫЫXЭ[Ы—Щ\Ь]WЪYH	\В€€€‹€
+ЫЫXЭ[Ы—Щ\Ь]WЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—Щ\Ь]J€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€\ЭШЫЫXЭ[Ы—Щ\Ь]\ЧЩ›Ь—Э[[ќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™YЫЫXЭ[Ы‘\Ь]K‹‹—N‚€€€”™]\›€ЫЫXЭ[Ы€\Ь]\И[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—Щ\Ь]WЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ\Ь]B€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H[Ш]ЫЫXЭ[Ы—Щ\Ь]WЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—Щ\Ь]JЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€[њЩ\ќШЫЫXЭ[Ы—Щ\Ь]J€Щ[‹ЫЫXЭ[Ы—Щ\Ь]N€ЭЬ™YЫЫXЭ[Ы‘\Ь]B€
+HO€ЭЬ™YЫЫXЭ[Ы‘\Ь]N‚€€€”\њЪ\ЭЫ™H[ЫЫ[Y\ЪX[\Ь]HЬ€™]\›€]ИY[ќ]H™\^K€€€‚€Y€ХT”‘SђЦWРУСWФUT“‹™ќ[X]Ъ
+ЫЫXЭ[Ы—Щ\Ь]KЭ\њ™[ЮWШЫЩJH\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЭ\њ™[ЮWШЫЩH]\Э™HH™YK[]\€TУИЫЩHЉB€Y€УХTђСWФVSРQТTТФUT“‹™ќ[X]Ъ
+€ЫЫXЭ[Ы—Щ\Ь]KњЫЭ\ЩWЬ^[ШYЪ\Ъ€
+H\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉњЫЭ\ЩWЬ^[ШYЪ\Ъ]\Э™HHЪLЌM€YЩ\ЭЉB€Y€ЫЫXЭ[Ы—Щ\Ь]KЫЫXЭ[Ы—Щ\Ь]WЬЭ]\ИOHљ[Ћ‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы—Щ\Ь]WЬЭ]\И]\Э™H[ЉB€™[XZ[љ[™ИH\њЩWЩ^XЭЩXЪ[X[
+€›Ь›X]Щ^XЭЩXЪ[X[
+ЫЫXЭ[Ы—Щ\Ь]Kњ™[XZ[љ[™ЧЫЭ]Э[™[™ЧШ[[Э[ќ
+B€
+B€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ\Ь]B€
+ЫЫXЭ[Ы—Щ\Ь]WЪY[[ќШXШЫЭ[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY€[ќ›ЪXЩWЩYќЪY\ЬЭYYЪ[ќ›ЪXЩWЪY€ЫЫXЭ[Ы—Щ\Ь]WШЫЫќXЭЭ™\њЪ[Ы‹ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э\њ™[ЮWШЫЩK™[XZ[љ[™ЧЫЭ]Э[™[™ЧШ[[Э[ќ€ЫЫXЭ[Ы—Щ\Ь]WЬЭ]\Л[Ш]™[X\ЩYШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘ИЫЫXЭ[Ы—Щ\Ь]WЪY€€€‹€
+€ЫЫXЭ[Ы—Щ\Ь]KЫЫXЭ[Ы—Щ\Ь]WЪY€ЫЫXЭ[Ы—Щ\Ь]Kќ[[ќШXШЫЭ[ќЪY€ЫЫXЭ[Ы—Щ\Ь]KЫЫXЭ[Ы—ШШ\ЩWЪY€ЫЫXЭ[Ы—Щ\Ь]Kљ[ќ›ЪXЩWЩYќЪY€ЫЫXЭ[Ы—Щ\Ь]Kљ\ЬЭYYЪ[ќ›ЪXЩWЪY€ЫЫXЭ[Ы—Щ\Ь]KЫЫXЭ[Ы—Щ\Ь]WШЫЫќXЭЭ™\њЪ[Ы‹€ЫЫXЭ[Ы—Щ\Ь]KњЫЭ\ЩWЬ^[ШYЪ\Ъ€ЫЫXЭ[Ы—Щ\Ь]KЭ\њ™[ЮWШЫЩK€™[XZ[љ[™Л€ЫЫXЭ[Ы—Щ\Ь]KЫЫXЭ[Ы—Щ\Ь]WЬЭ]\Л€ЫЫXЭ[Ы—Щ\Ь]Kљ[Ш]€ЫЫXЭ[Ы—Щ\Ь]Kњ™[X\ЩYШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—Щ\Ь]WЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ\Ь]B€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘ЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€€€‹€
+€ЫЫXЭ[Ы—Щ\Ь]Kќ[[ќШXШЫЭ[ќЪY€ЫЫXЭ[Ы—Щ\Ь]KЫЫXЭ[Ы—ШШ\ЩWЪY€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉ€ЫЫXЭ[Ы€\Ь]HY[ќ]HЫЫ™›XЭИЪ][€^\Э[™И›ЭИ‚€
+B€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—Щ\Ь]JЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€X\љЧШЫЫXЭ[Ы—Щ\Ь]WЬ™[X\ЩY
+€Щ[‹ЫЫXЭ[Ы—Щ\Ь]WЪY€URQ™[X\ЩYШ]€]][YB€
+HO€ЭЬ™YЫЫXЭ[Ы‘\Ь]N‚€€€‘›\Ы™H[\Ь]HИ™[X\ЩYЪ]Э]Ъ[™Ъ[™И™[XZ[љ[™Л€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—Щ\Ь]WЪY[[ќШXШЫЭ[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY€[ќ›ЪXЩWЩYќЪY\ЬЭYYЪ[ќ›ЪXЩWЪY€ЫЫXЭ[Ы—Щ\Ь]WШЫЫќXЭЭ™\њЪ[Ы‹ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э\њ™[ЮWШЫЩK™[XZ[љ[™ЧЫЭ]Э[™[™ЧШ[[Э[ќ€ЫЫXЭ[Ы—Щ\Ь]WЬЭ]\Л[Ш]™[X\ЩYШ]€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ\Ь]B€ТT‘HЫЫXЭ[Ы—Щ\Ь]WЪYH	\В€“Ф€TUB€€€‹€
+ЫЫXЭ[Ы—Щ\Ь]WЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€\Ь]H™[X\ЩH™\]Z\™\ИHЭЬ™Y\Ь]HЉB€ЭЬ™YHЩ[‹—ШЫЫXЭ[Ы—Щ\Ь]WЩњ›ЫWЬ›ЭК›ЭКB€Y€ЭЬ™YЫЫXЭ[Ы—Щ\Ь]WЬЭ]\ИOHњ™[X\ЩYЋ‚€™]\›€ЭЬ™Y€Y€ЭЬ™YЫЫXЭ[Ы—Щ\Ь]WЬЭ]\ИOHљ[Ћ€ИYЫXN€›ИЫЭ™\€H[Ь™[X\ЩYЫ›B€Z\ЩH[YQ\њ›ЬЉ›Ы›H[ЫЫXЭ[Ы€\Ь]\ИШ[€™[X\ЩHЉB€Э\њЫЬ‹™^XЭ]J€€€‚€TUHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ\Ь]B€СUЫЫXЭ[Ы—Щ\Ь]WЬЭ]\ИH	Ь™[X\ЩY	Л™[X\ЩYШ]H	\В€ТT‘HЫЫXЭ[Ы—Щ\Ь]WЪYH	\В€‘UT“’S‘ИЫЫXЭ[Ы—Щ\Ь]WЪY€€€‹€
+™[X\ЩYШ]ЫЫXЭ[Ы—Щ\Ь]WЪY
+K€
+B€\]YHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€\]Y\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH›ЭИ\ИШЪЩYX›Э™B€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€\Ь]H™[X\ЩH™\]Z\™\ИHЭЬ™Y\Ь]HЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—Щ\Ь]JЭ\њЫЬ‹URQ
+ЭЉ\]YМJJJB‚€Y€X\љЧШЫЫXЭ[Ы—ШШ\ЩWЩ\Ь]Y
+€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩN‚€€€‘›\[€Ь[€Ь€[›љ[™ИШ\ЩHИ\Ь]YЪ]Э]Ъ[™Ъ[™ИЭ]Э[™[™Л€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€Э\њ™[ЮWШЫЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ЛЭ]Э[™[™ЧШ[[Э[ќЬ[™YШ]€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€“Ф€TUB€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€\Ь]H™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€ЭЬ™YHЩ[‹—ШЫЫXЭ[Ы—ШШ\ЩWЩњ›ЫWЬ›ЭК›ЭКB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOH™\Ь]YЋ‚€™]\›€ЭЬ™Y€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\И›Э[€И›Ь[€‹™[›љ[™ИџN‚€Z\ЩH[YQ\њ›ЬЉ›Ы›HЬ[€Ь€[›љ[™ИЫЫXЭ[Ы€Ш\Щ\ИШ[€Ы\И\Ь]YЉB€Э\њЫЬ‹™^XЭ]J€€€‚€TUHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€СUЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИH	Щ\Ь]Y	В€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€‘UT“’S‘ИЫЫXЭ[Ы—ШШ\ЩWЪY€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€\]YHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€\]Y\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH›ЭИ\ИШЪЩYX›Э™B€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€\Ь]H™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ\]YМJJJB‚€Y€X\љЧШЫЫXЭ[Ы—ШШ\ЩWЬ™[X\ЩYЩњ›ЫWЩ\Ь]J€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩN‚€€€”™\ЭЬ™HH\Ь]YШ\ЩHИЬ[€Ь€[›љ[™ИЪ]Э]Ъ[™Ъ[™ИЭ]Э[™[™Л€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€Э\њ™[ЮWШЫЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ЛЭ]Э[™[™ЧШ[[Э[ќЬ[™YШ]€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€“Ф€TUB€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉ€ЫЫXЭ[Ы€\Ь]H™[X\ЩH™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩH‚€
+B€ЭЬ™YHЩ[‹—ШЫЫXЭ[Ы—ШШ\ЩWЩњ›ЫWЬ›ЭК›ЭКB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\И[€И›Ь[€‹™[›љ[™ИџN‚€™]\›€ЭЬ™Y€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOHњЩ]YЋ‚€Z\ЩH[YQ\њ›ЬЉњЩ]YЫЫXЭ[Ы€Ш\Щ\ИШ[››Э™[X\ЩHњ›ЫH\Ь]HЉB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOHќ›ЪYYЋ‚€Z\ЩH[YQ\њ›ЬЉќ›ЪYYЫЫXЭ[Ы€Ш\Щ\ИШ[››Э™[X\ЩHњ›ЫH\Ь]HЉB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOH™\Ь]YЋ€ИYЫXN€›ИЫЭ™\€HЫЬЩYЩ]€Z\ЩH[YQ\њ›ЬЉ›Ы›H\Ь]YЫЫXЭ[Ы€Ш\Щ\ИШ[€™[X\ЩHИЬ[€ЉB€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХB€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—Щ[›љ[™ЧЩ]™[ќ€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€SRUB€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€™\ЭЬ™YЬЭ]\ИH™[›љ[™И€Y€Э\њЫЬ‹™™]ЪЫ™J
+H\И›Э›Ы™H[ЩH›Ь[€‚€Э\њЫЬ‹™^XЭ]J€€€‚€TUHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€СUЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИH	\В€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€‘UT“’S‘ИЫЫXЭ[Ы—ШШ\ЩWЪY€€€‹€
+™\ЭЬ™YЬЭ]\ЛЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€\]YHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€\]Y\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH›ЭИ\ИШЪЩYX›Э™B€Z\ЩH[YQ\њ›ЬЉ€ЫЫXЭ[Ы€\Ь]H™[X\ЩH™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩH‚€
+B€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ\]YМJJJB‚€Y€\WШЫЫXЭ[Ы—ЬЩ][Y[ќ
+€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ\YYШ[[Э[ќ€[ћB€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩN‚€€€”™YXЩHЫ™HШ\ЩH[[ЩH[™Щ]H]Ъ[€H^XЭ™[XZ[™\€\И™\›Л€€€‚€\YYH\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+\YYШ[[Э[ќ
+JB€Y€\YYH‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Щ][Y[ќ[[Э[ќ]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€Э\њ™[ЮWШЫЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ЛЭ]Э[™[™ЧШ[[Э[ќЬ[™YШ]€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€“Ф€TUB€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Щ][Y[ќ™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€ЭЬ™YHЩ[‹—ШЫЫXЭ[Ы—ШШ\ЩWЩњ›ЫWЬ›ЭК›ЭКB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOHќ›ЪYYЋ‚€Z\ЩH[YQ\њ›ЬЉќ›ЪYYЫЫXЭ[Ы€Ш\Щ\ИШ[››ЭXШЩ\HЩ][Y[ќ\HЉB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOH™\Ь]YЋ‚€Z\ЩH[YQ\њ›ЬЉ™\Ь]YЫЫXЭ[Ы€Ш\Щ\ИШ[››ЭXШЩ\HЩ][Y[ќ\HЉB€Y€\YY€ЭЬ™Y›Э]Э[™[™ЧШ[[Э[ќ‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Щ][Y[ќ[[Э[ќШ[››Э^ЩYYЭ]Э[™[™ИЉB€™[XZ[љ[™ИHЭЬ™Y›Э]Э[™[™ЧШ[[Э[ќH\YY€Э]\ИHњЩ]Y€Y€™[XZ[љ[™ИOH[ЩHЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\В€Э\њЫЬ‹™^XЭ]J€€€‚€TUHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€СUЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИH	\ЛЭ]Э[™[™ЧШ[[Э[ќH	\В€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€‘UT“’S‘ИЫЫXЭ[Ы—ШШ\ЩWЪY€€€‹€
+Э]\Л™[XZ[љ[™ЛЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH›ЭИ\ИШЪЩYX›Э™B€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Щ][Y[ќ™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€љ[™ШЫЫXЭ[Ы—ЭЬљ]WЫЩ™Љ€Щ[‹[[ќШXШЫЭ[ќЪY€URQЫЫXЭ[Ы—ШШ\ЩWЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[Ы•Ьљ]SЩ™€›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬYЫЫXЭ[Ы€Ьљ]K[Щ™€Y[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ЭЬљ]WЫЩ™‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘ЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—ЭЬљ]WЫЩ™Љ€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€Щ]ШЫЫXЭ[Ы—ЭЬљ]WЫЩ™Љ€Щ[‹ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[Ы•Ьљ]SЩ™€›Ы™N‚€€€”™]\›€Ы™HЫЫXЭ[Ы€Ьљ]K[Щ™€ћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ЭЬљ]WЫЩ™‚€ТT‘HЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪYH	\В€€€‹€
+ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—ЭЬљ]WЫЩ™Љ€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€\ЭШЫЫXЭ[Ы—ЭЬљ]WЫЩ™њЧЩ›Ь—Э[[ќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™YЫЫXЭ[Ы•Ьљ]SЩ™‹‹‹—N‚€€€”™]\›€ЫЫXЭ[Ы€Ьљ]K[Щ™њИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ЭЬљ]WЫЩ™‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–HЬљ][—ЫЩ™—Ш]ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ЭЬљ]WЫЩ™ЉЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€[њЩ\ќШЫЫXЭ[Ы—ЭЬљ]WЫЩ™Љ€Щ[‹Ьљ]WЫЩ™Ћ€ЭЬ™YЫЫXЭ[Ы•Ьљ]SЩ™‚€
+HO€ЭЬ™YЫЫXЭ[Ы•Ьљ]SЩ™Ћ‚€€€”\њЪ\ЭЫ™H^XЭ^™\›ИЫЫ[Y\ЪX[Ьљ]K[Щ™€Ь€™\^H]€€€‚€Y€Ьљ]WЫЩ™‹ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЬЭ]\ИOHњ™XЫЬ™YЋ‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЬЭ]\И]\Э™H™XЫЬ™YЉB€Ьљ]WЫЩ™—Ш[[Э[ќH\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+Ьљ]WЫЩ™‹ќЬљ]WЫЩ™—Ш[[Э[ќ
+JB€™[XZ[љ[™ИH\њЩWЩ^XЭЩXЪ[X[
+€›Ь›X]Щ^XЭЩXЪ[X[
+Ьљ]WЫЩ™‹њ™[XZ[љ[™ЧЫЭ]Э[™[™ЧШ[[Э[ќ
+B€
+B€Y€Ьљ]WЫЩ™—Ш[[Э[ќH‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ьљ]K[Щ™€[[Э[ќ]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€Y€™[XZ[љ[™ИOH‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ьљ]K[Щ™€™[XZ[љ[™И]\Э™H^XЭ™\›ИЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ЭЬљ]WЫЩ™‚€
+ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY[[ќШXШЫЭ[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY€[ќ›ЪXЩWЩYќЪY\ЬЭYYЪ[ќ›ЪXЩWЪY€ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ШЫЫќXЭЭ™\њЪ[Ы‹ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э\њ™[ЮWШЫЩKЬљ]WЫЩ™—Ш[[Э[ќ™[XZ[љ[™ЧЫЭ]Э[™[™ЧШ[[Э[ќ€ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЬЭ]\ЛЬљ][—ЫЩ™—Ш]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘ИЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY€€€‹€
+€Ьљ]WЫЩ™‹ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY€Ьљ]WЫЩ™‹ќ[[ќШXШЫЭ[ќЪY€Ьљ]WЫЩ™‹ЫЫXЭ[Ы—ШШ\ЩWЪY€Ьљ]WЫЩ™‹љ[ќ›ЪXЩWЩYќЪY€Ьљ]WЫЩ™‹љ\ЬЭYYЪ[ќ›ЪXЩWЪY€Ьљ]WЫЩ™‹ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ШЫЫќXЭЭ™\њЪ[Ы‹€Ьљ]WЫЩ™‹њЫЭ\ЩWЬ^[ШYЪ\Ъ€Ьљ]WЫЩ™‹Э\њ™[ЮWШЫЩK€Ьљ]WЫЩ™—Ш[[Э[ќ€™[XZ[љ[™Л€Ьљ]WЫЩ™‹ЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЬЭ]\Л€Ьљ]WЫЩ™‹ќЬљ][—ЫЩ™—Ш]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ЭЬљ]WЫЩ™—ЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ЭЬљ]WЫЩ™‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘ЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€€€‹€
+Ьљ]WЫЩ™‹ќ[[ќШXШЫЭ[ќЪYЬљ]WЫЩ™‹ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ьљ]K[Щ™€Y[ќ]HЫЫ™›XЭИЪ][€^\Э[™И›ЭИЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ЭЬљ]WЫЩ™ЉЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€\WШЫЫXЭ[Ы—ЭЬљ]WЫЩ™Љ€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQЬљ]WЫЩ™—Ш[[Э[ќ€[ћB€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩN‚€€€–™\›ИЫ™HЬ[€ЫЫXЭ[Ы€Ш\ЩHЪ]Э]X\љЪ[™И]Щ]Y€€€‚€[[Э[ќH\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+Ьљ]WЫЩ™—Ш[[Э[ќ
+JB€Y€[[Э[ќH‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ьљ]K[Щ™€[[Э[ќ]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€Э\њ™[ЮWШЫЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ЛЭ]Э[™[™ЧШ[[Э[ќЬ[™YШ]€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€“Ф€TUB€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ьљ]K[Щ™€™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€ЭЬ™YHЩ[‹—ШЫЫXЭ[Ы—ШШ\ЩWЩњ›ЫWЬ›ЭК›ЭКB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\И[€ИњЩ]Y‹ќ›ЪYY‹™\Ь]YџN‚€Z\ЩH[YQ\њ›ЬЉњЩ]YЫЫXЭ[Ы€Ш\Щ\ИШ[››ЭXШЩ\HЬљ]K[Щ™€ЉB€Y€[[Э[ќOHЭЬ™Y›Э]Э[™[™ЧШ[[Э[ќ‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ьљ]K[Щ™€[[Э[ќ]\Э\]X[™[XZ[љ[™ИЭ]Э[™[™ИЉB€Э\њЫЬ‹™^XЭ]J€€€‚€TUHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€СUЭ]Э[™[™ЧШ[[Э[ќH€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€‘UT“’S‘ИЫЫXЭ[Ы—ШШ\ЩWЪY€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€\]YHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€\]Y\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH›ЭИ\ИШЪЩYX›Э™B€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ьљ]K[Щ™€™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ\]YМJJJB‚€Y€љ[™ШЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQЫЫXЭ[Ы—ШШ\ЩWЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩTЩ][Y[ќ›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬYЩ]K]Ъ[‹^™\›ИY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘ЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€Щ]ШЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ
+€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩTЩ][Y[ќ›Ы™N‚€€€”™]\›€Ы™HЫЫXЭ[Ы‹XШ\ЩHЩ][Y[ќћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪYH	\В€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€\ЭШЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЧЩ›Ь—Э[[ќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™YЫЫXЭ[ЫђШ\ЩTЩ][Y[ќ‹‹—N‚€€€”™]\›€ЫЫXЭ[Ы‹XШ\ЩHЩ][Y[ќИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–HЩ]YШ]ЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€[њЩ\ќШЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ
+€Щ[‹Щ][Y[ќ€ЭЬ™YЫЫXЭ[ЫђШ\ЩTЩ][Y[ќ€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩTЩ][Y[ќ‚€€€”\њЪ\ЭЫ™H^XЭ^™\›ИЩ][Y[ќЬ€™]\›€]ИY[ќ]H™\^K€€€‚€Y€Щ][Y[ќЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЬЭ]\ИOHњЩ]YЋ‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЬЭ]\И]\Э™HЩ]YЉB€™[XZ[љ[™ИH\њЩWЩ^XЭЩXЪ[X[
+€›Ь›X]Щ^XЭЩXЪ[X[
+Щ][Y[ќњ™[XZ[љ[™ЧЫЭ]Э[™[™ЧШ[[Э[ќ
+B€
+B€Y€™[XZ[љ[™ИOH‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ш\ЩHЩ][Y[ќ™[XZ[љ[™И]\Э™H^XЭ™\›ИЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ€
+ЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY[[ќШXШЫЭ[ќЪY€ЫЫXЭ[Ы—ШШ\ЩWЪY[ќ›ЪXЩWЩYќЪY\ЬЭYYЪ[ќ›ЪXЩWЪY€ЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќШЫЫќXЭЭ™\њЪ[Ы‹ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э\њ™[ЮWШЫЩK™[XZ[љ[™ЧЫЭ]Э[™[™ЧШ[[Э[ќ€ЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЬЭ]\ЛЩ]YШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘ИЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY€€€‹€
+€Щ][Y[ќЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY€Щ][Y[ќќ[[ќШXШЫЭ[ќЪY€Щ][Y[ќЫЫXЭ[Ы—ШШ\ЩWЪY€Щ][Y[ќљ[ќ›ЪXЩWЩYќЪY€Щ][Y[ќљ\ЬЭYYЪ[ќ›ЪXЩWЪY€Щ][Y[ќЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќШЫЫќXЭЭ™\њЪ[Ы‹€Щ][Y[ќњЫЭ\ЩWЬ^[ШYЪ\Ъ€Щ][Y[ќЭ\њ™[ЮWШЫЩK€™[XZ[љ[™Л€Щ][Y[ќЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЬЭ]\Л€Щ][Y[ќњЩ]YШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќЪY€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘ЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€€€‹€
+Щ][Y[ќќ[[ќШXШЫЭ[ќЪYЩ][Y[ќЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Щ][Y[ќY[ќ]HЫЫ™›XЭИЪ][€^\Э[™И›ЭИЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩWЬЩ][Y[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€X\љЧШЫЫXЭ[Ы—ШШ\ЩWЬЩ]Y
+€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩN‚€€€“X\љИЫ™H^XЭ^™\›ИЬ[€Ш\ЩHЩ]Y[™\€H›ЭИШЪЛ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€Э\њ™[ЮWШЫЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ЛЭ]Э[™[™ЧШ[[Э[ќЬ[™YШ]€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€“Ф€TUB€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Щ][Y[ќ™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€ЭЬ™YHЩ[‹—ШЫЫXЭ[Ы—ШШ\ЩWЩњ›ЫWЬ›ЭК›ЭКB€™[XZ[љ[™ИH\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+ЭЬ™Y›Э]Э[™[™ЧШ[[Э[ќ
+JB€Y€™[XZ[љ[™ИOH‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Ш\ЩHЭ]Э[™[™И]\Э™H^XЭ™\›ИИЩ]HЉB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOHњЩ]YЋ‚€™]\›€ЭЬ™Y€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOHќ›ЪYYЋ‚€Z\ЩH[YQ\њ›ЬЉќ›ЪYYЫЫXЭ[Ы€Ш\Щ\ИШ[››ЭЩ]HЉB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOH™\Ь]YЋ‚€Z\ЩH[YQ\њ›ЬЉ™\Ь]YЫЫXЭ[Ы€Ш\Щ\ИШ[››ЭЩ]HЉB€Э\њЫЬ‹™^XЭ]J€€€‚€TUHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€СUЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИH	ЬЩ]Y	В€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€‘UT“’S‘ИЫЫXЭ[Ы—ШШ\ЩWЪY€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€\]YHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€\]Y\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH›ЭИ\ИШЪЩYX›Э™B€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€Щ][Y[ќ™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ\]YМJJJB‚€Y€X\љЧШЫЫXЭ[Ы—ШШ\ЩWЭ›ЪYY
+€Щ[‹ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ^XЭYЫЭ]Э[™[™О€[ћB€
+HO€ЭЬ™YЫЫXЭ[ЫђШ\ЩN‚€€€ђЫЬЩH[€[ќ\ЩYЬ[€Ь€[›љ[™ИШ\ЩH\И›ЪYY]^XЭ™\›Л€€€‚€^XЭYH\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+^XЭYЫЭ]Э[™[™КJB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХЫЫXЭ[Ы—ШШ\ЩWЪY[[ќШXШЫЭ[ќЪY[ќ›ЪXЩWЩYќЪY€Э\њ™[ЮWШЫЩKЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ЛЭ]Э[™[™ЧШ[[Э[ќЬ[™YШ]€”“УHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€“Ф€TUB€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€›ЪY™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€ЭЬ™YHЩ[‹—ШЫЫXЭ[Ы—ШШ\ЩWЩњ›ЫWЬ›ЭК›ЭКB€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИOHќ›ЪYYЋ‚€™]\›€ЭЬ™Y€Y€ЭЬ™YЫЫXЭ[Ы—ШШ\ЩWЬЭ]\И›Э[€И›Ь[€‹™[›љ[™ИџN‚€Z\ЩH[YQ\њ›ЬЉ›Ы›HЬ[€Ь€[›љ[™ИЫЫXЭ[Ы€Ш\Щ\ИШ[€›ЪYЉB€™[XZ[љ[™ИH\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+ЭЬ™Y›Э]Э[™[™ЧШ[[Э[ќ
+JB€Y€™[XZ[љ[™ИOH^XЭY‚€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€›ЪY™[XZ[љ[™И]\Э\]X[H\ЬЭYY[[Э[ќЉB€Э\њЫЬ‹™^XЭ]J€€€‚€TUHљ[[™ЧШЫЬ™KЫЫXЭ[Ы—ШШ\ЩB€СUЫЫXЭ[Ы—ШШ\ЩWЬЭ]\ИH	Э›ЪYY	ЛЭ]Э[™[™ЧШ[[Э[ќH€ТT‘HЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€‘UT“’S‘ИЫЫXЭ[Ы—ШШ\ЩWЪY€€€‹€
+ЫЫXЭ[Ы—ШШ\ЩWЪY
+K€
+B€\]YHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€\]Y\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH›ЭИ\ИШЪЩYX›Э™B€Z\ЩH[YQ\њ›ЬЉЫЫXЭ[Ы€›ЪY™\]Z\™\ИHЭЬ™YЫЫXЭ[Ы€Ш\ЩHЉB€™]\›€Щ[‹—Щ™]ЪШЫЫXЭ[Ы—ШШ\ЩJЭ\њЫЬ‹URQ
+ЭЉ\]YМJJJB‚€Y€Щ]Ь^[Y[ќЪ[ќ[ќ
+Щ[‹^[Y[ќЪ[ќ[ќЪY€URQ
+HO€ЭЬ™Y^[Y[ќ[ќ[ќ›Ы™N‚€€€”™]\›€Ы™H^[Y[ќ[ќ[ќћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЪ[ќ[ќЪY€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЪ[ќ[ќ€ТT‘H^[Y[ќЪ[ќ[ќЪYH	\В€€€‹€
+^[Y[ќЪ[ќ[ќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЬ^[Y[ќЪ[ќ[ќ
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€љ[™Ь^[Y[ќЪ[ќ[ќ
+€Щ[‹€[[ќШXШЫЭ[ќЪY€URQ€ЫЫXЭ[Ы—ШШ\ЩWЪY€URQ€ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э‹€^[Y[ќЪ[ќ[ќШЫЫќXЭЭ™\њЪ[ЫЋ€[ќ€
+HO€ЭЬ™Y^[Y[ќ[ќ[ќ›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬY^[Y[ќZ[ќ[ќY[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЪ[ќ[ќЪY€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЪ[ќ[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘ЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘^[Y[ќЪ[ќ[ќШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€[[ќШXШЫЭ[ќЪY€ЫЫXЭ[Ы—ШШ\ЩWЪY€ЫЭ\ЩWЬ^[ШYЪ\Ъ€^[Y[ќЪ[ќ[ќШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЬ^[Y[ќЪ[ќ[ќ
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€[њЩ\ќЬ^[Y[ќЪ[ќ[ќ
+€Щ[‹^[Y[ќЪ[ќ[ќ€ЭЬ™Y^[Y[ќ[ќ[ќ€
+HO€ЭЬ™Y^[Y[ќ[ќ[ќ‚€€€”\њЪ\ЭЫ™HЬЪ]]™H›ЭљY\‹[™]][[ќ[ќЬ€™\^H]€€€‚€Y€^[Y[ќЪ[ќ[ќњ^[Y[ќЪ[ќ[ќЬЭ]\И›Э[€Ињ›Ъ™XЭY‹Ш[Щ[Y‹њ™Z™XЭYџN‚€Z\ЩH[YQ\њ›ЬЉњ^[Y[ќ[ќ[ќИШ[››Э™HШ\\™YЩ]YЬ€ЬЭYЉB€^[Y[ќШ[[Э[ќH\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+^[Y[ќЪ[ќ[ќњ^[Y[ќШ[[Э[ќ
+JB€Y€^[Y[ќШ[[Э[ќH‚€Z\ЩH[YQ\њ›ЬЉњ^[Y[ќ[ќ[ќ[[Э[ќ]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kњ^[Y[ќЪ[ќ[ќ€
+^[Y[ќЪ[ќ[ќЪY[[ќШXШЫЭ[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY€^[Y[ќЪ[ќ[ќШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€^[Y[ќЪ[ќ[ќЬЭ]\Л^[Y[ќШ[[Э[ќЫЭ\ЩWЬ^[ШYЪ\Ъ€›Ъ™XЭYШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И^[Y[ќЪ[ќ[ќЪY€€€‹€
+€^[Y[ќЪ[ќ[ќњ^[Y[ќЪ[ќ[ќЪY€^[Y[ќЪ[ќ[ќќ[[ќШXШЫЭ[ќЪY€^[Y[ќЪ[ќ[ќЫЫXЭ[Ы—ШШ\ЩWЪY€^[Y[ќЪ[ќ[ќњ^[Y[ќЪ[ќ[ќШЫЫќXЭЭ™\њЪ[Ы‹€^[Y[ќЪ[ќ[ќЭ\њ™[ЮWШЫЩK€^[Y[ќЪ[ќ[ќњ^[Y[ќЪ[ќ[ќЬЭ]\Л€^[Y[ќШ[[Э[ќ€^[Y[ќЪ[ќ[ќњЫЭ\ЩWЬ^[ШYЪ\Ъ€^[Y[ќЪ[ќ[ќњ›Ъ™XЭYШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЪ[ќ[ќЪY€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЪ[ќ[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘ЫЫXЭ[Ы—ШШ\ЩWЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘^[Y[ќЪ[ќ[ќШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€^[Y[ќЪ[ќ[ќќ[[ќШXШЫЭ[ќЪY€^[Y[ќЪ[ќ[ќЫЫXЭ[Ы—ШШ\ЩWЪY€^[Y[ќЪ[ќ[ќњЫЭ\ЩWЬ^[ШYЪ\Ъ€^[Y[ќЪ[ќ[ќњ^[Y[ќЪ[ќ[ќШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N€ИYЫXN€›ИЫЭ™\€HH[Y’ИЫЫ™›XЭ\И[€Y[ќ]H›ЭВ€Z\ЩH[YQ\њ›ЬЉњ^[Y[ќ[ќ[ќY[ќ]H[™XYH™[Ы™ЬИИ[›Э\€[ќ[ќЉB€™]\›€Щ[‹—Щ™]ЪЬ^[Y[ќЪ[ќ[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€\ЭЬ^[Y[ќЪ[ќ[ќК€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™Y^[Y[ќ[ќ[ќ‹‹—N‚€€€”™]\›€^[Y[ќ[ќ[ќИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЪ[ќ[ќЪY€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЪ[ќ[ќ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H›Ъ™XЭYШ]^[Y[ќЪ[ќ[ќЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЬ^[Y[ќЪ[ќ[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€Ш[Щ[ЬЭЬ™YЬ^[Y[ќЪ[ќ[ќ
+€Щ[‹^[Y[ќЪ[ќ[ќЪY€URQ€
+HO€ЭЬ™Y^[Y[ќ[ќ[ќ‚€€€ђШ[Щ[Ы™H›Ъ™XЭY[ќ[ќY[\Э[ќK€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€TUHљ[[™ЧШЫЬ™Kњ^[Y[ќЪ[ќ[ќ€СU^[Y[ќЪ[ќ[ќЬЭ]\ИH	ШШ[Щ[Y	В€ТT‘H^[Y[ќЪ[ќ[ќЪYH	\В€S‘^[Y[ќЪ[ќ[ќЬЭ]\ИH	Ь›Ъ™XЭY	В€‘UT“’S‘И^[Y[ќЪ[ќ[ќЪY€€€‹€
+^[Y[ќЪ[ќ[ќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЪ[ќ[ќЪY^[Y[ќЪ[ќ[ќЬЭ]\В€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЪ[ќ[ќ€ТT‘H^[Y[ќЪ[ќ[ќЪYH	\В€€€‹€
+^[Y[ќЪ[ќ[ќЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉњ^[Y[ќ[ќ[ќШ[Щ[][Ы€™\]Z\™\ИHЭЬ™Y^[Y[ќ[ќ[ќЉB€Y€›ЭЦМWHOHШ[Щ[YЋ‚€Z\ЩH[YQ\њ›ЬЉ›Ы›H›Ъ™XЭY^[Y[ќ[ќ[ќИШ[€™HШ[Щ[YЉB€™]\›€Щ[‹—Щ™]ЪЬ^[Y[ќЪ[ќ[ќ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€Щ]Ь^[Y[ќЬ™XЩZ\
+Щ[‹^[Y[ќЬ™XЩZ\ЪY€URQ
+HO€ЭЬ™Y^[Y[ќ™XЩZ\›Ы™N‚€€€”™]\›€Ы™H^[Y[ќ™XЩZ\ћHЬ\]YHY[ќYљY\‹€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЬ™XЩZ\ЪY€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЬ™XЩZ\€ТT‘H^[Y[ќЬ™XЩZ\ЪYH	\В€€€‹€
+^[Y[ќЬ™XЩZ\ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЬ^[Y[ќЬ™XЩZ\
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€љ[™Ь^[Y[ќЬ™XЩZ\
+€Щ[‹€[[ќШXШЫЭ[ќЪY€URQ€^[Y[ќЪ[ќ[ќЪY€URQ€ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э‹€Щ][Y[ќШЫЫќXЭЭ™\њЪ[ЫЋ€[ќ€
+HO€ЭЬ™Y^[Y[ќ™XЩZ\›Ы™N‚€€€”™]\›€Ы™H[[ќ\ШЫЬY^[Y[ќ\™XЩZ\Y[ќ]K€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЬ™XЩZ\ЪY€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЬ™XЩZ\€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘^[Y[ќЪ[ќ[ќЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘Щ][Y[ќШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€[[ќШXШЫЭ[ќЪY€^[Y[ќЪ[ќ[ќЪY€ЫЭ\ЩWЬ^[ШYЪ\Ъ€Щ][Y[ќШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЬ^[Y[ќЬ™XЩZ\
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€[њЩ\ќЬ^[Y[ќЬ™XЩZ\
+€Щ[‹^[Y[ќЬ™XЩZ\€ЭЬ™Y^[Y[ќ™XЩZ\€
+HO€ЭЬ™Y^[Y[ќ™XЩZ\‚€€€”\њЪ\ЭЫ™H\YY™XЩZ\Ь€™]\›€H^XЭY[ќ]H™\^K€€€‚€Y€^[Y[ќЬ™XЩZ\њ^[Y[ќЬ™XЩZ\ЬЭ]\ИOH\YYЋ‚€Z\ЩH[YQ\њ›ЬЉњ^[Y[ќ™XЩZ\ИШ[››Э™HШ\\™YЬ€ЬЭYЉB€™XЩZ]™YШ[[Э[ќH\њЩWЩ^XЭЩXЪ[X[
+€›Ь›X]Щ^XЭЩXЪ[X[
+^[Y[ќЬ™XЩZ\њ™XЩZ]™YШ[[Э[ќ
+B€
+B€Y€™XЩZ]™YШ[[Э[ќH‚€Z\ЩH[YQ\њ›ЬЉњ^[Y[ќ™XЩZ\[[Э[ќ]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kњ^[Y[ќЬ™XЩZ\€
+^[Y[ќЬ™XЩZ\ЪY[[ќШXШЫЭ[ќЪY^[Y[ќЪ[ќ[ќЪY€ЫЫXЭ[Ы—ШШ\ЩWЪYЩ][Y[ќШЫЫќXЭЭ™\њЪ[Ы‹Э\њ™[ЮWШЫЩK€^[Y[ќЬ™XЩZ\ЬЭ]\Л™XЩZ]™YШ[[Э[ќЫЭ\ЩWЬ^[ШYЪ\Ъ€™XЩZ]™YШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И^[Y[ќЬ™XЩZ\ЪY€€€‹€
+€^[Y[ќЬ™XЩZ\њ^[Y[ќЬ™XЩZ\ЪY€^[Y[ќЬ™XЩZ\ќ[[ќШXШЫЭ[ќЪY€^[Y[ќЬ™XЩZ\њ^[Y[ќЪ[ќ[ќЪY€^[Y[ќЬ™XЩZ\ЫЫXЭ[Ы—ШШ\ЩWЪY€^[Y[ќЬ™XЩZ\њЩ][Y[ќШЫЫќXЭЭ™\њЪ[Ы‹€^[Y[ќЬ™XЩZ\Э\њ™[ЮWШЫЩK€^[Y[ќЬ™XЩZ\њ^[Y[ќЬ™XЩZ\ЬЭ]\Л€™XЩZ]™YШ[[Э[ќ€^[Y[ќЬ™XЩZ\њЫЭ\ЩWЬ^[ШYЪ\Ъ€^[Y[ќЬ™XЩZ\њ™XЩZ]™YШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЬ™XЩZ\ЪY€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЬ™XЩZ\€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€S‘^[Y[ќЪ[ќ[ќЪYH	\В€S‘ЫЭ\ЩWЬ^[ШYЪ\ЪH	\В€S‘Щ][Y[ќШЫЫќXЭЭ™\њЪ[Ы€H	\В€€€‹€
+€^[Y[ќЬ™XЩZ\ќ[[ќШXШЫЭ[ќЪY€^[Y[ќЬ™XЩZ\њ^[Y[ќЪ[ќ[ќЪY€^[Y[ќЬ™XЩZ\њЫЭ\ЩWЬ^[ШYЪ\Ъ€^[Y[ќЬ™XЩZ\њЩ][Y[ќШЫЫќXЭЭ™\њЪ[Ы‹€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉњ^[Y[ќ™XЩZ\Y[ќ]HЫЫ™›XЭИЪ][€^\Э[™И›ЭИЉB€™]\›€Щ[‹—Щ™]ЪЬ^[Y[ќЬ™XЩZ\
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€\ЭЬ^[Y[ќЬ™XЩZ\К€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™Y^[Y[ќ™XЩZ\‹‹—N‚€€€”™]\›€^[Y[ќ™XЩZ\И[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ^[Y[ќЬ™XЩZ\ЪY€”“УHљ[[™ЧШЫЬ™Kњ^[Y[ќЬ™XЩZ\€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H™XЩZ]™YШ]^[Y[ќЬ™XЩZ\ЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЬ^[Y[ќЬ™XЩZ\
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€љ[™Э[\YYШШ\Ъ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ^[Y[ќЬ™XЩZ\ЪY€URQ€
+HO€ЭЬ™Y[\YYШ\Ъ›Ы™N‚€€€”™]\›€H\љЩYYќЭ™\€›Ь€Ы™H[[ќ^[Y[ќ™XЩZ\Y€[ћK€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[\YYШШ\ЪЪY€”“УHљ[[™ЧШЫЬ™Kќ[\YYШШ\Ъ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘^[Y[ќЬ™XЩZ\ЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY^[Y[ќЬ™XЩZ\ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЭ[\YYШШ\Ъ
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€Щ]Э[\YYШШ\Ъ
+Щ[‹[\YYШШ\ЪЪY€URQ
+HO€ЭЬ™Y[\YYШ\Ъ›Ы™N‚€€€”™]\›€Ы™H[\YYXШ\Ъ›ЭИћH[ќ\›[Y[ќYљY\‹Y€™\Щ[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[\YYШШ\ЪЪY€”“УHљ[[™ЧШЫЬ™Kќ[\YYШШ\Ъ€ТT‘H[\YYШШ\ЪЪYH	\В€€€‹€
+[\YYШШ\ЪЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЭ[\YYШШ\Ъ
+€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€\ЭЭ[\YYШШ\ЪЩ›Ь—Э[[ќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™Y[\YYШ\Ъ‹‹—N‚€€€”™]\›€[\YYXШ\Ъ›ЭЬИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[\YYШШ\ЪЪY€”“УHљ[[™ЧШЫЬ™Kќ[\YYШШ\Ъ€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H\љЩYШ][\YYШШ\ЪЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЭ[\YYШШ\Ъ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€[њЩ\ќЭ[\YYШШ\Ъ
+Щ[‹[\YYШШ\Ъ€ЭЬ™Y[\YYШ\Ъ
+HO€ЭЬ™Y[\YYШ\Ъ‚€€€”\њЪ\ЭЫ™H\љЩYYќЭ™\€Ь€™]\›€]ИY[ќ]H™\^K€€€‚€Y€ХT”‘SђЦWРУСWФUT“‹™ќ[X]Ъ
+[\YYШШ\ЪЭ\њ™[ЮWШЫЩJH\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉЭ\њ™[ЮWШЫЩH]\Э™HH™YK[]\€TУИЫЩHЉB€Y€УХTђСWФVSРQТTТФUT“‹™ќ[X]Ъ
+[\YYШШ\ЪњЫЭ\ЩWЬ^[ШYЪ\Ъ
+H\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉњЫЭ\ЩWЬ^[ШYЪ\Ъ]\Э™HHЪLЌM€YЩ\ЭЉB€Y€[\YYШШ\Ъќ[\YYШШ\ЪЬЭ]\ИOHњ\љЩYЋ‚€Z\ЩH[YQ\њ›ЬЉќ[\YYШШ\ЪЬЭ]\И]\Э™H\љЩYЉB€YќЭ™\€H\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+[\YYШШ\Ъќ[\YYШ[[Э[ќ
+JB€Y€YќЭ™\€H‚€Z\ЩH[YQ\њ›ЬЉќ[\YYШ\Ъ[[Э[ќ]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€™XЩZ]™YШ[[Э[ќH\њЩWЩ^XЭЩXЪ[X[
+€›Ь›X]Щ^XЭЩXЪ[X[
+[\YYШШ\Ъњ™XЩZ]™YШ[[Э[ќ
+B€
+B€\YYШ[[Э[ќH\њЩWЩ^XЭЩXЪ[X[
+›Ь›X]Щ^XЭЩXЪ[X[
+[\YYШШ\Ъ\YYШ[[Э[ќ
+JB€Y€™XЩZ]™YШ[[Э[ќH‚€Z\ЩH[YQ\њ›ЬЉќ[\YYШ\Ъ™XЩZ]™Y[[Э[ќ]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€Y€\YYШ[[Э[ќH‚€Z\ЩH[YQ\њ›ЬЉќ[\YYШ\Ъ\YY[[Э[ќ]\Э™HHЬЪ]]™H^XЭXЪ[X[ЉB€Y€YќЭ™\€€™XЩZ]™YШ[[Э[ќ‚€Z\ЩH[YQ\њ›ЬЉќ[\YYШ\ЪШ[››Э^ЩYYHЭЬ™Y™XЩZ\ЉB€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€S”СT•S•Иљ[[™ЧШЫЬ™Kќ[\YYШШ\Ъ€
+[\YYШШ\ЪЪY[[ќШXШЫЭ[ќЪY^[Y[ќЬ™XЩZ\ЪY€^[Y[ќЪ[ќ[ќЪYЫЫXЭ[Ы—ШШ\ЩWЪY€[\YYШШ\ЪШЫЫќXЭЭ™\њЪ[Ы‹ЫЭ\ЩWЬ^[ШYЪ\Ъ€Э\њ™[ЮWШЫЩK[\YYШ[[Э[ќ™XЩZ]™YШ[[Э[ќ€\YYШ[[Э[ќ[\YYШШ\ЪЬЭ]\Л\љЩYШ]
+B€ђSQTИ
+	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\Л	\КB€У€УУ‘“PХИ“ХS‘В€‘UT“’S‘И[\YYШШ\ЪЪY€€€‹€
+€[\YYШШ\Ъќ[\YYШШ\ЪЪY€[\YYШШ\Ъќ[[ќШXШЫЭ[ќЪY€[\YYШШ\Ъњ^[Y[ќЬ™XЩZ\ЪY€[\YYШШ\Ъњ^[Y[ќЪ[ќ[ќЪY€[\YYШШ\ЪЫЫXЭ[Ы—ШШ\ЩWЪY€[\YYШШ\Ъќ[\YYШШ\ЪШЫЫќXЭЭ™\њЪ[Ы‹€[\YYШШ\ЪњЫЭ\ЩWЬ^[ШYЪ\Ъ€[\YYШШ\ЪЭ\њ™[ЮWШЫЩK€YќЭ™\‹€™XЩZ]™YШ[[Э[ќ€\YYШ[[Э[ќ€[\YYШШ\Ъќ[\YYШШ\ЪЬЭ]\Л€[\YYШШ\Ъњ\љЩYШ]€
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[\YYШШ\ЪЪY€”“УHљ[[™ЧШЫЬ™Kќ[\YYШШ\Ъ€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘^[Y[ќЬ™XЩZ\ЪYH	\В€€€‹€
+[\YYШШ\Ъќ[[ќШXШЫЭ[ќЪY[\YYШШ\Ъњ^[Y[ќЬ™XЩZ\ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€Y€›ЭИ\И›Ы™N‚€Z\ЩH[YQ\њ›ЬЉ€ќ[\YYШ\ЪY[ќ]HЫЫ™›XЭИЪ][€^\Э[™И›ЭИ‚€
+B€™]\›€Щ[‹—Щ™]ЪЭ[\YYШШ\Ъ
+Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB‚€Y€љ[™Э[\YYШШ\ЪШ\XШ][ЫЉ€Щ[‹[[ќШXШЫЭ[ќЪY€URQ[\YYШШ\ЪЪY€URQ€
+HO€ЭЬ™Y[\YYШ\Ъ\XШ][Ы€›Ы™N‚€€€”™]\›€HYќЭ™\€\H›Ь€Ы™H[[ќ\љЩYYќЭ™\‹Y€[ћK€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[\YYШШ\ЪШ\XШ][Ы—ЪY€”“УHљ[[™ЧШЫЬ™Kќ[\YYШШ\ЪШ\XШ][Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\ИS‘[\YYШШ\ЪЪYH	\В€€€‹€
+[[ќШXШЫЭ[ќЪY[\YYШШ\ЪЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЭ[\YYШШ\ЪШ\XШ][ЫЉ€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€Щ]Э[\YYШШ\ЪШ\XШ][ЫЉ€Щ[‹[\YYШШ\ЪШ\XШ][Ы—ЪY€URQ€
+HO€ЭЬ™Y[\YYШ\Ъ\XШ][Ы€›Ы™N‚€€€”™]\›€Ы™HYќЭ™\€\XШ][Ы€ћH[ќ\›[Y[ќYљY\‹Y€™\Щ[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[\YYШШ\ЪШ\XШ][Ы—ЪY€”“УHљ[[™ЧШЫЬ™Kќ[\YYШШ\ЪШ\XШ][Ы‚€ТT‘H[\YYШШ\ЪШ\XШ][Ы—ЪYH	\В€€€‹€
+[\YYШШ\ЪШ\XШ][Ы—ЪY
+K€
+B€›ЭИHЭ\њЫЬ‹™™]ЪЫ™J
+B€™]\›€›Ы™HY€›ЭИ\И›Ы™H[ЩHЩ[‹—Щ™]ЪЭ[\YYШШ\ЪШ\XШ][ЫЉ€Э\њЫЬ‹URQ
+ЭЉ›ЭЦМJJB€
+B‚€Y€\ЭЭ[\YYШШ\ЪШ\XШ][ЫњЧЩ›Ь—Э[[ќ
+€Щ[‹[[ќШXШЫЭ[ќЪY€URQ€
+HO€\VФЭЬ™Y[\YYШ\Ъ\XШ][Ы‹‹‹—N‚€€€”™]\›€YќЭ™\€\XШ][ЫњИ[Z]YИЫ™H[[ќ€€€‚€Ъ]Щ[‹—ШЭ\њЫЬЉ
+H\ИЭ\њЫЬЋ‚€Э\њЫЬ‹™^XЭ]J€€€‚€СSPХ[\YYШШ\ЪШ\XШ][Ы—ЪY€”“УHљ[[™ЧШЫЬ™Kќ[\YYШШ\ЪШ\XШ][Ы‚€ТT‘H[[ќШXШЫЭ[ќЪYH	\В€Ф‘T€–H\YYШ][\YYШШ\ЪШ\XШ][Ы—ЪY€€€‹€
+[[ќШXШЫЭ[ќЪY
+K€
+B€™]\›€\J€Щ[‹—Щ™]ЪЭ[\YYШШ\ЪШ\XШ][ЫЉЭ\њЫЬ‹URQ
+ЭЉ›ЭЦМJJJB€›Ь€›ЭИ[€Э\њЫЬ‹™™]Ъ[
+
+B€
+B‚€Y€[њЩ\ќЭ[\YYШШ\ЪШ\XШ][ЫЉ€Щ[‹[\YYШШ\ЪШ\XШ][ЫЋ€ЭЬ™Y[\YYШ\Ъ\XШ][Ы‚€
+HO€ЭЬ™Y[\YYШ\Ъ\XШ][ЫЋ‚€€€”\њЪ\ЭЫ™HYќЭ™\€\HЬ€™]\›€]ИY[ќ}г«h‘йм¶»§q«^uЌ…СҐЅё№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅё№Х№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰Х№…ББ±Ґ•ђЃЌ…Н Ѓ…ББ±ҐЌ…СҐЅёЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅёЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎI•™Х№ђЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”Ѓ±•™СЅЩ•ИЃЙ•™Х№ђЃ™ЅИЃЅ№”ЃС•№…№РЃБ…Й­•ђЃ±•™СЅЩ•И°ЃҐЃ…№дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓќ•С}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ (ЂЂЂЂЂЂЂЃН•±°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎI•™Х№ђЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”Ѓ±•™СЅЩ•ИЃЙ•™Х№ђЃ‰дЃҐ№С•Й№…°ЃҐ‘•№СҐ™Ґ•И°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ±ҐНС}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘Н}™ЅЙ}С•№…№Р (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘U№…ББ±Ґ•‘…НЎI•™Х№ђ°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃ±•™СЅЩ•ИЃЙ•™Х№‘МЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃЙ•™Х№‘•‘}…Р°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ (ЂЂЂЂЂЂЂЃН•±°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђиЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎI•™Х№ђ(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎI•™Х№ђи(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”Ѓ±•™СЅЩ•ИЃЙ•™Х№ђЃЅИЃЙ•СХЙёЃҐСМЃҐ‘•№СҐСдЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃUII9e}=}AQQI8№™Х±±µ…СЌ ЎХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№ЌХЙЙ•№Ќе}ЌЅ‘”¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌХЙЙ•№Ќе}ЌЅ‘”ЃµХНРЃ‰”Ѓ„ЃСЎЙ•”µ±•СС•ИЃ%M<ЃЌЅ‘”€¤(ЂЂЂЂЂЂЂЃҐЃM=UI}Ae1=}!M!}AQQI8№™Х±±µ…СЌ  (ЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н (ЂЂЂЂЂЂЂЂ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЃµХНРЃ‰”Ѓ„ЃНЎ„ИФШЃ‘Ґќ•НР€¤(ЂЂЂЂЂЂЂЃҐЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}НС…СХМЂ„фЂ‰Й•ЌЅЙ‘•ђ€и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}НС…СХМЃµХНРЃ‰”ЃЙ•ЌЅЙ‘•ђ€¤(ЂЂЂЂЂЂЂЃЙ•™Х№‘}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Й•™Х№‘}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃҐЃЙ•™Х№‘}…µЅХ№РЂрфЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Х№…ББ±Ґ•ђЃЌ…Н ЃЙ•™Х№ђЃ…µЅХ№РЃµХНРЃ‰”Ѓ„ЃБЅНҐСҐЩ”Ѓ•б…ЌРЃ‘•ЌҐµ…°€¤(ЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Х№…ББ±Ґ•‘}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃҐЃХ№…ББ±Ґ•‘}…µЅХ№РЂрфЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Х№…ББ±Ґ•ђЃЌ…Н Ѓ…µЅХ№РЃµХНРЃ‰”Ѓ„ЃБЅНҐСҐЩ”Ѓ•б…ЌРЃ‘•ЌҐµ…°€¤(ЂЂЂЂЂЂЂЃҐЃЙ•™Х№‘}…µЅХ№РЂ„фЃХ№…ББ±Ґ•‘}…µЅХ№Ри(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Х№…ББ±Ґ•ђЃЌ…Н ЃЙ•™Х№ђЃ…µЅХ№РЃµХНРЃ•ЕХ…°ЃСЎ”ЃБ…Й­•ђЃ±•™СЅЩ•И€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°ЃБ…еµ•№С}Ґ№С•№С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЙ•™Х№‘}…µЅХ№Р°ЃХ№…ББ±Ґ•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}НС…СХМ°ЃЙ•™Х№‘•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Х№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Б…еµ•№С}Й•Ќ•ҐБС}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Б…еµ•№С}Ґ№С•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№ЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ•™Х№‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Й•™Х№‘•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ№Х№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰Х№…ББ±Ґ•ђЃЌ…Н ЃЙ•™Х№ђЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ…ББ±е}Х№…ББ±Ґ•‘}Ќ…НЎ}СЅ}ЌЅ±±•ЌСҐЅ№}Ќ…Н” (ЂЂЂЂЂЂЂЃН•±°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}ҐђиЃUU%°Ѓ…ББ±Ґ•‘}…µЅХ№РиЃ№д(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№…Н”и(ЂЂЂЂЂЂЂЂ€€‰I•‘ХЌ”ЃЅХСНС…№‘Ґ№њЃ‰дЃБ…Й­•ђЃ±•™СЅЩ•ИЃЭҐСЎЅХРЃ™±ҐББҐ№њЃСјЃН•СС±•ђё((ЂЂЂЂЂЂЂЂЊРШЃЙ•µ…Ґ№МЃСЎ”Ѓ•бБ±ҐЌҐРЃН•СС±”µЭЎ•ёµй•ЙјЃЌЅµµ…№ђёЃMС…СХМЃНС…еМ(ЂЂЂЂЂЂЂЃЃЃЅБ•№ЃЂЃЅИЃЃЃ‘Х№№Ґ№ќЃЂЃ•Щ•ёЃЭЎ•ёЃЙ•µ…Ґ№Ґ№њЃ‰•ЌЅµ•МЃ•б…ЌРЃй•Йјё(ЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЃ…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°Ў…ББ±Ґ•‘}…µЅХ№Р¤¤(ЂЂЂЂЂЂЂЃҐЃ…µЅХ№РЂрфЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Х№…ББ±Ґ•ђЃЌ…Н Ѓ…ББ±дЃ…µЅХ№РЃµХНРЃ‰”Ѓ„ЃБЅНҐСҐЩ”Ѓ•б…ЌРЃ‘•ЌҐµ…°€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}НС…СХМ°ЃЅХСНС…№‘Ґ№ќ}…µЅХ№Р°ЃЅБ•№•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}Ќ…Н”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=HЃUAQ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Х№…ББ±Ґ•ђЃЌ…Н Ѓ…ББ±дЃЙ•ЕХҐЙ•МЃ„ЃНСЅЙ•ђЃЌЅ±±•ЌСҐЅёЃЌ…Н”€¤(ЂЂЂЂЂЂЂЂЂЂЂЃНСЅЙ•ђЂфЃН•±№}ЌЅ±±•ЌСҐЅ№}Ќ…Н•}™ЙЅµ}ЙЅЬЎЙЅЬ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃНСЅЙ•ђ№ЌЅ±±•ЌСҐЅ№}Ќ…Н•}НС…СХМЃҐёЃм‰Н•СС±•ђ€°Ђ‰ЩЅҐ‘•ђ€°Ђ‰‘ҐНБХС•ђ‰фи(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Н•СС±•ђЃЌЅ±±•ЌСҐЅёЃЌ…Н•МЃЌ…№№ЅРЃ…ЌЌ•БРЃХ№…ББ±Ґ•ђЃЌ…Н €¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•µ…Ґ№Ґ№њЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎНСЅЙ•ђ№ЅХСНС…№‘Ґ№ќ}…µЅХ№Р¤¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃ…µЅХ№РЂшЃЙ•µ…Ґ№Ґ№њи(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Х№…ББ±Ґ•ђЃЌ…Н Ѓ…ББ±дЃ…µЅХ№РЃЌ…№№ЅРЃ•бЌ••ђЃЅХСНС…№‘Ґ№њ€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUAQЃ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}Ќ…Н”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃMPЃЅХСНС…№‘Ґ№ќ}…µЅХ№РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЙ•µ…Ґ№Ґ№њЂґЃ…µЅХ№Р°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃХБ‘…С•ђЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃХБ‘…С•ђЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃСЎ”ЃЙЅЬЃҐМЃ±ЅЌ­•ђЃ…‰ЅЩ”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Х№…ББ±Ґ•ђЃЌ…Н Ѓ…ББ±дЃЙ•ЕХҐЙ•МЃ„ЃНСЅЙ•ђЃЌЅ±±•ЌСҐЅёЃЌ…Н”€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}ЌЅ±±•ЌСҐЅ№}Ќ…Н”ЎЌХЙНЅИ°ЃUU%ЎНСИЎХБ‘…С•‘lБt¤¤¤((ЂЂЂЃ‘•Ѓќ•С}ЌЙ•‘ҐС}…‘©ХНСµ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС‘©ХНСµ•№РЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃЌЙ•‘ҐРЃ…‘©ХНСµ•№РЃ‰дЃЅБ…ЕХ”ЃҐ‘•№СҐ™Ґ•Иё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}…‘©ХНСµ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ЌЙ•‘ҐС}…‘©ХНСµ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}ЌЙ•‘ҐС}…‘©ХНСµ•№Р (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н иЃНСИ°(ЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёиЃҐ№Р°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС‘©ХНСµ•№РЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃЌЙ•‘ҐРµ…‘©ХНСµ•№РЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}…‘©ХНСµ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ЌЙ•‘ҐС}…‘©ХНСµ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}ЌЙ•‘ҐС}…‘©ХНСµ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЌЙ•‘ҐРиЃMСЅЙ•‘Й•‘ҐС‘©ХНСµ•№Р(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС‘©ХНСµ•№Ри(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”Ѓ•б…ЌРЃЌЙ•‘ҐРЃ…‘©ХНСµ•№РЃЅИЃЙ•СХЙёЃҐСМЃҐ‘•№СҐСдЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃЌЙ•‘ҐР№ЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”Ѓ№ЅРЃҐёЃм‰Й…СҐ№ќ}ЌЅЙЙ•ЌСҐЅё€°Ђ‰ќЅЅ‘ЭҐ±°€°Ђ‰‰Ґ±±Ґ№ќ}•ЙЙЅИ‰фи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”ЃҐМЃ№ЅРЃҐёЃСЎ”ЃЌ±ЅН•ђЃН•Р€¤(ЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЌЙ•‘ҐР№ЌЙ•‘ҐС}…µЅХ№Р¤¤(ЂЂЂЂЂЂЂЃС…б}•бЌ±ХНҐЩ•}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЌЙ•‘ҐР№С…б}•бЌ±ХНҐЩ•}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃС…б}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЌЙ•‘ҐР№С…б}…µЅХ№Р¤¤(ЂЂЂЂЂЂЂЃҐЃЌЙ•‘ҐС}…µЅХ№РЂрфЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘ҐРЃ…µЅХ№РЃµХНРЃ‰”Ѓ„ЃБЅНҐСҐЩ”Ѓ•б…ЌРЃ‘•ЌҐµ…°€¤(ЂЂЂЂЂЂЂЃҐЃС…б}•бЌ±ХНҐЩ•}…µЅХ№РЂ¬ЃС…б}…µЅХ№РЂ„фЃЌЙ•‘ҐС}…µЅХ№Ри(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘ҐРЃС…аЃНБ±ҐРЃµХНРЃНХґЃСјЃЌЙ•‘ҐС}…µЅХ№Р€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}…‘©ХНСµ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЌЙ•‘ҐС}…µЅХ№Р°ЃС…б}•бЌ±ХНҐЩ•}…µЅХ№Р°ЃС…б}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃЙ•ЌЅЙ‘•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№ЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№ЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№ЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС…б}•бЌ±ХНҐЩ•}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС…б}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№Й•ЌЅЙ‘•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}…‘©ХНСµ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐР№ЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘ҐРЃ…‘©ХНСµ•№РЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}ЌЙ•‘ҐС}…‘©ХНСµ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ±ҐНС}ЌЙ•‘ҐС}…‘©ХНСµ•№СМ (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘Й•‘ҐС‘©ХНСµ•№Р°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЌЙ•‘ҐРЃ…‘©ХНСµ•№СМЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}…‘©ХНСµ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃЙ•ЌЅЙ‘•‘}…Р°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}ЌЙ•‘ҐС}…‘©ХНСµ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС” (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС”ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”ЃҐННХ•ђЃЌЙ•‘ҐРЃ№ЅС”Ѓ™ЅИЃЅ№”ЃС•№…№РЃЌЙ•‘ҐР°ЃҐЃ…№дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓќ•С}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС” (ЂЂЂЂЂЂЂЃН•±°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС”ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃҐННХ•ђЃЌЙ•‘ҐРЃ№ЅС”Ѓ‰дЃҐ№С•Й№…°ЃҐ‘•№СҐ™Ґ•И°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ±ҐНС}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•Н}™ЅЙ}С•№…№Р (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС”°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃҐННХ•ђЃЌЙ•‘ҐРЃ№ЅС•МЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃҐННХ•‘}…Р°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС”ЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС” (ЂЂЂЂЂЂЂЃН•±°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”иЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС”(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС”и(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”ЃЌЅµµ•ЙЌҐ…°ЃЌЙ•‘ҐРµ№ЅС”ЃН№…БНЎЅРЃЅИЃЙ•СХЙёЃҐСМЃҐ‘•№СҐСдЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃUII9e}=}AQQI8№™Х±±µ…СЌ ЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌХЙЙ•№Ќе}ЌЅ‘”¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌХЙЙ•№Ќе}ЌЅ‘”ЃµХНРЃ‰”Ѓ„ЃСЎЙ•”µ±•СС•ИЃ%M<ЃЌЅ‘”€¤(ЂЂЂЂЂЂЂЃҐЃM=UI}Ae1=}!M!}AQQI8№™Х±±µ…СЌ ЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЃµХНРЃ‰”Ѓ„ЃНЎ„ИФШЃ‘Ґќ•НР€¤(ЂЂЂЂЂЂЂЃҐЂ (ЂЂЂЂЂЂЂЂЂЂЂЃM=UI}Ae1=}!M!}AQQI8№™Х±±µ…СЌ  (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌЙ•‘ҐС}…‘©ХНСµ•№С}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н (ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐМЃ9Ѕ№”(ЂЂЂЂЂЂЂЂ¤и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘ҐС}…‘©ХНСµ•№С}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЃµХНРЃ‰”Ѓ„ЃНЎ„ИФШЃ‘Ґќ•НР€¤(ЂЂЂЂЂЂЂЃҐЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НС…СХМЂ„фЂ‰ҐННХ•ђ€и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НС…СХМЃµХНРЃ‰”ЃҐННХ•ђ€¤(ЂЂЂЂЂЂЂЃҐЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”Ѓ№ЅРЃҐёЃм(ЂЂЂЂЂЂЂЂЂЂЂЂ‰Й…СҐ№ќ}ЌЅЙЙ•ЌСҐЅё€°(ЂЂЂЂЂЂЂЂЂЂЂЂ‰ќЅЅ‘ЭҐ±°€°(ЂЂЂЂЂЂЂЂЂЂЂЂ‰‰Ґ±±Ґ№ќ}•ЙЙЅИ€°(ЂЂЂЂЂЂЂЃфи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”ЃҐМЃ№ЅРЃҐёЃСЎ”ЃЌ±ЅН•ђЃН•Р€¤(ЂЂЂЂЂЂЂЃ•бЌ±ХНҐЩ”ЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№С…б}•бЌ±ХНҐЩ•}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃС…б}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№С…б}…µЅХ№Р¤¤(ЂЂЂЂЂЂЂЃҐ№Ќ±ХНҐЩ”ЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№С…б}Ґ№Ќ±ХНҐЩ•}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃҐЃ•бЌ±ХНҐЩ”Ђ¬ЃС…б}…µЅХ№РЂ„фЃҐ№Ќ±ХНҐЩ”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ҐННХ•ђЃЌЙ•‘ҐРЃ№ЅС”ЃСЅС…±МЃµХНРЃНХґ€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃС…б}•бЌ±ХНҐЩ•}…µЅХ№Р°ЃС…б}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС…б}Ґ№Ќ±ХНҐЩ•}…µЅХ№Р°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НС…СХМ°ЃҐННХ•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌЙ•‘ҐС}…‘©ХНСµ•№С}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•бЌ±ХНҐЩ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС…б}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№Ќ±ХНҐЩ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ҐННХ•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС”№ЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ҐННХ•ђЃЌЙ•‘ҐРЃ№ЅС”ЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС”ЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•YЅҐђЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”ЃЩЅҐђЃЙЅЬЃ™ЅИЃЅ№”ЃС•№…№РЃҐННХ•ђЃҐ№ЩЅҐЌ”°ЃҐЃ…№дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓќ•С}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•YЅҐђЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃҐННХ•ђµҐ№ЩЅҐЌ”ЃЩЅҐђЃ‰дЃҐ№С•Й№…°ЃҐ‘•№СҐ™Ґ•И°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ±ҐНС}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘Н}™ЅЙ}С•№…№Р (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•YЅҐђ°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃҐННХ•ђµҐ№ЩЅҐЌ”ЃЩЅҐ‘МЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃЩЅҐ‘•‘}…Р°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђиЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•YЅҐђ(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•YЅҐђи(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”ЃХ№ХН•ђЃҐННХ•ђµҐ№ЩЅҐЌ”ЃЩЅҐђЃЅИЃЙ•СХЙёЃҐСМЃҐ‘•№СҐСдЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃUII9e}=}AQQI8№™Х±±µ…СЌ ЎҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ЌХЙЙ•№Ќе}ЌЅ‘”¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌХЙЙ•№Ќе}ЌЅ‘”ЃµХНРЃ‰”Ѓ„ЃСЎЙ•”µ±•СС•ИЃ%M<ЃЌЅ‘”€¤(ЂЂЂЂЂЂЂЃҐЃM=UI}Ae1=}!M!}AQQI8№™Х±±µ…СЌ  (ЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н (ЂЂЂЂЂЂЂЂ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЃµХНРЃ‰”Ѓ„ЃНЎ„ИФШЃ‘Ґќ•НР€¤(ЂЂЂЂЂЂЂЃҐЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}НС…СХМЂ„фЂ‰Й•ЌЅЙ‘•ђ€и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}НС…СХМЃµХНРЃ‰”ЃЙ•ЌЅЙ‘•ђ€¤(ЂЂЂЂЂЂЂЃЙ•µ…Ґ№Ґ№њЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№Й•µ…Ґ№Ґ№ќ}ЅХСНС…№‘Ґ№ќ}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃҐЃЙ•µ…Ґ№Ґ№њЂ„фЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ҐННХ•ђµҐ№ЩЅҐЌ”ЃЩЅҐђЃЙ•µ…Ґ№Ґ№њЃµХНРЃ‰”Ѓ•б…ЌРЃй•Йј€¤(ЂЂЂЂЂЂЂЃЩЅҐ‘•‘}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ЩЅҐ‘•‘}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃҐЃЩЅҐ‘•‘}…µЅХ№РЂрфЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ҐННХ•ђµҐ№ЩЅҐЌ”ЃЩЅҐђЃ…µЅХ№РЃµХНРЃ‰”Ѓ„ЃБЅНҐСҐЩ”Ѓ•б…ЌРЃ‘•ЌҐµ…°€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЩЅҐ‘•‘}…µЅХ№Р°ЃЙ•µ…Ґ№Ґ№ќ}ЅХСНС…№‘Ґ№ќ}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}НС…СХМ°ЃЩЅҐ‘•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЩЅҐ‘•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ•µ…Ґ№Ґ№њ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ЩЅҐ‘•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ№ҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰ҐННХ•ђµҐ№ЩЅҐЌ”ЃЩЅҐђЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС•YЅҐђЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”ЃЩЅҐђЃЙЅЬЃ™ЅИЃЅ№”ЃС•№…№РЃҐННХ•ђЃЌЙ•‘ҐРЃ№ЅС”°ЃҐЃ…№дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓќ•С}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС•YЅҐђЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃҐННХ•ђµЌЙ•‘ҐРµ№ЅС”ЃЩЅҐђЃ‰дЃҐ№С•Й№…°ЃҐ‘•№СҐ™Ґ•И°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ±ҐНС}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘Н}™ЅЙ}С•№…№Р (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС•YЅҐђ°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃҐННХ•ђµЌЙ•‘ҐРµ№ЅС”ЃЩЅҐ‘МЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃЩЅҐ‘•‘}…Р°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђиЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС•YЅҐђ(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС•YЅҐђи(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”ЃХ№ХН•ђЃҐННХ•ђµЌЙ•‘ҐРµ№ЅС”ЃЩЅҐђЃЅИЃЙ•СХЙёЃҐСМЃҐ‘•№СҐСдЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃUII9e}=}AQQI8№™Х±±µ…СЌ ЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ЌХЙЙ•№Ќе}ЌЅ‘”¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌХЙЙ•№Ќе}ЌЅ‘”ЃµХНРЃ‰”Ѓ„ЃСЎЙ•”µ±•СС•ИЃ%M<ЃЌЅ‘”€¤(ЂЂЂЂЂЂЂЃҐЃM=UI}Ae1=}!M!}AQQI8№™Х±±µ…СЌ  (ЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н (ЂЂЂЂЂЂЂЂ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЃµХНРЃ‰”Ѓ„ЃНЎ„ИФШЃ‘Ґќ•НР€¤(ЂЂЂЂЂЂЂЃҐЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}НС…СХМЂ„фЂ‰Й•ЌЅЙ‘•ђ€и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}НС…СХМЃµХНРЃ‰”ЃЙ•ЌЅЙ‘•ђ€¤(ЂЂЂЂЂЂЂЃЩЅҐ‘•‘}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ЩЅҐ‘•‘}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃҐЃЩЅҐ‘•‘}…µЅХ№РЂрфЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰ҐННХ•ђµЌЙ•‘ҐРµ№ЅС”ЃЩЅҐђЃ…µЅХ№РЃµХНРЃ‰”Ѓ„ЃБЅНҐСҐЩ”Ѓ•б…ЌРЃ‘•ЌҐµ…°€(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЩЅҐ‘•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}НС…СХМ°ЃЩЅҐ‘•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЩЅҐ‘•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ЩЅҐ‘•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰ҐННХ•ђµЌЙ•‘ҐРµ№ЅС”ЃЩЅҐђЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС9ЅС•ББ±ҐЌ…СҐЅёЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”Ѓ…ББ±ҐЌ…СҐЅёЃ™ЅИЃЅ№”ЃС•№…№РЃҐННХ•ђЃЌЙ•‘ҐРЃ№ЅС”°ЃҐЃ…№дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓќ•С}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС9ЅС•ББ±ҐЌ…СҐЅёЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃЌЙ•‘ҐРµ№ЅС”Ѓ…ББ±ҐЌ…СҐЅёЃ‰дЃҐ№С•Й№…°ЃҐ‘•№СҐ™Ґ•И°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ±ҐНС}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№Н}™ЅЙ}С•№…№Р (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘Й•‘ҐС9ЅС•ББ±ҐЌ…СҐЅё°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЌЙ•‘ҐРµ№ЅС”Ѓ…ББ±ҐЌ…СҐЅ№МЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ…ББ±Ґ•‘}…Р°ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅёЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅёиЃMСЅЙ•‘Й•‘ҐС9ЅС•ББ±ҐЌ…СҐЅё(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС9ЅС•ББ±ҐЌ…СҐЅёи(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”Ѓ…ББ±Ґ•ђЃЌЙ•‘ҐРµ№ЅС”Ѓ…ББ±ҐЌ…СҐЅёЃЅИЃЙ•СХЙёЃҐСМЃҐ‘•№СҐСдЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃUII9e}=}AQQI8№™Х±±µ…СЌ ЎЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ЌХЙЙ•№Ќе}ЌЅ‘”¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌХЙЙ•№Ќе}ЌЅ‘”ЃµХНРЃ‰”Ѓ„ЃСЎЙ•”µ±•СС•ИЃ%M<ЃЌЅ‘”€¤(ЂЂЂЂЂЂЂЃҐЃM=UI}Ae1=}!M!}AQQI8№™Х±±µ…СЌ  (ЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н (ЂЂЂЂЂЂЂЂ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЃµХНРЃ‰”Ѓ„ЃНЎ„ИФШЃ‘Ґќ•НР€¤(ЂЂЂЂЂЂЂЃҐЃM=UI}Ae1=}!M!}AQQI8№™Х±±µ…СЌ  (ЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н (ЂЂЂЂЂЂЂЂ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЃµХНРЃ‰”Ѓ„ЃНЎ„ИФШЃ‘Ґќ•НР€(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃҐЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}НС…СХМЂ„фЂ‰…ББ±Ґ•ђ€и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}НС…СХМЃµХНРЃ‰”Ѓ…ББ±Ґ•ђ€¤(ЂЂЂЂЂЂЂЃ…ББ±Ґ•‘}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° (ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№…ББ±Ґ•‘}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃҐЃ…ББ±Ґ•‘}…µЅХ№РЂрфЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰ЌЙ•‘ҐРЃ№ЅС”Ѓ…ББ±ҐЌ…СҐЅёЃ…µЅХ№РЃµХНРЃ‰”Ѓ„ЃБЅНҐСҐЩ”Ѓ•б…ЌРЃ‘•ЌҐµ…°€(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…ББ±Ґ•‘}…µЅХ№Р°ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}НС…СХМ°Ѓ…ББ±Ґ•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…ББ±Ґ•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№…ББ±Ґ•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰ЌЙ•‘ҐРµ№ЅС”Ѓ…ББ±ҐЌ…СҐЅёЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅёЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}НБ•№‘}‰Х‘ќ•Р (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃЭҐ№‘ЅЭ}НС…ЙС•‘}…РиЃ‘…С•СҐµ”°(ЂЂЂЂЂЂЂЃЭҐ№‘ЅЭ}•№‘•‘}…РиЃ‘…С•СҐµ”°(ЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”иЃНСИ°(ЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н иЃНСИ°(ЂЂЂЂЂЂЂЃНБ•№‘}‰Х‘ќ•С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёиЃҐ№Р°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘MБ•№‘	Х‘ќ•РЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”ЃНБ•№ђЃ‰Х‘ќ•РЃ™ЅИЃЅ№”ЃС•№…№РµНЌЅБ•ђЃҐ‘•№СҐСд°ЃҐЃ…№дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃНБ•№‘}‰Х‘ќ•С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№НБ•№‘}‰Х‘ќ•Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЭҐ№‘ЅЭ}НС…ЙС•‘}…РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЭҐ№‘ЅЭ}•№‘•‘}…РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌХЙЙ•№Ќе}ЌЅ‘”ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНБ•№‘}‰Х‘ќ•С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЭҐ№‘ЅЭ}НС…ЙС•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЭҐ№‘ЅЭ}•№‘•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНБ•№‘}‰Х‘ќ•С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}НБ•№‘}‰Х‘ќ•Р (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓќ•С}НБ•№‘}‰Х‘ќ•РЎН•±°ЃНБ•№‘}‰Х‘ќ•С}ҐђиЃUU%¤ЂґшЃMСЅЙ•‘MБ•№‘	Х‘ќ•РЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃНБ•№ђЃ‰Х‘ќ•РЃ‰дЃҐ№С•Й№…°ЃҐ‘•№СҐ™Ґ•И°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃНБ•№‘}‰Х‘ќ•С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№НБ•№‘}‰Х‘ќ•Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃНБ•№‘}‰Х‘ќ•С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎНБ•№‘}‰Х‘ќ•С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}НБ•№‘}‰Х‘ќ•Р (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}НБ•№‘}‰Х‘ќ•РЎН•±°Ѓ‰Х‘ќ•РиЃMСЅЙ•‘MБ•№‘	Х‘ќ•Р¤ЂґшЃMСЅЙ•‘MБ•№‘	Х‘ќ•Ри(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”ЃБХ‰±ҐНЎ•ђЃНБ•№ђЃ‰Х‘ќ•РЃЅИЃЙ•СХЙёЃҐСМЃҐ‘•№СҐСдЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃUII9e}=}AQQI8№™Х±±µ…СЌ Ў‰Х‘ќ•Р№ЌХЙЙ•№Ќе}ЌЅ‘”¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌХЙЙ•№Ќе}ЌЅ‘”ЃµХНРЃ‰”Ѓ„ЃСЎЙ•”µ±•СС•ИЃ%M<ЃЌЅ‘”€¤(ЂЂЂЂЂЂЂЃҐЃM=UI}Ae1=}!M!}AQQI8№™Х±±µ…СЌ Ў‰Х‘ќ•Р№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЃµХНРЃ‰”Ѓ„ЃНЎ„ИФШЃ‘Ґќ•НР€¤(ЂЂЂЂЂЂЂЃҐЃ‰Х‘ќ•Р№НБ•№‘}‰Х‘ќ•С}НС…СХМЂ„фЂ‰БХ‰±ҐНЎ•ђ€и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НБ•№‘}‰Х‘ќ•С}НС…СХМЃµХНРЃ‰”ЃБХ‰±ҐНЎ•ђ€¤(ЂЂЂЂЂЂЂЃ‰Х‘ќ•С}…µЅХ№РЂфЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°Ў‰Х‘ќ•Р№‰Х‘ќ•С}…µЅХ№Р¤¤(ЂЂЂЂЂЂЂЃҐЃ‰Х‘ќ•С}…µЅХ№РЂрфЂАи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰‰Х‘ќ•РЃ…µЅХ№РЃµХНРЃ‰”Ѓ„ЃБЅНҐСҐЩ”Ѓ•б…ЌРЃ‘•ЌҐµ…°€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№НБ•№‘}‰Х‘ќ•Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎНБ•№‘}‰Х‘ќ•С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНБ•№‘}‰Х‘ќ•С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌХЙЙ•№Ќе}ЌЅ‘”°Ѓ‰Х‘ќ•С}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЭҐ№‘ЅЭ}НС…ЙС•‘}…Р°ЃЭҐ№‘ЅЭ}•№‘•‘}…Р°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБХ‰±ҐНЎ•‘}…Р°ЃНБ•№‘}‰Х‘ќ•С}НС…СХМ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃНБ•№‘}‰Х‘ќ•С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№НБ•№‘}‰Х‘ќ•С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№НБ•№‘}‰Х‘ќ•С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•С}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№ЭҐ№‘ЅЭ}НС…ЙС•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№ЭҐ№‘ЅЭ}•№‘•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№БХ‰±ҐНЎ•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№НБ•№‘}‰Х‘ќ•С}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃНБ•№‘}‰Х‘ќ•С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№НБ•№‘}‰Х‘ќ•Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЭҐ№‘ЅЭ}НС…ЙС•‘}…РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЭҐ№‘ЅЭ}•№‘•‘}…РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌХЙЙ•№Ќе}ЌЅ‘”ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНБ•№‘}‰Х‘ќ•С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№ЭҐ№‘ЅЭ}НС…ЙС•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№ЭҐ№‘ЅЭ}•№‘•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Х‘ќ•Р№НБ•№‘}‰Х‘ќ•С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НБ•№ђЃ‰Х‘ќ•РЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}НБ•№‘}‰Х‘ќ•РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ±ҐНС}НБ•№‘}‰Х‘ќ•СМ (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘MБ•№‘	Х‘ќ•Р°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃНБ•№ђЃ‰Х‘ќ•СМЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃНБ•№‘}‰Х‘ќ•С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№НБ•№‘}‰Х‘ќ•Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃБХ‰±ҐНЎ•‘}…Р°ЃНБ•№‘}‰Х‘ќ•С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}НБ•№‘}‰Х‘ќ•РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н иЃНСИ°(ЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёиЃҐ№Р°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃ‘Й…™РµЅ№±дЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБ…еµ•№С}Й•Ќ•ҐБС}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}Й•Ќ•ҐБР (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃБ…еµ•№С}Й•Ќ•ҐБС}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н иЃНСИ°(ЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёиЃҐ№Р°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃЌ…Н ЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБ…еµ•№С}Й•Ќ•ҐБС}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}ЌЙ•‘ҐР (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н иЃНСИ°(ЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёиЃҐ№Р°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃЌЙ•‘ҐРЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}ЌЙ•‘ҐС}…‘©ХНСµ•№Р (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђиЃUU%°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃЌЙ•‘ҐРЃБЙЅБЅН…°Ѓ‰дЃЌЙ•‘ҐРЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}ЭЙҐС•}Ѕ™ (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђиЃUU%°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃЭЙҐС”µЅ™ЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}Й•™Х№ђ (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђиЃUU%°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃ±•™СЅЩ•ИµЙ•™Х№ђЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}Х№…ББ±Ґ•‘}Ќ…Н  (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђиЃUU%°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃ±•™СЅЩ•ИЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђиЃUU%°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃ±•™СЅЩ•Иµ…ББ±дЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђиЃUU%°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃХ№ХН•ђЃҐ№ЩЅҐЌ”µЩЅҐђЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђиЃUU%°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃХ№ХН•ђЃЌЙ•‘ҐРµ№ЅС”µЩЅҐђЃБЙЅБЅН…°ЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}©ЅХЙ№…±}БЙЅБЅН…±}™ЅЙ}Ґ№ЩЅҐЌ•}‘Й…™Р (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђиЃUU%°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”Ѓ‘Й…™РµЅ№±дЃҐ№ЩЅҐЌ”Ѓ©ЅХЙ№…°Ѓ™ЅИЃЅ№”ЃС•№…№РµНЌЅБ•ђЃ‘Й…™Рё((ЂЂЂЂЂЂЂЃMБ•ЌҐ…±Ґй•ђЃЌ…Н °ЃЌЙ•‘ҐР°ЃЭЙҐС”µЅ™°Ѓ±•™СЅЩ•И°Ѓ…ББ±д°ЃЙ•™Х№ђ°(ЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ”µЩЅҐђ°Ѓ…№ђЃЌЙ•‘ҐРµ№ЅС”µЩЅҐђЃБЙЅБЅН…±МЃНЎ…Й”(ЂЂЂЂЂЂЂЃЃЃҐ№ЩЅҐЌ•}‘Й…™С}Ґ‘ЃЂЃ‰ХРЃ…Й”Ѓ№ЅРЃСЎҐМЃҐ‘•№СҐСдёЃ	Ґ№‘Ґ№њЃХН•МЃ	Ґ±±Ґ№њ(ЂЂЂЂЂЂЂЃЃЃБЙЅБЅН…±}Ґ‘ЃЂЃЅ№±дё(ЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБ…еµ•№С}Й•Ќ•ҐБС}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°иЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°°(ЂЂЂЂЂЂЂЃБЙЅБЅН…±}±Ґ№•МиЃСХБ±•mMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…±1Ґ№”°Ђёё№t°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°и(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”Ѓ‰…±…№Ќ•ђЃҐ№ЩЅҐЌ”µ‘Й…™Р°ЃЌ…Н °ЃЌЙ•‘ҐР°ЃЭЙҐС”µЅ™°Ѓ±•™СЅЩ•И°Ѓ…ББ±д°ЃЙ•™Х№ђ°ЃХ№ХН•ђЃҐ№ЩЅҐЌ”µЩЅҐђ°ЃЅИЃХ№ХН•ђЃЌЙ•‘ҐРµ№ЅС”µЩЅҐђЃБЙЅБЅН…°ЃЅИЃҐСМЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃ©ЅХЙ№…±}БЙЅБЅН…°№БЙЅБЅН…±}НС…СХМЃ№ЅРЃҐёЃм(ЂЂЂЂЂЂЂЂЂЂЂЂ‰‘Й…™Р€°(ЂЂЂЂЂЂЂЂЂЂЂЂ‰Щ…±Ґ‘…С•ђ€°(ЂЂЂЂЂЂЂЂЂЂЂЂ‰•бБЅЙС•ђ€°(ЂЂЂЂЂЂЂЂЂЂЂЂ‰Й•©•ЌС•ђ€°(ЂЂЂЂЂЂЂЃфи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰©ЅХЙ№…°ЃБЙЅБЅН…±МЃЌ…№№ЅРЃ‰”ЃБЅНС•ђ€¤(ЂЂЂЂЂЂЂЃҐЃ№ЅРЃБЙЅБЅН…±}±Ґ№•МЃЅИЃ±•ёЎн±Ґ№”№±Ґ№•}№Хµ‰•ИЃ™ЅИЃ±Ґ№”ЃҐёЃБЙЅБЅН…±}±Ґ№•Нф¤Ђ„фЃ±•ё (ЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}±Ґ№•М(ЂЂЂЂЂЂЂЂ¤и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰©ЅХЙ№…°ЃБЙЅБЅН…°Ѓ±Ґ№”Ѓ№Хµ‰•ЙМЃµХНРЃ‰”ЃХ№ҐЕХ”€¤(ЂЂЂЂЂЂЂЃБ…ЙН•‘}±Ґ№•МЂфЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°Ў±Ґ№”№‘•‰ҐС}…µЅХ№Р¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°Ў±Ґ№”№ЌЙ•‘ҐС}…µЅХ№Р¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃ±Ґ№”ЃҐёЃБЙЅБЅН…±}±Ґ№•М(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃ™ЅИЃ±Ґ№”°Ѓ‘•‰ҐС}…µЅХ№Р°ЃЌЙ•‘ҐС}…µЅХ№РЃҐёЃБ…ЙН•‘}±Ґ№•Ми(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃ±Ґ№”№©ЅХЙ№…±}БЙЅБЅН…±}ҐђЂ„фЃ©ЅХЙ№…±}БЙЅБЅН…°№©ЅХЙ№…±}БЙЅБЅН…±}Ґђи(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰©ЅХЙ№…°ЃБЙЅБЅН…°Ѓ±Ґ№”ЃЎ…МЃСЎ”ЃЭЙЅ№њЃБЙЅБЅН…°ЃҐ‘•№СҐСд€¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃ±Ґ№”№С•№…№С}…ЌЌЅХ№С}ҐђЂ„фЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђи(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰©ЅХЙ№…°ЃБЙЅБЅН…°Ѓ±Ґ№”ЃЎ…МЃСЎ”ЃЭЙЅ№њЃС•№…№РЃҐ‘•№СҐСд€¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЂЎ‘•‰ҐС}…µЅХ№РЂшЂА¤ЂффЂЎЌЙ•‘ҐС}…µЅХ№РЂшЂА¤и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰©ЅХЙ№…°ЃБЙЅБЅН…°Ѓ±Ґ№•МЃµХНРЃ‰”Ѓ‘•‰ҐРЃa=HЃЌЙ•‘ҐР€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•ЕХҐЙ•}БЅНС…‰±•}©ЅХЙ№…±}±Ґ№•}…µЅХ№СМЎ‘•‰ҐС}…µЅХ№Р°ЃЌЙ•‘ҐС}…µЅХ№Р¤(ЂЂЂЂЂЂЂЃҐЃНХґ ЎҐС•µlЕtЃ™ЅИЃҐС•ґЃҐёЃБ…ЙН•‘}±Ґ№•М¤°ЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° €А€¤¤Ђ„фЃНХґ (ЂЂЂЂЂЂЂЂЂЂЂЂЎҐС•µlЙtЃ™ЅИЃҐС•ґЃҐёЃБ…ЙН•‘}±Ґ№•М¤°ЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…° €А€¤(ЂЂЂЂЂЂЂЂ¤и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰©ЅХЙ№…°ЃБЙЅБЅН…°Ѓ±Ґ№•МЃµХНРЃ‰…±…№Ќ”€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃҐ‘•µБЅС•№Ќе}­•д°Ѓ±•ќ…±}•№СҐСе}Й•™•Й•№Ќ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№С•№‘•‘}‰ЅЅ­}ЙЅ±•}ЌЅ‘”°ЃСЙ…№Н…ЌСҐЅ№}ЌХЙЙ•№Ќд°ЃСЙ…№Н…ЌСҐЅ№}‘…С”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…ЌЌЅХ№СҐ№ќ}‘…С”°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃБЙЅБЅН•‘}…Р°ЃБЙЅБЅН…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}•Щ•№С}Й•™•Й•№Ќ”°ЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9Ѓ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№БЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Ґ‘•µБЅС•№Ќе}­•д°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№±•ќ…±}•№СҐСе}Й•™•Й•№Ќ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Ґ№С•№‘•‘}‰ЅЅ­}ЙЅ±•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№СЙ…№Н…ЌСҐЅ№}ЌХЙЙ•№Ќд°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№СЙ…№Н…ЌСҐЅ№}‘…С”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№…ЌЌЅХ№СҐ№ќ}‘…С”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№БЙЅБЅН•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№БЙЅБЅН…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№НЅХЙЌ•}•Щ•№С}Й•™•Й•№Ќ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Б…еµ•№С}Й•Ќ•ҐБС}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№ЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№ЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃ©ЅХЙ№…±}БЙЅБЅН…°№Б…еµ•№С}Й•Ќ•ҐБС}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ‘•№СҐСе}Щ…±Х”ЂфЃ©ЅХЙ№…±}БЙЅБЅН…°№Б…еµ•№С}Й•Ќ•ҐБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБ…еµ•№С}Й•Ќ•ҐБС}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ‘•№СҐСе}Щ…±Х”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№БЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•±ҐЃ©ЅХЙ№…±}БЙЅБЅН…°№ЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ‘•№СҐСе}Щ…±Х”ЂфЃ©ЅХЙ№…±}БЙЅБЅН…°№ЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ‘•№СҐСе}Щ…±Х”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№БЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•±ҐЃ©ЅХЙ№…±}БЙЅБЅН…°№ЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№ЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•±ҐЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•±ҐЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•±ҐЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•±ҐЃ©ЅХЙ№…±}БЙЅБЅН…°№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•±ҐЃ©ЅХЙ№…±}БЙЅБЅН…°№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•±Н”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБ…еµ•№С}Й•Ќ•ҐБС}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђЃ%LЃ9U10(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…°№БЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰©ЅХЙ№…°ЃБЙЅБЅН…°ЃҐ‘•№СҐСдЃЌЅ№™±ҐЌСМЃЭҐС Ѓ…ёЃ•бҐНСҐ№њЃЙЅЬ€¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…°ЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃ±Ґ№”°Ѓ‘•‰ҐС}…µЅХ№Р°ЃЌЙ•‘ҐС}…µЅХ№РЃҐёЃБ…ЙН•‘}±Ґ№•Ми(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…±}±Ґ№”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎ©ЅХЙ№…±}БЙЅБЅН…±}±Ґ№•}Ґђ°Ѓ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ±Ґ№•}№Хµ‰•И°Ѓ…ЌЌЅХ№С}ЙЅ±•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‘•‰ҐС}…µЅХ№Р°ЃЌЙ•‘ҐС}…µЅХ№Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№”№©ЅХЙ№…±}БЙЅБЅН…±}±Ґ№•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№”№©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№”№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№”№±Ґ№•}№Хµ‰•И°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№”№…ЌЌЅХ№С}ЙЅ±•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‘•‰ҐС}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎ©ЅХЙ№…±}БЙЅБЅН…°№©ЅХЙ№…±}БЙЅБЅН…±}Ґђ¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓќ•С}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЃН•±°Ѓ©ЅХЙ№…±}БЙЅБЅН…±}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”Ѓ©ЅХЙ№…°ЃБЙЅБЅН…°Ѓ‰дЃЅБ…ЕХ”ЃҐ‘•№СҐ™Ґ•Иё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃ©ЅХЙ№…±}БЙЅБЅН…±}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ±ҐНС}©ЅХЙ№…±}БЙЅБЅН…±М (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃ©ЅХЙ№…°ЃБЙЅБЅН…±МЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃБЙЅБЅН•‘}…Р°Ѓ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…°ЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…° (ЂЂЂЂЂЂЂЃН•±°ЃЌЙ•‘•№СҐ…°иЃMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…°и(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”ЃA$ЃЌЙ•‘•№СҐ…°ёЂЃM•ЌЙ•СМЃ…Й”Ѓ№•Щ•ИЃЙ•Б±…е•ђЃЅИЃНСЅЙ•ђё€€€(ЂЂЂЂЂЂЂЃҐЃЌЙ•‘•№СҐ…°№ЌЙ•‘•№СҐ…±}НС…СХМЃ№ЅРЃҐёЃм‰…ЌСҐЩ”€°Ђ‰Й•ЩЅ­•ђ‰фи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘•№СҐ…±}НС…СХМЃµХНРЃ‰”Ѓ…ЌСҐЩ”ЃЅИЃЙ•ЩЅ­•ђ€¤(ЂЂЂЂЂЂЂЃҐЃ№ЅРЃЌЙ•‘•№СҐ…°№ЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н №НС…ЙСНЭҐС  ‰Ўµ…ЊµНЎ„ИФШи€¤и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н ЃµХНРЃ‰”Ѓ„Ѓ­•е•ђЃ!5€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЂД(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЌЙ•‘•№СҐ…°№ЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н °¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЌХЙНЅИ№™•СЌЎЅ№” ¤ЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н Ѓ…±Й•…‘дЃНСЅЙ•ђ€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘•№СҐ…±}±…‰•°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…±}БЙ•™Ґа°ЃЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н °ЃЌЙ•‘•№СҐ…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}…Р°ЃЙ•ЩЅ­•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЂЎС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ¤Ѓ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№ЌЙ•‘•№СҐ…±}±…‰•°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№ЌЙ•‘•№СҐ…±}БЙ•™Ґа°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№ЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№ЌЙ•‘•№СҐ…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№ҐННХ•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°№Й•ЩЅ­•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЌХЙНЅИ№™•СЌЎЅ№” ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ҐђЃ…±Й•…‘дЃНСЅЙ•ђ€¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃЌЙ•‘•№СҐ…°((ЂЂЂЃ‘•Ѓќ•С}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…° (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃA$ЃЌЙ•‘•№СҐ…°Ѓ‰дЃҐ№С•Й№…°ЃҐ‘•№СҐ™Ґ•И°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘•№СҐ…±}±…‰•°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…±}БЙ•™Ґа°ЃЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н °ЃЌЙ•‘•№СҐ…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}…Р°ЃЙ•ЩЅ­•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}‰е}Ў…Н  (ЂЂЂЂЂЂЂЃН•±°ЃЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н иЃНСИ(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…°ЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”ЃЌЙ•‘•№СҐ…°Ѓ™ЅИЃЅ№”Ѓ­•е•ђЃЎ…Н °ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘•№СҐ…±}±…‰•°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…±}БЙ•™Ґа°ЃЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н °ЃЌЙ•‘•№СҐ…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}…Р°ЃЙ•ЩЅ­•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н °¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ±ҐНС}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±М (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…°°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃA$ЃЌЙ•‘•№СҐ…±МЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘•№СҐ…±}±…‰•°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…±}БЙ•™Ґа°ЃЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н °ЃЌЙ•‘•№СҐ…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}…Р°ЃЙ•ЩЅ­•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃҐННХ•‘}…Р°ЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭМЂфЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±”ЎН•±№}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}™ЙЅµ}ЙЅЬЎЙЅЬ¤Ѓ™ЅИЃЙЅЬЃҐёЃЙЅЭМ¤((ЂЂЂЃ‘•Ѓ±ҐНС}…ЌСҐЩ•}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±М (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…°°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃ…ЌСҐЩ”ЃA$ЃЌЙ•‘•№СҐ…±МЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЌЙ•‘•№СҐ…°ЃҐёЃН•±№±ҐНС}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±МЎС•№…№С}…ЌЌЅХ№С}Ґђ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЌЙ•‘•№СҐ…°№ЌЙ•‘•№СҐ…±}НС…СХМЂффЂ‰…ЌСҐЩ”€(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃЙ•ЩЅ­•}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…° (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ҐђиЃUU%°ЃЙ•ЩЅ­•‘}…РиЃ‘…С•СҐµ”(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…°и(ЂЂЂЂЂЂЂЂ€€‰5…Й¬ЃЅ№”ЃНСЅЙ•ђЃЌЙ•‘•№СҐ…°ЃЙ•ЩЅ­•ђёЂЃЃН•ЌЅ№ђЃЙ•ЩЅ­”ЃҐМЃҐ‘•µБЅС•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUAQЃ‰Ґ±±Ґ№ќ}ЌЅЙ”№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃMPЃЌЙ•‘•№СҐ…±}НС…СХМЂфЂќЙ•ЩЅ­•ђњ°ЃЙ•ЩЅ­•‘}…РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌЙ•‘•№СҐ…±}НС…СХМЂфЂќ…ЌСҐЩ”њ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЙ•ЩЅ­•‘}…Р°ЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЂД(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЌХЙНЅИ№™•СЌЎЅ№” ¤ЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰…Б¤ЃЌЙ•‘•№СҐ…°ЃЙ•ЩЅЌ…СҐЅёЃЙ•ЕХҐЙ•МЃ„ЃНСЅЙ•ђЃЌЙ•‘•№СҐ…°€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘•№СҐ…±}±…‰•°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…±}БЙ•™Ґа°ЃЌЙ•‘•№СҐ…±}Н•ЌЙ•С}Ў…Н °ЃЌЙ•‘•№СҐ…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}…Р°ЃЙ•ЩЅ­•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С•№…№С}…БҐ}ЌЙ•‘•№СҐ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃНСЅЙ•‘}ЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃ…НН•ЙРЃНСЅЙ•‘}ЙЅЬЃҐМЃ№ЅРЃ9Ѕ№”(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}™ЙЅµ}ЙЅЬЎНСЅЙ•‘}ЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}С•№…№С}…БҐ}ЌЙ•‘•№СҐ…±}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…°и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃA$ЃЌЙ•‘•№СҐ…°ЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Q•№…№СБҐЙ•‘•№СҐ…° (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃҐ№РЎЙЅЭlЙt¤°(ЂЂЂЂЂЂЂЂЂЂЂЃНСИЎЙЅЭlНt¤°(ЂЂЂЂЂЂЂЂЂЂЂЃНСИЎЙЅЭlСt¤°(ЂЂЂЂЂЂЂЂЂЂЂЃНСИЎЙЅЭlХt¤°(ЂЂЂЂЂЂЂЂЂЂЂЃНСИЎЙЅЭlЩt¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃНХ‰НЌЙҐБСҐЅёиЃMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅё(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅёи(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”ЃНХ‰НЌЙҐБСҐЅёмЃ„ЃХ№ҐЕХ”ЃҐ‘•№СҐСдЃЙ•СХЙ№МЃҐСМЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃҐЃНХ‰НЌЙҐБСҐЅё№НХ‰НЌЙҐБСҐЅ№}НС…СХМЃ№ЅРЃҐёЃм‰…ЌСҐЩ”€°Ђ‰Й•ЩЅ­•ђ‰фи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰НХ‰НЌЙҐБСҐЅ№}НС…СХМЃµХНРЃ‰”Ѓ…ЌСҐЩ”ЃЅИЃЙ•ЩЅ­•ђ€¤(ЂЂЂЂЂЂЂЃҐЃ№ЅРЃНХ‰НЌЙҐБСҐЅё№Э•‰ЎЅЅ­}Н•ЌЙ•С}Ў…Н №НС…ЙСНЭҐС  ‰Ўµ…ЊµНЎ„ИФШи€¤и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Э•‰ЎЅЅ­}Н•ЌЙ•С}Ў…Н ЃµХНРЃ‰”Ѓ„Ѓ­•е•ђЃ!5€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌ…±±‰…Ќ­}ХЙ°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№С}СеБ•}Н•Р°ЃЭ•‰ЎЅЅ­}Н•ЌЙ•С}БЙ•™Ґа°ЃЭ•‰ЎЅЅ­}Н•ЌЙ•С}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅ№}НС…СХМ°ЃҐННХ•‘}…Р°ЃЙ•ЩЅ­•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№Ќ…±±‰…Ќ­}ХЙ°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№•Щ•№С}СеБ•}Н•Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№Э•‰ЎЅЅ­}Н•ЌЙ•С}БЙ•™Ґа°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№Э•‰ЎЅЅ­}Н•ЌЙ•С}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№НХ‰НЌЙҐБСҐЅ№}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№ҐННХ•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№Й•ЩЅ­•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌ…±±‰…Ќ­}ХЙ°ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ•Щ•№С}СеБ•}Н•РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№Ќ…±±‰…Ќ­}ХЙ°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№•Щ•№С}СеБ•}Н•Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅё№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Э•‰ЎЅЅ¬ЃНХ‰НЌЙҐБСҐЅёЃҐ‘•№СҐСдЃ…±Й•…‘дЃ‰•±Ѕ№ќМЃСјЃ…№ЅСЎ•ИЃЙЅЬ€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅёЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•ЃНСЅЙ•}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Н•ЌЙ•Р (ЂЂЂЂЂЂЂЃН•±°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђиЃUU%°ЃЭ•‰ЎЅЅ­}Н•ЌЙ•РиЃНСИ(ЂЂЂЂ¤ЂґшЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰-••АЃСЎ”ЃЅ№”µСҐµ”ЃН•ЌЙ•РЃҐёЃСЎ”ЃЭЅЙ­•ИЃБЙЅЌ•НМмЃME0ЃНСЅЙ•МЃЅ№±дЃҐСМЃЎ…Н ё€€€(ЂЂЂЂЂЂЂЃҐЃ№ЅРЃЭ•‰ЎЅЅ­}Н•ЌЙ•Ри(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰Э•‰ЎЅЅ¬ЃН•ЌЙ•РЃµХНРЃ‰”Ѓ„Ѓ№Ѕёµ•µБСдЃНСЙҐ№њ€¤(ЂЂЂЂЂЂЂЃН•±№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Н•ЌЙ•СНmЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґ‘tЂфЃЭ•‰ЎЅЅ­}Н•ЌЙ•Р((ЂЂЂЃ‘•Ѓќ•С}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Н•ЌЙ•РЎН•±°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђиЃUU%¤ЂґшЃНСИЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”ЃБЙЅЌ•НМµ±ЅЌ…°ЃН•ЌЙ•РЃ™ЅИЃЅ№”ЃНХ‰НЌЙҐБСҐЅё°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Н•ЌЙ•СМ№ќ•РЎЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ¤((ЂЂЂЃ‘•Ѓќ•С}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅёЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃНХ‰НЌЙҐБСҐЅёЃ‰дЃЅБ…ЕХ”ЃҐ‘•№СҐ™Ґ•Иё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅёЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃЌ…±±‰…Ќ­}ХЙ°иЃНСИ°(ЂЂЂЂЂЂЂЃ•Щ•№С}СеБ•}Н•РиЃНСИ°(ЂЂЂЂЂЂЂЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёиЃҐ№Р°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅёЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃНХ‰НЌЙҐБСҐЅёЃҐ‘•№СҐСд°ЃҐЃБЙ•Н•№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌ…±±‰…Ќ­}ХЙ°ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ•Щ•№С}СеБ•}Н•РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌ…±±‰…Ќ­}ХЙ°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№С}СеБ•}Н•Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅёЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ±ҐНС}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№М (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅё°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃНХ‰НЌЙҐБСҐЅёЃµ•С…‘…С„Ѓ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}±ҐНС}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№МЎС•№…№С}…ЌЌЅХ№С}Ґђ¤((ЂЂЂЃ‘•Ѓ±ҐНС}…ЌСҐЩ•}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№М (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°Ѓ•Щ•№С}СеБ•}ЌЅ‘”иЃНСИ(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅё°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃ…ЌСҐЩ”ЃН…µ”µС•№…№РЃНХ‰НЌЙҐБСҐЅ№МЃЌЅ№С…Ґ№Ґ№њЃЅ№”Ѓ•Щ•№РЃЌЅ‘”ё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}±ҐНС}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№М (ЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№С}СеБ•}ЌЅ‘”х•Щ•№С}СеБ•}ЌЅ‘”(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃЙ•ЩЅ­•}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђиЃUU%°ЃЙ•ЩЅ­•‘}…РиЃ‘…С•СҐµ”(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅёи(ЂЂЂЂЂЂЂЂ€€‰I•ЩЅ­”ЃЅ№”ЃНХ‰НЌЙҐБСҐЅёЃҐ‘•µБЅС•№С±дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUAQЃ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃMPЃНХ‰НЌЙҐБСҐЅ№}НС…СХМЂфЂќЙ•ЩЅ­•ђњ°ЃЙ•ЩЅ­•‘}…РЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНХ‰НЌЙҐБСҐЅ№}НС…СХМЂфЂќ…ЌСҐЩ”њ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЙ•ЩЅ­•‘}…Р°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ‰Э•‰ЎЅЅ¬ЃНХ‰НЌЙҐБСҐЅёЃЙ•ЩЅЌ…СҐЅёЃЙ•ЕХҐЙ•МЃ„ЃНСЅЙ•ђЃНХ‰НЌЙҐБСҐЅё€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅёЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ™Ґ№‘}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃ•Щ•№С}СеБ•}ЌЅ‘”иЃНСИ°(ЂЂЂЂЂЂЂЃНЅХЙЌ•}ҐђиЃUU%°(ЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}Ў…Н иЃНСИ°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№РЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃС•№…№РµНЌЅБ•ђЃЅХС‰ЅаЃҐ‘•№СҐСд°ЃҐЃҐРЃ•бҐНСМё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ•Щ•№С}СеБ•}ЌЅ‘”ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБ…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№С}СеБ•}ЌЅ‘”°ЃНЅХЙЌ•}Ґђ°ЃБ…е±Ѕ…‘}Ў…Н ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓќ•С}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЅХС‰Ѕб}•Щ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№РЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”ЃЅХС‰ЅаЃЙЅЬЃ‰дЃЅБ…ЕХ”ЃҐ‘•№СҐ™Ґ•Иё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЅХС‰Ѕб}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЅХС‰Ѕб}•Щ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЅХС‰Ѕб}•Щ•№РиЃMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Р(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Ри(ЂЂЂЂЂЂЂЂ€€‰A•ЙНҐНРЃЅ№”ЃЅХС‰ЅаЃ•Щ•№Р°ЃЙ•СХЙ№Ґ№њЃСЎ”ЃҐ‘•№СҐСдЃЙ•Б±…дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЅХС‰Ѕб}•Щ•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№С}СеБ•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}Ў…Н °ЃНЅХЙЌ•}Ґђ°ЃЅЌЌХЙЙ•‘}…Р°Ѓ‘•±ҐЩ•Йе}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}©НЅё°Ѓ•№ЕХ•Х•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃY1ULЂ •М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№ЅХС‰Ѕб}•Щ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№•Щ•№С}СеБ•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№НЅХЙЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№ЅЌЌХЙЙ•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№‘•±ҐЩ•Йе}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№Б…е±Ѕ…‘}©НЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№•№ЕХ•Х•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ•Щ•№С}СеБ•}ЌЅ‘”ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНЅХЙЌ•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБ…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№•Щ•№С}СеБ•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№НЅХЙЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅХС‰Ѕб}•Щ•№Р№Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЅХС‰ЅаЃ•Щ•№РЃҐ‘•№СҐСдЃ…±Й•…‘дЃ‰•±Ѕ№ќМЃСјЃ…№ЅСЎ•ИЃЙЅЬ€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ±ҐНС}Б•№‘Ґ№ќ}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№СМ (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Р°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃБ•№‘Ґ№њЃЅХС‰ЅаЃ•Щ•№СМЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}±ҐНС}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№СМЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃБ•№‘Ґ№ќ}Ѕ№±дхQЙХ”¤((ЂЂЂЃ‘•Ѓ±ҐНС}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№СН}™ЅЙ}С•№…№Р (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Р°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃ…±°ЃЅХС‰ЅаЃ•Щ•№СМЃ±ҐµҐС•ђЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}±ҐНС}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№СМЎС•№…№С}…ЌЌЅХ№С}Ґђ°ЃБ•№‘Ґ№ќ}Ѕ№±дх…±Н”¤((ЂЂЂЃ‘•Ѓµ…Й­}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№С}‘•±ҐЩ•Й•ђ (ЂЂЂЂЂЂЂЃН•±°ЃЅХС‰Ѕб}•Щ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Ри(ЂЂЂЂЂЂЂЂ€€‰5…Й¬ЃЅ№”ЃЅХС‰ЅаЃ•Щ•№РЃ‘•±ҐЩ•Й•ђЃҐ‘•µБЅС•№С±дё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUAQЃ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃMPЃ‘•±ҐЩ•Йе}НС…СХМЂфЂќ‘•±ҐЩ•Й•ђњ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЅХС‰Ѕб}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ‘•±ҐЩ•Йе}НС…СХМЂфЂќБ•№‘Ґ№њњ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9ЃЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЅХС‰Ѕб}•Щ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЅХС‰Ѕб}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЅХС‰Ѕб}•Щ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰ЅХС‰ЅаЃ‘•±ҐЩ•ЙдЃЙ•ЕХҐЙ•МЃ„ЃНСЅЙ•ђЃ•Щ•№Р€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•ЃҐ№Н•ЙС}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР (ЂЂЂЂЂЂЂЃН•±°Ѓ…СС•µБРиЃMСЅЙ•‘]•‰ЎЅЅ­•±ҐЩ•ЙеСС•µБР(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­•±ҐЩ•ЙеСС•µБРи(ЂЂЂЂЂЂЂЂ€€‰ББ•№ђЃЅ№”Ѓ‘•±ҐЩ•ЙдЃ…СС•µБРмЃ…ёЃ•б…ЌРЃЙ•Б±…дЃЙ•СХЙ№МЃСЎ”ЃНСЅЙ•ђЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃҐЃ…СС•µБР№…СС•µБС}№Хµ‰•ИЂрЂДи(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰…СС•µБС}№Хµ‰•ИЃµХНРЃ‰”Ѓ…РЃ±•…НРЂД€¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ%9MIPЃ%9Q<Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎ‘•±ҐЩ•Йе}…СС•µБС}Ґђ°ЃЅХС‰Ѕб}•Щ•№С}Ґђ°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ…СС•µБС}№Хµ‰•И°ЃЎССБ}НС…СХМ°Ѓ‘•±ҐЩ•Й•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™…Ґ±ХЙ•}Й•…НЅ№}ЌЅ‘”°Ѓ…СС•µБС•‘}…Р¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЂ•М°Ђ•М°Ђ•М°Ѓј№С•№…№С}…ЌЌЅХ№С}Ґђ°Ђ•М°Ђ•М°Ђ•М°Ђ•М°Ђ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№РЃLЃј(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃј№ЅХС‰Ѕб}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓ=91%PЃ<Ѓ9=Q!%9(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃIQUI9%9Ѓ‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№‘•±ҐЩ•Йе}…СС•µБС}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№ЅХС‰Ѕб}•Щ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№…СС•µБС}№Хµ‰•И°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№ЎССБ}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№‘•±ҐЩ•Й•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№™…Ґ±ХЙ•}Й•…НЅ№}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№…СС•µБС•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№ЅХС‰Ѕб}•Щ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЅХС‰Ѕб}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ…СС•µБС}№Хµ‰•ИЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№ЅХС‰Ѕб}•Щ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБР№…СС•µБС}№Хµ‰•И°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”ЃY…±Х•ЙЙЅИ ‰‘•±ҐЩ•ЙдЃ…СС•µБРЃҐ‘•№СҐСдЃ…±Й•…‘дЃ‰•±Ѕ№ќМЃСјЃ…№ЅСЎ•ИЃЙЅЬ€¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБРЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ±ҐНС}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБСМ (ЂЂЂЂЂЂЂЃН•±°ЃЅХС‰Ѕб}•Щ•№С}ҐђиЃUU%°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђиЃUU%ЃрЃ9Ѕ№”ЂфЃ9Ѕ№”(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘]•‰ЎЅЅ­•±ҐЩ•ЙеСС•µБР°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃ…СС•µБСМЃ™ЅИЃЅ№”ЃЅХС‰ЅаЃ•Щ•№Р°ЃЅБСҐЅ№…±±дЃЅ№”ЃНХ‰НЌЙҐБСҐЅёё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЅХС‰Ѕб}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ…СС•µБС}№Хµ‰•И°Ѓ‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЅХС‰Ѕб}•Щ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ•±Н”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЅХС‰Ѕб}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ…СС•µБС}№Хµ‰•И°Ѓ‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЅХС‰Ѕб}•Щ•№С}Ґђ°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБРЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓќ•С}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР (ЂЂЂЂЂЂЂЃН•±°Ѓ‘•±ҐЩ•Йе}…СС•µБС}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­•±ҐЩ•ЙеСС•µБРЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃЅ№”Ѓ‘•±ҐЩ•ЙдЃ…СС•µБРЃ‰дЃЅБ…ЕХ”ЃҐ‘•№СҐ™Ґ•Иё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃ‘•±ҐЩ•Йе}…СС•µБС}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎ‘•±ҐЩ•Йе}…СС•µБС}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”ЃҐЃЙЅЬЃҐМЃ9Ѕ№”Ѓ•±Н”ЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБРЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ±ҐНС}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБСН}™ЅЙ}С•№…№Р (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘]•‰ЎЅЅ­•±ҐЩ•ЙеСС•µБР°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃ…СС•µБСМЃЭЎЅН”ЃЅХС‰ЅаЃ‰•±Ѕ№ќМЃСјЃЅ№”ЃС•№…№Рё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ„№‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБРЃLЃ„(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ)=%8Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№РЃLЃј(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8Ѓј№С•№…№С}…ЌЌЅХ№С}ҐђЂфЃ„№С•№…№С}…ЌЌЅХ№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓј№ЅХС‰Ѕб}•Щ•№С}ҐђЂфЃ„№ЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃ„№С•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ„№…СС•µБС•‘}…Р°Ѓ„№‘•±ҐЩ•Йе}…СС•µБС}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБРЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•ЃНСЅЙ•‘}ХН…ќ•}Н•РЎН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%¤ЂґшЃ™ЙЅй•№Н•СmСХБ±•mЅ‰©•ЌР°Ђёё№utи(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃСЎ”ЃН…µ”Ѓ‘•С•ЙµҐ№ҐНСҐЊЃҐ‘•№СҐСдЃБЙЅ©•ЌСҐЅёЃ…МЃСЎ”ЃЙ•™•Й•№Ќ”Ѓ±•‘ќ•Иё€€€(ЂЂЂЂЂЂЂЃҐ‘•№СҐСҐ•МЂфЃmt(ЂЂЂЂЂЂЂЃ™ЅИЃ•Щ•№РЃҐёЃН•±№±ҐНС}ХН…ќ•}•Щ•№СМЎС•№…№С}…ЌЌЅХ№С}Ґђ¤и(ЂЂЂЂЂЂЂЂЂЂЂЃҐ‘•№СҐСҐ•М№…ББ•№ђ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№Р№ХН…ќ•}•Щ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№Р№НЅХЙЌ•}•Щ•№С}­•д°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№Р№•Щ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№Р№•Щ•№С}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№Р№ЅЌЌХЙЙ•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃµ•…НХЙ•µ•№Р№µ•С•Й}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃµ•…НХЙ•µ•№Р№µ•…НХЙ•‘}ЕХ…№СҐСд°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃµ•…НХЙ•µ•№Р№Х№ҐС}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃµ•…НХЙ•µ•№Р№ЕХ…±ҐСе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃµ•…НХЙ•µ•№РЃҐёЃ•Щ•№Р№µ•…НХЙ•µ•№СМ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃ™ЙЅй•№Н•РЎҐ‘•№СҐСҐ•М¤((ЂЂЂЃ‘•ЃЙ•ЕХҐЙ•}С•№…№РЎН•±°ЃС•№…№С}Й•™•Й•№Ќ”иЃНСИ¤ЂґшЃQ•№…№СЌЌЅХ№Ри(ЂЂЂЂЂЂЂЂ€€‰I•СХЙёЃ„ЃС•№…№РЃЅИЃЙ…ҐН”ЃСЎ”ЃЙ•™•Й•№Ќ”µ±•‘ќ•ИµЌЅµБ…СҐ‰±”Ѓ-•еЙЙЅИё€€€(ЂЂЂЂЂЂЂЃС•№…№РЂфЃН•±№Й•НЅ±Щ•}С•№…№РЎС•№…№С}Й•™•Й•№Ќ”ҐlБt(ЂЂЂЂЂЂЂЃҐЃС•№…№РЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎС•№…№С}Й•™•Й•№Ќ”¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃС•№…№Р((ЂЂЂЃ‘•Ѓ}Й•ЕХҐЙ•}С•№…№РЎН•±°ЃС•№…№С}Й•™•Й•№Ќ”иЃНСИ¤ЂґшЃQ•№…№СЌЌЅХ№Ри(ЂЂЂЂЂЂЂЂ€€‰I•НЅ±Щ”Ѓ„ЃЙ•ќҐНСЙ…СҐЅёЃС•№…№РЃЅИЃЙ…ҐН”Ѓ„ЃНС…‰±”ЃЌ…С…±ЅњЃ•ЙЙЅИё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№Й•ЕХҐЙ•}С•№…№РЎС•№…№С}Й•™•Й•№Ќ”¤((ЂЂЂЃ‘•Ѓ}Й•ЕХҐЙ•}…ЌЌЅХ№РЎН•±°ЃС•№…№РиЃQ•№…№СЌЌЅХ№Р°ЃЙ•™•Й•№Ќ”иЃНСИ¤ЂґшЃ	Ґ±±Ґ№ќЌЌЅХ№Ри(ЂЂЂЂЂЂЂЂ€€‰I•НЅ±Щ”Ѓ…ёЃ…ЌЌЅХ№РЃ™ЅИЃЌ…С…±ЅњЃЙ•ќҐНСЙ…СҐЅёё€€€(ЂЂЂЂЂЂЂЃ}Й•ЕХҐЙ•}С•№…№С}НЌЅБ•‘}Й•™•Й•№Ќ”ЎС•№…№Р№С•№…№С}Й•™•Й•№Ќ”°ЃЙ•™•Й•№Ќ”¤(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Й•™•Й•№Ќ”°Ѓ…ЌЌЅХ№С}НС…СХН}ЌЅ‘”(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№‰Ґ±±Ґ№ќ}…ЌЌЅХ№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}ЌЅ‘”ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№Р№С•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ}Й•НЅХЙЌ•}ЌЅ‘”ЎЙ•™•Й•№Ќ”¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЙ•™•Й•№Ќ”¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃ	Ґ±±Ґ№ќЌЌЅХ№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°ЃUU%ЎНСИЎЙЅЭlЕt¤¤°ЃЙЅЭlНt°ЃЙЅЭlЙt°ЃЙЅЭlСt(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}Й•ЕХҐЙ•}БЙҐ№ЌҐБ…°ЎН•±°ЃС•№…№РиЃQ•№…№СЌЌЅХ№Р°ЃЙ•™•Й•№Ќ”иЃНСИ¤ЂґшЃ	Ґ±±Ґ№ќAЙҐ№ЌҐБ…°и(ЂЂЂЂЂЂЂЂ€€‰I•НЅ±Щ”Ѓ„ЃБЙҐ№ЌҐБ…°Ѓ™ЅИЃЌ…С…±ЅњЃЙ•ќҐНСЙ…СҐЅёЃЭҐСЎЅХРЃ…ёЃ•Щ•№РЃСҐµ”ё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ‰Ґ±±Ґ№ќ}БЙҐ№ЌҐБ…±}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃБЙҐ№ЌҐБ…±}­Ґ№‘}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБЙҐ№ЌҐБ…±}Й•™•Й•№Ќ”°ЃЩ…±Ґ‘}™ЙЅґ°ЃЩ…±Ґ‘}Сј(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№‰Ґ±±Ґ№ќ}БЙҐ№ЌҐБ…°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃБЙҐ№ЌҐБ…±}Й•™•Й•№Ќ”ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃЩ…±Ґ‘}™ЙЅґЃM(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ1%5%PЂД(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№Р№С•№…№С}…ЌЌЅХ№С}Ґђ°ЃЙ•™•Й•№Ќ”¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЙ•™•Й•№Ќ”¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}БЙҐ№ЌҐБ…±}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ}Й•ЕХҐЙ•}ЌЙ•‘•№СҐ…°ЎН•±°ЃС•№…№РиЃQ•№…№СЌЌЅХ№Р°ЃЙ•™•Й•№Ќ”иЃНСИ¤ЂґшЃЙ•‘•№СҐ…±I•ЌЅЙђи(ЂЂЂЂЂЂЂЂ€€‰I•НЅ±Щ”Ѓ„ЃЌЙ•‘•№СҐ…°Ѓ™ЅИЃЌ…С…±ЅњЃЙ•ќҐНСЙ…СҐЅёё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘•№СҐ…±}Й•ЌЅЙ‘}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЙ•‘•№СҐ…±}Й•™•Й•№Ќ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…±}­Ґ№‘}ЌЅ‘”°ЃЌЙ•‘•№СҐ…±}™Ґ№ќ•ЙБЙҐ№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘•№СҐ…±}Й•ЌЅЙђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃЌЙ•‘•№СҐ…±}Й•™•Й•№Ќ”ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№Р№С•№…№С}…ЌЌЅХ№С}Ґђ°ЃЙ•™•Й•№Ќ”¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЙ•™•Й•№Ќ”¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ЌЙ•‘•№СҐ…±}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ}™Ґ№‘}•Щ•№РЎН•±°ЃЕХ•ЙдиЃНСИ°ЃБ…Й…µ•С•ЙМиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘UН…ќ•Щ•№РЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰IХёЃЅ№”Ѓ™Ґб•ђЃҐ‘•№СҐСдЃЕХ•ЙдЃ…№ђЃЎе‘Й…С”ЃҐСМЃµ•…НХЙ•µ•№СМё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС”ЎЕХ•Йд°ЃБ…Й…µ•С•ЙМ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}ХН…ќ•}•Щ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤((ЂЂЂЃ‘•Ѓ}™Ґ№‘}•Щ•№С}ЭҐСЎ}ЌХЙНЅИ (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°Ѓ•Щ•№РиЃMСЅЙ•‘UН…ќ•Щ•№Р(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘UН…ќ•Щ•№РЃрЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂ€€‰±…ННҐ™дЃ„ЃХ№ҐЕХ”ЃЌЅ№™±ҐЌРЃ‰дЃЕХ•ЙеҐ№њЃ•…Ќ ЃС•№…№РµНЌЅБ•ђЃ•Щ•№РЃҐ‘•№СҐСдё€€€(ЂЂЂЂЂЂЂЃ™ЅИЃБЙ•‘ҐЌ…С”°ЃБ…Й…µ•С•ЙМЃҐёЂ (ЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХН…ќ•}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ХН…ќ•}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃНЅХЙЌ•}•Щ•№С}­•дЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ1%5%PЂД(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№Р№НЅХЙЌ•}•Щ•№С}­•д¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХН…ќ•}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ХН…ќ•}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ•Щ•№С}Б…е±Ѕ…‘}Ў…Н ЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9Ѓ•Щ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ1%5%PЂД(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№Р№•Щ•№С}Б…е±Ѕ…‘}Ў…Н °Ѓ•Щ•№Р№•Щ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХН…ќ•}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ХН…ќ•}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃБЙЅ‘ХЌ•Й}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ1%5%PЂД(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№Р№БЙЅ‘ХЌ•Й}•Щ•№С}Ґђ¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤°(ЂЂЂЂЂЂЂЂ¤и(ЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС”ЎБЙ•‘ҐЌ…С”°ЃБ…Й…µ•С•ЙМ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}™•СЌЎ}ХН…ќ•}•Щ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃ9Ѕ№”((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ХН…ќ•}•Щ•№РЎН•±°ЃЌХЙНЅИиЃ№д°ЃХН…ќ•}•Щ•№С}ҐђиЃUU%¤ЂґшЃMСЅЙ•‘UН…ќ•Щ•№Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”Ѓ•Щ•№РЃ…№ђЃҐСМЃ№ЅЙµ…±Ґй•ђЃµ•…НХЙ•µ•№РЃЙЅЭМЃЅёЃЅ№”ЃЌХЙНЅИё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХН…ќ•}•Щ•№С}Ґђ°ЃБЙЅ‘ХЌ•Й}•Щ•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Ґ±±Ґ№ќ}БЙҐ№ЌҐБ…±}Ґђ°ЃЌЙ•‘•№СҐ…±}Й•ЌЅЙ‘}Ґђ°ЃНЅХЙЌ•}•Щ•№С}­•д°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°Ѓ•Щ•№С}Б…е±Ѕ…‘}Ў…Н °ЃБЙЅ‘ХЌС}ЌЅ‘”°ЃЅБ•Й…СҐЅ№}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅЌЌХЙЙ•‘}…Р°ЃЙ•ЌЅЙ‘•‘}…Р°ЃЌЅНС}Ќ•№С•Й}Й•™•Й•№Ќ”°ЃБЙЅ©•ЌС}Й•™•Й•№Ќ”(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ХН…ќ•}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃХН…ќ•}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎХН…ќ•}•Щ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃСЎ”ЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎХН…ќ•}•Щ•№С}Ґђ¤(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХН…ќ•}µ•…НХЙ•µ•№С}Ґђ°ЃХН…ќ•}•Щ•№С}Ґђ°Ѓµ•С•Й}‘•™Ґ№ҐСҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃµ•С•Й}ЌЅ‘”°ЃХ№ҐС}ЌЅ‘”°Ѓµ•…НХЙ•‘}ЕХ…№СҐСд°ЃЕХ…±ҐСе}ЌЅ‘”(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ХН…ќ•}µ•…НХЙ•µ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЃ)=%8Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№µ•С•Й}‘•™Ґ№ҐСҐЅёЃUM%9ЂЎµ•С•Й}‘•™Ґ№ҐСҐЅ№}Ґђ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃХН…ќ•}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃХН…ќ•}µ•…НХЙ•µ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎХН…ќ•}•Щ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃµ•…НХЙ•µ•№СМЂфЃСХБ±”ЎН•±№}µ•…НХЙ•µ•№С}™ЙЅµ}ЙЅЬЎµ•…НХЙ•µ•№Р¤Ѓ™ЅИЃµ•…НХЙ•µ•№РЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘UН…ќ•Щ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃХН…ќ•}•Щ•№С}ҐђхUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБЙЅ‘ХЌ•Й}•Щ•№С}ҐђхUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђхUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}ҐђхUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ‰Ґ±±Ґ№ќ}БЙҐ№ЌҐБ…±}ҐђхUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘•№СҐ…±}Й•ЌЅЙ‘}Ґђх9Ѕ№”ЃҐЃЙЅЭlХtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}•Щ•№С}­•дхЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёхЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№С}Б…е±Ѕ…‘}Ў…Н хЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃБЙЅ‘ХЌС}ЌЅ‘”хЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЅБ•Й…СҐЅ№}ЌЅ‘”хЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃЅЌЌХЙЙ•‘}…РхЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•ЌЅЙ‘•‘}…РхЙЅЭlДЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃЌЅНС}Ќ•№С•Й}Й•™•Й•№Ќ”хЙЅЭlДНt°(ЂЂЂЂЂЂЂЂЂЂЂЃБЙЅ©•ЌС}Й•™•Й•№Ќ”хЙЅЭlДСt°(ЂЂЂЂЂЂЂЂЂЂЂЃµ•…НХЙ•µ•№СМхµ•…НХЙ•µ•№СМ°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Й…С•}Ќ…Й‘}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘I…С•…Йђи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”ЃБЙҐЌ”µ‰ЅЅ¬ЃЎ•…‘•ИЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘I…С•…Йђ (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Й…С•}Ќ…Й‘}±Ґ№•}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘I…С•…Й‘1Ґ№”и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃБЙҐЌ”µ‰ЅЅ¬Ѓ±Ґ№”ЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘I…С•…Й‘1Ґ№” (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}С…б}Й…С•}НЌЎ•‘Х±•}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘Q…бI…С•MЌЎ•‘Х±”и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”ЃС…аµЙ…С”ЃНЌЎ•‘Х±”ЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Q…бI…С•MЌЎ•‘Х±” (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°ЃUU%ЎНСИЎЙЅЭlЕt¤¤°ЃЙЅЭlЙt°ЃЙЅЭlНt(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}С…б}Й…С•}Щ•ЙНҐЅ№}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘Q…бI…С•Y•ЙНҐЅёи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”ЃБХ‰±ҐНЎ•ђЃС…аµЙ…С”ЃЩ•ЙНҐЅёЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Q…бI…С•Y•ЙНҐЅё (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}С…б}…НН•ННµ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃС…б}…НН•ННµ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Q…бНН•ННµ•№Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃС…аЃ…НН•ННµ•№РЃЭҐС ЃҐСМЃБХ‰±ҐНЎ•ђЃЩ•ЙНҐЅёЃ№Хµ‰•Иё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ…НН•ННµ•№Р№С…б}…НН•ННµ•№С}Ґђ°Ѓ…НН•ННµ•№Р№С•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…НН•ННµ•№Р№Ґ№ЩЅҐЌ•}‘Й…™С}Ґђ°Ѓ…НН•ННµ•№Р№С…б}Й…С•}Щ•ЙНҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…НН•ННµ•№Р№С…б}…НН•ННµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°Ѓ…НН•ННµ•№Р№С…б}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…НН•ННµ•№Р№С…б}Й…С”°Ѓ…НН•ННµ•№Р№ЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…НН•ННµ•№Р№С…б}•бЌ±ХНҐЩ•}…µЅХ№Р°Ѓ…НН•ННµ•№Р№С…б}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…НН•ННµ•№Р№С…б}Ґ№Ќ±ХНҐЩ•}…µЅХ№Р°Ѓ…НН•ННµ•№Р№НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…НН•ННµ•№Р№…НН•НН•‘}…Р°ЃЩ•ЙНҐЅё№Щ•ЙНҐЅ№}№Хµ‰•И(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С…б}…НН•ННµ•№РЃLЃ…НН•ННµ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЃ)=%8Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№С…б}Й…С•}Щ•ЙНҐЅёЃLЃЩ•ЙНҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8ЃЩ•ЙНҐЅё№С•№…№С}…ЌЌЅХ№С}ҐђЂфЃ…НН•ННµ•№Р№С•№…№С}…ЌЌЅХ№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЩ•ЙНҐЅё№С…б}Й…С•}Щ•ЙНҐЅ№}ҐђЂфЃ…НН•ННµ•№Р№С…б}Й…С•}Щ•ЙНҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃ…НН•ННµ•№Р№С…б}…НН•ННµ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎС…б}…НН•ННµ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎС…б}…НН•ННµ•№С}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}С…б}…НН•ННµ•№С}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ}Й…С•}Ќ…Й‘}Щ•ЙНҐЅ№}™ЙЅµ}ЌХЙНЅИ (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЙЅЬиЃСХБ±•m№д°Ђёё№t(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘I…С•…Й‘Y•ЙНҐЅёи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”Ѓ„ЃБХ‰±ҐНЎ•ђЃЩ•ЙНҐЅёЃ…№ђЃҐСМЃ±Ґ№•МЃЅёЃЅ№”ЃСЙ…№Н…ЌСҐЅёЃЌХЙНЅИё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЙ…С•}Ќ…Й‘}±Ґ№•}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЙ…С•}Ќ…Й‘}Щ•ЙНҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃµ•СЙҐЌ}ЌЅ‘”°ЃХ№ҐС}…µЅХ№Р°ЃЌХЙЙ•№Ќе}ЌЅ‘”(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Й…С•}Ќ…Й‘}±Ґ№”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃЙ…С•}Ќ…Й‘}Щ•ЙНҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃµ•СЙҐЌ}ЌЅ‘”°ЃЙ…С•}Ќ…Й‘}±Ґ№•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЙЅЭlЕt°ЃЙЅЭlБt¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘I…С•…Й‘Y•ЙНҐЅё (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃСХБ±”ЎН•±№}Й…С•}Ќ…Й‘}±Ґ№•}™ЙЅµ}ЙЅЬЎ±Ґ№”¤Ѓ™ЅИЃ±Ґ№”ЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤¤°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Й…СҐ№ќ}ЙХёЎН•±°ЃЌХЙНЅИиЃ№д°ЃЙ…СҐ№ќ}ЙХ№}ҐђиЃUU%¤ЂґшЃMСЅЙ•‘I…СҐ№ќIХёи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃЙ…СҐ№њЃЙХёЃ…№ђЃҐСМЃҐµµХС…‰±”Ѓ±Ґ№•Мё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЙХё№Й…СҐ№ќ}ЙХ№}Ґђ°ЃЙХё№С•№…№С}…ЌЌЅХ№С}Ґђ°ЃЙХё№Й…С•}Ќ…Й‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙХё№Й…С•}Ќ…Й‘}Щ•ЙНҐЅё°ЃЙХё№ЭҐ№‘ЅЭ}НС…ЙС•‘}…Р°ЃЙХё№ЭҐ№‘ЅЭ}•№‘•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙХё№ХН…ќ•}Н№…БНЎЅС}Ў…Н °ЃЙХё№ЌХЙЙ•№Ќе}ЌЅ‘”°ЃЙХё№Й…С•‘}СЅС…±}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙХё№Й•ЌЅЙ‘•‘}…Р°ЃЌ…Йђ№Й…С•}Ќ…Й‘}№…µ”°ЃЌ…Йђ№Й…С•}Ќ…Й‘}ЌЅ‘”(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Й…СҐ№ќ}ЙХёЃLЃЙХё(ЂЂЂЂЂЂЂЂЂЂЂЃ)=%8Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Й…С•}Ќ…ЙђЃLЃЌ…Йђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=8ЃЌ…Йђ№С•№…№С}…ЌЌЅХ№С}ҐђЂфЃЙХё№С•№…№С}…ЌЌЅХ№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃЌ…Йђ№Й…С•}Ќ…Й‘}ҐђЂфЃЙХё№Й…С•}Ќ…Й‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЙХё№Й…СҐ№ќ}ЙХ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЙ…СҐ№ќ}ЙХ№}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ЙМЃН•±•ЌРЃ…ёЃ•бҐНСҐ№њЃЙХё(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЙ…СҐ№ќ}ЙХ№}Ґђ¤(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЙ…СҐ№ќ}±Ґ№•}Ґђ°ЃЙ…СҐ№ќ}ЙХ№}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Й•™•Й•№Ќ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃµ•С•Й}‘•™Ґ№ҐСҐЅ№}Ґђ°Ѓµ•С•Й}ЌЅ‘”°ЃХ№ҐС}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…С•‘}ЕХ…№СҐСд°ЃХ№ҐС}БЙҐЌ•}…µЅХ№Р°Ѓ±Ґ№•}СЅС…±}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•}№Хµ‰•И(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Й…СҐ№ќ}±Ґ№”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃЙ…СҐ№ќ}ЙХ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ±Ґ№•}№Хµ‰•И(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЙЅЭlЕt°ЃЙЅЭlБt¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃ±Ґ№•МЂфЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЃMСЅЙ•‘I…СҐ№ќ1Ґ№” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lСt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lЩt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lЭt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lбt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lеt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lДБt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃ±Ґ№”ЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘I…СҐ№ќIХё (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБtЃЅИЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•М°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Ґ№ЩЅҐЌ•}‘Й…™РЎН•±°ЃЌХЙНЅИиЃ№д°ЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђиЃUU%¤ЂґшЃMСЅЙ•‘%№ЩЅҐЌ•Й…™Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃҐ№ЩЅҐЌ”Ѓ‘Й…™РЃ…№ђЃҐСМЃҐµµХС…‰±”ЃЌЅБҐ•ђЃ±Ґ№•Мё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЙ…СҐ№ќ}ЙХ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХН…ќ•}Н№…БНЎЅС}Ў…Н °ЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃҐ№ЩЅҐЌ•}‘Й…™С}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‘Й…™С•‘}СЅС…±}…µЅХ№Р°ЃЙ•ЌЅЙ‘•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Ґ№ЩЅҐЌ•}‘Й…™Р(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ЙМЃН•±•ЌРЃ…ёЃ•бҐНСҐ№њЃ‘Й…™Р(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎҐ№ЩЅҐЌ•}‘Й…™С}Ґђ¤(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐ№ЩЅҐЌ•}‘Й…™С}±Ґ№•}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Й•™•Й•№Ќ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃµ•С•Й}‘•™Ґ№ҐСҐЅ№}Ґђ°Ѓµ•С•Й}ЌЅ‘”°ЃХ№ҐС}ЌЅ‘”°ЃЙ…С•‘}ЕХ…№СҐСд°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№ҐС}БЙҐЌ•}…µЅХ№Р°Ѓ±Ґ№•}СЅС…±}…µЅХ№Р°Ѓ±Ґ№•}№Хµ‰•И(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Ґ№ЩЅҐЌ•}‘Й…™С}±Ґ№”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ±Ґ№•}№Хµ‰•И(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЙЅЭlЕt°ЃЙЅЭlБt¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃ±Ґ№•МЂфЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЃMСЅЙ•‘%№ЩЅҐЌ•Й…™С1Ґ№” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lСt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lЩt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lЭt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lбt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lеt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lДБt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃ±Ґ№”ЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘%№ЩЅҐЌ•Й…™Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•М°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}С…б}…НН•ННµ•№С}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘Q…бНН•ННµ•№Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”ЃБ•ЙНҐНС•ђЃС…аЃ…НН•ННµ•№РЃН№…БНЎЅРё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Q…бНН•ННµ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДНt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ҐННХ•‘}Ґ№ЩЅҐЌ” (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ”и(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃҐННХ•ђЃН№…БНЎЅРЃ…№ђЃҐСМЃҐµµХС…‰±”Ѓ±Ґ№•Мё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЙ…СҐ№ќ}ЙХ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХН…ќ•}Н№…БНЎЅС}Ў…Н °ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС…б}•бЌ±ХНҐЩ•}…µЅХ№Р°ЃС…б}…µЅХ№Р°ЃС…б}Ґ№Ќ±ХНҐЩ•}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}НС…СХМ°ЃҐННХ•‘}…Р°Ѓ‘Х•}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}Ґ№ЩЅҐЌ”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃҐННХ•‘}Ґ№ЩЅҐЌ•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ¤(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}Ґ№ЩЅҐЌ•}±Ґ№•}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•}№Хµ‰•И°Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Й•™•Й•№Ќ”°Ѓµ•С•Й}ЌЅ‘”°ЃХ№ҐС}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ…С•‘}ЕХ…№СҐСд°ЃХ№ҐС}БЙҐЌ•}…µЅХ№Р°Ѓ±Ґ№•}СЅС…±}…µЅХ№Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}Ґ№ЩЅҐЌ•}±Ґ№”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ±Ґ№•}№Хµ‰•И(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЙЅЭlЕt°ЃЙЅЭlБt¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃ±Ґ№•МЂфЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•1Ґ№” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lНt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lСt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lХt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lЩt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lЭt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lбt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lеt°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃ±Ґ№”ЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ” (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДНt°(ЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•М°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ЌЅ±±•ЌСҐЅ№}Ќ…Н•}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№…Н”и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЌЅ±±•ЌСҐЅёµЌ…Н”ЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№…Н” (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ЌЅ±±•ЌСҐЅ№}Ќ…Н” (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№…Н”и(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃЌЅ±±•ЌСҐЅёЃЌ…Н”ё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}НС…СХМ°ЃЅХСНС…№‘Ґ№ќ}…µЅХ№Р°ЃЅБ•№•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}Ќ…Н”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ЌЅ±±•ЌСҐЅ№}Ќ…Н•}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№Х№№Ґ№ќЩ•№Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃ‘Х№№Ґ№њµ•Щ•№РЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№Х№№Ґ№ќЩ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№Х№№Ґ№ќЩ•№Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”Ѓ‘Х№№Ґ№њЃ•Щ•№Рё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ‘Х№№Ґ№ќ}•Щ•№С}№Хµ‰•И°Ѓ‘Х№№Ґ№ќ}№ЅСҐЌ•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЅЌЌХЙЙ•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ}±ҐНС}ЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№СМ (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЂЁ°(ЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}ҐђиЃUU%ЃрЃ9Ѕ№”ЂфЃ9Ѕ№”°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%ЃрЃ9Ѕ№”ЂфЃ9Ѕ№”°(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘Ѕ±±•ЌСҐЅ№Х№№Ґ№ќЩ•№Р°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰1ҐНРЃ‘Х№№Ґ№њЃ•Щ•№СМЃ‰дЃЌ…Н”ЃЅИЃС•№…№РЃЭҐС Ѓ…ёЃ•бБ±ҐЌҐРЃБЙ•‘ҐЌ…С”ё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}ҐђЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ‘Х№№Ґ№ќ}•Щ•№С}№Хµ‰•И°ЃЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ•±Н”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃЅЌЌХЙЙ•‘}…Р°ЃЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}ЌЅ±±•ЌСҐЅ№}‘Х№№Ґ№ќ}•Щ•№РЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Б…еµ•№С}Ґ№С•№С}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘A…еµ•№С%№С•№Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃБ…еµ•№РµҐ№С•№РЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘A…еµ•№С%№С•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlЩt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Б…еµ•№С}Ґ№С•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃБ…еµ•№С}Ґ№С•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘A…еµ•№С%№С•№Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃБ…еµ•№РЃҐ№С•№Рё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃБ…еµ•№С}Ґ№С•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…еµ•№С}Ґ№С•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…еµ•№С}Ґ№С•№С}НС…СХМ°ЃБ…еµ•№С}…µЅХ№Р°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБЙЅ©•ЌС•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Б…еµ•№С}Ґ№С•№Р(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃБ…еµ•№С}Ґ№С•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎБ…еµ•№С}Ґ№С•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎБ…еµ•№С}Ґ№С•№С}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}Б…еµ•№С}Ґ№С•№С}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Б…еµ•№С}Й•Ќ•ҐБС}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘A…еµ•№СI•Ќ•ҐБРи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃБ…еµ•№РµЙ•Ќ•ҐБРЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘A…еµ•№СI•Ќ•ҐБР (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlЭt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Б…еµ•№С}Й•Ќ•ҐБР (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃБ…еµ•№С}Й•Ќ•ҐБС}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘A…еµ•№СI•Ќ•ҐБРи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃБ…еµ•№РЃЙ•Ќ•ҐБРё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃБ…еµ•№С}Ґ№С•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°ЃН•СС±•µ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…еµ•№С}Й•Ќ•ҐБС}НС…СХМ°ЃЙ•Ќ•ҐЩ•‘}…µЅХ№Р°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЙ•Ќ•ҐЩ•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Б…еµ•№С}Й•Ќ•ҐБР(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃБ…еµ•№С}Й•Ќ•ҐБС}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎБ…еµ•№С}Й•Ќ•ҐБС}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}Б…еµ•№С}Й•Ќ•ҐБС}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Х№…ББ±Ґ•‘}Ќ…НЎ}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…Н и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃБ…Й­•ђЃ±•™СЅЩ•ИЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘U№…ББ±Ґ•‘…Н  (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlбt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlеt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlДБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЙt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Х№…ББ±Ґ•‘}Ќ…Н  (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…Н и(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃБ…Й­•ђЃ±•™СЅЩ•Иё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…еµ•№С}Ґ№С•№С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃХ№…ББ±Ґ•‘}…µЅХ№Р°ЃЙ•Ќ•ҐЩ•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…ББ±Ґ•‘}…µЅХ№Р°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}НС…СХМ°ЃБ…Й­•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Х№…ББ±Ґ•‘}Ќ…Н (ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃХ№…ББ±Ґ•‘}Ќ…НЎ}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}Х№…ББ±Ґ•‘}Ќ…НЎ}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎББ±ҐЌ…СҐЅёи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃ±•™СЅЩ•Иµ…ББ±дЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlеt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎББ±ҐЌ…СҐЅёи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”Ѓ±•™СЅЩ•ИЃ…ББ±дё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°ЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃЌХЙЙ•№Ќе}ЌЅ‘”°Ѓ…ББ±Ґ•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}НС…СХМ°Ѓ…ББ±Ґ•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}Х№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎI•™Х№ђи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃ±•™СЅЩ•ИµЙ•™Х№ђЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎI•™Х№ђ (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlеt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlДБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЙt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘U№…ББ±Ґ•‘…НЎI•™Х№ђи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”Ѓ±•™СЅЩ•ИЃЙ•™Х№ђё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°ЃБ…еµ•№С}Ґ№С•№С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЙ•™Х№‘}…µЅХ№Р°ЃХ№…ББ±Ґ•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}НС…СХМ°ЃЙ•™Х№‘•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№ђ(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}Х№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ЌЙ•‘ҐС}…‘©ХНСµ•№С}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘Й•‘ҐС‘©ХНСµ•№Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЌЙ•‘ҐРµ…‘©ХНСµ•№РЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Й•‘ҐС‘©ХНСµ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlЩt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlЭt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlбt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ЌЙ•‘ҐС}…‘©ХНСµ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС‘©ХНСµ•№Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃЌЙ•‘ҐРЃ…‘©ХНСµ•№Рё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЌЙ•‘ҐС}…µЅХ№Р°ЃС…б}•бЌ±ХНҐЩ•}…µЅХ№Р°ЃС…б}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃЙ•ЌЅЙ‘•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}…‘©ХНСµ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ЌЙ•‘ҐС}…‘©ХНСµ•№С}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС”и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃҐННХ•ђµЌЙ•‘ҐРµ№ЅС”ЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС” (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlСtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlДЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlДЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlДНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДХt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС” (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС”и(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃҐННХ•ђЃЌЙ•‘ҐРµ№ЅС”ЃН№…БНЎЅРё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌЙ•‘ҐС}Й•…НЅ№}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃС…б}•бЌ±ХНҐЩ•}…µЅХ№Р°ЃС…б}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС…б}Ґ№Ќ±ХНҐЩ•}…µЅХ№Р°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НС…СХМ°ЃҐННХ•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•YЅҐђи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃХ№ХН•ђЃҐННХ•ђµҐ№ЩЅҐЌ”ЃЩЅҐђЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•YЅҐђ (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlСtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlбt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlеt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘%№ЩЅҐЌ•YЅҐђи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃХ№ХН•ђЃҐННХ•ђµҐ№ЩЅҐЌ”ЃЩЅҐђё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЩЅҐ‘•‘}…µЅХ№Р°ЃЙ•µ…Ґ№Ґ№ќ}ЅХСНС…№‘Ґ№ќ}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}НС…СХМ°ЃЩЅҐ‘•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС•YЅҐђи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃХ№ХН•ђЃҐННХ•ђµЌЙ•‘ҐРµ№ЅС”ЃЩЅҐђЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС•YЅҐђ (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlХtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlеt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘%ННХ•‘Й•‘ҐС9ЅС•YЅҐђи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃХ№ХН•ђЃҐННХ•ђµЌЙ•‘ҐРµ№ЅС”ЃЩЅҐђё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°ЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЩЅҐ‘•‘}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}НС…СХМ°ЃЩЅҐ‘•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐђ(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t°(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС9ЅС•ББ±ҐЌ…СҐЅёи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЌЙ•‘ҐРµ№ЅС”Ѓ…ББ±ҐЌ…СҐЅёЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Й•‘ҐС9ЅС•ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlХtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlДЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДНt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Й•‘ҐС9ЅС•ББ±ҐЌ…СҐЅёи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃЌЙ•‘ҐРµ№ЅС”Ѓ…ББ±ҐЌ…СҐЅёё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}НЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃЌХЙЙ•№Ќе}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…ББ±Ґ•‘}…µЅХ№Р°ЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}НС…СХМ°Ѓ…ББ±Ґ•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ЌЙ•‘ҐС}№ЅС•}…ББ±ҐЌ…СҐЅ№}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}НБ•№‘}‰Х‘ќ•С}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘MБ•№‘	Х‘ќ•Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃБХ‰±ҐНЎ•ђЃНБ•№ђµ‰Х‘ќ•РЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘MБ•№‘	Х‘ќ•Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}НБ•№‘}‰Х‘ќ•Р (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃНБ•№‘}‰Х‘ќ•С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘MБ•№‘	Х‘ќ•Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃБХ‰±ҐНЎ•ђЃНБ•№ђЃ‰Х‘ќ•Рё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃНБ•№‘}‰Х‘ќ•С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ‰Ґ±±Ґ№ќ}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНБ•№‘}‰Х‘ќ•С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌХЙЙ•№Ќе}ЌЅ‘”°Ѓ‰Х‘ќ•С}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЭҐ№‘ЅЭ}НС…ЙС•‘}…Р°ЃЭҐ№‘ЅЭ}•№‘•‘}…Р°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБХ‰±ҐНЎ•‘}…Р°ЃНБ•№‘}‰Х‘ќ•С}НС…СХМ(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№НБ•№‘}‰Х‘ќ•Р(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃНБ•№‘}‰Х‘ќ•С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎНБ•№‘}‰Х‘ќ•С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎНБ•№‘}‰Х‘ќ•С}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}НБ•№‘}‰Х‘ќ•С}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№]ЙҐС•=™и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЌЅ±±•ЌСҐЅёЃЭЙҐС”µЅ™ЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№]ЙҐС•=™ (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlСtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlбt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlеt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™ (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№]ЙҐС•=™и(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃЌЅ±±•ЌСҐЅёЃЭЙҐС”µЅ™ё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЭЙҐС•}Ѕ™™}…µЅХ№Р°ЃЙ•µ…Ґ№Ґ№ќ}ЅХСНС…№‘Ґ№ќ}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}НС…СХМ°ЃЭЙҐСС•№}Ѕ™™}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№…Н•M•СС±•µ•№Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЌЅ±±•ЌСҐЅёЃН•СС±•µ•№РЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№…Н•M•СС±•µ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlСtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlбt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№…Н•M•СС±•µ•№Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃЌЅ±±•ЌСҐЅёµЌ…Н”ЃН•СС±•µ•№Рё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЙ•µ…Ґ№Ґ№ќ}ЅХСНС…№‘Ґ№ќ}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}НС…СХМ°ЃН•СС±•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ЌЅ±±•ЌСҐЅ№}Ќ…Н•}Н•СС±•µ•№С}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№ҐНБХС”и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЌЅ±±•ЌСҐЅёµ‘ҐНБХС”ЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№ҐНБХС” (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlСtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°ЎЙЅЭlбt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}ЌЅ±±•ЌСҐЅ№}‘ҐНБХС” (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘Ѕ±±•ЌСҐЅ№ҐНБХС”и(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃЌЅ±±•ЌСҐЅёЃ‘ҐНБХС”ё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃЌЅ±±•ЌСҐЅ№}Ќ…Н•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙЙ•№Ќе}ЌЅ‘”°ЃЙ•µ…Ґ№Ґ№ќ}ЅХСНС…№‘Ґ№ќ}…µЅХ№Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}НС…СХМ°ЃЎ•±‘}…Р°ЃЙ•±•…Н•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№ЌЅ±±•ЌСҐЅ№}‘ҐНБХС”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}ЌЅ±±•ЌСҐЅ№}‘ҐНБХС•}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}©ЅХЙ№…±}БЙЅБЅН…±}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t°Ѓ±Ґ№•МиЃСХБ±•mMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…±1Ґ№”°Ђёё№t(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃ©ЅХЙ№…°µБЙЅБЅН…°ЃЙЅЬЃ…№ђЃҐСМЃ±Ґ№•Мё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…° (ЂЂЂЂЂЂЂЂЂЂЂЃ©ЅХЙ№…±}БЙЅБЅН…±}ҐђхUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђхUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃҐ№ЩЅҐЌ•}‘Й…™С}ҐђхUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅёхЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃҐ‘•µБЅС•№Ќе}­•дхЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃ±•ќ…±}•№СҐСе}Й•™•Й•№Ќ”хЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃҐ№С•№‘•‘}‰ЅЅ­}ЙЅ±•}ЌЅ‘”хЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃСЙ…№Н…ЌСҐЅ№}ЌХЙЙ•№ЌдхЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃСЙ…№Н…ЌСҐЅ№}‘…С”хЙЅЭlбt№ҐНЅ™ЅЙµ…Р ¤ЃҐЃЎ…Н…ССИЎЙЅЭlбt°Ђ‰ҐНЅ™ЅЙµ…Р€¤Ѓ•±Н”ЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃ…ЌЌЅХ№СҐ№ќ}‘…С”хЙЅЭlеt№ҐНЅ™ЅЙµ…Р ¤ЃҐЃЎ…Н…ССИЎЙЅЭlеt°Ђ‰ҐНЅ™ЅЙµ…Р€¤Ѓ•±Н”ЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н хЙЅЭlДБt°(ЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН•‘}…РхЙЅЭlДЕt°(ЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}НС…СХМхЙЅЭlДЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}•Щ•№С}Й•™•Й•№Ќ”хЙЅЭlДНt°(ЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}±Ґ№•Мх±Ґ№•М°(ЂЂЂЂЂЂЂЂЂЂЂЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђх9Ѕ№”ЃҐЃЙЅЭlДСtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlДСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђх9Ѕ№”ЃҐЃЙЅЭlДХtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlДХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђх9Ѕ№”ЃҐЃЙЅЭlДЩtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlДЩt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђх9Ѕ№”ЃҐЃЙЅЭlДЭtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlДЭt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђх9Ѕ№”ЃҐЃЙЅЭlДбtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlДбt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђх9Ѕ№”ЃҐЃЙЅЭlДеtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlДеt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђх9Ѕ№”ЃҐЃЙЅЭlИБtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlИБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђх9Ѕ№”ЃҐЃЙЅЭlИЕtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlИЕt¤¤°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}©ЅХЙ№…±}БЙЅБЅН…° (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°Ѓ©ЅХЙ№…±}БЙЅБЅН…±}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…°и(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”Ѓ©ЅХЙ№…°ЃБЙЅБЅН…°Ѓ…№ђЃҐСМЃҐµµХС…‰±”Ѓ±Ґ№•Мё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°ЃҐ№ЩЅҐЌ•}‘Й…™С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБЙЅБЅН…±}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃҐ‘•µБЅС•№Ќе}­•д°Ѓ±•ќ…±}•№СҐСе}Й•™•Й•№Ќ”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐ№С•№‘•‘}‰ЅЅ­}ЙЅ±•}ЌЅ‘”°ЃСЙ…№Н…ЌСҐЅ№}ЌХЙЙ•№Ќд°ЃСЙ…№Н…ЌСҐЅ№}‘…С”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…ЌЌЅХ№СҐ№ќ}‘…С”°ЃНЅХЙЌ•}Б…е±Ѕ…‘}Ў…Н °ЃБЙЅБЅН•‘}…Р°ЃБЙЅБЅН…±}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНЅХЙЌ•}•Щ•№С}Й•™•Й•№Ќ”°ЃБ…еµ•№С}Й•Ќ•ҐБС}Ґђ°ЃЌЙ•‘ҐС}…‘©ХНСµ•№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌЅ±±•ЌСҐЅ№}ЭЙҐС•}Ѕ™™}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Й•™Х№‘}Ґђ°ЃХ№…ББ±Ґ•‘}Ќ…НЎ}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃХ№…ББ±Ґ•‘}Ќ…НЎ}…ББ±ҐЌ…СҐЅ№}Ґђ°ЃҐННХ•‘}Ґ№ЩЅҐЌ•}ЩЅҐ‘}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃҐННХ•‘}ЌЙ•‘ҐС}№ЅС•}ЩЅҐ‘}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…°(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃ©ЅХЙ№…±}БЙЅБЅН…±}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ¤(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ©ЅХЙ№…±}БЙЅБЅН…±}±Ґ№•}Ґђ°Ѓ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ±Ґ№•}№Хµ‰•И°Ѓ…ЌЌЅХ№С}ЙЅ±•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ‘•‰ҐС}…µЅХ№Р°ЃЌЙ•‘ҐС}…µЅХ№Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№©ЅХЙ№…±}БЙЅБЅН…±}±Ґ№”(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃ©ЅХЙ№…±}БЙЅБЅН…±}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ±Ґ№•}№Хµ‰•И°Ѓ©ЅХЙ№…±}БЙЅБЅН…±}±Ґ№•}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎ©ЅХЙ№…±}БЙЅБЅН…±}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃ±Ґ№•МЂфЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЃMСЅЙ•‘)ЅХЙ№…±AЙЅБЅН…±1Ґ№” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎ±Ґ№•lЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lНt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ±Ґ№•lСt°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°Ў±Ґ№•lХt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…ЙН•}•б…ЌС}‘•ЌҐµ…°Ў™ЅЙµ…С}•б…ЌС}‘•ЌҐµ…°Ў±Ґ№•lЩt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃ±Ґ№”ЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}©ЅХЙ№…±}БЙЅБЅН…±}™ЙЅµ}ЙЅЬЎЙЅЬ°Ѓ±Ґ№•М¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅёи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЭ•‰ЎЅЅ¬ЃНХ‰НЌЙҐБСҐЅёЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅё (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlеt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅёи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃНХ‰НЌЙҐБСҐЅёё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ЌЅ№СЙ…ЌС}Щ•ЙНҐЅё°ЃЌ…±±‰…Ќ­}ХЙ°°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ•Щ•№С}СеБ•}Н•Р°ЃЭ•‰ЎЅЅ­}Н•ЌЙ•С}БЙ•™Ґа°ЃЭ•‰ЎЅЅ­}Н•ЌЙ•С}Ў…Н °(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃНХ‰НЌЙҐБСҐЅ№}НС…СХМ°ЃҐННХ•‘}…Р°ЃЙ•ЩЅ­•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ}±ҐНС}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№М (ЂЂЂЂЂЂЂЃН•±°(ЂЂЂЂЂЂЂЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°(ЂЂЂЂЂЂЂЂЁ°(ЂЂЂЂЂЂЂЃ•Щ•№С}СеБ•}ЌЅ‘”иЃНСИЃрЃ9Ѕ№”ЂфЃ9Ѕ№”°(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘]•‰ЎЅЅ­MХ‰НЌЙҐБСҐЅё°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰1ҐНРЃНХ‰НЌЙҐБСҐЅ№МЃЭҐС Ѓ•бБ±ҐЌҐРЃС•№…№РЃ…№ђЃЅБСҐЅ№…°Ѓ•Щ•№РЃБЙ•‘ҐЌ…С•Мё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃ•Щ•№С}СеБ•}ЌЅ‘”ЃҐМЃ№ЅРЃ9Ѕ№”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃНХ‰НЌЙҐБСҐЅ№}НС…СХМЂфЂќ…ЌСҐЩ”њ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ9ЃБЅНҐСҐЅё њ°њЃсрЂ•МЃсрЂњ°њЃҐёЂњ°њЃсрЃ•Щ•№С}СеБ•}Н•РЃсрЂњ°њ¤ЂшЂА(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃҐННХ•‘}…Р°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№С}СеБ•}ЌЅ‘”¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ•±Н”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅё(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃҐННХ•‘}…Р°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃН•±№}™•СЌЎ}Э•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅёЎЌХЙНЅИ°ЃUU%ЎНСИЎЙЅЭlБt¤¤¤(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤(ЂЂЂЂЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Э•‰ЎЅЅ­}ЅХС‰Ѕб}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЭ•‰ЎЅЅ¬ЃЅХС‰ЅаЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБС}™ЙЅµ}ЙЅЬ (ЂЂЂЂЂЂЂЃЙЅЬиЃСХБ±•m№д°Ђёё№t(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­•±ҐЩ•ЙеСС•µБРи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”ЃЅ№”Ѓ№ЅЙµ…±Ґй•ђЃЭ•‰ЎЅЅ¬Ѓ‘•±ҐЩ•ЙдЃ…СС•µБРЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘]•‰ЎЅЅ­•±ҐЩ•ЙеСС•µБР (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°Ѓ‘•±ҐЩ•Йе}…СС•µБС}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­•±ҐЩ•ЙеСС•µБРи(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”Ѓ‘•±ҐЩ•ЙдЃ…СС•µБРё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃ‘•±ҐЩ•Йе}…СС•µБС}Ґђ°ЃЅХС‰Ѕб}•Щ•№С}Ґђ°ЃЭ•‰ЎЅЅ­}НХ‰НЌЙҐБСҐЅ№}Ґђ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ…СС•µБС}№Хµ‰•И°ЃЎССБ}НС…СХМ°Ѓ‘•±ҐЩ•Й•‘}…Р°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ™…Ґ±ХЙ•}Й•…НЅ№}ЌЅ‘”°Ѓ…СС•µБС•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБР(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃ‘•±ҐЩ•Йе}…СС•µБС}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎ‘•±ҐЩ•Йе}…СС•µБС}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎ‘•±ҐЩ•Йе}…СС•µБС}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}Э•‰ЎЅЅ­}‘•±ҐЩ•Йе}…СС•µБС}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ}™•СЌЎ}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р (ЂЂЂЂЂЂЂЃН•±°ЃЌХЙНЅИиЃ№д°ЃЅХС‰Ѕб}•Щ•№С}ҐђиЃUU%(ЂЂЂЂ¤ЂґшЃMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Ри(ЂЂЂЂЂЂЂЂ€€‰!е‘Й…С”ЃЅ№”ЃЅХС‰ЅаЃ•Щ•№Рё€€€(ЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЅХС‰Ѕб}•Щ•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№С}СеБ•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}Ў…Н °ЃНЅХЙЌ•}Ґђ°ЃЅЌЌХЙЙ•‘}…Р°Ѓ‘•±ҐЩ•Йе}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}©НЅё°Ѓ•№ЕХ•Х•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃЅХС‰Ѕб}•Щ•№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЎЅХС‰Ѕб}•Щ•№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЃЙЅЬЂфЃЌХЙНЅИ№™•СЌЎЅ№” ¤(ЂЂЂЂЂЂЂЃҐЃЙЅЬЃҐМЃ9Ѕ№”иЂЂЊЃБЙ…ќµ„иЃ№јЃЌЅЩ•ИЂґЃЌ…±±•ИЃН•±•ЌС•ђЃ…ёЃ•бҐНСҐ№њЃЙЅЬ(ЂЂЂЂЂЂЂЂЂЂЂЃЙ…ҐН”Ѓ-•еЙЙЅИЎЅХС‰Ѕб}•Щ•№С}Ґђ¤(ЂЂЂЂЂЂЂЃЙ•СХЙёЃН•±№}Э•‰ЎЅЅ­}ЅХС‰Ѕб}™ЙЅµ}ЙЅЬЎЙЅЬ¤((ЂЂЂЃ‘•Ѓ}±ҐНС}Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№СМ (ЂЂЂЂЂЂЂЃН•±°ЃС•№…№С}…ЌЌЅХ№С}ҐђиЃUU%°ЂЁ°ЃБ•№‘Ґ№ќ}Ѕ№±диЃ‰ЅЅ°(ЂЂЂЂ¤ЂґшЃСХБ±•mMСЅЙ•‘]•‰ЎЅЅ­=ХС‰ЅбЩ•№Р°Ђёё№tи(ЂЂЂЂЂЂЂЂ€€‰1ҐНРЃЅХС‰ЅаЃ•Щ•№СМЃЭҐС ЃЅ№”Ѓ•бБ±ҐЌҐРЃС•№…№РЃБЙ•‘ҐЌ…С”ё€€€(ЂЂЂЂЂЂЂЃЭҐС ЃН•±№}ЌХЙНЅИ ¤Ѓ…МЃЌХЙНЅИи(ЂЂЂЂЂЂЂЂЂЂЂЃҐЃБ•№‘Ґ№ќ}Ѕ№±ди(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЅХС‰Ѕб}•Щ•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№С}СеБ•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}Ў…Н °ЃНЅХЙЌ•}Ґђ°ЃЅЌЌХЙЙ•‘}…Р°Ѓ‘•±ҐЩ•Йе}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}©НЅё°Ѓ•№ЕХ•Х•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•МЃ9Ѓ‘•±ҐЩ•Йе}НС…СХМЂфЂќБ•№‘Ґ№њњ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ•№ЕХ•Х•‘}…Р°ЃЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃ•±Н”и(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃЌХЙНЅИ№•б•ЌХС” (ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃM1PЃЅХС‰Ѕб}•Щ•№С}Ґђ°ЃС•№…№С}…ЌЌЅХ№С}Ґђ°Ѓ•Щ•№С}СеБ•}ЌЅ‘”°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}Ў…Н °ЃНЅХЙЌ•}Ґђ°ЃЅЌЌХЙЙ•‘}…Р°Ѓ‘•±ҐЩ•Йе}НС…СХМ°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃБ…е±Ѕ…‘}©НЅё°Ѓ•№ЕХ•Х•‘}…Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃI=4Ѓ‰Ґ±±Ґ№ќ}ЌЅЙ”№Э•‰ЎЅЅ­}ЅХС‰Ѕб}•Щ•№Р(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ]!IЃС•№…№С}…ЌЌЅХ№С}ҐђЂфЂ•М(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЃ=IHЃ	dЃ•№ЕХ•Х•‘}…Р°ЃЅХС‰Ѕб}•Щ•№С}Ґђ(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ€€€°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЎС•№…№С}…ЌЌЅХ№С}Ґђ°¤°(ЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂЂ¤(ЂЂЂЂЂЂЂЂЂЂЂЃЙ•СХЙёЃСХБ±”ЎН•±№}Э•‰ЎЅЅ­}ЅХС‰Ѕб}™ЙЅµ}ЙЅЬЎЙЅЬ¤Ѓ™ЅИЃЙЅЬЃҐёЃЌХЙНЅИ№™•СЌЎ…±° ¤¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}БЙҐ№ЌҐБ…±}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃ	Ґ±±Ґ№ќAЙҐ№ЌҐБ…°и(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”Ѓ„ЃБЙҐ№ЌҐБ…°ЃЕХ•ЙдЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃ	Ґ±±Ґ№ќAЙҐ№ЌҐБ…° (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЙt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}ЌЙ•‘•№СҐ…±}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃЙ•‘•№СҐ…±I•ЌЅЙђи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”Ѓ„ЃЌЙ•‘•№СҐ…°ЃЕХ•ЙдЃЙЅЬЃЭҐСЎЅХРЃ•бБЅНҐ№њЃ…№дЃН•ЌЙ•Рё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃЙ•‘•№СҐ…±I•ЌЅЙђЎUU%ЎНСИЎЙЅЭlБt¤¤°ЃUU%ЎНСИЎЙЅЭlЕt¤¤°ЃЙЅЭlЙt°ЃЙЅЭlНt°ЃЙЅЭlСt¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}…ННҐќ№µ•№С}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃЙ•‘•№СҐ…±ННҐќ№µ•№Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”Ѓ…ёЃ…ННҐќ№µ•№РЃЕХ•ЙдЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃЙ•‘•№СҐ…±ННҐќ№µ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlНt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlСt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}µ•С•Й}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃ5•С•Й•™Ґ№ҐСҐЅёи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”Ѓ„Ѓµ•С•ИЃЕХ•ЙдЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃ5•С•Й•™Ґ№ҐСҐЅё (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°ЃЙЅЭlЕt°ЃЙЅЭlЙt°ЃЙЅЭlНt°ЃЙЅЭlСt°ЃЙЅЭlХt°ЃЙЅЭlЩt(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}µ•…НХЙ•µ•№С}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘UН…ќ•5•…НХЙ•µ•№Ри(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”Ѓ„Ѓ№ЅЙµ…±Ґй•ђЃµ•…НХЙ•µ•№РЃ©ЅҐёЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘UН…ќ•5•…НХЙ•µ•№Р (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂ¤((ЂЂЂЃНС…СҐЌµ•СЎЅђ(ЂЂЂЃ‘•Ѓ}Й•Ќ•ҐБС}™ЙЅµ}ЙЅЬЎЙЅЬиЃСХБ±•m№д°Ђёё№t¤ЂґшЃMСЅЙ•‘%№ќ•НСҐЅ№I•Ќ•ҐБРи(ЂЂЂЂЂЂЂЂ€€‰•ЌЅ‘”Ѓ…ёЃ…ББ•№ђµЅ№±дЃЙ•Ќ•ҐБРЃЙЅЬё€€€(ЂЂЂЂЂЂЂЃЙ•СХЙёЃMСЅЙ•‘%№ќ•НСҐЅ№I•Ќ•ҐБР (ЂЂЂЂЂЂЂЂЂЂЂЃUU%ЎНСИЎЙЅЭlБt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlЕtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlЕt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃ9Ѕ№”ЃҐЃЙЅЭlЙtЃҐМЃ9Ѕ№”Ѓ•±Н”ЃUU%ЎНСИЎЙЅЭlЙt¤¤°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlНt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlСt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlХt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЩt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlЭt°(ЂЂЂЂЂЂЂЂЂЂЂЃЙЅЭlбt°(ЂЂЂЂЂЂЂЂ¤(()UН…ќ•1•‘ќ•ИЂфЃ5•µЅЙеUН…ќ•1•‘ќ•ИЃрЃAЅНСќЙ•НUН…ќ•1•‘ќ•И(€€‰1•‘ќ•ИЃҐµБ±•µ•№С…СҐЅ№МЃ…ЌЌ•БС•ђЃ‰дЃСЎ”Ѓ!QQ@Ѓ…‘…БС•ИЃ…№ђЃН•ЙЩҐЌ”ЃЭҐЙҐ№њё()ЃЃ5•µЅЙеUН…ќ•1•‘ќ•ЙЃЂЃНС…еМЃСЎ”Ѓ‘•С•ЙµҐ№ҐНСҐЊЃЙ•™•Й•№Ќ”Ѓ…№ђЃС•НРЃ…‘…БС•Им(йЌ±…НМйЃAЅНСќЙ•НUН…ќ•1•‘ќ•ЙЂЃҐМЃСЎ”Ѓ‘ХЙ…‰±”ЃБЙЅ‘ХЌСҐЅёЃНеНС•ґЃЅЃЙ•ЌЅЙђё(€€€
