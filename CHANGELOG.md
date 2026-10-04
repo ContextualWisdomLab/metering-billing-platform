@@ -14,6 +14,52 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Foundation CI now selects the `CWL CI isolated` Linux self-hosted group and
+  its dedicated labels together, retaining PostgreSQL 18, hash-locked installs,
+  pinned actions and complete coverage enforcement. PR 182's original hosted
+  jobs never started because of an account billing lock. The routing change
+  does not establish operator-owned capacity, repository access, hosted test
+  success or managed default CodeQL acceptance (ADR
+  `0129-isolated-foundation-ci-routing`).
+
+- The default AIS receipt, outbox-list, and publish transport now refuses every
+  redirect before target I/O, including same-origin 301/302/303/307/308 responses.
+  Redirect handles are closed without reading their bodies and return stable
+  `transport_failure`. Tenant headers cannot be forwarded by a redirect and
+  publish cannot be rewritten into GET. Valid redirected receipts write no
+  observation; a later direct response stores once and replays normally. This
+  narrow containment is not complete #88 egress assurance or reusable policy
+  ownership (ADR `0128-refuse-ais-redirects`).
+
+- All AIS receipt, outbox-list, and publish response bodies now use one shared
+  one-MiB admission ceiling, read no more than the ceiling plus one overflow
+  byte, and reject oversized success bodies as `transport_failure`. HTTP error
+  bodies are never read and are explicitly closed; cleanup failures reject
+  instead of reporting successful error mapping. Existing 403/404 semantics
+  remain when cleanup succeeds (ADR `0127-bounded-ais-response-admission`,
+  issue #88). Preserve HTTP framing completeness: valid JSON shorter than the
+  parsed Content-Length rejects before observation storage, and incomplete
+  chunked framing/HTTPExceptions normalize to `transport_failure`. Reject
+  non-byte injected-reader results. Redirect and reusable egress policy are
+  not implied.
+
+- AIS outbox parsing now rejects missing, empty, and non-string required row
+  fields instead of coercing external JSON into apparent identifiers. The
+  whole page is validated before receipt polling, observation persistence, or
+  publish, with stable `transport_failure` rejection. Opaque URN equality and
+  proposal-only accounting remain unchanged (ADR
+  `0126-strict-ais-outbox-field-types`; issue #88).
+
+- Rating no longer substitutes another card for an explicit missing
+  `rate_card_code` or a configured nondefault card. `POST /v1/rating-runs`
+  forwards its optional card selector, rejects malformed selectors, and retains
+  the selected exact price through replay, PostgreSQL reload, and invoice
+  drafting. Omitted selectors keep the legacy default-service lookup. Existing
+  rating history, monetary response contracts, and accounting authority are
+  unchanged. See ADR `0125-explicit-rating-card-selection`.
+
 ### Added
 
 - The HTTP accept surface selects its ledger backend from the environment: `create_http_app(ledger=...)` now accepts either the deterministic `MemoryUsageLedger` reference adapter or the durable `PostgresUsageLedger` production system of record through the new `UsageLedger` union, and `metering_billing.http_app.create_default_ledger(environ=None)` builds the selected backend — `METERING_BILLING_LEDGER_BACKEND=postgres` constructs `PostgresUsageLedger` via the existing `PostgresUsageLedger.connect` convention from `METERING_BILLING_POSTGRES_DSN`, a missing or empty DSN raises a startup `ValueError` naming `METERING_BILLING_POSTGRES_DSN`, and every other value including unset keeps returning `MemoryUsageLedger()` so tests stay unchanged. Unauthenticated `GET /readyz` joins `GET /healthz` in the same dispatch style: healthy backends answer `200 {"status": "ready", "backend": "memory" | "postgres"}`, and a failing PostgreSQL probe answers `503 {"status": "not_ready", "backend": ..., "reason": "migration_history_unavailable"}` using one cheap migration-history row count (`public.metering_billing_schema_migration`) executed through the ledger's own connection and transaction conventions with no ad-hoc psycopg connections and no raw exception text. Memory stays the deterministic reference/test adapter; postgres becomes the selectable production system of record as partial progress on issue #84. Service constructor signatures, existing routes, exact-decimal money, journal boundaries, AIS pull behavior, and the #24 outbox stay unchanged. ADR 0123 documents the decision. There is no new third-party dependency, schema change, secret, or provider call on this path.

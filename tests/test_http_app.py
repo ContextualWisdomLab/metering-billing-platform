@@ -86,6 +86,7 @@ def invoke_http(
         headers: list[tuple[str, str]],
         exc_info: object | None = None,
     ) -> Any:
+        """Capture WSGI status and headers and return a no-op response write callback."""
         recorded["status"] = status
         recorded["headers"] = headers
         return lambda _data: None
@@ -124,6 +125,109 @@ def _assert_decimal_strings(testcase: unittest.TestCase, payload: Mapping[str, A
 
 class HttpAcceptSurfaceTests(unittest.TestCase):
     """Verify JSON HTTP is a thin adapter over the existing commercial services."""
+
+    def test_selected_rate_card_flows_from_usage_to_invoice_draft(self) -> None:
+        """Two cards sharing version one must retain the selected exact price."""
+        ledger = seed_rated_ledger()
+        app = create_http_app(ledger)
+        card_status, card = invoke_http(
+            app, "POST", "/v1/rate-cards",
+            {
+                "tenant_reference": TENANT_ONE,
+                "rate_card_name": "cwl_premium",
+                "currency_code": "USD",
+                "lines": [{"metric_code": "gen_ai_output_token", "unit_amount": "0.000004"}],
+            },
+        )
+        self.assertEqual(card_status, 200)
+        self.assertEqual(card["rate_card_version"], 1)
+        ingest_status, _ = invoke_http(
+            app, "POST", "/v1/usage-events",
+            {"tenant_reference": TENANT_ONE, "events": list(known_event_batch())},
+        )
+        self.assertEqual(ingest_status, 200)
+        request = {
+            "tenant_reference": TENANT_ONE,
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "rate_card_version": 1,
+            "rate_card_code": "cwl_premium",
+        }
+        status, rated = invoke_http(app, "POST", "/v1/rating-runs", request)
+        self.assertEqual(status, 200)
+        self.assertEqual(rated["rate_card_code"], "cwl_premium")
+        self.assertEqual(Decimal(rated["rated_total_amount"]), KNOWN_MORNING_TOTAL * 2)
+        self.assertEqual(validate_rating_run(rated), ())
+        replay_status, replay = invoke_http(app, "POST", "/v1/rating-runs", request)
+        self.assertEqual(replay_status, 200)
+        self.assertEqual(replay["rating_outcome_code"], "duplicate_replay")
+        self.assertEqual(replay["rating_run_id"], rated["rating_run_id"])
+        draft_status, draft = invoke_http(
+            app, "POST", "/v1/invoice-drafts",
+            {"tenant_reference": TENANT_ONE, "rating_run_id": rated["rating_run_id"]},
+        )
+        self.assertEqual(draft_status, 200)
+        self.assertEqual(draft["drafted_total_amount"], rated["rated_total_amount"])
+        self.assertEqual(validate_invoice_draft(draft), ())
+        self.assertEqual(len(ledger.rating_runs), 1)
+        self.assertEqual(len(ledger.invoice_drafts), 1)
+        self.assertEqual(len(ledger.accounting_export_records), 0)
+        standard_status, standard = invoke_http(
+            app, "POST", "/v1/rating-runs", {**request, "rate_card_code": "cwl_standard"}
+        )
+        self.assertEqual(standard_status, 200)
+        self.assertEqual(Decimal(standard["rated_total_amount"]), KNOWN_MORNING_TOTAL)
+        self.assertNotEqual(standard["rating_run_id"], rated["rating_run_id"])
+        self.assertEqual(len(ledger.rating_runs), 2)
+
+    def test_invalid_rate_card_selector_fails_closed_over_http(self) -> None:
+        """An explicit null, non-string, or empty selector is not omission."""
+        for code in (None, [], {}, 1, True, "", " "):
+            with self.subTest(code=code):
+                ledger = seed_rated_ledger()
+                status, body = invoke_http(
+                    create_http_app(ledger), "POST", "/v1/rating-runs",
+                    {
+                        "tenant_reference": TENANT_ONE,
+                        "window_started_at": "2026-08-16T10:00:00Z",
+                        "window_ended_at": "2026-08-16T11:00:00Z",
+                        "rate_card_version": 1,
+                        "rate_card_code": code,
+                    },
+                )
+                self.assertEqual(status, 422)
+                self.assertEqual(body["rejection_reason_code"], "request_invalid")
+                self.assertEqual(len(ledger.rating_runs), 0)
+
+    def test_unknown_or_foreign_rate_card_selector_writes_no_rating(self) -> None:
+        """Unknown and foreign-only card names cannot fall back to standard."""
+        ledger = seed_rated_ledger()
+        app = create_http_app(ledger)
+        status, _ = invoke_http(
+            app, "POST", "/v1/rate-cards",
+            {
+                "tenant_reference": TENANT_TWO,
+                "rate_card_name": "foreign_contract",
+                "currency_code": "USD",
+                "lines": [{"metric_code": "gen_ai_output_token", "unit_amount": "5"}],
+            },
+        )
+        self.assertEqual(status, 200)
+        for code in ("missing_contract", "foreign_contract"):
+            with self.subTest(code=code):
+                status, body = invoke_http(
+                    app, "POST", "/v1/rating-runs",
+                    {
+                        "tenant_reference": TENANT_ONE,
+                        "window_started_at": "2026-08-16T10:00:00Z",
+                        "window_ended_at": "2026-08-16T11:00:00Z",
+                        "rate_card_version": 1,
+                        "rate_card_code": code,
+                    },
+                )
+                self.assertEqual(status, 422)
+                self.assertEqual(body["rejection_reason_code"], "rate_card_not_found")
+                self.assertEqual(len(ledger.rating_runs), 0)
 
     def test_full_commercial_path_accepts_exact_decimal_json(self) -> None:
         """Buyers can walk usage through cash journal over HTTP without floats."""
@@ -584,6 +688,7 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         recorded: dict[str, str] = {}
 
         def start_response(status: str, headers: list[tuple[str, str]], exc_info: object | None = None) -> Any:
+            """Record the JSON helper's WSGI status and return a no-op write callback."""
             recorded["status"] = status
             return lambda _data: None
 

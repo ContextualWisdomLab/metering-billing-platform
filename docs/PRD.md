@@ -65,6 +65,8 @@ contextual-orchestrator usage
 - A known stored-usage set in a half-open ISO 8601 window produces one exact invoice-intent money total equal to quantity times the published `unit_amount`.
 - Equivalent decimal and UTC spellings (`1` vs `1.0`, `Z` vs `+00:00`) remain one stored fact and therefore one rated quantity.
 - Rating requires a persisted same-tenant `rate_card_version`. An unknown or cross-tenant version rejects.
+- Optional `rate_card_code` on `POST /v1/rating-runs` selects the published card name together with its integer version. An explicit unknown or foreign-only card rejects as `rate_card_not_found`, writes zero rating rows, and never substitutes another card. Explicit null, non-string, empty, or whitespace-only selectors are HTTP 422 `request_invalid`.
+- Omitting the selector preserves the legacy default-service lookup: prefer the published `cwl_standard` version, otherwise accept only a unique same-tenant version. A configured nondefault service card never falls back. Two selected cards with the same version number remain distinct rating identities and retain their exact prices through invoice drafting and restart.
 - A billable meter missing from the published card fails closed and does not invent a price.
 - A second rate of the same tenant, window, rate-card version, and usage snapshot returns the same `rating_run_id` and totals.
 - Another tenant's usage is invisible to the rated total.
@@ -139,6 +141,9 @@ contextual-orchestrator usage
 - `operator_console` Storybook adds one `JournalProposal` story for the validated morning cash-journal GET. There is no login wall, Stripe, AIS call, journal compose, or production SPA.
 
 ## Posting-receipt observation acceptance
+
+- The AIS client accepts at most 1,048,576 bytes (one MiB) per receipt lookup, outbox list, or publish response. It reads at most the ceiling plus one overflow byte without trusting Content-Length, closes success responses on overflow or read failure, and returns stable `transport_failure`. HTTP error bodies are never read and are explicitly closed; 403/404 mapping is preserved only when cleanup succeeds. Error cleanup failure is a transport denial. Parsed stdlib HTTP Content-Length must be fully satisfied even when a shorter body is valid JSON; truncated chunked framing and other HTTPExceptions also return `transport_failure` before observation storage. Injected transports must provide blocking byte `read(size)` completion/EOF semantics; non-byte results reject. This byte bound is not an end-to-end deadline, DNS policy, or completed #88 egress assurance.
+- The default AIS opener refuses 301/302/303/307/308 redirects, including same-origin redirects, before any second-hop request. Receipt, outbox list, and publish return `transport_failure` after closing the unread redirect response. A redirect cannot forward the tenant header, rewrite publish into a GET, or persist a receipt observation. Normal direct responses and duplicate replay remain unchanged (ADR `0128-refuse-ais-redirects`). Injected transports are trusted adapter seams and must also prohibit redirects; this local guard is not reusable destination/DNS/proxy/TLS policy.
 
 - An operator can pull an AIS posting receipt for the published invoice and cash idempotency keys and store one `posting_receipt_observation`.
 - A replay of the same tenant, key, and receipt returns the same observation as `duplicate_replay`.
@@ -560,6 +565,7 @@ contextual-orchestrator usage
 
 - An operator can drain AIS `posting_receipt` outbox events for a known tenant through `AisOutboxDrainService.drain_ais_outbox` or `POST /v1/ais-outbox-drains`.
 - Empty unpublished `outbox_events` is success and performs zero receipt GETs.
+- Every AIS outbox row requires nonempty string `outbox_event_id`, `event_type_code`, `aggregate_reference`, `payload_reference`, `payload_hash`, and `created_at`. Null, boolean, numeric, container, empty, or missing values reject the whole page as `transport_failure` before any receipt GET, observation insert, or publish from that page. Never coerce those fields with `str(...)`. References remain opaque; extra fields and legacy `items`/`cursor` remain ignored.
 - Matching uses equality against URNs constructed from our stored `proposal_id`: `urn:cwl:accounting:posting_receipt:{proposal_id}` and `urn:cwl:accounting:general_journal:{proposal_id}`. Billing does not parse `payload_reference`.
 - Receipt lookup stays `GET /posting-receipts?idempotency_key=` with the stored Billing key (`invoice_draft`, `cash_receipt`, or `credit_adjustment` as published). The payload URN is never the query.
 - A successful or existing observation for the matched proposal POSTs `/outbox-events/{outbox_event_id}/publish`. AIS 403 is cross-tenant and is not retried as another tenant. AIS 404 does not invent a row.

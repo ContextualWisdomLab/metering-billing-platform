@@ -20,10 +20,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from http.client import HTTPException, HTTPResponse
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
 from metering_billing.contracts import validate_consumed_posting_receipt
@@ -41,10 +42,41 @@ from metering_billing.usage_ledger import (
 
 Clock = Callable[[], datetime]
 UrlOpen = Callable[..., Any]
+AIS_RESPONSE_MAX_BYTES = 1_048_576
+
+
+def _read_ais_response(response: Any) -> bytes:
+    """Read at most one MiB plus one overflow byte, rejecting oversized bodies.
+
+    The caller owns response closure. All AIS success routes use the same
+    admission limit before parsing or retaining bytes. The stdlib HTTP reader's
+    parsed remaining Content-Length is checked for truncation, independently
+    from the byte cap; chunked framing exceptions are normalized by callers.
+    Injected openers must return a context-managed response with read(size)
+    yielding bytes and HTTPResponse-compatible full-read/EOF semantics, not a
+    nonblocking short-read stream.
+    """
+    expected_length = response.length if isinstance(response, HTTPResponse) else None
+    raw_body = response.read(AIS_RESPONSE_MAX_BYTES + 1)
+    if not isinstance(raw_body, bytes):
+        raise AisTransportError("transport_failure")
+    if len(raw_body) > AIS_RESPONSE_MAX_BYTES:
+        raise AisTransportError("transport_failure")
+    if expected_length is not None and len(raw_body) != expected_length:
+        raise AisTransportError("transport_failure")
+    return raw_body
 
 
 class AisTransportError(Exception):
     """Raised when the AIS lookup cannot be completed safely."""
+
+
+def _close_ais_error(error: HTTPError) -> None:
+    """Close an unread HTTP error body or return a stable cleanup denial."""
+    try:
+        error.close()
+    except (OSError, ValueError) as close_error:
+        raise AisTransportError("transport_failure") from close_error
 
 
 @dataclass(frozen=True)
@@ -192,7 +224,12 @@ def general_journal_aggregate_reference(proposal_id: UUID) -> str:
 
 
 class AisPostingReceiptClient:
-    """Stdlib HTTP client for AIS posting-receipt and outbox routes."""
+    """Stdlib HTTP client for AIS posting-receipt and outbox routes.
+
+    An injected ``urlopen`` must return a context-managed blocking byte
+    response with standard ``read(size)`` completion/EOF semantics. Production
+    HTTPResponse framing is validated before bytes reach contract consumers.
+    """
 
     def __init__(
         self,
@@ -200,6 +237,12 @@ class AisPostingReceiptClient:
         urlopen: UrlOpen | None = None,
         timeout_seconds: float = 10.0,
     ) -> None:
+        """Store the slash-trimmed AIS base URL, opener, and request timeout.
+
+        Default to the redirect-refusing opener; an injected opener must satisfy
+        the class's context-managed blocking read(size) response contract.
+        Construction performs no request or endpoint validation.
+        """
         self.ais_base_url = ais_base_url.rstrip("/")
         self._urlopen: UrlOpen = urlopen if urlopen is not None else urlopen_default
         self.timeout_seconds = timeout_seconds
@@ -218,12 +261,13 @@ class AisPostingReceiptClient:
         try:
             with self._urlopen(request, timeout=self.timeout_seconds) as response:
                 status_code = int(getattr(response, "status", 200))
-                raw_body = response.read()
+                raw_body = _read_ais_response(response)
         except HTTPError as error:
+            _close_ais_error(error)
             if error.code in {403, 404}:
                 return AisLookupResult(status_code=error.code, raw_body=b"")
             raise AisTransportError("transport_failure") from error
-        except (URLError, TimeoutError, OSError, ValueError) as error:
+        except (URLError, TimeoutError, OSError, ValueError, HTTPException) as error:
             raise AisTransportError("transport_failure") from error
         if status_code != 200:
             raise AisTransportError("transport_failure")
@@ -267,12 +311,13 @@ class AisPostingReceiptClient:
         try:
             with self._urlopen(request, timeout=self.timeout_seconds) as response:
                 status_code = int(getattr(response, "status", 200))
-                raw_body = response.read()
+                raw_body = _read_ais_response(response)
         except HTTPError as error:
+            _close_ais_error(error)
             if error.code in {403, 404}:
                 return AisOutboxPage(status_code=error.code, outbox_events=(), next_cursor=None)
             raise AisTransportError("transport_failure") from error
-        except (URLError, TimeoutError, OSError, ValueError) as error:
+        except (URLError, TimeoutError, OSError, ValueError, HTTPException) as error:
             raise AisTransportError("transport_failure") from error
         if status_code != 200:
             raise AisTransportError("transport_failure")
@@ -294,12 +339,13 @@ class AisPostingReceiptClient:
         try:
             with self._urlopen(request, timeout=self.timeout_seconds) as response:
                 status_code = int(getattr(response, "status", 200))
-                raw_body = response.read()
+                raw_body = _read_ais_response(response)
         except HTTPError as error:
+            _close_ais_error(error)
             if error.code in {403, 404}:
                 return AisLookupResult(status_code=error.code, raw_body=b"")
             raise AisTransportError("transport_failure") from error
-        except (URLError, TimeoutError, OSError, ValueError) as error:
+        except (URLError, TimeoutError, OSError, ValueError, HTTPException) as error:
             raise AisTransportError("transport_failure") from error
         if status_code not in {200, 204}:
             raise AisTransportError("transport_failure")
@@ -307,7 +353,12 @@ class AisPostingReceiptClient:
 
 
 def _parse_outbox_page(raw_body: bytes) -> AisOutboxPage:
-    """Decode one AIS outbox envelope without reading ``items`` or ``cursor``."""
+    """Decode the whole AIS page before any receipt or publish side effect.
+
+    Required row fields must be nonempty strings; never coerce external JSON
+    into an identifier or evidence reference. References remain opaque, and
+    legacy extra fields, ``items``, and ``cursor`` remain ignored.
+    """
     try:
         loaded = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -325,30 +376,38 @@ def _parse_outbox_page(raw_body: bytes) -> AisOutboxPage:
         if not isinstance(item, dict):
             raise AisTransportError("transport_failure")
         try:
-            parsed.append(
-                AisOutboxEvent(
-                    outbox_event_id=str(item["outbox_event_id"]),
-                    event_type_code=str(item["event_type_code"]),
-                    aggregate_reference=str(item["aggregate_reference"]),
-                    payload_reference=str(item["payload_reference"]),
-                    payload_hash=str(item["payload_hash"]),
-                    created_at=str(item["created_at"]),
-                )
+            fields = (
+                "outbox_event_id", "event_type_code", "aggregate_reference",
+                "payload_reference", "payload_hash", "created_at",
             )
+            values = {field: item[field] for field in fields}
+            if any(not isinstance(value, str) or not value for value in values.values()):
+                raise AisTransportError("transport_failure")
+            parsed.append(AisOutboxEvent(**values))
         except KeyError as error:
             raise AisTransportError("transport_failure") from error
     return AisOutboxPage(status_code=200, outbox_events=tuple(parsed), next_cursor=next_cursor)
 
 
+class _RejectAisRedirect(HTTPRedirectHandler):
+    """Reject every AIS redirect before sending a second request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Keep the original response owned by the client's HTTPError cleanup."""
+        raise HTTPError(req.full_url, code, "redirect_refused", headers, fp)
+
+
 def urlopen_default(request: Request, timeout: float | None = None) -> Any:
-    """Call stdlib ``urllib.request.urlopen`` so tests can replace the client hook."""
+    """Open an allowed initial AIS URL with redirects disabled.
+
+    All redirect statuses reject, including same-origin redirects. The client
+    closes the unread HTTPError and maps it to ``transport_failure``. This is
+    narrow consumer containment, not DNS, proxy, TLS, or deadline policy.
+    """
     request_url = getattr(request, "full_url", None)
     if not isinstance(request_url, str) or not ais_base_url_is_allowed(request_url):
         raise ValueError("ais endpoint is insecure")
-    # URL is constrained to https or local HTTP immediately above.
-    return urlopen(  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-        request, timeout=timeout
-    )
+    return build_opener(_RejectAisRedirect()).open(request, timeout=timeout)
 
 
 class PostingReceiptPullService:
@@ -360,6 +419,12 @@ class PostingReceiptPullService:
         ais_client: AisPostingReceiptClient | None = None,
         clock: Clock | None = None,
     ) -> None:
+        """Bind observation storage, the optional AIS client, and the recording clock.
+
+        Default to a fresh memory ledger and the current UTC clock.
+        An omitted client stays unconfigured; construction neither pulls
+        receipts nor changes any journal proposal status.
+        """
         self.ledger = MemoryUsageLedger() if ledger is None else ledger
         self.ais_client = ais_client
         self._clock: Clock = clock if clock is not None else (lambda: datetime.now(UTC))

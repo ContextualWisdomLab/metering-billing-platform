@@ -712,6 +712,7 @@ class HttpRequestError(ValueError):
     """Raised when the HTTP adapter cannot decode or authorize a write."""
 
     def __init__(self, rejection_reason_code: str) -> None:
+        """Retain the HTTP rejection code as both exception text and adapter metadata."""
         super().__init__(rejection_reason_code)
         self.rejection_reason_code = rejection_reason_code
 
@@ -3573,7 +3574,15 @@ def _dispatch_write(
         rate_card_version = payload.get("rate_card_version")
         if not isinstance(rate_card_version, int) or isinstance(rate_card_version, bool):
             raise HttpRequestError("request_invalid")
-        result = rating.rate_usage_window(tenant_reference, window, rate_card_version)
+        rate_card_code = payload.get("rate_card_code")
+        if "rate_card_code" in payload and (
+            not isinstance(rate_card_code, str) or not rate_card_code.strip()
+        ):
+            raise HttpRequestError("request_invalid")
+        result = rating.rate_usage_window(
+            tenant_reference, window, rate_card_version,
+            rate_card_code=rate_card_code,
+        )
         return result.as_contract_dict(), _status_for_result(result)
     if route_name == "invoice_drafts":
         result = drafts.draft_invoice(
