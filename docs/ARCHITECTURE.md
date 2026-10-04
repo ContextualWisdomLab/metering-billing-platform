@@ -63,6 +63,16 @@ CWL usage producers ---> Usage ledger ---> Metering ---> Rating
 
 ## Commercial rating
 
+The optional HTTP `rate_card_code` is the published card name, not a provider
+identifier. It binds pricing authority together with tenant and integer
+`rate_card_version`. The adapter forwards that selector to `UsageRatingService`.
+Explicit missing or foreign-only names fail closed before usage lookup, replay,
+or insert; they cannot reuse a differently priced stored run. The default service
+with an omitted selector retains the legacy `cwl_standard` preference and unique
+same-tenant version fallback. Configured nondefault cards do not fall back.
+Malformed HTTP selectors reject as `request_invalid`. No schema migration or
+response-envelope change is required (ADR `0125-explicit-rating-card-selection`).
+
 `metering_billing.UsageRatingService` is the read-and-rate path for already-stored usage.  A buyer supplies a tenant, a half-open ISO 8601 window, and a persisted rate-card version.  The service resolves that same-tenant version, aggregates billable quality only, multiplies exact quantities by the stored `unit_amount` for each matching `metric_code`, and persists append-only `rating_run` and `rating_line` rows.  Identity is `(tenant_account_id, window_started_at, window_ended_at, rate_card_version_id, usage_snapshot_hash)`.  An unknown version, a cross-tenant version, or a missing metric fails closed and does not invent a price.  An identical replay returns the same `rating_run_id` and totals.  `POST /v1/rating-runs` stays that command and refuses PAN and provider secrets.  `RatingRunPresentmentService` projects a stored run as a statement.  `GET /v1/rating-runs/{rating_run_id}` is HTTP 200 for the same tenant and HTTP 404 across tenants.  `GET /v1/rating-runs` lists `{rating_runs, next_cursor}` ordered by `recorded_at` then `rating_run_id`.  Rate a window, then draft an invoice.  Rating never drafts an invoice, never calls a payment provider, and never writes a posted journal.
 
 ## Invoice draft
@@ -123,6 +133,29 @@ The deployment surface is Docker Compose (`compose/docker-compose.yml`, fixed pr
 
 ## Posting-receipt observation
 
+The AIS client's three response consumers share a one-MiB (1,048,576-byte)
+admission ceiling. They read only the ceiling plus one overflow byte before
+parsing or retaining a success body, independent of Content-Length. Response
+contexts close on overflow and read errors. HTTP error bodies are not read;
+their handles are explicitly closed before mapping 403/404, and failed cleanup
+is `transport_failure`. Parsed stdlib HTTP Content-Length is checked against
+received bytes, and truncated chunked framing/HTTPExceptions normalize to that
+same denial before any receipt is stored. Injected transports require blocking
+byte-read completion/EOF semantics and non-byte results reject.
+This local resource containment neither owns reusable
+egress policy nor proves redirect, DNS, TLS, or end-to-end time budgets (ADR
+`0127-bounded-ais-response-admission`).
+
+The default AIS opener uses a private `HTTPRedirectHandler` that raises an
+`HTTPError` retaining the original response instead of creating a second
+request. All three consumers close that unread response and normalize redirects
+to `transport_failure`. Both same-origin and cross-origin redirects are refused;
+publish is never rewritten into GET. Observation storage remains empty on a
+redirect, while a later direct response can store once and replay. Injected
+openers remain trusted transport adapters and must provide equivalent redirect
+refusal. This is narrow Billing-local containment, not reusable egress ownership
+or released EgressWeave integration (ADR `0128-refuse-ais-redirects`).
+
 `metering_billing.PostingReceiptPullService` GETs an AIS-owned `posting_receipt` from `{ais_base_url}/posting-receipts?idempotency_key=` with required `X-CWL-Tenant-Reference`.  The response is validated against the consumed AIS contract in `schemas/consumed/`.  A successful pull persists one append-only `posting_receipt_observation` identified by `(tenant_account_id, idempotency_key)` plus `source_payload_hash` / `receipt_id`.  AIS `receipt_id` is not the internal primary key.  Replay of the same tenant, key, and receipt returns the stored observation.  `posting_status_code` stays an AIS fact (`posted`, `held`, `rejected`, `reversed`) and is never mapped onto Billing `proposal_status`.  AIS 403 writes zero rows.  AIS 404 is `not_yet_accepted` and writes zero rows.  `POST /v1/posting-receipt-observations` stays that #16 pull and refuses PAN and provider secrets.  `GET /v1/posting-receipt-observations/{idempotency_key}` stays the existing #16 item read: HTTP 200 for the same tenant and HTTP 404 across tenants.  `PostingReceiptObservationPresentmentService` projects a stored observation as a statement.  `GET /v1/posting-receipt-observations` lists `{posting_receipt_observations, next_cursor}` ordered by `observed_at` then `posting_receipt_observation_id`.  Drain AIS outbox, then store the receipt observation.  This path does not flip `proposal_status`, invent a receipt shape, or start operator UI.
 
 ## Usage-event presentment
@@ -170,6 +203,15 @@ The deployment surface is Docker Compose (`compose/docker-compose.yml`, fixed pr
 `metering_billing.DunningEventPresentmentService` projects one tenant-scoped reminder statement from stored `collection_dunning_event` rows.  Identity is the stored `collection_dunning_event_id`, published as `dunning_event_id`.  Sequence is `dunning_event_number`.  Notice codes stay `first_notice` or `overdue_notice`.  Next operator action is `wait` when the parent case is settled, otherwise `collect`.  `POST /v1/collection-cases/{collection_case_id}/dunning-events` stays the #10 record and refuses PAN and provider secrets.  `GET /v1/dunning-events/{dunning_event_id}` is HTTP 200 for the same tenant and HTTP 404 across tenants.  `GET /v1/dunning-events` lists `{dunning_events, next_cursor}` ordered by `occurred_at` then `collection_dunning_event_id`.  Record the commercial reminder, then collect or credit.  This path does not send mail, invent recipient PII, capture payment, call AIS, or start a production SPA.
 
 ## AIS outbox drain
+
+The AIS client admits the entire page before draining any event. All six
+required row fields must be nonempty strings; coercing nulls, numbers,
+booleans, or containers into apparent identifiers is forbidden. A malformed
+row rejects the page as `transport_failure` before receipt lookup, observation
+insert, or outbox publish from that page. Opaque reference equality, ignored
+extra fields, and `next_cursor` handling are unchanged. This is narrow Billing
+consumer validation, not AIS schema ownership or EgressWeave transport policy
+(ADR `0126-strict-ais-outbox-field-types`).
 
 `metering_billing.AisOutboxDrainService` drains AIS `GET /outbox-events?event_type_code=posting_receipt`.  The client reads `outbox_events` and `next_cursor` only.  Empty unpublished pages are success and perform zero receipt GETs.  For `posting_receipt`, Billing constructs `urn:cwl:accounting:posting_receipt:{proposal_id}` and `urn:cwl:accounting:general_journal:{proposal_id}` from stored `proposal_id` and matches those strings by equality.  It does not parse `payload_reference`.  The stored Billing `idempotency_key` is the only `GET /posting-receipts` query.  After a successful or existing observation, the drain POSTs `/outbox-events/{outbox_event_id}/publish`.  AIS 403 is not retried as another tenant.  AIS 404 does not invent a row.  `journal_reversal` and `period_close` are not drained.  `POST /v1/ais-outbox-drains` uses the tenant pin plus the API-credential key rule.  Drain AIS outbox, then store the receipt observation; AIS may keep being polled only when the outbox is non-empty.
 

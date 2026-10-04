@@ -554,7 +554,7 @@ class PostingReceiptObservationTests(unittest.TestCase):
         class FakeResponse:
             status = 200
 
-            def read(self) -> bytes:
+            def read(self, size: int = -1) -> bytes:
                 return json.dumps({"ok": True}).encode("utf-8")
 
             def __enter__(self) -> FakeResponse:
@@ -579,7 +579,7 @@ class PostingReceiptObservationTests(unittest.TestCase):
         self.assertEqual(headers.get("x-cwl-tenant-reference") or headers.get("X-Cwl-Tenant-Reference"), TENANT_ONE)
 
         class StatuslessResponse:
-            def read(self) -> bytes:
+            def read(self, size: int = -1) -> bytes:
                 return b"{}"
 
             def __enter__(self) -> StatuslessResponse:
@@ -600,7 +600,7 @@ class PostingReceiptObservationTests(unittest.TestCase):
             class Unexpected:
                 status = 204
 
-                def read(self) -> bytes:
+                def read(self, size: int = -1) -> bytes:
                     return b""
 
                 def __enter__(self) -> Unexpected:

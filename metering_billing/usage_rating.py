@@ -162,7 +162,15 @@ class UsageRatingService:
 
         A replay of the same tenant, normalized window, rate-card version, and
         usage snapshot returns the stored ``rating_run_id`` and exact totals.
+        An explicit ``rate_card_code`` or configured nondefault card never
+        falls back to another card. With no selector and the default service
+        configuration, legacy lookup prefers ``cwl_standard`` and otherwise
+        accepts only a unique same-tenant version.
         """
+        if rate_card_code is not None and (
+            not isinstance(rate_card_code, str) or not rate_card_code.strip()
+        ):
+            return _rejected(RatingRejectionReasonCode.RATE_CARD_NOT_FOUND)
         resolved_name = self._rate_card_code if rate_card_code is None else rate_card_code
         tenant, tenant_error = self.ledger.resolve_tenant(tenant_reference)
         if tenant_error is not None:
@@ -176,7 +184,11 @@ class UsageRatingService:
         rate_card_version_row = self.ledger.find_rate_card_version(
             tenant.tenant_account_id, rate_card_version, resolved_name
         )
-        if rate_card_version_row is None:
+        if (
+            rate_card_version_row is None
+            and rate_card_code is None
+            and self._rate_card_code == DEFAULT_RATE_CARD_CODE
+        ):
             rate_card_version_row = self.ledger.find_rate_card_version(
                 tenant.tenant_account_id, rate_card_version
             )

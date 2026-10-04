@@ -608,6 +608,68 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             tuple(executor.map(hammer, range(8)))
         self.assertEqual(failures, [])
 
+    def test_named_rate_card_http_survives_restart_without_price_substitution(self) -> None:
+        """HTTP-selected pricing and replay stay pinned after a fresh DB connection."""
+        from metering_billing.http_app import create_http_app
+        from tests.test_http_app import invoke_http
+
+        app = create_http_app(self.ledger)
+        for tenant, name, price in (
+            (TENANT_ONE, "cwl_standard", "0.000002"),
+            (TENANT_ONE, "cwl_premium", "0.000004"),
+            (TENANT_TWO, "foreign_contract", "5"),
+        ):
+            status, card = invoke_http(
+                app, "POST", "/v1/rate-cards",
+                {
+                    "tenant_reference": tenant, "rate_card_name": name,
+                    "currency_code": "USD",
+                    "lines": [{"metric_code": "gen_ai_output_token", "unit_amount": price}],
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(card["rate_card_version"], 1)
+        ingest_status, _ = invoke_http(app, "POST", "/v1/usage-events", make_event())
+        self.assertEqual(ingest_status, 200)
+        request = {
+            "tenant_reference": TENANT_ONE,
+            "window_started_at": "2026-08-16T10:00:00Z",
+            "window_ended_at": "2026-08-16T11:00:00Z",
+            "rate_card_version": 1, "rate_card_code": "cwl_premium",
+        }
+        status, rated = invoke_http(app, "POST", "/v1/rating-runs", request)
+        self.assertEqual(status, 200)
+        self.assertEqual(rated["rate_card_code"], "cwl_premium")
+        self.assertEqual(Decimal(rated["rated_total_amount"]), Decimal("0.007240"))
+        draft_status, draft = invoke_http(
+            app, "POST", "/v1/invoice-drafts",
+            {"tenant_reference": TENANT_ONE, "rating_run_id": rated["rating_run_id"]},
+        )
+        self.assertEqual(draft_status, 200)
+        self.assertEqual(draft["drafted_total_amount"], rated["rated_total_amount"])
+        with psycopg.connect(POSTGRES_DSN) as fresh_connection:
+            fresh_ledger = PostgresUsageLedger(fresh_connection)
+            fresh_app = create_http_app(fresh_ledger)
+            replay_status, replay = invoke_http(fresh_app, "POST", "/v1/rating-runs", request)
+            self.assertEqual(replay_status, 200)
+            self.assertEqual(replay["rating_outcome_code"], "duplicate_replay")
+            self.assertEqual(replay["rating_run_id"], rated["rating_run_id"])
+            read_status, statement = invoke_http(
+                fresh_app, "GET", "/v1/invoice-drafts/" + draft["invoice_draft_id"],
+                query={"tenant_reference": TENANT_ONE},
+            )
+            self.assertEqual(read_status, 200)
+            self.assertEqual(statement["amount_due"], rated["rated_total_amount"])
+            for code in ("foreign_contract", "missing_contract"):
+                rejected_status, rejected = invoke_http(
+                    fresh_app, "POST", "/v1/rating-runs", {**request, "rate_card_code": code}
+                )
+                self.assertEqual(rejected_status, 422)
+                self.assertEqual(rejected["rejection_reason_code"], "rate_card_not_found")
+            tenant_id = fresh_ledger.require_tenant(TENANT_ONE).tenant_account_id
+            self.assertEqual(len(fresh_ledger.list_rating_runs(tenant_id)), 1)
+            self.assertEqual(len(fresh_ledger.list_invoice_drafts(tenant_id)), 1)
+
     def test_rate_card_and_rating_are_durable_and_tenant_scoped(self) -> None:
         """The first usage-to-rating path survives reload and exact replay."""
         ingest = UsageIngestionService(self.ledger)

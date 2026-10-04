@@ -215,6 +215,58 @@ class AisOutboxDrainTests(unittest.TestCase):
             "urn:cwl:accounting:general_journal:11111111-1111-1111-1111-111111111111",
         )
 
+    def test_outbox_required_fields_reject_nonstring_values(self) -> None:
+        """AIS identifiers and evidence remain strings, never coerced JSON values."""
+        valid = outbox_item(proposal_id=EXAMPLE_PROPOSAL_ID)
+        for field in valid:
+            for value in (None, True, 17, 1.5, [], {}, ""):
+                with self.subTest(field=field, value=value):
+                    raw = json.dumps({
+                        "outbox_events": [{**valid, field: value}], "next_cursor": None
+                    }).encode("utf-8")
+                    with self.assertRaisesRegex(AisTransportError, "^transport_failure$"):
+                        _parse_outbox_page(raw)
+
+    def test_malformed_outbox_page_has_no_receipt_or_publish_effect(self) -> None:
+        """Validate the whole HTTP page before observing or publishing any event."""
+        ledger, proposal, _cash = persist_known_ar_and_cash_proposals()
+        valid = outbox_item(proposal_id=proposal.proposal_id)
+        state = FakeAisOutboxState()
+        state.receipts[(TENANT_ONE, str(proposal.idempotency_key))] = make_ais_receipt(
+            tenant_reference=TENANT_ONE,
+            idempotency_key=str(proposal.idempotency_key),
+            source_proposal_id=str(proposal.proposal_id),
+            source_payload_hash=str(proposal.source_payload_hash),
+        )
+        httpd = start_fake_ais_outbox(state)
+        try:
+            service = AisOutboxDrainService(
+                ledger, ais_client=AisPostingReceiptClient(ais_base_url(httpd))
+            )
+            for field in valid:
+                with self.subTest(field=field):
+                    state.pages = [{
+                        "outbox_events": [valid, {**valid, field: True}], "next_cursor": None
+                    }]
+                    result = service.drain_ais_outbox(TENANT_ONE)
+                    self.assertEqual(
+                        result.rejection_reason_code, AisOutboxDrainRejectionReasonCode.TRANSPORT_FAILURE
+                    )
+                    self.assertEqual(state.published, [])
+                    self.assertFalse(any(call[1] == "/posting-receipts" for call in state.calls))
+                    tenant_id = ledger.require_tenant(TENANT_ONE).tenant_account_id
+                    self.assertIsNone(ledger.find_posting_receipt_observation(
+                        tenant_id, str(proposal.idempotency_key)
+                    ))
+            state.pages = [{"outbox_events": [valid], "next_cursor": None}]
+            accepted = service.drain_ais_outbox(TENANT_ONE)
+            self.assertEqual(accepted.published_event_count, 1)
+            self.assertEqual(state.published, [valid["outbox_event_id"]])
+            self.assertEqual(ledger.get_journal_proposal(proposal.proposal_id).proposal_status, "validated")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_empty_outbox_skips_receipt_polls(self) -> None:
         """An empty unpublished set is success and must not GET posting-receipts."""
         ledger, ar_proposal, _cash = persist_known_ar_and_cash_proposals()
@@ -671,7 +723,7 @@ class AisOutboxDrainTests(unittest.TestCase):
         class _Ok:
             status = 200
 
-            def read(self) -> bytes:
+            def read(self, size: int = -1) -> bytes:
                 return b'{"outbox_events":[],"next_cursor":null}'
 
             def __enter__(self) -> _Ok:
@@ -744,7 +796,7 @@ class AisOutboxDrainTests(unittest.TestCase):
             AisPostingReceiptClient("http://127.0.0.1:9", urlopen=raise_url).publish_outbox_event(TENANT_ONE, "x")
 
         class _Statusless:
-            def read(self) -> bytes:
+            def read(self, size: int = -1) -> bytes:
                 return b'{"outbox_events":[],"next_cursor":null}'
 
             def __enter__(self) -> _Statusless:
@@ -760,7 +812,7 @@ class AisOutboxDrainTests(unittest.TestCase):
         class _Created:
             status = 201
 
-            def read(self) -> bytes:
+            def read(self, size: int = -1) -> bytes:
                 return b"{}"
 
             def __enter__(self) -> _Created:
@@ -781,7 +833,7 @@ class AisOutboxDrainTests(unittest.TestCase):
         class _NoContent:
             status = 204
 
-            def read(self) -> bytes:
+            def read(self, size: int = -1) -> bytes:
                 return b""
 
             def __enter__(self) -> _NoContent:

@@ -130,6 +130,68 @@ class UsageRatingTests(unittest.TestCase):
         self.assertEqual(len(ingest.ledger.accounting_export_records), 0)
         self.assertEqual(len(ingest.ledger.invoice_drafts), 0)
 
+    def test_explicit_missing_rate_card_never_uses_another_card(self) -> None:
+        """An explicit card is pricing authority, not a fallback preference."""
+        ingest = ingest_known_batch()
+        rating = UsageRatingService(ingest.ledger)
+        result = rating.rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="missing_contract"
+        )
+        self.assertEqual(result.rating_outcome_code, RatingOutcomeCode.REJECTED)
+        self.assertEqual(
+            result.rejection_reason_code, RatingRejectionReasonCode.RATE_CARD_NOT_FOUND
+        )
+        self.assertEqual(len(ingest.ledger.rating_runs), 0)
+        self.assertEqual(len(ingest.ledger.rating_lines), 0)
+
+    def test_invalid_explicit_rate_card_rejects_without_writing(self) -> None:
+        """Non-string selectors must not crash or select a different price."""
+        for code in ([], {}, 1, True, "", " "):
+            with self.subTest(code=code):
+                ingest = ingest_known_batch()
+                result = UsageRatingService(ingest.ledger).rate_usage_window(
+                    TENANT_ONE, MORNING_WINDOW, 1, rate_card_code=code
+                )
+                self.assertEqual(result.rating_outcome_code, RatingOutcomeCode.REJECTED)
+                self.assertEqual(
+                    result.rejection_reason_code, RatingRejectionReasonCode.RATE_CARD_NOT_FOUND
+                )
+                self.assertEqual(len(ingest.ledger.rating_runs), 0)
+
+    def test_omitted_selector_preserves_unique_nondefault_card(self) -> None:
+        """Legacy bare version remains valid when exactly one card matches."""
+        ingest = UsageIngestionService(seed_ledger())
+        self.assertEqual(ingest.ingest_usage_batch(known_event_batch()).accepted_event_count, 3)
+        RateCardService(ingest.ledger).publish_rate_card(
+            TENANT_ONE, "custom_contract", "USD", STANDARD_RATE_CARD_LINES
+        )
+        result = UsageRatingService(ingest.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1
+        )
+        self.assertEqual(result.rating_outcome_code, RatingOutcomeCode.ACCEPTED)
+        self.assertEqual(result.rate_card_code, "custom_contract")
+        self.assertEqual(result.rated_total_amount, KNOWN_MORNING_TOTAL)
+
+    def test_omitted_selector_rejects_ambiguous_nondefault_cards(self) -> None:
+        """A bare version cannot choose arbitrarily between nondefault cards."""
+        ledger = seed_ledger()
+        for name in ("custom_contract", "other_contract"):
+            RateCardService(ledger).publish_rate_card(
+                TENANT_ONE, name, "USD", STANDARD_RATE_CARD_LINES
+            )
+        result = UsageRatingService(ledger).rate_usage_window(TENANT_ONE, MORNING_WINDOW, 1)
+        self.assertEqual(result.rejection_reason_code, RatingRejectionReasonCode.RATE_CARD_NOT_FOUND)
+        self.assertEqual(len(ledger.rating_runs), 0)
+
+    def test_configured_nondefault_card_never_falls_back(self) -> None:
+        """A configured contract name has the same authority as a method selector."""
+        ingest = ingest_known_batch()
+        result = UsageRatingService(
+            ingest.ledger, rate_card_code="missing_contract"
+        ).rate_usage_window(TENANT_ONE, MORNING_WINDOW, 1)
+        self.assertEqual(result.rejection_reason_code, RatingRejectionReasonCode.RATE_CARD_NOT_FOUND)
+        self.assertEqual(len(ingest.ledger.rating_runs), 0)
+
     def test_equivalent_decimal_and_utc_spellings_rate_as_one_fact(self) -> None:
         """Ingested ``1``/``1.0`` and ``Z``/``+00:00`` remain one fact and one money total."""
         ingest = UsageIngestionService(seed_rated_ledger())

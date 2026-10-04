@@ -44,6 +44,19 @@ This is a repository and product-readiness assessment. It is not a legal, tax, a
 
 ## Current repository evidence
 
+> **Pricing-repair snapshot (2026-10-03):** `develop` was verified at
+> `ebeed33f98b34afc232eed980f41d6af9a7a445c`; live GitHub inventory contained
+> 29 open PRs and nine open issues (#84–#91 and #176). The tables below are
+> historical assessments, not the current merge queue. The local
+> `feat-pr-issue-prd` candidate repairs binding rate-card selection in the
+> service and HTTP usage-to-rating-to-draft path (ADR
+> `0125-explicit-rating-card-selection`). This is a pricing-correctness slice
+> toward #84/#89, not closure of either issue or a GA release. Existing PR #180
+> owns the license-clean PostgreSQL replacement for #176; #143 owns spend
+> authorization; #146 owns producer SDK work; #157 owns public documentation.
+> Their open state is not shipment evidence. This candidate neither adopts
+> their unmerged changes nor claims a license-clean production install.
+
 > **Status update (2026-08-25):** the verified release train has merged. The
 > cumulative candidate stack (`#82` plus descendants `#93`–`#132`, recreated
 > as `#133`–`#136`) and the contributor/validation docs (`#137`) are on
@@ -121,6 +134,30 @@ The cumulative candidate provides meaningful foundations:
 - product-specific pricing logic embedded in every CWL producer.
 
 ## Completion backlog
+
+The local `feat-pr-issue-prd` candidate also repairs the strict AIS outbox
+field-type seam called out in issue #88: required fields are nonempty strings,
+never coerced JSON; malformed pages reject before receipt/publish effects.
+ADR `0126-strict-ais-outbox-field-types` records that bounded consumer change.
+It is not a claim of completed identity, egress, DNS, response-size, redirect,
+or supply-chain acceptance. The existing scheduler PR #155 remains separate.
+
+The successor local response-admission slice (ADR
+`0127-bounded-ais-response-admission`) now caps each AIS success body at one
+MiB and closes unread HTTP errors. This narrows the response-size/cleanup gap;
+redirect, DNS, destination/proxy/TLS, end-to-end deadlines, released reusable
+egress integration, and the remainder of #88 are still open. It is not a
+measured upstream document envelope or live AIS acceptance claim.
+
+A subsequent local redirect-refusal slice (ADR `0128-refuse-ais-redirects`)
+refuses all standard redirects in the default AIS opener before second-hop
+I/O, including same-origin destinations. Three-route wire controls cover
+301/302/303/307/308, with zero redirected receipt observations and direct
+success/replay controls. This closes only that consumer's automatic redirect
+follow behavior; DNS rebinding, initial-destination/private-address policy,
+proxy/TLS controls, total deadlines, released EgressWeave integration and the
+remainder of #88 remain open. Webhook PR #144 and scheduler PR #155 retain their
+separate ownership. This unmerged local slice is not deployed or live AIS proof.
 
 The assessment produced the following issues. Their acceptance criteria constitute the minimum completion evidence for the corresponding gap.
 
