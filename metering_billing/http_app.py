@@ -712,6 +712,7 @@ class HttpRequestError(ValueError):
     """Raised when the HTTP adapter cannot decode or authorize a write."""
 
     def __init__(self, rejection_reason_code: str) -> None:
+        """Retain the HTTP rejection code as both exception text and adapter metadata."""
         super().__init__(rejection_reason_code)
         self.rejection_reason_code = rejection_reason_code
 

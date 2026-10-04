@@ -22,6 +22,7 @@ class TrackedResponse(io.BytesIO):
     status = 200
 
     def __init__(self, body: bytes) -> None:
+        """Seed the byte stream and initialize requested-size and returned-byte tracking."""
         super().__init__(body)
         self.read_sizes: list[int] = []
         self.returned_bytes = 0
@@ -282,6 +283,7 @@ class AisResponseBoundsTests(unittest.TestCase):
                     error = HTTPError("http://127.0.0.1:9", status, "fixture", None, body)
 
                     def reject(*_args, error=error, **_kwargs):
+                        """Raise the prepared HTTP error so the client must close its body without reading."""
                         raise error
 
                     client = AisPostingReceiptClient("http://127.0.0.1:9", urlopen=reject)
@@ -301,12 +303,14 @@ class AisResponseBoundsTests(unittest.TestCase):
                 close = error.close
 
                 def broken_close(close=close):
+                    """Close the real error response first, then raise the fixture cleanup failure."""
                     close()
                     raise OSError("fixture_cleanup_failure")
 
                 error.close = broken_close
 
                 def reject(*_args, error=error, **_kwargs):
+                    """Raise the HTTP 403 fixture whose close method fails after closing its body."""
                     raise error
 
                 client = AisPostingReceiptClient("http://127.0.0.1:9", urlopen=reject)

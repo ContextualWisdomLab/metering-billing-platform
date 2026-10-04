@@ -129,6 +129,11 @@ class UsageRatingService:
         clock: Clock | None = None,
         rate_card_code: str = DEFAULT_RATE_CARD_CODE,
     ) -> None:
+        """Bind the ledger, recording clock, and configured rate-card selector.
+
+        Use a fresh memory ledger and the current UTC clock when omitted.
+        The card name selects persisted pricing; construction publishes no prices.
+        """
         self.ledger = MemoryUsageLedger() if ledger is None else ledger
         self._clock: Clock = clock if clock is not None else (lambda: datetime.now(UTC))
         self._rate_card_code = rate_card_code
@@ -326,6 +331,7 @@ class _RatingRejected(Exception):
     """Internal control-flow exception for a single failed rating decision."""
 
     def __init__(self, reason_code: RatingRejectionReasonCode) -> None:
+        """Carry a typed rating rejection reason with its stable code as exception text."""
         super().__init__(reason_code.value)
         self.reason_code = reason_code
 

@@ -84,6 +84,7 @@ class FakeAisState:
     """In-process AIS lookup table keyed by tenant pin and idempotency key."""
 
     def __init__(self) -> None:
+        """Initialize tenant-keyed receipt bodies, status overrides, and request tracking."""
         self.receipts: dict[tuple[str, str], dict[str, object]] = {}
         self.raw_bodies: dict[tuple[str, str], bytes] = {}
         self.status_overrides: dict[tuple[str, str], int] = {}
@@ -94,6 +95,7 @@ def start_fake_ais(state: FakeAisState) -> Any:
     """Serve GET /posting-receipts on a local stdlib HTTP server."""
 
     def application(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+        """Record tenant/key lookups and serve scripted receipt JSON, raw bytes, or errors."""
         tenant = environ.get("HTTP_X_CWL_TENANT_REFERENCE")
         if not isinstance(tenant, str):
             tenant = None
@@ -146,6 +148,7 @@ class ScriptedAisClient:
     """Deterministic AIS client used when a live HTTP server is unnecessary."""
 
     def __init__(self, results: list[AisLookupResult | BaseException]) -> None:
+        """Copy the ordered AIS results and start an empty tenant/key call history."""
         self._results = list(results)
         self.calls: list[tuple[str, str]] = []
 
@@ -512,18 +515,22 @@ class PostingReceiptObservationTests(unittest.TestCase):
             invalid_endpoint.get_posting_receipt(TENANT_ONE, key)
 
         def raise_http(request: object, timeout: object = None) -> object:
+            """Raise an HTTP 500 with an empty body to exercise transport-failure mapping."""
             del request, timeout
             raise HTTPError("http://ais.test/posting-receipts", 500, "error", None, io.BytesIO(b""))
 
         def raise_url(request: object, timeout: object = None) -> object:
+            """Raise a connection-refused URL error instead of returning a response."""
             del request, timeout
             raise URLError("connection refused")
 
         def raise_timeout(request: object, timeout: object = None) -> object:
+            """Raise a request timeout to exercise the stable transport rejection."""
             del request, timeout
             raise TimeoutError("timed out")
 
         def raise_os(request: object, timeout: object = None) -> object:
+            """Raise a connection-reset OS error to exercise transport-failure mapping."""
             del request, timeout
             raise OSError("reset")
 
@@ -533,10 +540,12 @@ class PostingReceiptObservationTests(unittest.TestCase):
                 client.get_posting_receipt(TENANT_ONE, key)
 
         def raise_forbidden(request: object, timeout: object = None) -> object:
+            """Raise an HTTP 403 with an empty body for cross-tenant denial mapping."""
             del request, timeout
             raise HTTPError("http://ais.test/posting-receipts", 403, "no", None, io.BytesIO(b""))
 
         def raise_missing(request: object, timeout: object = None) -> object:
+            """Raise an HTTP 404 with an empty body for not-yet-accepted receipt mapping."""
             del request, timeout
             raise HTTPError("http://ais.test/posting-receipts", 404, "no", None, io.BytesIO(b""))
 
@@ -555,16 +564,20 @@ class PostingReceiptObservationTests(unittest.TestCase):
             status = 200
 
             def read(self, size: int = -1) -> bytes:
+                """Return the fixture's success JSON bytes regardless of the requested read size."""
                 return json.dumps({"ok": True}).encode("utf-8")
 
             def __enter__(self) -> FakeResponse:
+                """Expose this HTTP 200 JSON fixture as its own context-managed response."""
                 return self
 
             def __exit__(self, *args: object) -> bool:
+                """Ignore context-exit arguments without suppressing a consumer exception."""
                 del args
                 return False
 
         def capture_open(request: object, timeout: object = None) -> FakeResponse:
+            """Capture URL, headers, and timeout before returning the HTTP 200 JSON fixture."""
             captured["url"] = getattr(request, "full_url", None)
             captured["headers"] = dict(getattr(request, "headers", {}))
             captured["timeout"] = timeout
@@ -580,12 +593,15 @@ class PostingReceiptObservationTests(unittest.TestCase):
 
         class StatuslessResponse:
             def read(self, size: int = -1) -> bytes:
+                """Return empty-object JSON from a fixture lacking an HTTP status attribute."""
                 return b"{}"
 
             def __enter__(self) -> StatuslessResponse:
+                """Expose the statusless fixture itself to test default HTTP 200 handling."""
                 return self
 
             def __exit__(self, *args: object) -> bool:
+                """Ignore context-exit arguments without suppressing a statusless-response exception."""
                 del args
                 return False
 
@@ -595,18 +611,22 @@ class PostingReceiptObservationTests(unittest.TestCase):
         self.assertEqual(statusless.status_code, 200)
 
         def unexpected_status(request: object, timeout: object = None) -> FakeResponse:
+            """Return a no-body HTTP 204 fixture to reject an unexpected receipt status."""
             del request, timeout
 
             class Unexpected:
                 status = 204
 
                 def read(self, size: int = -1) -> bytes:
+                    """Return no bytes for the deliberately unsupported HTTP 204 receipt response."""
                     return b""
 
                 def __enter__(self) -> Unexpected:
+                    """Expose the unexpected HTTP 204 fixture as the context-managed response."""
                     return self
 
                 def __exit__(self, *args: object) -> bool:
+                    """Ignore context-exit arguments without suppressing an unexpected-status exception."""
                     del args
                     return False
 

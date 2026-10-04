@@ -16,6 +16,14 @@
 
 ### Fixed
 
+- Foundation CI now selects the `CWL CI isolated` Linux self-hosted group and
+  its dedicated labels together, retaining PostgreSQL 18, hash-locked installs,
+  pinned actions and complete coverage enforcement. PR 182's original hosted
+  jobs never started because of an account billing lock. The routing change
+  does not establish operator-owned capacity, repository access, hosted test
+  success or managed default CodeQL acceptance (ADR
+  `0129-isolated-foundation-ci-routing`).
+
 - The default AIS receipt, outbox-list, and publish transport now refuses every
   redirect before target I/O, including same-origin 301/302/303/307/308 responses.
   Redirect handles are closed without reading their bodies and return stable

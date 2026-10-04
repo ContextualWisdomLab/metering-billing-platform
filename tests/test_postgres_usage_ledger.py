@@ -522,6 +522,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
 
         def make_stored(**overrides: object) -> StoredTenantApiCredential:
+            """Build an active tenant credential with a fresh keyed hash and caller field overrides."""
             base: dict[str, object] = {
                 "tenant_api_credential_id": uuid4(),
                 "tenant_account_id": tenant_id,
@@ -586,6 +587,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         barrier = Barrier(8)
 
         def hammer(worker_number: int) -> None:
+            """Synchronize workers, repeat credential HTTP and migration reads, and collect failures."""
             try:
                 barrier.wait()
                 for _ in range(20):
@@ -1051,11 +1053,13 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         class BarrierLedger(PostgresUsageLedger):
             def find_by_source_event_key(self, tenant_account_id, source_event_key):
+                """Read the source-event identity, then synchronize all eight competing insert workers."""
                 result = super().find_by_source_event_key(tenant_account_id, source_event_key)
                 barrier.wait()
                 return result
 
         def ingest_once(_: int) -> str:
+            """Ingest the shared event on a dedicated connection and return its outcome code."""
             with psycopg.connect(POSTGRES_DSN) as connection:
                 receipt = UsageIngestionService(BarrierLedger(connection)).ingest_usage_event(event)
                 return receipt.ingestion_outcome_code.value
@@ -1085,6 +1089,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         class BarrierLedger(PostgresUsageLedger):
             def find_by_source_event_key(self, tenant_account_id, source_event_key):
+                """Read the source-event identity, then synchronize the two conflicting ingest workers."""
                 result = super().find_by_source_event_key(tenant_account_id, source_event_key)
                 barrier.wait()
                 return result
@@ -1103,6 +1108,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
 
         def ingest_once(event):
+            """Ingest one conflicting event using its own connection and return the full receipt."""
             with psycopg.connect(POSTGRES_DSN) as connection:
                 return UsageIngestionService(BarrierLedger(connection)).ingest_usage_event(event)
 
@@ -1363,6 +1369,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent identity race."""
 
             def find_payment_receipt(self, *args, **kwargs):
+                """Hide the existing payment receipt so settlement exercises insert-time replay."""
                 return None
 
         race_replay = PaymentSettlementService(
@@ -1375,10 +1382,12 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Exercise the fail-closed branch after a concurrent receipt replay."""
 
             def __init__(self, connection):
+                """Bind the database connection and start the collection-case read counter at zero."""
                 super().__init__(connection)
                 self._case_reads = 0
 
             def get_collection_case(self, collection_case_id):
+                """Hide only the second collection-case read to reject the raced receipt replay."""
                 self._case_reads += 1
                 if self._case_reads == 2:
                     return None
@@ -1540,6 +1549,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent credit race."""
 
             def find_credit_adjustment(self, *args, **kwargs):
+                """Hide the stored credit adjustment so recording exercises insert-time replay."""
                 return None
 
         race_replay = CreditAdjustmentService(
@@ -1552,6 +1562,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Exercise the fail-closed branch when a raced journal is absent."""
 
             def find_journal_proposal_for_credit(self, *args, **kwargs):
+                """Hide the credit's journal proposal to reject a replay without accounting evidence."""
                 return None
 
         missing_proposal = CreditAdjustmentService(
@@ -2112,6 +2123,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent identity race."""
 
             def find_journal_proposal_for_write_off(self, *args, **kwargs):
+                """Hide the write-off journal lookup so composition reaches the repository insert race."""
                 return None
 
         raced = AccountingExportService(
@@ -2516,6 +2528,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent identity race."""
 
             def find_journal_proposal_for_unapplied_cash(self, *args, **kwargs):
+                """Hide the parked-cash journal lookup so composition reaches insert-time identity reuse."""
                 return None
 
         raced = AccountingExportService(
@@ -3072,6 +3085,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent identity race."""
 
             def find_journal_proposal_for_unapplied_cash_application(self, *args, **kwargs):
+                """Hide the leftover-application journal lookup to exercise insert-time proposal reuse."""
                 return None
 
         raced = AccountingExportService(
@@ -3611,6 +3625,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent identity race."""
 
             def find_journal_proposal_for_refund(self, *args, **kwargs):
+                """Hide the leftover-refund journal lookup to exercise insert-time proposal reuse."""
                 return None
 
         raced = AccountingExportService(
@@ -4140,6 +4155,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent identity race."""
 
             def find_journal_proposal_for_issued_invoice_void(self, *args, **kwargs):
+                """Hide the invoice-void journal lookup to exercise insert-time proposal reuse."""
                 return None
 
         raced = AccountingExportService(
@@ -4835,6 +4851,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent identity race."""
 
             def find_journal_proposal_for_issued_credit_note_void(self, *args, **kwargs):
+                """Hide the credit-note-void journal lookup to exercise insert-time proposal reuse."""
                 return None
 
         raced = AccountingExportService(
@@ -5499,6 +5516,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the repository insert path used after a concurrent identity race."""
 
             def find_journal_proposal(self, *args, **kwargs):
+                """Hide the invoice-draft journal lookup to exercise insert-time proposal reuse."""
                 return None
 
         raced = AccountingExportService(
@@ -5693,9 +5711,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
 
         class ReplayOnInsertLedger(PostgresUsageLedger):
             def find_webhook_subscription(self, *args, **kwargs):
+                """Hide the stored webhook subscription to make registration reach the insert seam."""
                 return None
 
             def insert_webhook_subscription(self, candidate):
+                """Return the already stored matching subscription instead of inserting the candidate."""
                 stored_candidate = super().find_webhook_subscription(
                     candidate.tenant_account_id,
                     candidate.callback_url,
@@ -6153,6 +6173,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_spend_budget(self, *args, **kwargs):
+                """Hide the published spend budget so publication exercises insert-time replay."""
                 return None
 
         raced = SpendBudgetService(
@@ -6475,6 +6496,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_issued_credit_note(self, *args, **kwargs):
+                """Hide the issued credit note so issuance exercises insert-time replay."""
                 return None
 
         raced = IssuedCreditNoteService(
@@ -6875,6 +6897,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_issued_credit_note_void(self, *args, **kwargs):
+                """Hide the credit-note void so voiding exercises insert-time replay."""
                 return None
 
         raced = IssuedCreditNoteVoidService(
@@ -7266,6 +7289,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_credit_note_application(self, *args, **kwargs):
+                """Hide the credit-note application so applying exercises insert-time replay."""
                 return None
 
         raced = CreditNoteApplicationService(
@@ -7723,6 +7747,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_issued_invoice_void(self, *args, **kwargs):
+                """Hide the invoice void so voiding exercises insert-time replay and case recovery."""
                 return None
 
         raced = IssuedInvoiceVoidService(
@@ -7751,9 +7776,11 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert race when the stored case cannot be loaded."""
 
             def find_issued_invoice_void(self, *args, **kwargs):
+                """Hide the invoice void while the companion fixture also hides its collection case."""
                 return None
 
             def get_collection_case(self, *args, **kwargs):
+                """Report no collection case for the invoice-void insert-race denial fixture."""
                 return None
 
         self.assertEqual(
@@ -8141,6 +8168,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_unapplied_cash(self, *args, **kwargs):
+                """Hide the parked leftover so parking exercises insert-time replay."""
                 return None
 
         raced = UnappliedCashService(
@@ -8766,6 +8794,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_unapplied_cash_application(self, *args, **kwargs):
+                """Hide the leftover application so applying exercises insert-time replay."""
                 return None
 
         raced = UnappliedCashApplicationService(
@@ -8784,13 +8813,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert race when the stored case cannot be loaded."""
 
             def __init__(self, connection: object) -> None:
+                """Bind the connection with collection-case reads visible until an application insert."""
                 super().__init__(connection)
                 self._hide_collection_case = False
 
             def find_unapplied_cash_application(self, *args, **kwargs):
+                """Hide the leftover application to force insertion before the case disappears."""
                 return None
 
             def insert_unapplied_cash_application(self, application):
+                """Insert or reuse the application, then hide its collection case from later reads."""
                 stored_application = PostgresUsageLedger.insert_unapplied_cash_application(
                     self, application
                 )
@@ -8798,6 +8830,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 return stored_application
 
             def get_collection_case(self, collection_case_id):
+                """Read the stored case until application insertion, then report it missing."""
                 if self._hide_collection_case:
                     return None
                 return PostgresUsageLedger.get_collection_case(self, collection_case_id)
@@ -9268,6 +9301,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_unapplied_cash_refund(self, *args, **kwargs):
+                """Hide the leftover refund so refunding exercises insert-time replay."""
                 return None
 
         raced = UnappliedCashRefundService(
@@ -9286,18 +9320,22 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert race when the stored leftover cannot be loaded."""
 
             def __init__(self, connection: object) -> None:
+                """Bind the connection with parked-leftover reads visible until a refund insert."""
                 super().__init__(connection)
                 self._hide_leftover = False
 
             def find_unapplied_cash_refund(self, *args, **kwargs):
+                """Hide the leftover refund to force insertion before the parked amount disappears."""
                 return None
 
             def insert_unapplied_cash_refund(self, refund):
+                """Insert or reuse the refund, then hide the parked leftover from subsequent reads."""
                 stored_refund = PostgresUsageLedger.insert_unapplied_cash_refund(self, refund)
                 self._hide_leftover = True
                 return stored_refund
 
             def get_unapplied_cash(self, unapplied_cash_id):
+                """Read the parked leftover until refund insertion, then report it missing."""
                 if self._hide_leftover:
                     return None
                 return PostgresUsageLedger.get_unapplied_cash(self, unapplied_cash_id)
@@ -9917,6 +9955,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert race when the stored dispute is already released."""
 
             def find_collection_dispute(self, *args, **kwargs):
+                """Hide the released dispute to exercise the insert path against its stored identity."""
                 return None
 
         released_mismatch = CollectionDisputeService(
@@ -9998,18 +10037,22 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert race when the stored case cannot be loaded."""
 
             def __init__(self, connection: object) -> None:
+                """Bind the connection with collection-case reads visible until a dispute insert."""
                 super().__init__(connection)
                 self._hide_case = False
 
             def find_collection_dispute(self, *args, **kwargs):
+                """Hide the dispute to force insertion before its collection case disappears."""
                 return None
 
             def insert_collection_dispute(self, dispute):
+                """Insert or reuse the dispute, then hide its collection case from later reads."""
                 stored_dispute = PostgresUsageLedger.insert_collection_dispute(self, dispute)
                 self._hide_case = True
                 return stored_dispute
 
             def get_collection_case(self, collection_case_id):
+                """Read the collection case until dispute insertion, then report it missing."""
                 if self._hide_case:
                     return None
                 return PostgresUsageLedger.get_collection_case(self, collection_case_id)
@@ -10031,6 +10074,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             """Force the insert path used after a concurrent identity race."""
 
             def find_collection_dispute(self, *args, **kwargs):
+                """Hide the stored dispute so holding exercises insert-time replay."""
                 return None
 
         raced = CollectionDisputeService(

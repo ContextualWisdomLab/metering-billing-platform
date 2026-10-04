@@ -237,6 +237,12 @@ class AisPostingReceiptClient:
         urlopen: UrlOpen | None = None,
         timeout_seconds: float = 10.0,
     ) -> None:
+        """Store the slash-trimmed AIS base URL, opener, and request timeout.
+
+        Default to the redirect-refusing opener; an injected opener must satisfy
+        the class's context-managed blocking read(size) response contract.
+        Construction performs no request or endpoint validation.
+        """
         self.ais_base_url = ais_base_url.rstrip("/")
         self._urlopen: UrlOpen = urlopen if urlopen is not None else urlopen_default
         self.timeout_seconds = timeout_seconds
@@ -413,6 +419,12 @@ class PostingReceiptPullService:
         ais_client: AisPostingReceiptClient | None = None,
         clock: Clock | None = None,
     ) -> None:
+        """Bind observation storage, the optional AIS client, and the recording clock.
+
+        Default to a fresh memory ledger and the current UTC clock.
+        An omitted client stays unconfigured; construction neither pulls
+        receipts nor changes any journal proposal status.
+        """
         self.ledger = MemoryUsageLedger() if ledger is None else ledger
         self.ais_client = ais_client
         self._clock: Clock = clock if clock is not None else (lambda: datetime.now(UTC))

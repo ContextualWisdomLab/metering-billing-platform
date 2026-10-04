@@ -55,6 +55,7 @@ class FakeAisOutboxState:
     """In-process AIS outbox, receipt, and publish table."""
 
     def __init__(self) -> None:
+        """Initialize scripted pages, tenant-keyed receipts, publish statuses, and call logs."""
         self.pages: list[dict[str, object]] = []
         self.receipts: dict[tuple[str, str], dict[str, object]] = {}
         self.publish_status: dict[tuple[str, str], int] = {}
@@ -67,6 +68,7 @@ def start_fake_ais_outbox(state: FakeAisOutboxState) -> Any:
     """Serve AIS outbox, publish, and posting-receipt routes locally."""
 
     def application(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+        """Record tenant-pinned calls and serve scripted outbox, receipt, and publish routes."""
         tenant = environ.get("HTTP_X_CWL_TENANT_REFERENCE")
         method = str(environ.get("REQUEST_METHOD") or "GET")
         path = str(environ.get("PATH_INFO") or "")
@@ -163,6 +165,7 @@ class ScriptedOutboxClient:
         receipts: dict[tuple[str, str], AisLookupResult | BaseException] | None = None,
         publishes: dict[str, AisLookupResult | BaseException] | None = None,
     ) -> None:
+        """Copy the scripted page queue and retain receipt/publish outcomes with empty call logs."""
         self._pages = list(pages or [])
         self._receipts = receipts or {}
         self._publishes = publishes or {}
@@ -410,6 +413,7 @@ class AisOutboxDrainTests(unittest.TestCase):
         opener_calls: list[str] = []
 
         def opener(request: Any, timeout: float | None = None) -> Any:
+            """Record and fail any unexpected HTTP open after rejecting an items-only page."""
             opener_calls.append(str(request.full_url))
             raise AssertionError("items-only envelopes must fail before receipt GETs")
 
@@ -630,6 +634,7 @@ class AisOutboxDrainTests(unittest.TestCase):
         )
         class ReceiptOnly:
             def get_posting_receipt(self, tenant_reference: str, idempotency_key: str) -> AisLookupResult:
+                """Fail if draining incorrectly invokes a client that only supports receipt lookup."""
                 raise AssertionError("drain must not fall back to receipt-only clients")
 
         self.assertEqual(
@@ -690,9 +695,11 @@ class AisOutboxDrainTests(unittest.TestCase):
         )
         class PublishMissing:
             def list_outbox_events(self, *args: object, **kwargs: object) -> AisOutboxPage:
+                """Return the second proposal's outbox event without offering a publish method."""
                 return AisOutboxPage(status_code=200, outbox_events=(second_event,), next_cursor=None)
 
             def get_posting_receipt(self, tenant_reference: str, idempotency_key: str) -> AisLookupResult:
+                """Return the cash receipt so the drain reaches the missing-publish-method branch."""
                 return AisLookupResult(status_code=200, raw_body=json.dumps(cash_receipt).encode("utf-8"))
 
         self.assertEqual(
@@ -724,15 +731,19 @@ class AisOutboxDrainTests(unittest.TestCase):
             status = 200
 
             def read(self, size: int = -1) -> bytes:
+                """Return an empty outbox page regardless of the requested fixture read size."""
                 return b'{"outbox_events":[],"next_cursor":null}'
 
             def __enter__(self) -> _Ok:
+                """Expose this successful response fixture as its own context-managed value."""
                 return self
 
             def __exit__(self, *args: object) -> None:
+                """Leave the in-memory successful response unchanged on context exit."""
                 return None
 
         def capture_open(request: Any, timeout: float | None = None) -> _Ok:
+            """Capture the requested URL and HTTP method before returning an empty outbox page."""
             captured["url"] = str(request.full_url)
             captured["method"] = request.get_method()
             return _Ok()
@@ -759,15 +770,19 @@ class AisOutboxDrainTests(unittest.TestCase):
             AisPostingReceiptClient("http://127.0.0.1:9").publish_outbox_event(TENANT_ONE, "")
 
         def raise_forbidden(request: Any, timeout: float | None = None) -> Any:
+            """Raise HTTP 403 for the requested URL to exercise forbidden-response mapping."""
             raise HTTPError(str(request.full_url), 403, "forbidden", None, None)
 
         def raise_missing(request: Any, timeout: float | None = None) -> Any:
+            """Raise HTTP 404 for the requested URL to exercise missing-response mapping."""
             raise HTTPError(str(request.full_url), 404, "missing", None, None)
 
         def raise_server(request: Any, timeout: float | None = None) -> Any:
+            """Raise HTTP 500 for the requested URL to exercise transport-error normalization."""
             raise HTTPError(str(request.full_url), 500, "error", None, None)
 
         def raise_url(request: Any, timeout: float | None = None) -> Any:
+            """Raise a closed-connection URL error instead of returning an AIS response."""
             raise URLError("closed")
 
         self.assertEqual(
@@ -797,12 +812,15 @@ class AisOutboxDrainTests(unittest.TestCase):
 
         class _Statusless:
             def read(self, size: int = -1) -> bytes:
+                """Return an empty outbox page from the fixture lacking an HTTP status attribute."""
                 return b'{"outbox_events":[],"next_cursor":null}'
 
             def __enter__(self) -> _Statusless:
+                """Expose the statusless fixture itself to exercise the default success status."""
                 return self
 
             def __exit__(self, *args: object) -> None:
+                """Perform no cleanup or exception suppression for the statusless byte fixture."""
                 return None
 
         statusless = AisPostingReceiptClient("http://127.0.0.1:9", urlopen=lambda request, timeout=None: _Statusless())
@@ -813,12 +831,15 @@ class AisOutboxDrainTests(unittest.TestCase):
             status = 201
 
             def read(self, size: int = -1) -> bytes:
+                """Return empty-object JSON for the deliberately unsupported HTTP 201 response."""
                 return b"{}"
 
             def __enter__(self) -> _Created:
+                """Expose this HTTP 201 fixture as the context-managed response."""
                 return self
 
             def __exit__(self, *args: object) -> None:
+                """Perform no cleanup or exception suppression for the HTTP 201 fixture."""
                 return None
 
         with self.assertRaises(AisTransportError):
@@ -834,12 +855,15 @@ class AisOutboxDrainTests(unittest.TestCase):
             status = 204
 
             def read(self, size: int = -1) -> bytes:
+                """Return no body bytes for the accepted HTTP 204 publish response."""
                 return b""
 
             def __enter__(self) -> _NoContent:
+                """Expose this no-content publish fixture as the context-managed response."""
                 return self
 
             def __exit__(self, *args: object) -> None:
+                """Perform no cleanup or exception suppression for the no-content fixture."""
                 return None
 
         self.assertEqual(

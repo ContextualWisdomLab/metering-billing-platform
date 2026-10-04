@@ -86,6 +86,7 @@ def invoke_http(
         headers: list[tuple[str, str]],
         exc_info: object | None = None,
     ) -> Any:
+        """Capture WSGI status and headers and return a no-op response write callback."""
         recorded["status"] = status
         recorded["headers"] = headers
         return lambda _data: None
@@ -687,6 +688,7 @@ class HttpAcceptSurfaceTests(unittest.TestCase):
         recorded: dict[str, str] = {}
 
         def start_response(status: str, headers: list[tuple[str, str]], exc_info: object | None = None) -> Any:
+            """Record the JSON helper's WSGI status and return a no-op write callback."""
             recorded["status"] = status
             return lambda _data: None
 
