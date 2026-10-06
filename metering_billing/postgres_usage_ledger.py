@@ -16,7 +16,7 @@ subsequent slices of the persistence port.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from threading import RLock
 from typing import Any, Iterator
 from uuid import UUID
@@ -71,6 +71,7 @@ from metering_billing.usage_ledger import (
     StoredTaxAssessment,
     StoredPaymentIntent,
     StoredPaymentReceipt,
+    StoredPostingReceiptObservation,
     StoredSpendBudget,
     StoredUsageEvent,
     StoredUsageMeasurement,
@@ -3194,6 +3195,173 @@ class PostgresUsageLedger:
                 if row is None:
                     raise ValueError("payment receipt identity conflicts with an existing row")
             return self._fetch_payment_receipt(cursor, UUID(str(row[0])))
+
+    _POSTING_RECEIPT_OBSERVATION_COLUMNS = (
+        "posting_receipt_observation_id, tenant_account_id, receipt_id, "
+        "receipt_contract_version, idempotency_key, source_proposal_id, "
+        "source_payload_hash, legal_entity_reference, accounting_book_reference, "
+        "accounting_policy_version, posting_rule_version, posting_status_code, "
+        "recorded_at, fiscal_period_reference, journal_reference, "
+        "reversal_of_journal_reference, hold_reason_code, rejection_reason_code, "
+        "posted_at, line_count, transaction_currency, functional_currency, "
+        "observed_at"
+    )
+    _SELECT_POSTING_RECEIPT_OBSERVATIONS = (
+        "SELECT " + _POSTING_RECEIPT_OBSERVATION_COLUMNS
+        + " FROM billing_core.posting_receipt_observation "
+    )
+    _SELECT_POSTING_RECEIPT_OBSERVATION_BY_KEY = (
+        _SELECT_POSTING_RECEIPT_OBSERVATIONS
+        + "WHERE tenant_account_id = %s AND idempotency_key = %s"
+    )
+    _SELECT_POSTING_RECEIPT_OBSERVATION_BY_RECEIPT = (
+        _SELECT_POSTING_RECEIPT_OBSERVATIONS
+        + "WHERE tenant_account_id = %s AND receipt_id = %s"
+    )
+    _LIST_POSTING_RECEIPT_OBSERVATIONS = (
+        _SELECT_POSTING_RECEIPT_OBSERVATIONS
+        + "WHERE (%s::uuid IS NULL OR tenant_account_id = %s) "
+        "ORDER BY observed_at, posting_receipt_observation_id"
+    )
+    _INSERT_POSTING_RECEIPT_OBSERVATION = (
+        "INSERT INTO billing_core.posting_receipt_observation ("
+        + _POSTING_RECEIPT_OBSERVATION_COLUMNS
+        + ") VALUES (" + ", ".join(["%s"] * 23) + ") "
+        "ON CONFLICT DO NOTHING RETURNING posting_receipt_observation_id"
+    )
+
+    def find_posting_receipt_observation(
+        self, tenant_account_id: UUID, idempotency_key: str
+    ) -> StoredPostingReceiptObservation | None:
+        """Return the observation for one tenant-scoped AIS idempotency key."""
+        with self._cursor() as cursor:
+            return self._select_posting_receipt_observation(
+                cursor,
+                self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_KEY,
+                tenant_account_id,
+                idempotency_key,
+            )
+
+    def find_posting_receipt_observation_by_receipt(
+        self, tenant_account_id: UUID, receipt_id: UUID
+    ) -> StoredPostingReceiptObservation | None:
+        """Return the observation for one tenant-scoped AIS receipt identifier."""
+        with self._cursor() as cursor:
+            return self._select_posting_receipt_observation(
+                cursor,
+                self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_RECEIPT,
+                tenant_account_id,
+                receipt_id,
+            )
+
+    def insert_posting_receipt_observation(
+        self, observation: StoredPostingReceiptObservation
+    ) -> StoredPostingReceiptObservation:
+        """Append an immutable observation.  Same receipt identity is a replay.
+
+        A row that collides on the tenant idempotency key, the tenant AIS
+        ``receipt_id``, or the internal identifier is returned only when it is
+        the same AIS receipt with the same payload hash.  Every other collision
+        fails closed and writes nothing.
+        """
+        if observation.posting_status_code not in {"posted", "held", "rejected", "reversed"}:
+            raise ValueError("posting_status_code must remain an AIS-owned receipt status")
+        with self._cursor() as cursor:
+            cursor.execute(
+                self._INSERT_POSTING_RECEIPT_OBSERVATION,
+                (
+                    observation.posting_receipt_observation_id,
+                    observation.tenant_account_id,
+                    observation.receipt_id,
+                    observation.receipt_contract_version,
+                    observation.idempotency_key,
+                    observation.source_proposal_id,
+                    observation.source_payload_hash,
+                    observation.legal_entity_reference,
+                    observation.accounting_book_reference,
+                    observation.accounting_policy_version,
+                    observation.posting_rule_version,
+                    observation.posting_status_code,
+                    observation.recorded_at,
+                    observation.fiscal_period_reference,
+                    observation.journal_reference,
+                    observation.reversal_of_journal_reference,
+                    observation.hold_reason_code,
+                    observation.rejection_reason_code,
+                    observation.posted_at,
+                    observation.line_count,
+                    observation.transaction_currency,
+                    observation.functional_currency,
+                    observation.observed_at,
+                ),
+            )
+            inserted = cursor.fetchone() is not None
+            stored = self._select_posting_receipt_observation(
+                cursor,
+                self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_KEY,
+                observation.tenant_account_id,
+                observation.idempotency_key,
+            )
+            if inserted or (
+                stored is not None
+                and stored.receipt_id == observation.receipt_id
+                and stored.source_payload_hash == observation.source_payload_hash
+            ):
+                assert stored is not None
+                return stored
+            raise ValueError("posting receipt observations are immutable and cannot be replaced")
+
+    def list_posting_receipt_observations(
+        self, tenant_account_id: UUID | None = None
+    ) -> tuple[StoredPostingReceiptObservation, ...]:
+        """Return observations, optionally limited to one tenant."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                self._LIST_POSTING_RECEIPT_OBSERVATIONS,
+                (tenant_account_id, tenant_account_id),
+            )
+            return tuple(
+                self._posting_receipt_observation_from_row(row) for row in cursor.fetchall()
+            )
+
+    def _select_posting_receipt_observation(
+        self, cursor: Any, query: str, tenant_account_id: UUID, key_value: object
+    ) -> StoredPostingReceiptObservation | None:
+        """Hydrate one tenant-scoped observation with a constant unique-key query."""
+        cursor.execute(query, (tenant_account_id, key_value))
+        row = cursor.fetchone()
+        return None if row is None else self._posting_receipt_observation_from_row(row)
+
+    @staticmethod
+    def _posting_receipt_observation_from_row(
+        row: tuple[Any, ...],
+    ) -> StoredPostingReceiptObservation:
+        """Decode one append-only AIS receipt observation row."""
+        return StoredPostingReceiptObservation(
+            posting_receipt_observation_id=UUID(str(row[0])),
+            tenant_account_id=UUID(str(row[1])),
+            receipt_id=UUID(str(row[2])),
+            receipt_contract_version=row[3],
+            idempotency_key=row[4],
+            source_proposal_id=UUID(str(row[5])),
+            source_payload_hash=row[6],
+            legal_entity_reference=row[7],
+            accounting_book_reference=row[8],
+            accounting_policy_version=row[9],
+            posting_rule_version=row[10],
+            posting_status_code=row[11],
+            recorded_at=row[12],
+            fiscal_period_reference=row[13],
+            journal_reference=row[14],
+            reversal_of_journal_reference=row[15],
+            hold_reason_code=row[16],
+            rejection_reason_code=row[17],
+            posted_at=row[18],
+            line_count=row[19],
+            transaction_currency=row[20],
+            functional_currency=row[21],
+            observed_at=row[22].astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        )
 
     def list_payment_receipts(
         self, tenant_account_id: UUID

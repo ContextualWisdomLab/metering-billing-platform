@@ -197,6 +197,7 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                billing_core.posting_receipt_observation,
                 billing_core.spend_budget,
                 billing_core.journal_proposal_line,
                 billing_core.journal_proposal,
@@ -1689,6 +1690,201 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.connection.commit()
         with self.assertRaises(ValueError):
             self.ledger.mark_collection_case_settled(case.collection_case_id)
+
+    def test_posting_receipt_observation_is_durable_and_tenant_scoped(self) -> None:
+        """AIS receipt observations survive restart, replay once, and stay immutable."""
+        import json
+
+        from metering_billing.http_app import create_http_app
+        from metering_billing.posting_receipt import AisLookupResult, PostingReceiptPullService
+        from tests.test_http_app_backend_selection import invoke_http
+
+        UsageIngestionService(self.ledger).ingest_usage_event(make_event())
+        RateCardService(self.ledger).publish_rate_card(
+            TENANT_ONE,
+            "cwl_standard",
+            "USD",
+            (
+                {"metric_code": "gen_ai_output_token", "unit_amount": "0.000002", "currency_code": "USD"},
+            ),
+        )
+        rating = UsageRatingService(self.ledger).rate_usage_window(
+            TENANT_ONE, MORNING_WINDOW, 1, rate_card_code="cwl_standard"
+        )
+        draft = InvoiceDraftService(self.ledger).draft_invoice(TENANT_ONE, rating.rating_run_id)
+        proposal = AccountingExportService(self.ledger).propose_journal(
+            TENANT_ONE, draft.invoice_draft_id
+        )
+        assert proposal.proposal_id is not None
+        idempotency_key = str(proposal.idempotency_key)
+        receipt_id = uuid4()
+        receipt = {
+            "receipt_id": str(receipt_id),
+            "receipt_contract_version": 1,
+            "idempotency_key": idempotency_key,
+            "source_proposal_id": str(proposal.proposal_id),
+            "source_payload_hash": str(proposal.source_payload_hash),
+            "tenant_reference": TENANT_ONE,
+            "legal_entity_reference": "urn:cwl:entity_001",
+            "accounting_book_reference": "urn:cwl:book_primary",
+            "accounting_policy_version": "policy-2026.1",
+            "posting_rule_version": "rule-2026.1",
+            "posting_status_code": "posted",
+            "recorded_at": "2026-08-17T18:00:00Z",
+            "journal_reference": "urn:cwl:journal_ar",
+            "fiscal_period_reference": "urn:cwl:period_2026_08",
+            "posted_at": "2026-08-17T18:05:00Z",
+            "line_count": 2,
+            "transaction_currency": "USD",
+            "functional_currency": "USD",
+        }
+
+        class ScriptedAis:
+            """Return the same AIS receipt for every lookup."""
+
+            def get_posting_receipt(self, tenant_reference: str, key: str) -> AisLookupResult:
+                """Serve the scripted receipt body."""
+                return AisLookupResult(200, json.dumps(receipt).encode("utf-8"))
+
+        observed_at = datetime(2026, 8, 18, 9, 30, 15, 123456, tzinfo=UTC)
+        pulls = PostingReceiptPullService(
+            self.ledger, ais_client=ScriptedAis(), clock=lambda: observed_at
+        )
+        accepted = pulls.pull_posting_receipt(TENANT_ONE, idempotency_key)
+        self.assertEqual(accepted.posting_receipt_observation_outcome_code.value, "accepted")
+        replay = pulls.pull_posting_receipt(TENANT_ONE, idempotency_key)
+        self.assertEqual(replay.posting_receipt_observation_outcome_code.value, "duplicate_replay")
+        self.assertEqual(
+            replay.posting_receipt_observation_id, accepted.posting_receipt_observation_id
+        )
+        observation_count_sql = "SELECT COUNT(*) FROM billing_core.posting_receipt_observation"
+        self.assertEqual(self.connection.execute(observation_count_sql).fetchone()[0], 1)
+
+        tenant_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+        stored = self.ledger.find_posting_receipt_observation(tenant_id, idempotency_key)
+        assert stored is not None
+        self.assertEqual(stored.posting_receipt_observation_id, accepted.posting_receipt_observation_id)
+        self.assertEqual(stored.receipt_id, receipt_id)
+        self.assertEqual(stored.observed_at, "2026-08-18T09:30:15.123456Z")
+        self.assertEqual(stored.line_count, 2)
+        self.assertIsNone(stored.reversal_of_journal_reference)
+        restarted = PostgresUsageLedger.connect(POSTGRES_DSN)
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.find_posting_receipt_observation(tenant_id, idempotency_key), stored)
+        self.assertEqual(
+            restarted.find_posting_receipt_observation_by_receipt(tenant_id, receipt_id), stored
+        )
+        self.assertEqual(restarted.list_posting_receipt_observations(tenant_id), (stored,))
+        self.assertEqual(restarted.list_posting_receipt_observations(), (stored,))
+        self.assertIsNone(restarted.find_posting_receipt_observation(tenant_id, "missing-key"))
+        self.assertIsNone(restarted.find_posting_receipt_observation_by_receipt(tenant_id, uuid4()))
+        other_tenant_id = self.ledger.require_tenant(TENANT_TWO).tenant_account_id
+        self.assertIsNone(restarted.find_posting_receipt_observation(other_tenant_id, idempotency_key))
+        self.assertIsNone(
+            restarted.find_posting_receipt_observation_by_receipt(other_tenant_id, receipt_id)
+        )
+        self.assertEqual(restarted.list_posting_receipt_observations(other_tenant_id), ())
+
+        self.assertEqual(
+            self.ledger.insert_posting_receipt_observation(
+                replace(stored, posting_receipt_observation_id=uuid4())
+            ),
+            stored,
+        )
+        for conflicting in (
+            replace(stored, posting_receipt_observation_id=uuid4(), receipt_id=uuid4()),
+            replace(
+                stored,
+                posting_receipt_observation_id=uuid4(),
+                source_payload_hash="sha256:" + "4" * 64,
+            ),
+            replace(stored, posting_receipt_observation_id=uuid4(), idempotency_key="other-key"),
+            replace(stored, idempotency_key="other-key", receipt_id=uuid4()),
+            replace(stored, posting_receipt_observation_id=uuid4(), posting_status_code="validated"),
+        ):
+            with self.assertRaisesRegex(ValueError, "posting"):
+                self.ledger.insert_posting_receipt_observation(conflicting)
+        self.assertEqual(self.connection.execute(observation_count_sql).fetchone()[0], 1)
+        stored_proposal = self.ledger.get_journal_proposal(proposal.proposal_id)
+        assert stored_proposal is not None
+        self.assertEqual(stored_proposal.proposal_status, "validated")
+
+        app = create_http_app(ledger=restarted)
+        headers = {"X-CWL-Tenant-Reference": TENANT_ONE}
+        status, body = invoke_http(
+            app, "GET", f"/v1/posting-receipt-observations/{idempotency_key}", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["receipt_id"], str(receipt_id))
+        status, body = invoke_http(app, "GET", "/v1/posting-receipt-observations", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["posting_receipt_observations"]), 1)
+        status, _ = invoke_http(
+            app,
+            "GET",
+            f"/v1/posting-receipt-observations/{idempotency_key}",
+            headers={"X-CWL-Tenant-Reference": TENANT_TWO},
+        )
+        self.assertEqual(status, 404)
+
+        from metering_billing.ais_outbox_drain import AisOutboxDrainService
+        from metering_billing.posting_receipt import AisOutboxPage, _parse_outbox_page
+
+        outbox_event_id = str(uuid4())
+        page = _parse_outbox_page(
+            json.dumps(
+                {
+                    "outbox_events": [
+                        {
+                            "outbox_event_id": outbox_event_id,
+                            "event_type_code": "posting_receipt",
+                            "aggregate_reference": (
+                                f"urn:cwl:accounting:general_journal:{proposal.proposal_id}"
+                            ),
+                            "payload_reference": (
+                                f"urn:cwl:accounting:posting_receipt:{proposal.proposal_id}"
+                            ),
+                            "payload_hash": "sha256:" + "a" * 64,
+                            "created_at": "2026-08-17T19:00:00Z",
+                        }
+                    ],
+                    "next_cursor": None,
+                }
+            ).encode("utf-8")
+        )
+        self.assertIsInstance(page, AisOutboxPage)
+
+        class DrainAis(ScriptedAis):
+            """Serve one outbox page and record publishes; receipt GETs must not happen."""
+
+            def __init__(self) -> None:
+                self.receipt_calls = 0
+                self.published: list[str] = []
+
+            def list_outbox_events(self, *args: object, **kwargs: object) -> AisOutboxPage:
+                """Return the single scripted page."""
+                return page
+
+            def get_posting_receipt(self, tenant_reference: str, key: str) -> AisLookupResult:
+                """Count receipt GETs; the durable observation should make them unnecessary."""
+                self.receipt_calls += 1
+                return super().get_posting_receipt(tenant_reference, key)
+
+            def publish_outbox_event(self, tenant_reference: str, event_id: str) -> AisLookupResult:
+                """Record the idempotent publish."""
+                self.published.append(event_id)
+                return AisLookupResult(200, b"")
+
+        drain_ais = DrainAis()
+        drained = AisOutboxDrainService(restarted, ais_client=drain_ais).drain_ais_outbox(TENANT_ONE)
+        self.assertEqual(drained.ais_outbox_drain_outcome_code.value, "accepted")
+        self.assertEqual(drained.published_event_count, 1)
+        self.assertEqual(drain_ais.receipt_calls, 0)
+        self.assertEqual(drain_ais.published, [outbox_event_id])
+        self.assertEqual(self.connection.execute(observation_count_sql).fetchone()[0], 1)
+        self.assertEqual(
+            restarted.get_journal_proposal(proposal.proposal_id).proposal_status, "validated"
+        )
 
     def test_write_off_journal_is_durable(self) -> None:
         """Persist one write-off journal and keep GET presentment after restart."""
