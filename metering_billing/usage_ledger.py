@@ -840,6 +840,63 @@ class StoredPostingReceiptObservation:
     observed_at: str
 
 
+POSTGRES_INT4_MAX = 2**31 - 1
+POSTING_RECEIPT_STATUS_CODES = frozenset({"posted", "held", "rejected", "reversed"})
+
+
+class PostingReceiptObservationInvalid(ValueError):
+    """Raised when an observation holds a value no ledger may store.
+
+    It is a ``ValueError`` so existing fail-closed callers keep working, and a
+    distinct type so a pull can report ``receipt_invalid`` instead of a
+    replay conflict.
+    """
+
+
+def validate_posting_receipt_observation(observation: StoredPostingReceiptObservation) -> None:
+    """Fail closed on values that the durable ``posting_receipt_observation`` row cannot hold.
+
+    Both ledgers call this before any write so the memory reference adapter
+    and PostgreSQL accept exactly the same observations.  Integers must fit a
+    PostgreSQL ``integer``, the payload hash must match the stored check, and
+    no text may contain NUL.
+    """
+    if observation.posting_status_code not in POSTING_RECEIPT_STATUS_CODES:
+        raise ValueError("posting_status_code must remain an AIS-owned receipt status")
+    if not 1 <= observation.receipt_contract_version <= POSTGRES_INT4_MAX:
+        raise PostingReceiptObservationInvalid(
+            "posting receipt observation receipt_contract_version is out of range"
+        )
+    if observation.line_count is not None and not 0 <= observation.line_count <= POSTGRES_INT4_MAX:
+        raise PostingReceiptObservationInvalid(
+            "posting receipt observation line_count is out of range"
+        )
+    if SOURCE_PAYLOAD_HASH_PATTERN.fullmatch(observation.source_payload_hash) is None:
+        raise PostingReceiptObservationInvalid(
+            "posting receipt observation source_payload_hash is malformed"
+        )
+    for value in (
+        observation.idempotency_key,
+        observation.legal_entity_reference,
+        observation.accounting_book_reference,
+        observation.accounting_policy_version,
+        observation.posting_rule_version,
+        observation.recorded_at,
+        observation.fiscal_period_reference,
+        observation.journal_reference,
+        observation.reversal_of_journal_reference,
+        observation.hold_reason_code,
+        observation.rejection_reason_code,
+        observation.posted_at,
+        observation.transaction_currency,
+        observation.functional_currency,
+    ):
+        if value is not None and "\x00" in value:
+            raise PostingReceiptObservationInvalid(
+                "posting receipt observation text must not contain NUL"
+            )
+
+
 @dataclass(frozen=True)
 class StoredIngestionReceipt:
     """Append-only audit row for one ingest attempt."""
@@ -3751,8 +3808,7 @@ class MemoryUsageLedger:
         self, observation: StoredPostingReceiptObservation
     ) -> StoredPostingReceiptObservation:
         """Append an immutable observation.  Same receipt identity is a replay."""
-        if observation.posting_status_code not in {"posted", "held", "rejected", "reversed"}:
-            raise ValueError("posting_status_code must remain an AIS-owned receipt status")
+        validate_posting_receipt_observation(observation)
         identity_key = (observation.tenant_account_id, observation.idempotency_key)
         receipt_key = (observation.tenant_account_id, observation.receipt_id)
         existing_id = self.posting_receipt_observation_index.get(identity_key)

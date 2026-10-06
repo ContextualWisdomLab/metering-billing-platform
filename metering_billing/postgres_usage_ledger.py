@@ -83,6 +83,7 @@ from metering_billing.usage_ledger import (
     _resource_code,
     _single_urn_segment,
     generate_record_id,
+    validate_posting_receipt_observation,
 )
 
 
@@ -3234,6 +3235,8 @@ class PostgresUsageLedger:
         self, tenant_account_id: UUID, idempotency_key: str
     ) -> StoredPostingReceiptObservation | None:
         """Return the observation for one tenant-scoped AIS idempotency key."""
+        if "\x00" in idempotency_key:
+            return None
         with self._cursor() as cursor:
             return self._select_posting_receipt_observation(
                 cursor,
@@ -3264,8 +3267,7 @@ class PostgresUsageLedger:
         the same AIS receipt with the same payload hash.  Every other collision
         fails closed and writes nothing.
         """
-        if observation.posting_status_code not in {"posted", "held", "rejected", "reversed"}:
-            raise ValueError("posting_status_code must remain an AIS-owned receipt status")
+        validate_posting_receipt_observation(observation)
         with self._cursor() as cursor:
             cursor.execute(
                 self._INSERT_POSTING_RECEIPT_OBSERVATION,

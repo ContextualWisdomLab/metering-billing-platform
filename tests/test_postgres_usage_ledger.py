@@ -103,11 +103,13 @@ from metering_billing.tenant_api_credential import (
 from metering_billing.time_window import TimeWindow
 from metering_billing.usage_rating import UsageRatingService
 from metering_billing.usage_ledger import (
+    MemoryUsageLedger,
     StoredCollectionDispute,
     StoredCreditNoteApplication,
     StoredIssuedCreditNote,
     StoredIssuedCreditNoteVoid,
     StoredIssuedInvoiceVoid,
+    StoredPostingReceiptObservation,
     StoredTenantApiCredential,
     StoredUnappliedCash,
     StoredUnappliedCashApplication,
@@ -1885,6 +1887,69 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             restarted.get_journal_proposal(proposal.proposal_id).proposal_status, "validated"
         )
+
+    def test_posting_receipt_observation_unstorable_values_fail_closed(self) -> None:
+        """Values PostgreSQL cannot hold fail closed as ValueError or a miss, never a driver error."""
+        tenant_id = self.ledger.require_tenant(TENANT_ONE).tenant_account_id
+        baseline = StoredPostingReceiptObservation(
+            posting_receipt_observation_id=uuid4(),
+            tenant_account_id=tenant_id,
+            receipt_id=uuid4(),
+            receipt_contract_version=1,
+            idempotency_key="urn:cwl:tenant_001:invoice_draft:unstorable",
+            source_proposal_id=uuid4(),
+            source_payload_hash="sha256:" + "5" * 64,
+            legal_entity_reference="urn:cwl:entity_001",
+            accounting_book_reference="urn:cwl:book_primary",
+            accounting_policy_version="policy-2026.1",
+            posting_rule_version="rule-2026.1",
+            posting_status_code="posted",
+            recorded_at="2026-08-17T18:00:00Z",
+            fiscal_period_reference=None,
+            journal_reference=None,
+            reversal_of_journal_reference=None,
+            hold_reason_code=None,
+            rejection_reason_code=None,
+            posted_at=None,
+            line_count=None,
+            transaction_currency=None,
+            functional_currency=None,
+            observed_at="2026-08-18T09:30:15.123456Z",
+        )
+        for unstorable in (
+            replace(baseline, receipt_contract_version=2**31),
+            replace(baseline, line_count=2**31),
+            replace(baseline, line_count=-1),
+            replace(baseline, receipt_contract_version=0),
+            replace(baseline, idempotency_key="urn:cwl:tenant_001:a\x00b"),
+            replace(baseline, journal_reference="urn:cwl:journal\x00ar"),
+            replace(baseline, source_payload_hash="sha256:not-a-hash"),
+        ):
+            with self.assertRaisesRegex(ValueError, "posting receipt observation"):
+                self.ledger.insert_posting_receipt_observation(unstorable)
+            with self.assertRaisesRegex(ValueError, "posting receipt observation"):
+                MemoryUsageLedger().insert_posting_receipt_observation(unstorable)
+        observation_count_sql = "SELECT COUNT(*) FROM billing_core.posting_receipt_observation"
+        self.assertEqual(self.connection.execute(observation_count_sql).fetchone()[0], 0)
+        self.assertIsNone(
+            self.ledger.find_posting_receipt_observation(tenant_id, "urn:cwl:tenant_001:a\x00b")
+        )
+        stored = self.ledger.insert_posting_receipt_observation(
+            replace(baseline, receipt_contract_version=2**31 - 1, line_count=2**31 - 1)
+        )
+        self.assertEqual(stored.line_count, 2**31 - 1)
+        self.assertEqual(stored.receipt_contract_version, 2**31 - 1)
+
+        from metering_billing.http_app import create_http_app
+        from tests.test_http_app_backend_selection import invoke_http
+
+        status, _ = invoke_http(
+            create_http_app(ledger=self.ledger),
+            "GET",
+            "/v1/posting-receipt-observations/a%00b",
+            headers={"X-CWL-Tenant-Reference": TENANT_ONE},
+        )
+        self.assertEqual(status, 404)
 
     def test_write_off_journal_is_durable(self) -> None:
         """Persist one write-off journal and keep GET presentment after restart."""

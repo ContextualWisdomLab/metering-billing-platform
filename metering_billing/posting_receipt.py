@@ -34,6 +34,7 @@ from metering_billing.errors import (
 )
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
+    PostingReceiptObservationInvalid,
     StoredPostingReceiptObservation,
     generate_record_id,
 )
@@ -451,6 +452,8 @@ class PostingReceiptPullService:
         )
         try:
             stored = self.ledger.insert_posting_receipt_observation(observation)
+        except PostingReceiptObservationInvalid:
+            return _rejected(PostingReceiptObservationRejectionReasonCode.RECEIPT_INVALID)
         except ValueError:
             return _rejected(PostingReceiptObservationRejectionReasonCode.OBSERVATION_CONFLICT)
         return _from_stored(stored, tenant_reference, PostingReceiptObservationOutcomeCode.ACCEPTED)

@@ -396,6 +396,20 @@ class PostingReceiptObservationTests(unittest.TestCase):
             PostingReceiptObservationRejectionReasonCode.RECEIPT_INVALID,
         )
 
+        for unstorable in (
+            dict(valid, line_count=2**31),
+            dict(valid, receipt_contract_version=2**31),
+            dict(valid, journal_reference="urn:cwl:journal\x00ar"),
+        ):
+            unstorable_result = PostingReceiptPullService(
+                ledger, ais_client=ScriptedAisClient([_lookup_result(200, unstorable)])
+            ).pull_posting_receipt(TENANT_ONE, key)
+            self.assertEqual(
+                unstorable_result.rejection_reason_code,
+                PostingReceiptObservationRejectionReasonCode.RECEIPT_INVALID,
+            )
+        self.assertEqual(len(ledger.posting_receipt_observations), 0)
+
         mismatched = dict(valid, tenant_reference=TENANT_TWO)
         mismatch_service = PostingReceiptPullService(
             ledger, ais_client=ScriptedAisClient([_lookup_result(200, mismatched)])
