@@ -863,11 +863,13 @@ def validate_posting_receipt_observation(observation: StoredPostingReceiptObserv
     """
     if observation.posting_status_code not in POSTING_RECEIPT_STATUS_CODES:
         raise ValueError("posting_status_code must remain an AIS-owned receipt status")
-    if not 1 <= observation.receipt_contract_version <= POSTGRES_INT4_MAX:
+    if type(observation.receipt_contract_version) is not int or not 1 <= observation.receipt_contract_version <= POSTGRES_INT4_MAX:
         raise PostingReceiptObservationInvalid(
             "posting receipt observation receipt_contract_version is out of range"
         )
-    if observation.line_count is not None and not 0 <= observation.line_count <= POSTGRES_INT4_MAX:
+    if observation.line_count is not None and (
+        type(observation.line_count) is not int or not 0 <= observation.line_count <= POSTGRES_INT4_MAX
+    ):
         raise PostingReceiptObservationInvalid(
             "posting receipt observation line_count is out of range"
         )

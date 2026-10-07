@@ -1793,6 +1793,16 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             stored,
         )
+        self.assertEqual(
+            self.ledger.insert_posting_receipt_observation(
+                replace(
+                    stored,
+                    posting_receipt_observation_id=uuid4(),
+                    idempotency_key="same-receipt-different-key",
+                )
+            ),
+            stored,
+        )
         for conflicting in (
             replace(stored, posting_receipt_observation_id=uuid4(), receipt_id=uuid4()),
             replace(
@@ -1800,7 +1810,6 @@ class PostgresUsageLedgerTests(unittest.TestCase):
                 posting_receipt_observation_id=uuid4(),
                 source_payload_hash="sha256:" + "4" * 64,
             ),
-            replace(stored, posting_receipt_observation_id=uuid4(), idempotency_key="other-key"),
             replace(stored, idempotency_key="other-key", receipt_id=uuid4()),
             replace(stored, posting_receipt_observation_id=uuid4(), posting_status_code="validated"),
         ):
@@ -1918,7 +1927,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         )
         for unstorable in (
             replace(baseline, receipt_contract_version=2**31),
+            replace(baseline, receipt_contract_version=True),
             replace(baseline, line_count=2**31),
+            replace(baseline, line_count=False),
             replace(baseline, line_count=-1),
             replace(baseline, receipt_contract_version=0),
             replace(baseline, idempotency_key="urn:cwl:tenant_001:a\x00b"),

@@ -3298,18 +3298,34 @@ class PostgresUsageLedger:
                 ),
             )
             inserted = cursor.fetchone() is not None
+            if inserted:
+                stored = self._select_posting_receipt_observation(
+                    cursor,
+                    self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_KEY,
+                    observation.tenant_account_id,
+                    observation.idempotency_key,
+                )
+                assert stored is not None
+                return stored
+
             stored = self._select_posting_receipt_observation(
                 cursor,
                 self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_KEY,
                 observation.tenant_account_id,
                 observation.idempotency_key,
             )
-            if inserted or (
+            if stored is None:
+                stored = self._select_posting_receipt_observation(
+                    cursor,
+                    self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_RECEIPT,
+                    observation.tenant_account_id,
+                    observation.receipt_id,
+                )
+            if (
                 stored is not None
                 and stored.receipt_id == observation.receipt_id
                 and stored.source_payload_hash == observation.source_payload_hash
             ):
-                assert stored is not None
                 return stored
             raise ValueError("posting receipt observations are immutable and cannot be replaced")
 
