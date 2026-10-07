@@ -1924,6 +1924,9 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             replace(baseline, idempotency_key="urn:cwl:tenant_001:a\x00b"),
             replace(baseline, journal_reference="urn:cwl:journal\x00ar"),
             replace(baseline, source_payload_hash="sha256:not-a-hash"),
+            replace(baseline, observed_at="not-a-timestamp"),
+            replace(baseline, observed_at="2026-08-18T09:30:15"),
+            replace(baseline, observed_at="2026-08-18T09:30:15.123456\x00Z"),
         ):
             with self.assertRaisesRegex(ValueError, "posting receipt observation"):
                 self.ledger.insert_posting_receipt_observation(unstorable)

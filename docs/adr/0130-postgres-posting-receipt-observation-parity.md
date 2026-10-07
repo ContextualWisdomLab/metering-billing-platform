@@ -34,7 +34,8 @@ and AIS outbox drain failed with `AttributeError`. It was the only public
 - Both ledgers call one shared `validate_posting_receipt_observation` before
   any write. It refuses an `integer` outside PostgreSQL's range, a
   `receipt_contract_version` below 1 or a negative `line_count`, a payload hash
-  that does not match the stored check, and text containing NUL. It raises
+  that does not match the stored check, an invalid timezone-aware `observed_at`,
+  and text containing NUL. It raises
   `PostingReceiptObservationInvalid`, a `ValueError`, so a pull reports
   `receipt_invalid` and no driver error escapes. A read with a NUL idempotency
   key returns no row, as the memory adapter does.

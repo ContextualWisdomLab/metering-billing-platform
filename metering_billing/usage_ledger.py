@@ -875,6 +875,16 @@ def validate_posting_receipt_observation(observation: StoredPostingReceiptObserv
         raise PostingReceiptObservationInvalid(
             "posting receipt observation source_payload_hash is malformed"
         )
+    try:
+        parsed_observed_at = datetime.fromisoformat(observation.observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise PostingReceiptObservationInvalid(
+            "posting receipt observation observed_at is not a timestamp"
+        ) from None
+    if parsed_observed_at.tzinfo is None:
+        raise PostingReceiptObservationInvalid(
+            "posting receipt observation observed_at is not a timestamp"
+        )
     for value in (
         observation.idempotency_key,
         observation.legal_entity_reference,
@@ -890,6 +900,7 @@ def validate_posting_receipt_observation(observation: StoredPostingReceiptObserv
         observation.posted_at,
         observation.transaction_currency,
         observation.functional_currency,
+        observation.observed_at,
     ):
         if value is not None and "\x00" in value:
             raise PostingReceiptObservationInvalid(

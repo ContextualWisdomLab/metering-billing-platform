@@ -17,7 +17,10 @@ concurrency:
 jobs:
   repository-contracts:
     name: Repository contracts
-    runs-on: ubuntu-latest
+    # PR-controlled tests run only on the isolated Linux self-hosted pool.
+    runs-on:
+      group: CWL CI isolated
+      labels: [self-hosted, Linux, X64, cwlab-ci-isolated]
     timeout-minutes: 15
     env:
       METERING_BILLING_POSTGRES_DSN: dbname=metering_billing_test user=postgres password=postgres host=127.0.0.1 port=5432

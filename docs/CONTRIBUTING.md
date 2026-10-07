@@ -45,7 +45,10 @@ readiness.
 ## Exact-head CI
 
 The default branch carries the repository-local workflow
-(`.github/workflows/ci.yml`, "Foundation CI"), which:
+(`.github/workflows/ci.yml`, "Foundation CI"), which runs the PR-controlled
+repository contract job only on the isolated Linux self-hosted pool
+`CWL CI isolated` with labels `self-hosted`, `Linux`, `X64`, and
+`cwlab-ci-isolated`:
 
 - checks out the exact commit under test with a commit-pinned
   `actions/checkout`;
@@ -62,11 +65,11 @@ Mutable GitHub Action tags (`@v4`, `@main`) are rejected by the repository
 validator. Review and merge evidence must match the current head commit; an
 approval or check on a previous SHA is not evidence for a later push.
 
-Organization required workflows from `ContextualWisdomLab/.github`
-(OpenCode review, Noema review, Strix, Semgrep, Trivy, OSV, Scorecard, and
-related jobs) also run on pull requests. Those jobs judge the current head
-SHA. A cancelled or superseded check is a queue or evidence state, not a
-source-code finding.
+The central `ContextualWisdomLab/.github` repository owns organization-required
+review and security workflows. This repository does not invent a reusable
+workflow name or ref when that central source is unavailable. Managed CodeQL
+and Code Quality are settings-owned workflows, not repository YAML; their
+owner must disable them or route them to an approved self-hosted pool.
 
 ## Successor heads and PR stacking
 
