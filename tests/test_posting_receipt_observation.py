@@ -396,6 +396,20 @@ class PostingReceiptObservationTests(unittest.TestCase):
             PostingReceiptObservationRejectionReasonCode.RECEIPT_INVALID,
         )
 
+        for unstorable in (
+            dict(valid, line_count=2**31),
+            dict(valid, receipt_contract_version=2**31),
+            dict(valid, journal_reference="urn:cwl:journal\x00ar"),
+        ):
+            unstorable_result = PostingReceiptPullService(
+                ledger, ais_client=ScriptedAisClient([_lookup_result(200, unstorable)])
+            ).pull_posting_receipt(TENANT_ONE, key)
+            self.assertEqual(
+                unstorable_result.rejection_reason_code,
+                PostingReceiptObservationRejectionReasonCode.RECEIPT_INVALID,
+            )
+        self.assertEqual(len(ledger.posting_receipt_observations), 0)
+
         mismatched = dict(valid, tenant_reference=TENANT_TWO)
         mismatch_service = PostingReceiptPullService(
             ledger, ais_client=ScriptedAisClient([_lookup_result(200, mismatched)])
@@ -982,14 +996,15 @@ class PostingReceiptObservationTests(unittest.TestCase):
             functional_currency=None,
             observed_at="not-a-timestamp",
         )
-        ledger.insert_posting_receipt_observation(corrupt)
-        corrupt_app = create_http_app(ledger)
-        corrupt_status, corrupt_body = invoke_http(
-            corrupt_app,
-            "GET",
-            f"/v1/posting-receipt-observations/{quote('corrupt-key', safe='')}",
-            query={"tenant_reference": TENANT_ONE},
-        )
+        with mock.patch.object(
+            ledger, "find_posting_receipt_observation", return_value=corrupt
+        ):
+            corrupt_status, corrupt_body = invoke_http(
+                create_http_app(ledger),
+                "GET",
+                f"/v1/posting-receipt-observations/{quote('corrupt-key', safe='')}",
+                query={"tenant_reference": TENANT_ONE},
+            )
         self.assertEqual(corrupt_status, 422)
         self.assertEqual(corrupt_body["rejection_reason_code"], "request_invalid")
 
