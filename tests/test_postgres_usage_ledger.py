@@ -104,6 +104,7 @@ from metering_billing.time_window import TimeWindow
 from metering_billing.usage_rating import UsageRatingService
 from metering_billing.usage_ledger import (
     MemoryUsageLedger,
+    PostingReceiptObservationInvalid,
     StoredCollectionDispute,
     StoredCreditNoteApplication,
     StoredIssuedCreditNote,
@@ -1793,16 +1794,18 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             ),
             stored,
         )
-        self.assertEqual(
-            self.ledger.insert_posting_receipt_observation(
-                replace(
-                    stored,
-                    posting_receipt_observation_id=uuid4(),
-                    idempotency_key="same-receipt-different-key",
-                )
-            ),
+        different_key = replace(
             stored,
+            posting_receipt_observation_id=uuid4(),
+            idempotency_key="same-receipt-different-key",
         )
+        memory = MemoryUsageLedger()
+        memory.insert_posting_receipt_observation(stored)
+        for ledger in (memory, self.ledger):
+            with self.subTest(adapter=type(ledger).__name__):
+                with self.assertRaisesRegex(ValueError, "immutable"):
+                    ledger.insert_posting_receipt_observation(different_key)
+                self.assertEqual(ledger.list_posting_receipt_observations(tenant_id), (stored,))
         for conflicting in (
             replace(stored, posting_receipt_observation_id=uuid4(), receipt_id=uuid4()),
             replace(
@@ -1925,6 +1928,42 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             functional_currency=None,
             observed_at="2026-08-18T09:30:15.123456Z",
         )
+        malformed_fields = (
+            "posting_receipt_observation_id", "tenant_account_id", "receipt_id",
+            "source_proposal_id", "idempotency_key", "source_payload_hash",
+            "legal_entity_reference", "accounting_book_reference",
+            "accounting_policy_version", "posting_rule_version",
+            "posting_status_code", "recorded_at", "observed_at",
+        )
+        optional_text_fields = (
+            "fiscal_period_reference", "journal_reference", "reversal_of_journal_reference",
+            "hold_reason_code", "rejection_reason_code", "posted_at",
+            "transaction_currency", "functional_currency",
+        )
+        for field_name in malformed_fields + optional_text_fields:
+            values = (123, b"invalid", [])
+            if field_name in malformed_fields:
+                values += (None,)
+            for value in values:
+                for ledger in (MemoryUsageLedger(), self.ledger):
+                    with self.subTest(field=field_name, value=value, adapter=type(ledger).__name__):
+                        with self.assertRaises(PostingReceiptObservationInvalid):
+                            ledger.insert_posting_receipt_observation(
+                                replace(baseline, **{field_name: value})
+                            )
+                        self.assertEqual(ledger.list_posting_receipt_observations(tenant_id), ())
+        for field_name in (
+            "idempotency_key", "legal_entity_reference", "accounting_book_reference",
+            "accounting_policy_version", "posting_rule_version", "recorded_at",
+        ) + optional_text_fields:
+            for value in ("valid\ud800text", "valid\udffftext"):
+                for ledger in (MemoryUsageLedger(), self.ledger):
+                    with self.subTest(field=field_name, adapter=type(ledger).__name__):
+                        with self.assertRaises(PostingReceiptObservationInvalid):
+                            ledger.insert_posting_receipt_observation(
+                                replace(baseline, **{field_name: value})
+                            )
+                        self.assertEqual(ledger.list_posting_receipt_observations(tenant_id), ())
         for unstorable in (
             replace(baseline, receipt_contract_version=2**31),
             replace(baseline, receipt_contract_version=True),
@@ -1935,7 +1974,15 @@ class PostgresUsageLedgerTests(unittest.TestCase):
             replace(baseline, idempotency_key="urn:cwl:tenant_001:a\x00b"),
             replace(baseline, journal_reference="urn:cwl:journal\x00ar"),
             replace(baseline, source_payload_hash="sha256:not-a-hash"),
+            replace(baseline, observed_at="0001-01-01T00:00:00+00:01"),
+            replace(baseline, observed_at="9999-12-31T23:59:59-00:01"),
+            replace(baseline, observed_at="0001-01-01T00:00:00+15:59"),
+            replace(baseline, observed_at="9999-12-31T23:59:59-15:59"),
             replace(baseline, observed_at="not-a-timestamp"),
+            replace(baseline, observed_at="2026-02-30T09:30:15Z"),
+            replace(baseline, observed_at="2026-08-18🐟09:30:15+00:00"),
+            replace(baseline, observed_at="2026-08-18T09:30:15+16:00"),
+            replace(baseline, observed_at="2026-08-18T09:30:15.1234567Z"),
             replace(baseline, observed_at="2026-08-18T09:30:15"),
             replace(baseline, observed_at="2026-08-18T09:30:15.123456\x00Z"),
         ):
@@ -1948,11 +1995,59 @@ class PostgresUsageLedgerTests(unittest.TestCase):
         self.assertIsNone(
             self.ledger.find_posting_receipt_observation(tenant_id, "urn:cwl:tenant_001:a\x00b")
         )
+        for key in ("valid\ud800text", "valid\udffftext"):
+            self.assertIsNone(self.ledger.find_posting_receipt_observation(tenant_id, key))
+            self.assertIsNone(MemoryUsageLedger().find_posting_receipt_observation(tenant_id, key))
         stored = self.ledger.insert_posting_receipt_observation(
             replace(baseline, receipt_contract_version=2**31 - 1, line_count=2**31 - 1)
         )
         self.assertEqual(stored.line_count, 2**31 - 1)
         self.assertEqual(stored.receipt_contract_version, 2**31 - 1)
+        for timestamp in (
+            "0001-01-01T00:00:00Z",
+            "9999-12-31T23:59:59.999999Z",
+            "0001-01-01T00:01:00+00:01",
+            "9999-12-31T23:58:59-00:01",
+            "2026-08-18T18:30:15.123456+09:00",
+            "2026-08-18 09:30:15+00:00",
+            "2026-08-18T09:30:15-05:30",
+        ):
+            observation = replace(
+                baseline,
+                posting_receipt_observation_id=uuid4(),
+                receipt_id=uuid4(),
+                idempotency_key=f"timestamp:{timestamp}",
+                observed_at=timestamp,
+                journal_reference="urn:cwl:전표:🐟",
+                recorded_at="2026-08-17T18:00:00Z 한글",
+            )
+            memory = MemoryUsageLedger()
+            self.assertEqual(memory.insert_posting_receipt_observation(observation), observation)
+            durable = self.ledger.insert_posting_receipt_observation(observation)
+            self.assertEqual(durable.journal_reference, observation.journal_reference)
+            self.assertEqual(durable.recorded_at, observation.recorded_at)
+            self.assertEqual(
+                datetime.fromisoformat(durable.observed_at.replace("Z", "+00:00")),
+                datetime.fromisoformat(timestamp),
+            )
+        original_timezone = self.connection.execute("SHOW TimeZone").fetchone()[0]
+        try:
+            for timezone_name in ("Pacific/Kiritimati", "Etc/GMT+12"):
+                self.connection.execute("SELECT set_config('TimeZone', %s, false)", (timezone_name,))
+                self.connection.commit()
+                for observation in self.ledger.list_posting_receipt_observations(tenant_id):
+                    self.assertTrue(observation.observed_at.endswith("Z"))
+                    self.assertEqual(
+                        self.ledger.find_posting_receipt_observation(tenant_id, observation.idempotency_key),
+                        observation,
+                    )
+                    self.assertEqual(
+                        self.ledger.find_posting_receipt_observation_by_receipt(tenant_id, observation.receipt_id),
+                        observation,
+                    )
+        finally:
+            self.connection.execute("SELECT set_config('TimeZone', %s, false)", (original_timezone,))
+            self.connection.commit()
 
         from metering_billing.http_app import create_http_app
         from tests.test_http_app_backend_selection import invoke_http

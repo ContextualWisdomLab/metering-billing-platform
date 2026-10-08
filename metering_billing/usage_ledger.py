@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import ModuleType
 from typing import Callable
@@ -842,6 +842,10 @@ class StoredPostingReceiptObservation:
 
 POSTGRES_INT4_MAX = 2**31 - 1
 POSTING_RECEIPT_STATUS_CODES = frozenset({"posted", "held", "rejected", "reversed"})
+POSTING_RECEIPT_OBSERVED_AT_PATTERN = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{1,6})?(?:Z|[+-](?:0[0-9]|1[0-5]):[0-5][0-9])"
+)
 
 
 class PostingReceiptObservationInvalid(ValueError):
@@ -856,14 +860,55 @@ class PostingReceiptObservationInvalid(ValueError):
 def validate_posting_receipt_observation(observation: StoredPostingReceiptObservation) -> None:
     """Fail closed on values that the durable ``posting_receipt_observation`` row cannot hold.
 
-    Both ledgers call this before any write so the memory reference adapter
-    and PostgreSQL accept exactly the same observations.  Integers must fit a
-    PostgreSQL ``integer``, the payload hash must match the stored check, and
-    no text may contain NUL.
+    Both ledgers require UUID identifiers, required strings, optional strings
+    or ``None``, strict PostgreSQL integer bounds, a checked payload hash, and
+    UTF-8-encodable NUL-free text before writing.  The timestamp grammar uses a Gregorian
+    date, ``T`` or space, seconds with at most six fractional digits, and ``Z``
+    or a signed ``HH:MM`` offset (hours at most 15, minutes at most 59).
+    UTC conversion must remain representable in years 1 through 9999.
     """
+    for field_name in (
+        "posting_receipt_observation_id", "tenant_account_id", "receipt_id",
+        "source_proposal_id",
+    ):
+        if not isinstance(getattr(observation, field_name), UUID):
+            raise PostingReceiptObservationInvalid(
+                f"posting receipt observation {field_name} must be a UUID"
+            )
+    required_text_fields = (
+        "idempotency_key", "source_payload_hash", "legal_entity_reference",
+        "accounting_book_reference", "accounting_policy_version", "posting_rule_version",
+        "posting_status_code", "recorded_at", "observed_at",
+    )
+    optional_text_fields = (
+        "fiscal_period_reference", "journal_reference", "reversal_of_journal_reference",
+        "hold_reason_code", "rejection_reason_code", "posted_at",
+        "transaction_currency", "functional_currency",
+    )
+    for field_name in required_text_fields + optional_text_fields:
+        value = getattr(observation, field_name)
+        if value is None and field_name in optional_text_fields:
+            continue
+        if not isinstance(value, str):
+            raise PostingReceiptObservationInvalid(
+                f"posting receipt observation {field_name} must be text"
+            )
+        if "\x00" in value:
+            raise PostingReceiptObservationInvalid(
+                "posting receipt observation text must not contain NUL"
+            )
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise PostingReceiptObservationInvalid(
+                "posting receipt observation text must be valid UTF-8"
+            ) from None
     if observation.posting_status_code not in POSTING_RECEIPT_STATUS_CODES:
         raise ValueError("posting_status_code must remain an AIS-owned receipt status")
-    if type(observation.receipt_contract_version) is not int or not 1 <= observation.receipt_contract_version <= POSTGRES_INT4_MAX:
+    if (
+        type(observation.receipt_contract_version) is not int
+        or not 1 <= observation.receipt_contract_version <= POSTGRES_INT4_MAX
+    ):
         raise PostingReceiptObservationInvalid(
             "posting receipt observation receipt_contract_version is out of range"
         )
@@ -877,37 +922,16 @@ def validate_posting_receipt_observation(observation: StoredPostingReceiptObserv
         raise PostingReceiptObservationInvalid(
             "posting receipt observation source_payload_hash is malformed"
         )
-    try:
-        parsed_observed_at = datetime.fromisoformat(observation.observed_at.replace("Z", "+00:00"))
-    except ValueError:
-        raise PostingReceiptObservationInvalid(
-            "posting receipt observation observed_at is not a timestamp"
-        ) from None
-    if parsed_observed_at.tzinfo is None:
+    if POSTING_RECEIPT_OBSERVED_AT_PATTERN.fullmatch(observation.observed_at) is None:
         raise PostingReceiptObservationInvalid(
             "posting receipt observation observed_at is not a timestamp"
         )
-    for value in (
-        observation.idempotency_key,
-        observation.legal_entity_reference,
-        observation.accounting_book_reference,
-        observation.accounting_policy_version,
-        observation.posting_rule_version,
-        observation.recorded_at,
-        observation.fiscal_period_reference,
-        observation.journal_reference,
-        observation.reversal_of_journal_reference,
-        observation.hold_reason_code,
-        observation.rejection_reason_code,
-        observation.posted_at,
-        observation.transaction_currency,
-        observation.functional_currency,
-        observation.observed_at,
-    ):
-        if value is not None and "\x00" in value:
-            raise PostingReceiptObservationInvalid(
-                "posting receipt observation text must not contain NUL"
-            )
+    try:
+        datetime.fromisoformat(observation.observed_at.replace("Z", "+00:00")).astimezone(UTC)
+    except (ValueError, OverflowError):
+        raise PostingReceiptObservationInvalid(
+            "posting receipt observation observed_at is not a timestamp"
+        ) from None
 
 
 @dataclass(frozen=True)

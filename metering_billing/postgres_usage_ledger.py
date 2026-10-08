@@ -3208,7 +3208,8 @@ class PostgresUsageLedger:
         "observed_at"
     )
     _SELECT_POSTING_RECEIPT_OBSERVATIONS = (
-        "SELECT " + _POSTING_RECEIPT_OBSERVATION_COLUMNS
+        "SELECT " + _POSTING_RECEIPT_OBSERVATION_COLUMNS.rsplit(", ", 1)[0]
+        + ", observed_at AT TIME ZONE 'UTC' AS observed_at"
         + " FROM billing_core.posting_receipt_observation "
     )
     _SELECT_POSTING_RECEIPT_OBSERVATION_BY_KEY = (
@@ -3236,6 +3237,10 @@ class PostgresUsageLedger:
     ) -> StoredPostingReceiptObservation | None:
         """Return the observation for one tenant-scoped AIS idempotency key."""
         if "\x00" in idempotency_key:
+            return None
+        try:
+            idempotency_key.encode("utf-8")
+        except UnicodeEncodeError:
             return None
         with self._cursor() as cursor:
             return self._select_posting_receipt_observation(
@@ -3298,34 +3303,18 @@ class PostgresUsageLedger:
                 ),
             )
             inserted = cursor.fetchone() is not None
-            if inserted:
-                stored = self._select_posting_receipt_observation(
-                    cursor,
-                    self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_KEY,
-                    observation.tenant_account_id,
-                    observation.idempotency_key,
-                )
-                assert stored is not None
-                return stored
-
             stored = self._select_posting_receipt_observation(
                 cursor,
                 self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_KEY,
                 observation.tenant_account_id,
                 observation.idempotency_key,
             )
-            if stored is None:
-                stored = self._select_posting_receipt_observation(
-                    cursor,
-                    self._SELECT_POSTING_RECEIPT_OBSERVATION_BY_RECEIPT,
-                    observation.tenant_account_id,
-                    observation.receipt_id,
-                )
-            if (
+            if inserted or (
                 stored is not None
                 and stored.receipt_id == observation.receipt_id
                 and stored.source_payload_hash == observation.source_payload_hash
             ):
+                assert stored is not None
                 return stored
             raise ValueError("posting receipt observations are immutable and cannot be replaced")
 
@@ -3378,7 +3367,7 @@ class PostgresUsageLedger:
             line_count=row[19],
             transaction_currency=row[20],
             functional_currency=row[21],
-            observed_at=row[22].astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            observed_at=row[22].replace(tzinfo=UTC).isoformat().replace("+00:00", "Z"),
         )
 
     def list_payment_receipts(
